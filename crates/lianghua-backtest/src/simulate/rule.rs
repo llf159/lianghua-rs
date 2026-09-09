@@ -23,6 +23,9 @@ use crate::simulate::fp_utils::{
     sample_std, spearman_corr,
 };
 const PCT_CHG_BATCH_SIZE: usize = 512;
+const RESIDUAL_SERIES_TARGET_POINTS: usize = 256 * 1024;
+const RESIDUAL_STOCK_BATCH_MIN: usize = 128;
+const RESIDUAL_STOCK_BATCH_MAX: usize = PCT_CHG_BATCH_SIZE;
 const EFFICIENCY_RATIO_PERIOD: usize = 20;
 pub const DEFAULT_RULE_WITH_SAMPLES_PARALLEL_BATCH_SIZE: usize = 4;
 
@@ -253,6 +256,20 @@ impl TriggeredScoreColumn {
             values: vec![0.0; len],
             valid: vec![false; len],
         }
+    }
+
+    fn from_indexed(len: usize, scores: Vec<(usize, f64)>) -> Self {
+        if scores.is_empty() || len == 0 {
+            return Self::empty();
+        }
+        let mut encoded = Self::with_len(len);
+        for (index, score) in scores {
+            if index < len {
+                encoded.values[index] = score;
+                encoded.valid[index] = true;
+            }
+        }
+        encoded
     }
 
     #[inline]
@@ -942,6 +959,130 @@ where
     Ok(out)
 }
 
+/// 消费评分明细并立即压缩为运行时下标。用于临时策略回测，避免在原始
+/// `ScoreDetails` 之外再为全部规则复制一份三层字符串 HashMap。
+pub fn calc_all_rule_layer_metrics_with_validation_from_owned_rows_map<T, F>(
+    source_conn: &Connection,
+    source_dir: &str,
+    rule_names: &[String],
+    score_summary_rows: &[ScoreSummary],
+    score_detail_rows: Vec<ScoreDetails>,
+    stock_adj_type: &str,
+    index_ts_code: &str,
+    index_beta: f64,
+    concept_beta: f64,
+    industry_beta: f64,
+    start_date: &str,
+    end_date: &str,
+    layer_config: &RuleLayerConfig,
+    parallel_batch_size: usize,
+    map_result: F,
+) -> Result<Vec<T>, String>
+where
+    T: Send,
+    F: Fn(&str, RuleLayerMetricsWithValidation) -> Result<T, String> + Sync,
+{
+    validate_rule_common_input(
+        stock_adj_type,
+        index_ts_code,
+        index_beta,
+        concept_beta,
+        industry_beta,
+        start_date,
+        end_date,
+        layer_config,
+    )?;
+    if rule_names.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let runtime_cache = build_rule_layer_runtime_cache_from_summary_rows(
+        source_conn,
+        source_dir,
+        score_summary_rows,
+        stock_adj_type,
+        index_ts_code,
+        index_beta,
+        concept_beta,
+        industry_beta,
+        start_date,
+        end_date,
+        layer_config,
+    )?;
+    let rule_name_ids = rule_names
+        .iter()
+        .enumerate()
+        .map(|(index, rule_name)| (rule_name.as_str(), index))
+        .collect::<HashMap<_, _>>();
+    let mut indexed_scores_by_rule = (0..rule_names.len())
+        .map(|_| Vec::<(usize, f64)>::new())
+        .collect::<Vec<_>>();
+    for row in score_detail_rows {
+        if row.trade_date.as_str() < start_date
+            || row.trade_date.as_str() > end_date
+            || !row.rule_score.is_finite()
+        {
+            continue;
+        }
+        let (Some(&rule_id), Some(&ts_code_id), Some(&day_group_id)) = (
+            rule_name_ids.get(row.rule_name.as_str()),
+            runtime_cache.ts_code_ids.get(&row.ts_code),
+            runtime_cache.day_group_ids.get(&row.trade_date),
+        ) else {
+            continue;
+        };
+        let flat_index = runtime_cache.day_groups[day_group_id].score_offset + ts_code_id as usize;
+        indexed_scores_by_rule[rule_id].push((flat_index, row.rule_score));
+    }
+
+    let batch_size = parallel_batch_size.max(1);
+    let mut grouped_results = Vec::with_capacity(rule_names.len());
+    for batch_start in (0..rule_names.len()).step_by(batch_size) {
+        let batch_end = (batch_start + batch_size).min(rule_names.len());
+        let encoded_scores = (batch_start..batch_end)
+            .map(|rule_id| {
+                TriggeredScoreColumn::from_indexed(
+                    runtime_cache.score_column_len,
+                    std::mem::take(&mut indexed_scores_by_rule[rule_id]),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut batch_results = rule_names[batch_start..batch_end]
+            .par_iter()
+            .zip(encoded_scores.par_iter())
+            .map(|(rule_name, triggered_scores)| {
+                let computation = compute_rule_layer_from_runtime_cache(
+                    &runtime_cache,
+                    Some(triggered_scores),
+                    layer_config,
+                    RuleLayerCollectOptions {
+                        metrics: true,
+                        all_samples: false,
+                        triggered_samples: false,
+                        validation_details: true,
+                    },
+                )?;
+                map_result(
+                    rule_name,
+                    RuleLayerMetricsWithValidation {
+                        metrics: computation.metrics,
+                        triggered_samples: computation.triggered_samples,
+                        daily_score_layers: computation.daily_score_layers,
+                        return_distribution_counts: computation.return_distribution_counts,
+                    },
+                )
+            })
+            .collect::<Vec<Result<T, String>>>();
+        grouped_results.append(&mut batch_results);
+    }
+
+    let mut out = Vec::with_capacity(grouped_results.len());
+    for item in grouped_results {
+        out.push(item?);
+    }
+    Ok(out)
+}
+
 pub fn build_rule_layer_runtime_cache(
     source_conn: &Connection,
     source_dir: &str,
@@ -1360,6 +1501,12 @@ fn build_rule_layer_runtime_cache_from_universe_rows(
         })
         .collect::<Vec<_>>();
 
+    let residual_stock_batch_size = if trade_dates.is_empty() {
+        RESIDUAL_STOCK_BATCH_MAX
+    } else {
+        (RESIDUAL_SERIES_TARGET_POINTS / trade_dates.len())
+            .clamp(RESIDUAL_STOCK_BATCH_MIN, RESIDUAL_STOCK_BATCH_MAX)
+    };
     stream_residual_maps(
         source_conn,
         source_dir,
@@ -1377,6 +1524,7 @@ fn build_rule_layer_runtime_cache_from_universe_rows(
             backtest_period: layer_config.backtest_period,
             min_listed_trade_days: layer_config.min_listed_trade_days,
         },
+        residual_stock_batch_size,
         |ts_code, residual_map| {
             let Some(&ts_code_id) = ts_code_ids.get(&ts_code) else {
                 return Ok(());
@@ -2307,6 +2455,7 @@ fn stream_residual_maps<F>(
     concept_map: &HashMap<String, String>,
     industry_map: &HashMap<String, String>,
     input: &ResidualCacheInput<'_>,
+    stock_batch_size: usize,
     mut visit: F,
 ) -> Result<(), String>
 where
@@ -2366,7 +2515,7 @@ where
         Ok(None)
     })(source_conn, "ER")?;
 
-    for ts_code_batch in ts_codes.chunks(128) {
+    for ts_code_batch in ts_codes.chunks(stock_batch_size.max(1)) {
         // 只让当前残差计算批次的原始涨跌幅常驻，并把该批残差直接交给最终
         // day_groups。禁止重新引入全量 residual_map_cache，否则会为每一行重复持有
         // 交易日期字符串，导致单策略回测也可能在进入规则计算前耗尽内存。

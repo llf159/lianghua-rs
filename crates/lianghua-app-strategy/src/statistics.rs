@@ -1,9409 +1,1490 @@
-use std::{
-    cmp::Ordering,
-    collections::{HashMap, HashSet},
-    sync::{Arc, Mutex, OnceLock},
-    time::{Duration, Instant},
-};
-
-use duckdb::{Connection, params, params_from_iter};
-use rand::random;
-#[cfg(test)]
-use rand::{Rng, SeedableRng, rngs::StdRng};
-use rayon::prelude::*;
-use serde::{Deserialize, Serialize};
-
-use crate::{
-    data::{
-        DataReader, RuleKind, RuleStage, RuleTag, RuntimeKeyCollectOptions, ScopeWay, ScoreRule,
-        ScoreScene, collect_assigned_names_from_expr_program,
-        collect_runtime_keys_from_expr_programs, concept_performance_db_path,
-        expr_program_uses_runtime_key, load_stock_list, load_ths_concepts_list, result_db_path,
-        runtime::row_into_rt, source_db_path,
-    },
-    expr::{
-        eval::{Runtime, Value},
-        lexer::TokenKind,
-        parser::{Stmt, Stmts, lex_all},
-        validation::{
-            estimate_expression_warmup, parse_expression_program, validate_expression_functions,
-        },
-    },
-    scoring::rule_cache::cache_rule_build as build_scoring_rule_cache,
-    scoring::runner::{ScoringMemoryMode, scoring_all_to_memory_with_mode},
-    scoring::tools::{
-        CyqChenFieldInjector, SimilarityRankFieldInjector, calc_query_need_rows,
-        calc_query_start_date, collect_used_cyq_chen_runtime_keys, cyq_chen_runtime_key_names,
-        inject_stock_extra_fields, load_st_list, load_total_share_map,
-    },
-    scoring::{CachedRule, evaluate_cached_rule_scores},
-    scoring_model::{SceneBacktestRow, ScoreDetails, ScoreSummary},
-    simulate::{
-        DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS, build_backtest_sample_eligibility,
-        rank::{
-            RankLayerConfig, RankLayerFromDbInput, RankLayerMethod,
-            calc_rank_layer_metrics_from_rank_samples, calc_rank_layer_metrics_from_score_rows,
-        },
-        rule::{
-            DEFAULT_RULE_WITH_SAMPLES_PARALLEL_BATCH_SIZE, RuleLayerConfig,
-            RuleLayerDailyScoreLayers, RuleLayerFromDbInput, RuleLayerMetricsWithValidation,
-            RuleLayerRuntimeCache, RuleLayerSamplePointRef,
-            build_rule_layer_runtime_cache_from_stock_data_with_ts_filter,
-            calc_all_rule_layer_metrics_with_validation_from_db_map_with_ts_filter,
-            calc_all_rule_layer_metrics_with_validation_from_rows_map,
-            calc_rule_layer_metrics_from_cache, calc_rule_layer_metrics_from_db_with_ts_filter,
-            calc_rule_layer_metrics_with_samples_from_cache,
-            visit_triggered_rule_samples_from_cache,
-        },
-        scene::{
-            SceneLayerConfig, SceneLayerFromDbInput,
-            calc_all_scene_layer_metrics_from_db_with_ts_filter,
-            calc_all_scene_layer_metrics_from_rows,
-            calc_scene_layer_metrics_from_db_with_ts_filter,
-        },
-    },
-    utils::utils::board_category,
-};
-use lianghua_app_shared::{build_concepts_map, build_name_map, build_total_mv_map, filter_mv};
-
-#[derive(Debug, Clone)]
-struct RuleMeta {
-    when: String,
-    explain: String,
-    trigger_mode: String,
-    is_each: bool,
-    points: f64,
-}
-
-#[derive(Debug, Clone, Default)]
-struct RuleDayAgg {
-    trigger_count: i64,
-    contribution_score: f64,
-    top100_trigger_count: i64,
-    best_rank: Option<i64>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct StrategyHeatmapCell {
-    pub trade_date: String,
-    pub day_level: Option<f64>,
-    pub avg_level: Option<f64>,
-    pub delta_level: Option<f64>,
-    pub above_avg: Option<bool>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct StrategyOverviewPayload {
-    pub items: Option<Vec<StrategyHeatmapCell>>,
-    pub latest_trade_date: Option<String>,
-    pub average_level: Option<f64>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct StrategyDailyRow {
-    pub trade_date: String,
-    pub rule_name: String,
-    pub trigger_mode: Option<String>,
-    pub sample_count: Option<i64>,
-    pub trigger_count: Option<i64>,
-    pub coverage: Option<f64>,
-    pub contribution_score: Option<f64>,
-    pub contribution_per_trigger: Option<f64>,
-    pub median_trigger_count: Option<f64>,
-    pub top100_trigger_count: Option<i64>,
-    pub best_rank: Option<i64>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct StrategyChartPoint {
-    pub trade_date: String,
-    pub trigger_count: Option<i64>,
-    pub top100_trigger_count: Option<i64>,
-    pub coverage: Option<f64>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct StrategyChartPayload {
-    pub items: Option<Vec<StrategyChartPoint>>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct TriggeredStockRow {
-    pub rank: Option<i64>,
-    pub ts_code: String,
-    pub name: Option<String>,
-    pub total_score: Option<f64>,
-    pub rule_score: Option<f64>,
-    pub concept: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct StrategyStatisticsPageData {
-    pub overview: Option<StrategyOverviewPayload>,
-    pub detail_rows: Option<Vec<StrategyDailyRow>>,
-    pub strategy_options: Option<Vec<String>>,
-    pub resolved_strategy_name: Option<String>,
-    pub analysis_trade_date_options: Option<Vec<String>>,
-    pub resolved_analysis_trade_date: Option<String>,
-    pub chart: Option<StrategyChartPayload>,
-    pub triggered_stocks: Option<Vec<TriggeredStockRow>>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct StrategyStatisticsDetailData {
-    pub strategy_name: String,
-    pub analysis_trade_date_options: Vec<String>,
-    pub resolved_analysis_trade_date: Option<String>,
-    pub selected_daily_row: Option<StrategyDailyRow>,
-    pub chart: Option<StrategyChartPayload>,
-    pub triggered_stocks: Vec<TriggeredStockRow>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct SceneStageRow {
-    pub stage: String,
-    pub sample_count: i64,
-    pub stage_ratio_in_scene: Option<f64>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct SceneContributionSummary {
-    pub scene_covered_count: i64,
-    pub scene_total_sample_count: i64,
-    pub scene_coverage_ratio: Option<f64>,
-    pub scene_rule_contribution_score: Option<f64>,
-    pub all_rule_contribution_score: Option<f64>,
-    pub scene_rule_contribution_ratio: Option<f64>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct SceneStatisticsPageData {
-    pub scene_options: Option<Vec<String>>,
-    pub resolved_scene_name: Option<String>,
-    pub analysis_trade_date_options: Option<Vec<String>>,
-    pub resolved_analysis_trade_date: Option<String>,
-    pub stage_rows: Option<Vec<SceneStageRow>>,
-    pub summary: Option<SceneContributionSummary>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct SceneLayerStateAvgResidualReturn {
-    pub scene_state: String,
-    pub avg_residual_return: Option<f64>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct SceneLayerPointPayload {
-    pub trade_date: String,
-    pub state_avg_residual_returns: Vec<SceneLayerStateAvgResidualReturn>,
-    pub top_bottom_spread: Option<f64>,
-    pub ic: Option<f64>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct SceneLayerSceneSummary {
-    pub scene_name: String,
-    pub point_count: usize,
-    pub spread_mean: Option<f64>,
-    pub ic_mean: Option<f64>,
-    pub ic_std: Option<f64>,
-    pub icir: Option<f64>,
-    pub ic_t_value: Option<f64>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct SceneLayerBacktestData {
-    pub scene_name: String,
-    pub stock_adj_type: String,
-    pub index_ts_code: String,
-    pub index_beta: f64,
-    pub concept_beta: f64,
-    pub industry_beta: f64,
-    pub start_date: String,
-    pub end_date: String,
-    pub resolved_board: Option<String>,
-    pub exclude_st_board: bool,
-    pub total_mv_min: Option<f64>,
-    pub total_mv_max: Option<f64>,
-    pub min_samples_per_scene_day: usize,
-    pub min_listed_trade_days: usize,
-    pub backtest_period: usize,
-    pub points: Vec<SceneLayerPointPayload>,
-    pub spread_mean: Option<f64>,
-    pub ic_mean: Option<f64>,
-    pub ic_std: Option<f64>,
-    pub icir: Option<f64>,
-    pub ic_t_value: Option<f64>,
-    pub is_all_scenes: bool,
-    pub all_scene_summaries: Vec<SceneLayerSceneSummary>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct SceneLayerBacktestDefaultsData {
-    pub scene_options: Vec<String>,
-    pub resolved_scene_name: Option<String>,
-    pub start_date: Option<String>,
-    pub end_date: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RuleLayerPointPayload {
-    pub trade_date: String,
-    pub sample_count: usize,
-    pub avg_rule_score: Option<f64>,
-    pub avg_residual_return: Option<f64>,
-    pub avg_excess_residual_return: Option<f64>,
-    pub top_bottom_spread: Option<f64>,
-    pub ic: Option<f64>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct RuleDecayValidation {
-    pub window_days: usize,
-    pub recent_start_date: Option<String>,
-    pub recent_end_date: Option<String>,
-    pub recent_day_count: usize,
-    pub prior_day_count: usize,
-    pub recent_directional_excess_mean: Option<f64>,
-    pub prior_directional_excess_mean: Option<f64>,
-    pub decay_change: Option<f64>,
-    pub decay_t_value: Option<f64>,
-    pub status: String,
-    pub status_label: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RuleLayerRuleSummary {
-    pub rule_name: String,
-    pub point_count: usize,
-    pub avg_residual_mean: Option<f64>,
-    pub avg_excess_residual_mean: Option<f64>,
-    pub avg_er_change: Option<f64>,
-    #[serde(skip)]
-    pub er_change_sample_count: usize,
-    pub profit_loss_ratio: Option<f64>,
-    pub spread_mean: Option<f64>,
-    pub avg_contribution_score: Option<f64>,
-    pub avg_contribution_per_trigger: Option<f64>,
-    pub ic_mean: Option<f64>,
-    pub ic_std: Option<f64>,
-    pub icir: Option<f64>,
-    pub ic_t_value: Option<f64>,
-    pub decay_validations: Vec<RuleDecayValidation>,
-    #[serde(skip)]
-    pub decay_daily_values: Vec<(String, f64)>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RuleLayerBacktestData {
-    pub rule_name: String,
-    pub stock_adj_type: String,
-    pub index_ts_code: String,
-    pub index_beta: f64,
-    pub concept_beta: f64,
-    pub industry_beta: f64,
-    pub start_date: String,
-    pub end_date: String,
-    pub resolved_board: Option<String>,
-    pub exclude_st_board: bool,
-    pub total_mv_min: Option<f64>,
-    pub total_mv_max: Option<f64>,
-    pub min_samples_per_rule_day: usize,
-    pub min_listed_trade_days: usize,
-    pub backtest_period: usize,
-    pub points: Vec<RuleLayerPointPayload>,
-    pub avg_residual_mean: Option<f64>,
-    pub avg_excess_residual_mean: Option<f64>,
-    pub decay_validations: Vec<RuleDecayValidation>,
-    pub avg_er_change: Option<f64>,
-    pub profit_loss_ratio: Option<f64>,
-    pub spread_mean: Option<f64>,
-    pub avg_contribution_score: Option<f64>,
-    pub avg_contribution_per_trigger: Option<f64>,
-    pub ic_mean: Option<f64>,
-    pub ic_std: Option<f64>,
-    pub icir: Option<f64>,
-    pub ic_t_value: Option<f64>,
-    pub layer_count: Option<usize>,
-    pub layer_method: Option<String>,
-    pub layer_method_label: Option<String>,
-    pub layer_summaries: Vec<RankLayerBucketSummary>,
-    pub is_all_rules: bool,
-    pub all_rule_summaries: Vec<RuleLayerRuleSummary>,
-    pub rule_validation_details: Vec<RuleValidationComboResult>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RuleLayerBacktestDefaultsData {
-    pub rule_options: Vec<String>,
-    pub resolved_rule_name: Option<String>,
-    pub start_date: Option<String>,
-    pub end_date: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RankLayerBucketSummary {
-    pub layer_index: usize,
-    pub layer_label: String,
-    pub point_count: usize,
-    pub sample_count: usize,
-    pub avg_score: Option<f64>,
-    pub avg_residual_return: Option<f64>,
-    pub avg_er_change: Option<f64>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RankTopKSummaryData {
-    pub top_k: usize,
-    pub point_count: usize,
-    pub sample_count: usize,
-    pub avg_daily_residual_return: Option<f64>,
-    pub median_daily_residual_return: Option<f64>,
-    pub positive_day_ratio: Option<f64>,
-    pub daily_std: Option<f64>,
-    pub hac_t_value: Option<f64>,
-    pub hac_lag: usize,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RankTopKPeriodSummaryData {
-    pub period_label: String,
-    pub start_date: String,
-    pub end_date: String,
-    pub top_k: usize,
-    pub point_count: usize,
-    pub sample_count: usize,
-    pub avg_daily_residual_return: Option<f64>,
-    pub median_daily_residual_return: Option<f64>,
-    pub positive_day_ratio: Option<f64>,
-    pub hac_t_value: Option<f64>,
-    pub hac_lag: usize,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RankLayerSampleGroup {
-    pub layer_index: usize,
-    pub layer_label: String,
-    pub total_samples: usize,
-    pub triggered_days: usize,
-    pub positive_count: usize,
-    pub negative_count: usize,
-    pub random_count: usize,
-    pub positive: Vec<RuleValidationSampleRow>,
-    pub negative: Vec<RuleValidationSampleRow>,
-    pub random: Vec<RuleValidationSampleRow>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RankLayerBacktestData {
-    pub stock_adj_type: String,
-    pub index_ts_code: String,
-    pub index_beta: f64,
-    pub concept_beta: f64,
-    pub industry_beta: f64,
-    pub start_date: String,
-    pub end_date: String,
-    pub resolved_board: Option<String>,
-    pub exclude_st_board: bool,
-    pub market_value_grouping: bool,
-    pub min_samples_per_rank_day: usize,
-    pub min_listed_trade_days: usize,
-    pub backtest_period: usize,
-    pub layer_count: usize,
-    pub layer_method: String,
-    pub layer_method_label: String,
-    pub point_count: usize,
-    pub sample_count: usize,
-    pub avg_er_change: Option<f64>,
-    pub spread_mean: Option<f64>,
-    pub ic_mean: Option<f64>,
-    pub ic_std: Option<f64>,
-    pub icir: Option<f64>,
-    pub ic_t_value: Option<f64>,
-    pub top_k_summaries: Vec<RankTopKSummaryData>,
-    pub top_k_period_summaries: Vec<RankTopKPeriodSummaryData>,
-    pub layer_summaries: Vec<RankLayerBucketSummary>,
-    pub layer_sample_groups: Vec<RankLayerSampleGroup>,
-    pub market_value_summaries: Vec<RankLayerMarketValueSummary>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RankLayerMarketValueSummary {
-    pub group_label: String,
-    pub total_mv_min: Option<f64>,
-    pub total_mv_max: Option<f64>,
-    pub point_count: usize,
-    pub sample_count: usize,
-    pub avg_er_change: Option<f64>,
-    pub spread_mean: Option<f64>,
-    pub ic_mean: Option<f64>,
-    pub ic_t_value: Option<f64>,
-    pub icir: Option<f64>,
-}
-
-const VALIDATION_EPS: f64 = 1e-12;
-const RULE_BACKTEST_EPS: f64 = 1e-12;
-const VALIDATION_MAX_COMBINATIONS: usize = 256;
-const VALIDATION_CONTINUATION_TTL: Duration = Duration::from_secs(30 * 60);
-const RANK_BACKTEST_LAYER_SAMPLE_LIMIT_PER_GROUP: usize = 5;
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct RuleValidationUnknownConfig {
-    pub name: String,
-    pub start: f64,
-    pub end: f64,
-    pub step: f64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct RuleValidationUnknownValue {
-    pub name: String,
-    pub value: f64,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RuleValidationSimilarityRow {
-    pub rule_name: String,
-    pub explain: Option<String>,
-    pub overlap_samples: usize,
-    pub overlap_rate_vs_validation: Option<f64>,
-    pub overlap_rate_vs_existing: Option<f64>,
-    pub overlap_lift: Option<f64>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RuleValidationSampleStats {
-    pub positive_count: usize,
-    pub negative_count: usize,
-    pub random_count: usize,
-    pub total_samples: usize,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct RuleValidationTriggerCountStats {
-    pub trigger_count: usize,
-    pub positive_count: usize,
-    pub negative_count: usize,
-    pub random_count: usize,
-    pub total_samples: usize,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RuleValidationSampleRow {
-    pub ts_code: String,
-    pub name: Option<String>,
-    pub board: String,
-    pub volatility_group: String,
-    pub trade_date: String,
-    pub trigger_count: usize,
-    pub rule_score: f64,
-    pub residual_return: f64,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RuleValidationSampleGroups {
-    pub positive: Vec<RuleValidationSampleRow>,
-    pub negative: Vec<RuleValidationSampleRow>,
-    pub random: Vec<RuleValidationSampleRow>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RuleValidationReturnDistributionBucket {
-    pub bucket_label: String,
-    pub sample_count: usize,
-    pub sample_ratio: Option<f64>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RuleValidationComboResult {
-    pub combo_key: String,
-    pub combo_label: String,
-    pub formula: String,
-    pub unknown_values: Vec<RuleValidationUnknownValue>,
-    pub trigger_samples: usize,
-    pub triggered_days: usize,
-    pub avg_daily_trigger: f64,
-    pub sample_stats: RuleValidationSampleStats,
-    pub trigger_count_stats: Vec<RuleValidationTriggerCountStats>,
-    pub sample_groups: RuleValidationSampleGroups,
-    pub return_distribution: Vec<RuleValidationReturnDistributionBucket>,
-    pub backtest: RuleLayerBacktestData,
-    pub similarity_rows: Vec<RuleValidationSimilarityRow>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RuleExpressionValidationData {
-    pub import_rule_name: String,
-    pub import_rule_explain: String,
-    pub scope_way: String,
-    pub scope_windows: usize,
-    pub sample_limit_per_group: usize,
-    pub combo_results: Vec<RuleValidationComboResult>,
-    pub best_combo_key: Option<String>,
-    pub continuation_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct RuleExpressionCalibrationBucket {
-    pub score_multiplier: f64,
-    pub sample_count: usize,
-    pub avg_residual_return: Option<f64>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct RuleExpressionCalibrationDistancePoint {
-    pub min: usize,
-    pub max: usize,
-    pub points: f64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct RuleExpressionCalibrationCandidate {
-    pub candidate_key: String,
-    pub scope_way: String,
-    pub scope_label: String,
-    pub scope_windows: usize,
-    pub is_current: bool,
-    pub trigger_samples: usize,
-    pub triggered_days: usize,
-    pub avg_daily_trigger: f64,
-    pub avg_residual_mean: Option<f64>,
-    pub avg_excess_residual_mean: Option<f64>,
-    pub daily_std: Option<f64>,
-    pub standard_error: Option<f64>,
-    pub conservative_edge: Option<f64>,
-    pub early_excess_residual_mean: Option<f64>,
-    pub late_excess_residual_mean: Option<f64>,
-    pub ic_mean: Option<f64>,
-    pub ic_t_value: Option<f64>,
-    pub score_monotonicity: Option<f64>,
-    pub avg_score_multiplier: Option<f64>,
-    pub suggested_points: f64,
-    pub suggested_total_points: f64,
-    pub calibration_score: f64,
-    pub status: String,
-    pub status_label: String,
-    pub score_buckets: Vec<RuleExpressionCalibrationBucket>,
-    pub suggested_dist_points: Vec<RuleExpressionCalibrationDistancePoint>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RuleExpressionCalibrationData {
-    pub continuation_id: String,
-    pub combo_key: String,
-    pub combo_label: String,
-    pub direction: String,
-    pub candidate_count: usize,
-    pub point_scale_description: String,
-    pub recommended_candidate_key: Option<String>,
-    pub candidates: Vec<RuleExpressionCalibrationCandidate>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RuleExpressionValidationManualStrategy {
-    pub name: Option<String>,
-    pub scene_name: Option<String>,
-    pub stage: Option<String>,
-    pub scope_way: Option<String>,
-    pub scope_windows: Option<usize>,
-    pub when: Option<String>,
-    pub points: Option<f64>,
-    pub dist_points: Option<Vec<crate::data::DistPoint>>,
-    pub explain: Option<String>,
-    pub tag: Option<String>,
-}
-
-#[derive(Debug)]
-struct ValidationVariant {
-    combo_key: String,
-    combo_label: String,
-    formula: String,
-    unknown_values: Vec<RuleValidationUnknownValue>,
-}
-
-type ValidationTriggeredScoreMap = HashMap<String, HashMap<String, f64>>;
-
-struct PreparedValidationCombo {
-    variant: ValidationVariant,
-    cached_rule: CachedRule,
-    assigned_names: Vec<String>,
-}
-
-struct ValidationExecutionPlan {
-    combos: Vec<PreparedValidationCombo>,
-    need_rows: usize,
-    query_start_date: String,
-}
-
-struct ValidationTsCodeEvaluation {
-    ts_code: String,
-    combo_hits: Vec<(usize, HashMap<String, f64>)>,
-}
-
-#[derive(Debug, Clone)]
-struct ValidationSeedRule {
-    rule_name: String,
-    rule_explain: String,
-    scope_way: ScopeWay,
-    scope_windows: usize,
-    formula: String,
-    points: f64,
-    dist_points: Option<Vec<crate::data::DistPoint>>,
-    tag: RuleTag,
-    exclude_rule_name: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-struct ValidationContinuationCombo {
-    combo_key: String,
-    combo_label: String,
-    formula: String,
-}
-
-#[derive(Debug)]
-struct ValidationContinuationSession {
-    created_at: Instant,
-    source_path: String,
-    params: RuleLayerBacktestRunParams,
-    runtime_cache: Arc<RuleLayerRuntimeCache>,
-    seed_rule: ValidationSeedRule,
-    validation_ts_codes: Vec<String>,
-    combos: HashMap<String, ValidationContinuationCombo>,
-}
-
-static VALIDATION_CONTINUATION_CACHE: OnceLock<
-    Mutex<HashMap<String, Arc<ValidationContinuationSession>>>,
-> = OnceLock::new();
-
-fn validation_continuation_cache()
--> &'static Mutex<HashMap<String, Arc<ValidationContinuationSession>>> {
-    VALIDATION_CONTINUATION_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-#[derive(Debug, Serialize)]
-pub struct MarketRankItem {
-    pub name: String,
-    pub value: f64,
-    pub ts_code: Option<String>,
-    pub start_date: Option<String>,
-    pub end_date: Option<String>,
-    pub concepts: Option<String>,
-    pub three_day_gain: Option<f64>,
-    pub five_day_gain: Option<f64>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct MarketAnalysisSnapshot {
-    pub trade_date: Option<String>,
-    pub concept_top: Vec<MarketRankItem>,
-    pub industry_top: Vec<MarketRankItem>,
-    pub concept_money_flow_top: Vec<MarketRankItem>,
-    pub industry_money_flow_top: Vec<MarketRankItem>,
-    pub concept_money_outflow_top: Vec<MarketRankItem>,
-    pub industry_money_outflow_top: Vec<MarketRankItem>,
-    pub gain_top: Vec<MarketRankItem>,
-    pub sub_interval_gain_top: Vec<MarketRankItem>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct MarketAnalysisData {
-    pub lookback_period: usize,
-    pub stock_rank_limit: usize,
-    pub sub_interval_period: usize,
-    pub min_board_stock_count: usize,
-    pub latest_trade_date: Option<String>,
-    pub resolved_reference_trade_date: Option<String>,
-    pub board_options: Vec<String>,
-    pub resolved_board: Option<String>,
-    pub interval: MarketAnalysisSnapshot,
-    pub daily: MarketAnalysisSnapshot,
-}
-
-#[derive(Debug, Serialize)]
-pub struct MarketContributorItem {
-    pub ts_code: String,
-    pub name: Option<String>,
-    pub industry: Option<String>,
-    pub contribution_pct: f64,
-}
-
-fn market_rank_item(name: String, value: f64) -> MarketRankItem {
-    MarketRankItem {
-        name,
-        value,
-        ts_code: None,
-        start_date: None,
-        end_date: None,
-        concepts: None,
-        three_day_gain: None,
-        five_day_gain: None,
-    }
-}
-
-fn market_stock_rank_item(
-    stock_name_map: &HashMap<String, String>,
-    ts_code: String,
-    value: f64,
-    start_date: Option<String>,
-    end_date: Option<String>,
-) -> MarketRankItem {
-    let name = stock_name_map
-        .get(&ts_code)
-        .cloned()
-        .unwrap_or_else(|| ts_code.clone());
-    MarketRankItem {
-        name: format!("{} ({})", name, ts_code),
-        value,
-        ts_code: Some(ts_code),
-        start_date,
-        end_date,
-        concepts: None,
-        three_day_gain: None,
-        five_day_gain: None,
-    }
-}
-
-fn trailing_period_gain(rows: &[(String, f64)], period: usize) -> Option<f64> {
-    if period == 0 || rows.len() <= period {
-        return None;
-    }
-    let start_close = rows.get(rows.len() - period - 1)?.1;
-    let end_close = rows.last()?.1;
-    if !start_close.is_finite() || !end_close.is_finite() || start_close <= f64::EPSILON {
-        return None;
-    }
-    let value = (end_close / start_close - 1.0) * 100.0;
-    value.is_finite().then_some(value)
-}
-
-#[derive(Debug, Serialize)]
-pub struct MarketContributionData {
-    pub scope: String,
-    pub kind: String,
-    pub name: String,
-    pub trade_date: Option<String>,
-    pub start_date: Option<String>,
-    pub end_date: Option<String>,
-    pub lookback_period: usize,
-    pub contributors: Vec<MarketContributorItem>,
-}
-
-fn open_result_conn(source_path: &str) -> Result<Connection, String> {
-    let result_db = result_db_path(source_path);
-    let result_db_str = result_db
-        .to_str()
-        .ok_or_else(|| "ç»“æžœåº“è·¯å¾„ä¸æ˜¯æœ‰æ•ˆUTF-8".to_string())?;
-    Connection::open(result_db_str).map_err(|e| format!("æ‰“å¼€ç»“æžœåº“å¤±è´¥: {e}"))
-}
-
-fn scope_way_label(scope_way: ScopeWay) -> String {
-    match scope_way {
-        ScopeWay::Any => "any".to_string(),
-        ScopeWay::Last => "last".to_string(),
-        ScopeWay::Each => "each".to_string(),
-        ScopeWay::Recent => "recent".to_string(),
-        ScopeWay::Consec(n) => format!("consec>={n}"),
-    }
-}
-
-fn parse_scope_way_input(scope_way_raw: &str) -> Result<ScopeWay, String> {
-    let normalized = scope_way_raw.trim().to_ascii_uppercase();
-    match normalized.as_str() {
-        "ANY" => Ok(ScopeWay::Any),
-        "LAST" => Ok(ScopeWay::Last),
-        "EACH" => Ok(ScopeWay::Each),
-        "RECENT" => Ok(ScopeWay::Recent),
-        value => {
-            let Some(num) = value.strip_prefix("CONSEC>=") else {
-                return Err(format!(
-                    "scope_way ä¸æ”¯æŒ: {scope_way_raw}ï¼Œä»…æ”¯æŒ ANY/LAST/EACH/RECENT/CONSEC>=N"
-                ));
-            };
-            let threshold = num
-                .parse::<usize>()
-                .map_err(|_| format!("scope_way è¿žç»­é˜ˆå€¼éžæ³•: {scope_way_raw}"))?;
-            if threshold == 0 {
-                return Err("scope_way è¿žç»­é˜ˆå€¼å¿…é¡» >= 1".to_string());
-            }
-            Ok(ScopeWay::Consec(threshold))
-        }
-    }
-}
-
-fn read_non_empty_owned(raw: Option<&str>) -> Option<String> {
-    raw.map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-}
-
-fn load_rule_meta(source_path: &str) -> Result<(Vec<String>, HashMap<String, RuleMeta>), String> {
-    let rules = ScoreRule::load_rules(source_path)?;
-    let mut order = Vec::with_capacity(rules.len());
-    let mut meta_map = HashMap::with_capacity(rules.len());
-
-    for rule in rules {
-        order.push(rule.name.clone());
-        let when = match rule.kind {
-            RuleKind::Single => rule.when.clone(),
-            RuleKind::Combination => (|rule: &ScoreRule| -> String {
-                let conditions = rule
-                    .conditions
-                    .iter()
-                    .map(|condition| format!("{}: {}", condition.name, condition.when))
-                    .collect::<Vec<_>>()
-                    .join("ï¼›");
-                let bonuses = rule
-                    .conditions
-                    .iter()
-                    .filter(|condition| condition.bonus_points != 0.0)
-                    .map(|condition| format!("{}: {:+}", condition.name, condition.bonus_points))
-                    .collect::<Vec<_>>()
-                    .join("ï¼›");
-                let mut parts = vec![
-                    format!("ç»„åˆæ¡ä»¶ï¼š{conditions}"),
-                    format!(
-                        "å‘½ä¸­æ•°å¾—åˆ†ï¼š{:?}",
-                        rule.points_by_hits.as_deref().unwrap_or_default()
-                    ),
-                ];
-                if !bonuses.is_empty() {
-                    parts.push(format!("é¢å¤–åŠ åˆ†ï¼š{bonuses}"));
-                }
-                parts.join("ï¼›")
-            })(&rule),
-        };
-        let points = rule.representative_points();
-        meta_map.insert(
-            rule.name,
-            RuleMeta {
-                when,
-                explain: rule.explain,
-                trigger_mode: scope_way_label(rule.scope_way),
-                is_each: rule.kind == RuleKind::Single && matches!(rule.scope_way, ScopeWay::Each),
-                points,
-            },
-        );
-    }
-
-    Ok((order, meta_map))
-}
-
-fn load_scene_options(source_path: &str) -> Result<Vec<String>, String> {
-    let scenes = ScoreScene::load_scenes(source_path)?;
-    Ok(scenes.into_iter().map(|scene| scene.name).collect())
-}
-
-fn query_daily_rows(
-    conn: &Connection,
-    rule_order: &[String],
-    meta_map: &HashMap<String, RuleMeta>,
-) -> Result<Vec<StrategyDailyRow>, String> {
-    let each_medians = (|conn: &Connection,
-                         meta_map: &HashMap<String, RuleMeta>|
-     -> Result<HashMap<(String, String), f64>, String> {
-        let mut out = HashMap::new();
-
-        for (rule_name, meta) in meta_map {
-            if !meta.is_each || meta.points == 0.0 {
-                continue;
-            }
-
-            let mut stmt = conn
-                .prepare(
-                    r#"
-                SELECT
-                    trade_date,
-                    QUANTILE_CONT(ABS(rule_score / ?), 0.5) AS median_trigger_count
-                FROM rule_details
-                WHERE rule_name = ?
-                  AND rule_score IS NOT NULL
-                  AND ABS(rule_score) > 1e-12
-                GROUP BY 1
-                ORDER BY 1 ASC
-                "#,
-                )
-                .map_err(|e| format!("é¢„ç¼–è¯‘ EACH ä¸­ä½è§¦å‘æ¬¡æ•° SQL å¤±è´¥: {e}"))?;
-            let mut rows = stmt
-                .query(params![meta.points, rule_name])
-                .map_err(|e| format!("æ‰§è¡Œ EACH ä¸­ä½è§¦å‘æ¬¡æ•° SQL å¤±è´¥: {e}"))?;
-
-            while let Some(row) = rows
-                .next()
-                .map_err(|e| format!("è¯»å– EACH ä¸­ä½è§¦å‘æ¬¡æ•°å¤±è´¥: {e}"))?
-            {
-                let trade_date: String = row.get(0).map_err(|e| format!("è¯»å–äº¤æ˜“æ—¥å¤±è´¥: {e}"))?;
-                let median: Option<f64> = row
-                    .get(1)
-                    .map_err(|e| format!("è¯»å–ä¸­ä½è§¦å‘æ¬¡æ•°å¤±è´¥: {e}"))?;
-                if let Some(value) = median {
-                    out.insert((trade_date, rule_name.clone()), value);
-                }
-            }
-        }
-
-        Ok(out)
-    })(conn, meta_map)?;
-    let mut sample_stmt = conn
-        .prepare(
-            r#"
-        SELECT
-            trade_date,
-            COUNT(*) AS sample_count
-        FROM score_summary
-        GROUP BY 1
-        ORDER BY 1 ASC
-        "#,
-        )
-        .map_err(|e| format!("é¢„ç¼–è¯‘æ—¥åº¦æ ·æœ¬æ•° SQL å¤±è´¥: {e}"))?;
-    let mut sample_rows = sample_stmt
-        .query([])
-        .map_err(|e| format!("æ‰§è¡Œæ—¥åº¦æ ·æœ¬æ•° SQL å¤±è´¥: {e}"))?;
-
-    let mut daily_samples = Vec::new();
-    while let Some(row) = sample_rows
-        .next()
-        .map_err(|e| format!("è¯»å–æ—¥åº¦æ ·æœ¬æ•°å¤±è´¥: {e}"))?
-    {
-        let trade_date: String = row.get(0).map_err(|e| format!("è¯»å–äº¤æ˜“æ—¥å¤±è´¥: {e}"))?;
-        let sample_count: i64 = row.get(1).map_err(|e| format!("è¯»å–æ ·æœ¬æ•°å¤±è´¥: {e}"))?;
-        daily_samples.push((trade_date, sample_count));
-    }
-
-    let sql = r#"
-        WITH daily_rank_bounds AS (
-            SELECT
-                trade_date,
-                MAX(rank) AS max_rank
-            FROM score_summary
-            GROUP BY 1
-        ),
-        triggered_rule_rows AS (
-            SELECT *
-            FROM rule_details
-            WHERE rule_score IS NOT NULL
-              AND ABS(rule_score) > 1e-12
-        )
-        SELECT
-            d.trade_date,
-            d.rule_name,
-            COUNT(*) AS trigger_count,
-            SUM(
-                CASE
-                    WHEN s.rank IS NOT NULL
-                      AND b.max_rank IS NOT NULL
-                      AND b.max_rank > 0
-                    THEN d.rule_score * CAST((b.max_rank + 1 - s.rank) AS DOUBLE) / CAST(b.max_rank AS DOUBLE)
-                    ELSE 0
-                END
-            ) AS contribution_score,
-            SUM(CASE WHEN s.rank <= ? THEN 1 ELSE 0 END) AS top100_trigger_count,
-            MIN(s.rank) AS best_rank
-        FROM triggered_rule_rows AS d
-        LEFT JOIN score_summary AS s
-          ON s.ts_code = d.ts_code
-         AND s.trade_date = d.trade_date
-        LEFT JOIN daily_rank_bounds AS b
-          ON b.trade_date = d.trade_date
-        GROUP BY 1, 2
-        ORDER BY d.trade_date ASC, d.rule_name ASC
-    "#;
-
-    let mut stmt = conn
-        .prepare(sql)
-        .map_err(|e| format!("é¢„ç¼–è¯‘æ—¥åº¦ç­–ç•¥ç»Ÿè®¡ SQL å¤±è´¥: {e}"))?;
-    let mut rows = stmt
-        .query(params![(100)])
-        .map_err(|e| format!("æ‰§è¡Œæ—¥åº¦ç­–ç•¥ç»Ÿè®¡ SQL å¤±è´¥: {e}"))?;
-
-    let mut out = Vec::new();
-    let mut daily_agg_map: HashMap<(String, String), RuleDayAgg> = HashMap::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| format!("è¯»å–æ—¥åº¦ç­–ç•¥ç»Ÿè®¡å¤±è´¥: {e}"))?
-    {
-        let trade_date: String = row.get(0).map_err(|e| format!("è¯»å–äº¤æ˜“æ—¥å¤±è´¥: {e}"))?;
-        let rule_name: String = row.get(1).map_err(|e| format!("è¯»å–ç­–ç•¥åå¤±è´¥: {e}"))?;
-        daily_agg_map.insert(
-            (trade_date, rule_name),
-            RuleDayAgg {
-                trigger_count: row.get(2).map_err(|e| format!("è¯»å–è§¦å‘æ¬¡æ•°å¤±è´¥: {e}"))?,
-                contribution_score: row
-                    .get::<usize, Option<f64>>(3)
-                    .map_err(|e| format!("è¯»å–ç­–ç•¥è´¡çŒ®åº¦å¤±è´¥: {e}"))?
-                    .unwrap_or(0.0),
-                top100_trigger_count: row
-                    .get::<usize, Option<i64>>(4)
-                    .map_err(|e| format!("è¯»å–å‰100è§¦å‘æ¬¡æ•°å¤±è´¥: {e}"))?
-                    .unwrap_or(0),
-                best_rank: row.get(5).map_err(|e| format!("è¯»å–æœ€ä¼˜æŽ’åå¤±è´¥: {e}"))?,
-            },
-        );
-    }
-
-    for (trade_date, sample_count) in daily_samples {
-        for rule_name in rule_order {
-            let agg = daily_agg_map
-                .get(&(trade_date.clone(), rule_name.clone()))
-                .cloned()
-                .unwrap_or_default();
-            let meta = meta_map.get(rule_name);
-            let contribution_score = if agg.trigger_count > 0 {
-                Some(agg.contribution_score)
-            } else {
-                None
-            };
-            let contribution_per_trigger =
-                contribution_score.map(|score| score / agg.trigger_count as f64);
-            let coverage = if sample_count > 0 {
-                Some(agg.trigger_count as f64 / sample_count as f64)
-            } else {
-                None
-            };
-
-            out.push(StrategyDailyRow {
-                median_trigger_count: each_medians
-                    .get(&(trade_date.clone(), rule_name.clone()))
-                    .copied(),
-                trade_date: trade_date.clone(),
-                rule_name: rule_name.clone(),
-                trigger_mode: meta.map(|v| v.trigger_mode.clone()),
-                sample_count: Some(sample_count),
-                trigger_count: Some(agg.trigger_count),
-                coverage,
-                contribution_score,
-                contribution_per_trigger,
-                top100_trigger_count: Some(agg.top100_trigger_count),
-                best_rank: agg.best_rank,
-            });
-        }
-    }
-
-    Ok(out)
-}
-
-fn resolve_analysis_trade_date(
-    requested: Option<String>,
-    trade_date_options: &[String],
-) -> Option<String> {
-    let requested = requested
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty());
-    if let Some(trade_date) = requested {
-        if trade_date_options.iter().any(|item| item == &trade_date) {
-            return Some(trade_date);
-        }
-    }
-    trade_date_options.first().cloned()
-}
-
-fn build_chart(strategy_rows: &[StrategyDailyRow]) -> StrategyChartPayload {
-    let items = strategy_rows
-        .iter()
-        .map(|row| StrategyChartPoint {
-            trade_date: row.trade_date.clone(),
-            trigger_count: row.trigger_count,
-            top100_trigger_count: row.top100_trigger_count,
-            coverage: row.coverage,
-        })
-        .collect();
-
-    StrategyChartPayload { items: Some(items) }
-}
-
-fn query_triggered_stocks(
-    conn: &Connection,
-    source_path: &str,
-    rule_name: &str,
-    trade_date: &str,
-) -> Result<Vec<TriggeredStockRow>, String> {
-    let name_map = build_name_map(source_path).unwrap_or_default();
-    let concept_map = build_concepts_map(source_path).unwrap_or_default();
-    let mut stmt = conn
-        .prepare(
-            r#"
-            SELECT
-                s.rank,
-                d.ts_code,
-                s.total_score,
-                d.rule_score
-            FROM rule_details AS d
-            LEFT JOIN score_summary AS s
-              ON s.ts_code = d.ts_code
-             AND s.trade_date = d.trade_date
-            WHERE d.trade_date = ?
-              AND d.rule_name = ?
-              AND d.rule_score IS NOT NULL
-              AND ABS(d.rule_score) > 1e-12
-            ORDER BY s.rank ASC NULLS LAST, d.ts_code ASC
-            "#,
-        )
-        .map_err(|e| format!("é¢„ç¼–è¯‘è§¦å‘è‚¡ç¥¨ SQL å¤±è´¥: {e}"))?;
-    let mut rows = stmt
-        .query(params![trade_date, rule_name])
-        .map_err(|e| format!("æ‰§è¡Œè§¦å‘è‚¡ç¥¨ SQL å¤±è´¥: {e}"))?;
-
-    let mut out = Vec::new();
-    while let Some(row) = rows.next().map_err(|e| format!("è¯»å–è§¦å‘è‚¡ç¥¨å¤±è´¥: {e}"))? {
-        let ts_code: String = row.get(1).map_err(|e| format!("è¯»å–è‚¡ç¥¨ä»£ç å¤±è´¥: {e}"))?;
-        out.push(TriggeredStockRow {
-            rank: row.get(0).map_err(|e| format!("è¯»å–æŽ’åå¤±è´¥: {e}"))?,
-            total_score: row.get(2).map_err(|e| format!("è¯»å–æ€»åˆ†å¤±è´¥: {e}"))?,
-            rule_score: row.get(3).map_err(|e| format!("è¯»å–ç­–ç•¥å¾—åˆ†å¤±è´¥: {e}"))?,
-            name: name_map.get(&ts_code).cloned(),
-            concept: concept_map.get(&ts_code).cloned(),
-            ts_code,
-        });
-    }
-
-    Ok(out)
-}
-
-pub fn get_strategy_triggered_stocks(
-    source_path: String,
-    strategy_name: String,
-    analysis_trade_date: String,
-) -> Result<Vec<TriggeredStockRow>, String> {
-    let strategy_name = strategy_name.trim();
-    let analysis_trade_date = analysis_trade_date.trim();
-    if strategy_name.is_empty() || analysis_trade_date.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let conn = open_result_conn(&source_path)?;
-    query_triggered_stocks(&conn, &source_path, strategy_name, analysis_trade_date)
-}
-
-pub fn get_strategy_statistics_detail(
-    source_path: String,
-    strategy_name: String,
-    analysis_trade_date: Option<String>,
-) -> Result<StrategyStatisticsDetailData, String> {
-    let strategy_name = strategy_name.trim().to_string();
-    if strategy_name.is_empty() {
-        return Err("ç­–ç•¥åä¸èƒ½ä¸ºç©º".to_string());
-    }
-
-    let conn = open_result_conn(&source_path)?;
-    let (rule_order, meta_map) = load_rule_meta(&source_path)?;
-    let detail_rows_all = query_daily_rows(&conn, &rule_order, &meta_map)?;
-    let strategy_rows = detail_rows_all
-        .iter()
-        .filter(|row| row.rule_name == strategy_name)
-        .cloned()
-        .collect::<Vec<_>>();
-
-    let mut analysis_trade_date_options = strategy_rows
-        .iter()
-        .filter(|row| row.trigger_count.unwrap_or(0) > 0)
-        .map(|row| row.trade_date.clone())
-        .collect::<Vec<_>>();
-    analysis_trade_date_options.sort();
-    analysis_trade_date_options.dedup();
-    analysis_trade_date_options.reverse();
-    if analysis_trade_date_options.is_empty() {
-        analysis_trade_date_options = strategy_rows
-            .iter()
-            .map(|row| row.trade_date.clone())
-            .collect::<Vec<_>>();
-        analysis_trade_date_options.sort();
-        analysis_trade_date_options.dedup();
-        analysis_trade_date_options.reverse();
-    }
-    let resolved_analysis_trade_date =
-        resolve_analysis_trade_date(analysis_trade_date, &analysis_trade_date_options);
-    let selected_daily_row = resolved_analysis_trade_date
-        .as_ref()
-        .and_then(|trade_date| {
-            strategy_rows
-                .iter()
-                .find(|row| row.trade_date == *trade_date)
-                .cloned()
-        });
-    let triggered_stocks = if let Some(trade_date) = resolved_analysis_trade_date.as_deref() {
-        query_triggered_stocks(&conn, &source_path, &strategy_name, trade_date)?
-    } else {
-        Vec::new()
-    };
-
-    Ok(StrategyStatisticsDetailData {
-        strategy_name,
-        analysis_trade_date_options,
-        resolved_analysis_trade_date,
-        selected_daily_row,
-        chart: Some(build_chart(&strategy_rows)),
-        triggered_stocks,
-    })
-}
-
-pub fn get_strategy_statistics_page(
-    source_path: String,
-    strategy_name: Option<String>,
-    analysis_trade_date: Option<String>,
-) -> Result<StrategyStatisticsPageData, String> {
-    let conn = open_result_conn(&source_path)?;
-    let overview = (|conn: &Connection| -> Result<StrategyOverviewPayload, String> {
-        let sql = r#"
-        WITH per_stock_day AS (
-            SELECT
-                trade_date,
-                ts_code,
-                COUNT(*) AS hit_rule_count
-            FROM rule_details
-            WHERE rule_score IS NOT NULL
-              AND ABS(rule_score) > 1e-12
-            GROUP BY 1, 2
-        ),
-        daily_level AS (
-            SELECT
-                trade_date,
-                AVG(hit_rule_count) AS day_level
-            FROM per_stock_day
-            GROUP BY 1
-        ),
-        overall_level AS (
-            SELECT AVG(hit_rule_count) AS avg_level
-            FROM per_stock_day
-        )
-        SELECT
-            d.trade_date,
-            d.day_level,
-            o.avg_level,
-            d.day_level - o.avg_level AS delta_level,
-            CASE
-                WHEN d.day_level IS NULL OR o.avg_level IS NULL THEN NULL
-                ELSE d.day_level > o.avg_level
-            END AS above_avg
-        FROM daily_level AS d
-        CROSS JOIN overall_level AS o
-        ORDER BY d.trade_date ASC
-    "#;
-
-        let mut stmt = conn
-            .prepare(sql)
-            .map_err(|e| format!("é¢„ç¼–è¯‘æ€»ä½“ç»Ÿè®¡ SQL å¤±è´¥: {e}"))?;
-        let mut rows = stmt
-            .query([])
-            .map_err(|e| format!("æ‰§è¡Œæ€»ä½“ç»Ÿè®¡ SQL å¤±è´¥: {e}"))?;
-
-        let mut items = Vec::new();
-        let mut latest_trade_date = None;
-        let mut average_level = None;
-
-        while let Some(row) = rows.next().map_err(|e| format!("è¯»å–æ€»ä½“ç»Ÿè®¡å¤±è´¥: {e}"))? {
-            let trade_date: String = row.get(0).map_err(|e| format!("è¯»å–äº¤æ˜“æ—¥å¤±è´¥: {e}"))?;
-            let avg_level: Option<f64> =
-                row.get(2).map_err(|e| format!("è¯»å–å¹³å‡æ°´å¹³å¤±è´¥: {e}"))?;
-
-            latest_trade_date = Some(trade_date.clone());
-            average_level = avg_level;
-            items.push(StrategyHeatmapCell {
-                trade_date,
-                day_level: row.get(1).map_err(|e| format!("è¯»å–å½“æ—¥æ°´å¹³å¤±è´¥: {e}"))?,
-                avg_level,
-                delta_level: row.get(3).map_err(|e| format!("è¯»å–å·®å€¼å¤±è´¥: {e}"))?,
-                above_avg: row.get(4).map_err(|e| format!("è¯»å–å¼ºå¼±æ ‡è®°å¤±è´¥: {e}"))?,
-            });
-        }
-
-        Ok(StrategyOverviewPayload {
-            items: Some(items),
-            latest_trade_date,
-            average_level,
-        })
-    })(&conn)?;
-    let (strategy_options, meta_map) = load_rule_meta(&source_path)?;
-    let detail_rows_all = query_daily_rows(&conn, &strategy_options, &meta_map)?;
-
-    let resolved_strategy_name =
-        (|requested: Option<String>, strategy_options: &[String]| -> Option<String> {
-            let requested = requested
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty());
-            if let Some(name) = requested {
-                if strategy_options.iter().any(|item| item == &name) {
-                    return Some(name);
-                }
-            }
-            None
-        })(strategy_name, &strategy_options);
-
-    let strategy_rows: Vec<StrategyDailyRow> =
-        if let Some(selected_name) = resolved_strategy_name.as_ref() {
-            detail_rows_all
-                .iter()
-                .filter(|row| row.rule_name == *selected_name)
-                .cloned()
-                .collect()
-        } else {
-            Vec::new()
-        };
-
-    let mut analysis_trade_date_options: Vec<String> = detail_rows_all
-        .iter()
-        .filter(|row| row.trigger_count.unwrap_or(0) > 0)
-        .map(|row| row.trade_date.clone())
-        .collect();
-    analysis_trade_date_options.sort();
-    analysis_trade_date_options.dedup();
-    analysis_trade_date_options.reverse();
-
-    if analysis_trade_date_options.is_empty() {
-        analysis_trade_date_options = detail_rows_all
-            .iter()
-            .map(|row| row.trade_date.clone())
-            .collect();
-        analysis_trade_date_options.sort();
-        analysis_trade_date_options.dedup();
-        analysis_trade_date_options.reverse();
-    }
-
-    let resolved_analysis_trade_date =
-        resolve_analysis_trade_date(analysis_trade_date, &analysis_trade_date_options);
-
-    let triggered_stocks = if let (Some(rule_name), Some(trade_date)) = (
-        resolved_strategy_name.as_deref(),
-        resolved_analysis_trade_date.as_deref(),
-    ) {
-        query_triggered_stocks(&conn, &source_path, rule_name, trade_date)?
-    } else {
-        Vec::new()
-    };
-
-    let mut detail_rows = detail_rows_all;
-    detail_rows.sort_by(|a, b| {
-        b.trade_date
-            .cmp(&a.trade_date)
-            .then_with(|| {
-                b.trigger_count
-                    .unwrap_or(0)
-                    .cmp(&a.trigger_count.unwrap_or(0))
-            })
-            .then_with(|| a.rule_name.cmp(&b.rule_name))
-    });
-
-    Ok(StrategyStatisticsPageData {
-        overview: Some(overview),
-        detail_rows: Some(detail_rows),
-        strategy_options: Some(strategy_options),
-        resolved_strategy_name,
-        analysis_trade_date_options: Some(analysis_trade_date_options),
-        resolved_analysis_trade_date,
-        chart: Some(build_chart(&strategy_rows)),
-        triggered_stocks: Some(triggered_stocks),
-    })
-}
-
-pub fn get_scene_statistics_page(
-    source_path: String,
-    scene_name: Option<String>,
-    analysis_trade_date: Option<String>,
-) -> Result<SceneStatisticsPageData, String> {
-    let conn = open_result_conn(&source_path)?;
-    let scene_options = load_scene_options(&source_path)?;
-    let resolved_scene_name =
-        (|requested: Option<String>, scene_options: &[String]| -> Option<String> {
-            let requested = requested
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty());
-            if let Some(scene_name) = requested {
-                if scene_options.iter().any(|item| item == &scene_name) {
-                    return Some(scene_name);
-                }
-            }
-            scene_options.first().cloned()
-        })(scene_name, &scene_options);
-    let analysis_trade_date_options = (|conn: &Connection| -> Result<Vec<String>, String> {
-        let mut stmt = conn
-            .prepare(
-                r#"
-            SELECT DISTINCT trade_date
-            FROM scene_details
-            ORDER BY trade_date DESC
-            "#,
-            )
-            .map_err(|e| format!("é¢„ç¼–è¯‘ scene äº¤æ˜“æ—¥ SQL å¤±è´¥: {e}"))?;
-        let mut rows = stmt
-            .query([])
-            .map_err(|e| format!("æ‰§è¡Œ scene äº¤æ˜“æ—¥ SQL å¤±è´¥: {e}"))?;
-
-        let mut out = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .map_err(|e| format!("è¯»å– scene äº¤æ˜“æ—¥å¤±è´¥: {e}"))?
-        {
-            let trade_date: String = row.get(0).map_err(|e| format!("è¯»å–äº¤æ˜“æ—¥å­—æ®µå¤±è´¥: {e}"))?;
-            if !trade_date.trim().is_empty() {
-                out.push(trade_date);
-            }
-        }
-
-        Ok(out)
-    })(&conn)?;
-    let resolved_analysis_trade_date =
-        resolve_analysis_trade_date(analysis_trade_date, &analysis_trade_date_options);
-
-    let mut stage_rows = Vec::new();
-    let mut summary = None;
-
-    if let (Some(selected_scene_name), Some(selected_trade_date)) = (
-        resolved_scene_name.as_deref(),
-        resolved_analysis_trade_date.as_deref(),
-    ) {
-        let (next_stage_rows, total_sample_count, covered_count) =
-            (|conn: &Connection,
-              scene_name: &str,
-              trade_date: &str|
-             -> Result<(Vec<SceneStageRow>, i64, i64), String> {
-                let mut stmt = conn
-                    .prepare(
-                        r#"
-            SELECT
-                COALESCE(NULLIF(stage, ''), 'none') AS stage,
-                COUNT(*) AS sample_count
-            FROM scene_details
-            WHERE trade_date = ?
-              AND scene_name = ?
-            GROUP BY 1
-            "#,
-                    )
-                    .map_err(|e| format!("é¢„ç¼–è¯‘ scene é˜¶æ®µç»Ÿè®¡ SQL å¤±è´¥: {e}"))?;
-                let mut rows = stmt
-                    .query(params![trade_date, scene_name])
-                    .map_err(|e| format!("æ‰§è¡Œ scene é˜¶æ®µç»Ÿè®¡ SQL å¤±è´¥: {e}"))?;
-
-                let mut stage_count_map: HashMap<String, i64> = HashMap::new();
-                while let Some(row) = rows
-                    .next()
-                    .map_err(|e| format!("è¯»å– scene é˜¶æ®µç»Ÿè®¡å¤±è´¥: {e}"))?
-                {
-                    let stage: String = row.get(0).map_err(|e| format!("è¯»å–é˜¶æ®µå­—æ®µå¤±è´¥: {e}"))?;
-                    let sample_count: i64 =
-                        row.get(1).map_err(|e| format!("è¯»å–é˜¶æ®µæ•°é‡å¤±è´¥: {e}"))?;
-                    let normalized_stage = stage.trim().to_ascii_lowercase();
-                    stage_count_map.insert(normalized_stage, sample_count);
-                }
-
-                let total_sample_count: i64 = stage_count_map.values().sum();
-                let none_count = stage_count_map.get("none").copied().unwrap_or(0);
-                let covered_count = (total_sample_count - none_count).max(0);
-
-                let mut rows_out = Vec::new();
-                let stage_order = ["trigger", "confirm", "observe", "fail", "none"];
-
-                for stage in stage_order {
-                    let sample_count = stage_count_map.remove(stage).unwrap_or(0);
-                    rows_out.push(SceneStageRow {
-                        stage: stage.to_string(),
-                        sample_count,
-                        stage_ratio_in_scene: if total_sample_count > 0 {
-                            Some(sample_count as f64 / total_sample_count as f64)
-                        } else {
-                            None
-                        },
-                    });
-                }
-
-                let mut remain_stages = stage_count_map.into_iter().collect::<Vec<_>>();
-                remain_stages.sort_by(|a, b| a.0.cmp(&b.0));
-                for (stage, sample_count) in remain_stages {
-                    rows_out.push(SceneStageRow {
-                        stage,
-                        sample_count,
-                        stage_ratio_in_scene: if total_sample_count > 0 {
-                            Some(sample_count as f64 / total_sample_count as f64)
-                        } else {
-                            None
-                        },
-                    });
-                }
-
-                Ok((rows_out, total_sample_count, covered_count))
-            })(&conn, selected_scene_name, selected_trade_date)?;
-        stage_rows = next_stage_rows;
-
-        let scene_rule_name_sets =
-            (|source_path: &str| -> Result<HashMap<String, HashSet<String>>, String> {
-                let rules = ScoreRule::load_rules(source_path)?;
-                let mut out: HashMap<String, HashSet<String>> = HashMap::new();
-
-                for rule in rules {
-                    out.entry(rule.scene_name).or_default().insert(rule.name);
-                }
-
-                Ok(out)
-            })(&source_path)?;
-        let contribution_by_rule = (|conn: &Connection,
-                                     trade_date: &str|
-         -> Result<HashMap<String, f64>, String> {
-            let sql = r#"
-        WITH daily_rank_bounds AS (
-            SELECT
-                trade_date,
-                MAX(rank) AS max_rank
-            FROM score_summary
-            WHERE trade_date = ?
-            GROUP BY 1
-        ),
-        triggered_rule_rows AS (
-            SELECT *
-            FROM rule_details
-            WHERE trade_date = ?
-              AND rule_score IS NOT NULL
-              AND ABS(rule_score) > 1e-12
-        )
-        SELECT
-            d.rule_name,
-            SUM(
-                CASE
-                    WHEN s.rank IS NOT NULL
-                      AND b.max_rank IS NOT NULL
-                      AND b.max_rank > 0
-                    THEN d.rule_score * CAST((b.max_rank + 1 - s.rank) AS DOUBLE) / CAST(b.max_rank AS DOUBLE)
-                    ELSE 0
-                END
-            ) AS contribution_score
-        FROM triggered_rule_rows AS d
-        LEFT JOIN score_summary AS s
-          ON s.ts_code = d.ts_code
-         AND s.trade_date = d.trade_date
-        LEFT JOIN daily_rank_bounds AS b
-          ON b.trade_date = d.trade_date
-        GROUP BY 1
-    "#;
-
-            let mut stmt = conn
-                .prepare(sql)
-                .map_err(|e| format!("é¢„ç¼–è¯‘ scene è§„åˆ™è´¡çŒ®åº¦ SQL å¤±è´¥: {e}"))?;
-            let mut rows = stmt
-                .query(params![trade_date, trade_date])
-                .map_err(|e| format!("æ‰§è¡Œ scene è§„åˆ™è´¡çŒ®åº¦ SQL å¤±è´¥: {e}"))?;
-
-            let mut out = HashMap::new();
-            while let Some(row) = rows
-                .next()
-                .map_err(|e| format!("è¯»å– scene è§„åˆ™è´¡çŒ®åº¦å¤±è´¥: {e}"))?
-            {
-                let rule_name: String = row.get(0).map_err(|e| format!("è¯»å–è§„åˆ™åå¤±è´¥: {e}"))?;
-                let contribution_score = row
-                    .get::<usize, Option<f64>>(1)
-                    .map_err(|e| format!("è¯»å–è§„åˆ™è´¡çŒ®åº¦å¤±è´¥: {e}"))?
-                    .unwrap_or(0.0);
-                out.insert(rule_name, contribution_score);
-            }
-
-            Ok(out)
-        })(&conn, selected_trade_date)?;
-        summary = Some((|scene_total_sample_count: i64,
-                         scene_covered_count: i64,
-                         scene_rule_names: Option<&HashSet<String>>,
-                         contribution_by_rule: &HashMap<String, f64>|
-         -> SceneContributionSummary {
-            let scene_rule_contribution_score = scene_rule_names.map(|rule_names| {
-                contribution_by_rule
-                    .iter()
-                    .filter(|(rule_name, _)| rule_names.contains(*rule_name))
-                    .map(|(_, score)| *score)
-                    .sum::<f64>()
-            });
-            let all_rule_contribution_score = if contribution_by_rule.is_empty() {
-                None
-            } else {
-                Some(contribution_by_rule.values().sum::<f64>())
-            };
-            let scene_rule_contribution_ratio =
-                match (scene_rule_contribution_score, all_rule_contribution_score) {
-                    (Some(scene_score), Some(all_score)) if all_score.abs() > 1e-12 => {
-                        Some(scene_score / all_score)
-                    }
-                    _ => None,
-                };
-
-            SceneContributionSummary {
-                scene_covered_count,
-                scene_total_sample_count,
-                scene_coverage_ratio: if scene_total_sample_count > 0 {
-                    Some(scene_covered_count as f64 / scene_total_sample_count as f64)
-                } else {
-                    None
-                },
-                scene_rule_contribution_score,
-                all_rule_contribution_score,
-                scene_rule_contribution_ratio,
-            }
-        })(
-            total_sample_count,
-            covered_count,
-            scene_rule_name_sets.get(selected_scene_name),
-            &contribution_by_rule,
-        ));
-    }
-
-    Ok(SceneStatisticsPageData {
-        scene_options: Some(scene_options),
-        resolved_scene_name,
-        analysis_trade_date_options: Some(analysis_trade_date_options),
-        resolved_analysis_trade_date,
-        stage_rows: Some(stage_rows),
-        summary,
-    })
-}
-
-fn format_validation_number(value: f64) -> String {
-    let rounded = value.round();
-    if (value - rounded).abs() < 1e-9 {
-        format!("{rounded:.0}")
-    } else {
-        let mut text = format!("{value:.6}");
-        while text.contains('.') && text.ends_with('0') {
-            text.pop();
-        }
-        if text.ends_with('.') {
-            text.pop();
-        }
-        text
-    }
-}
-
-fn estimate_rule_warmup(
-    stmts: &Stmts,
-    scope_way: ScopeWay,
-    scope_windows: usize,
-) -> Result<usize, String> {
-    let expression_need = estimate_expression_warmup(stmts)?;
-
-    let scope_extra = match scope_way {
-        ScopeWay::Last => 0,
-        ScopeWay::Any | ScopeWay::Each | ScopeWay::Recent => scope_windows.saturating_sub(1),
-        ScopeWay::Consec(threshold) => scope_windows
-            .saturating_sub(1)
-            .max(threshold.saturating_sub(1)),
-    };
-
-    Ok(expression_need + scope_extra)
-}
-
-fn build_validation_cached_rule(
-    rule_name: String,
-    scope_way: ScopeWay,
-    scope_windows: usize,
-    points: f64,
-    dist_points: Option<Vec<crate::data::DistPoint>>,
-    tag: crate::data::RuleTag,
-    formula: &str,
-) -> Result<CachedRule, String> {
-    let stmts = parse_expression_program(formula)
-        .map_err(|e| format!("è¡¨è¾¾å¼è§£æžé”™è¯¯åœ¨{}:{}", e.idx, e.msg))?;
-    validate_expression_functions(&stmts)?;
-    let assigned_names = collect_assigned_names_from_expr_program(&stmts);
-
-    Ok(CachedRule {
-        name: rule_name,
-        scope_windows,
-        scope_way,
-        points,
-        dist_points,
-        max_points: None,
-        tag,
-        when_src: formula.to_string(),
-        when_ast: stmts,
-        assigned_names,
-        combination: None,
-    })
-}
-
-fn collect_validation_assigned_names(stmts: &Stmts) -> Vec<String> {
-    let mut assigned = HashSet::new();
-    for stmt in &stmts.item {
-        if let Stmt::Assign { name, .. } = stmt {
-            assigned.insert(name.clone());
-        }
-    }
-
-    let mut out = assigned.into_iter().collect::<Vec<_>>();
-    out.sort();
-    out
-}
-
-fn collect_rule_validation_runtime_keys(combos: &[PreparedValidationCombo]) -> HashSet<String> {
-    let programs = combos
-        .iter()
-        .map(|combo| &combo.cached_rule.when_ast)
-        .collect::<Vec<_>>();
-    let cyq_chen_keys = cyq_chen_runtime_key_names();
-    let injected_keys = (["RANK", "SCORE", "S_RANK", "ZHANG", "TOTAL_MV_YI"])
-        .iter()
-        .copied()
-        .chain(cyq_chen_keys)
-        .collect::<Vec<_>>();
-
-    collect_runtime_keys_from_expr_programs(
-        &programs,
-        RuntimeKeyCollectOptions {
-            always_keys: &[],
-            injected_keys: &injected_keys,
-            aliases: &([]),
-        },
-    )
-}
-
-fn snapshot_runtime_values(runtime: &Runtime, names: &[String]) -> Vec<(String, Value)> {
-    names
-        .iter()
-        .filter_map(|name| {
-            runtime
-                .vars
-                .get(name)
-                .cloned()
-                .map(|value| (name.clone(), value))
-        })
-        .collect()
-}
-
-fn restore_runtime_values(runtime: &mut Runtime, values: &[(String, Value)]) {
-    for (name, value) in values {
-        runtime.vars.insert(name.clone(), value.clone());
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-struct ValidationRankScoreInfo {
-    rank: Option<f64>,
-    score: Option<f64>,
-}
-
-fn build_validation_triggered_scores_for_combos(
-    source_path: &str,
-    stock_adj_type: &str,
-    query_start_date: &str,
-    start_date: &str,
-    end_date: &str,
-    need_rows: usize,
-    ts_codes: &[String],
-    st_list: &HashSet<String>,
-    combos: &[PreparedValidationCombo],
-) -> Result<Vec<ValidationTriggeredScoreMap>, String> {
-    if combos.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let required_runtime_keys = collect_rule_validation_runtime_keys(combos);
-    let used_cyq_chen_keys = (|combos: &[PreparedValidationCombo]| -> HashSet<String> {
-        let programs = combos
-            .iter()
-            .map(|combo| &combo.cached_rule.when_ast)
-            .collect::<Vec<_>>();
-        collect_used_cyq_chen_runtime_keys(&programs)
-    })(combos);
-    let total_share_map = load_total_share_map(source_path).unwrap_or_default();
-    let needs_rank_score = (|combos: &[PreparedValidationCombo]| -> bool {
-        combos.iter().any(|combo| {
-            expr_program_uses_runtime_key(&combo.cached_rule.when_ast, "RANK")
-                || expr_program_uses_runtime_key(&combo.cached_rule.when_ast, "SCORE")
-        })
-    })(combos);
-    let needs_similarity_rank = combos
-        .iter()
-        .any(|combo| expr_program_uses_runtime_key(&combo.cached_rule.when_ast, "S_RANK"));
-    let rank_score_series_map = if needs_rank_score {
-        (|source_path: &str,
-          start_date: &str,
-          end_date: &str|
-         -> HashMap<String, HashMap<String, ValidationRankScoreInfo>> {
-            let result_db = result_db_path(source_path);
-            if !result_db.exists() {
-                return HashMap::new();
-            }
-
-            let Some(result_db_str) = result_db.to_str() else {
-                return HashMap::new();
-            };
-            let Ok(conn) = Connection::open(result_db_str) else {
-                return HashMap::new();
-            };
-            let Ok(mut stmt) = conn.prepare(
-                r#"
-        SELECT ts_code, trade_date, rank, total_score
-        FROM score_summary
-        WHERE trade_date >= ? AND trade_date <= ?
-        "#,
-            ) else {
-                return HashMap::new();
-            };
-            let Ok(mut rows) = stmt.query(params![start_date, end_date]) else {
-                return HashMap::new();
-            };
-
-            let mut out: HashMap<String, HashMap<String, ValidationRankScoreInfo>> = HashMap::new();
-            while let Ok(Some(row)) = rows.next() {
-                let Ok(ts_code) = row.get::<_, String>(0) else {
-                    continue;
-                };
-                let Ok(trade_date) = row.get::<_, String>(1) else {
-                    continue;
-                };
-                let rank = row
-                    .get::<_, Option<i64>>(2)
-                    .ok()
-                    .flatten()
-                    .map(|value| value as f64);
-                let score = row.get::<_, Option<f64>>(3).ok().flatten();
-                out.entry(ts_code)
-                    .or_default()
-                    .insert(trade_date, ValidationRankScoreInfo { rank, score });
-            }
-
-            out
-        })(source_path, query_start_date, end_date)
-    } else {
-        HashMap::new()
-    };
-    let combo_triggered_maps = Mutex::new(
-        std::iter::repeat_with(HashMap::new)
-            .take(combos.len())
-            .collect::<Vec<ValidationTriggeredScoreMap>>(),
-    );
-    let results = ts_codes
-        .par_iter()
-        .map_init(
-            || {
-                DataReader::new_with_runtime_keys(source_path, &required_runtime_keys).map(
-                    |reader| {
-                        (
-                            reader,
-                            CyqChenFieldInjector::new(source_path, &used_cyq_chen_keys),
-                            SimilarityRankFieldInjector::new(source_path, needs_similarity_rank),
-                        )
-                    },
-                )
-            },
-            |worker_res, ts_code| {
-                let (reader, cyq_chen_injector, similarity_rank_injector) =
-                    worker_res.as_mut().map_err(|err| err.clone())?;
-                let ValidationTsCodeEvaluation {
-                    ts_code,
-                    combo_hits,
-                } = (|reader: &mut DataReader,
-                      cyq_chen_injector: &CyqChenFieldInjector,
-                      similarity_rank_injector: &SimilarityRankFieldInjector,
-                      ts_code: &str,
-                      stock_adj_type: &str,
-                      start_date: &str,
-                      end_date: &str,
-                      need_rows: usize,
-                      st_list: &HashSet<String>,
-                      total_share_map: &HashMap<String, f64>,
-                      rank_score_series_map: &HashMap<
-                    String,
-                    HashMap<String, ValidationRankScoreInfo>,
-                >,
-                      needs_rank_score: bool,
-                      needs_similarity_rank: bool,
-                      combos: &[PreparedValidationCombo]|
-                 -> Result<ValidationTsCodeEvaluation, String> {
-                    let mut row_data =
-                        reader.load_one_tail_rows(ts_code, stock_adj_type, end_date, need_rows)?;
-                    let _ = cyq_chen_injector.inject(&mut row_data, ts_code);
-                    if needs_similarity_rank {
-                        similarity_rank_injector.inject(&mut row_data, ts_code)?;
-                    }
-                    inject_stock_extra_fields(
-                        &mut row_data,
-                        ts_code,
-                        st_list.contains(ts_code),
-                        total_share_map.get(ts_code).copied(),
-                    )?;
-                    if needs_rank_score {
-                        (|row_data: &mut crate::data::RowData,
-                          ts_code: &str,
-                          rank_score_series_map: &HashMap<
-                            String,
-                            HashMap<String, ValidationRankScoreInfo>,
-                        >|
-                         -> Result<(), String> {
-                            let len = row_data.trade_dates.len();
-                            let mut rank_series = vec![None; len];
-                            let mut score_series = vec![None; len];
-
-                            if let Some(date_to_values) = rank_score_series_map.get(ts_code) {
-                                for (index, trade_date) in row_data.trade_dates.iter().enumerate() {
-                                    if let Some(values) = date_to_values.get(trade_date).copied() {
-                                        rank_series[index] = values.rank;
-                                        score_series[index] = values.score;
-                                    }
-                                }
-                            }
-
-                            row_data.cols.insert("RANK".to_string(), rank_series);
-                            row_data.cols.insert("SCORE".to_string(), score_series);
-                            row_data.validate()
-                        })(&mut row_data, ts_code, rank_score_series_map)?;
-                    }
-
-                    let trade_dates = row_data.trade_dates.clone();
-                    if trade_dates.is_empty() {
-                        return Ok(ValidationTsCodeEvaluation {
-                            ts_code: ts_code.to_string(),
-                            combo_hits: Vec::new(),
-                        });
-                    }
-
-                    let keep_from = trade_dates
-                        .binary_search_by(|date| date.as_str().cmp(start_date))
-                        .unwrap_or_else(|index| index);
-                    let mut runtime = row_into_rt(row_data)?;
-                    let restore_values = combos
-                        .iter()
-                        .map(|combo| snapshot_runtime_values(&runtime, &combo.assigned_names))
-                        .collect::<Vec<_>>();
-                    let mut combo_hits = Vec::new();
-
-                    // All combos originate from the same formula template with different constants,
-                    // so one runtime load can be reused as long as any overwritten base columns are restored.
-                    for (combo_index, combo) in combos.iter().enumerate() {
-                        if !restore_values[combo_index].is_empty() {
-                            restore_runtime_values(&mut runtime, &restore_values[combo_index]);
-                        }
-
-                        let (scores, triggered_flags) =
-                            evaluate_cached_rule_scores(&combo.cached_rule, &mut runtime)?;
-                        let Some(date_score_map) =
-                            (|trade_dates: &[String],
-                              keep_from: usize,
-                              scores: &[f64],
-                              triggered_flags: &[bool],
-                              rule_points: f64|
-                             -> Option<HashMap<String, f64>> {
-                                let min_len = usize::min(
-                                    trade_dates.len(),
-                                    usize::min(scores.len(), triggered_flags.len()),
-                                );
-                                if keep_from >= min_len {
-                                    return None;
-                                }
-
-                                let mut date_score_map = HashMap::new();
-                                for index in keep_from..min_len {
-                                    let Some(score) =
-                                        (|score: f64,
-                                          triggered: bool,
-                                          rule_points: f64|
-                                         -> Option<f64> {
-                                            if !score.is_finite() {
-                                                return None;
-                                            }
-                                            if score.abs() > VALIDATION_EPS {
-                                                return Some(score);
-                                            }
-                                            if !triggered {
-                                                return None;
-                                            }
-
-                                            if rule_points.is_finite()
-                                                && rule_points.abs() > VALIDATION_EPS
-                                            {
-                                                return Some(rule_points.signum());
-                                            }
-                                            Some(1.0)
-                                        })(
-                                            scores[index], triggered_flags[index], rule_points
-                                        )
-                                    else {
-                                        continue;
-                                    };
-                                    date_score_map.insert(trade_dates[index].clone(), score);
-                                }
-
-                                if date_score_map.is_empty() {
-                                    None
-                                } else {
-                                    Some(date_score_map)
-                                }
-                            })(
-                                &trade_dates,
-                                keep_from,
-                                &scores,
-                                &triggered_flags,
-                                combo.cached_rule.points,
-                            )
-                        else {
-                            continue;
-                        };
-                        combo_hits.push((combo_index, date_score_map));
-                    }
-
-                    Ok(ValidationTsCodeEvaluation {
-                        ts_code: ts_code.to_string(),
-                        combo_hits,
-                    })
-                })(
-                    reader,
-                    cyq_chen_injector,
-                    similarity_rank_injector,
-                    ts_code,
-                    stock_adj_type,
-                    start_date,
-                    end_date,
-                    need_rows,
-                    st_list,
-                    &total_share_map,
-                    &rank_score_series_map,
-                    needs_rank_score,
-                    needs_similarity_rank,
-                    combos,
-                )?;
-
-                if !combo_hits.is_empty() {
-                    let mut maps = combo_triggered_maps
-                        .lock()
-                        .map_err(|_| "å†™å…¥éªŒè¯è§¦å‘ç»“æžœå¤±è´¥:é”å·²æŸå".to_string())?;
-                    for (combo_index, date_score_map) in combo_hits {
-                        maps[combo_index].insert(ts_code.clone(), date_score_map);
-                    }
-                }
-
-                Ok::<(), String>(())
-            },
-        )
-        .collect::<Vec<_>>();
-
-    for result in results {
-        result?;
-    }
-
-    combo_triggered_maps
-        .into_inner()
-        .map_err(|_| "è¯»å–éªŒè¯è§¦å‘ç»“æžœå¤±è´¥:é”å·²æŸå".to_string())
-}
-
-#[cfg(test)]
-fn build_validation_triggered_scores(
-    source_path: &str,
-    stock_adj_type: &str,
-    start_date: &str,
-    end_date: &str,
-    cached_rule: &CachedRule,
-) -> Result<HashMap<String, HashMap<String, f64>>, String> {
-    let combo = PreparedValidationCombo {
-        variant: ValidationVariant {
-            combo_key: cached_rule.name.clone(),
-            combo_label: cached_rule.name.clone(),
-            formula: cached_rule.when_src.clone(),
-            unknown_values: Vec::new(),
-        },
-        cached_rule: cached_rule.clone(),
-        assigned_names: collect_validation_assigned_names(&cached_rule.when_ast),
-    };
-    let required_runtime_keys = collect_rule_validation_runtime_keys(std::slice::from_ref(&combo));
-    let reader = DataReader::new_with_runtime_keys(source_path, &required_runtime_keys)?;
-    let ts_codes = reader.list_ts_code(stock_adj_type, start_date, end_date)?;
-    let st_list = load_st_list(source_path)?;
-    let warmup_need = estimate_rule_warmup(
-        &cached_rule.when_ast,
-        cached_rule.scope_way,
-        cached_rule.scope_windows,
-    )?;
-    let need_rows = calc_query_need_rows(source_path, warmup_need, start_date, end_date)?;
-    let mut triggered_maps = build_validation_triggered_scores_for_combos(
-        source_path,
-        stock_adj_type,
-        &calc_query_start_date(source_path, warmup_need, start_date)?,
-        start_date,
-        end_date,
-        need_rows,
-        &ts_codes,
-        &st_list,
-        &[combo],
-    )?;
-    Ok(triggered_maps.pop().unwrap_or_default())
-}
-
-struct ValidationScoreLayerAgg {
-    score: f64,
-    point_count: usize,
-    sample_count: usize,
-    residual_sum: f64,
-}
-
-struct ValidationScoreLayerDetails {
-    spread_mean: Option<f64>,
-    layer_summaries: Vec<RankLayerBucketSummary>,
-}
-
-fn mean_f64(values: &[f64]) -> Option<f64> {
-    if values.is_empty() {
-        return None;
-    }
-    Some(values.iter().sum::<f64>() / values.len() as f64)
-}
-
-fn build_validation_score_layer_details(
-    samples: &[crate::simulate::rule::RuleLayerSamplePoint],
-    min_samples_per_day: usize,
-) -> ValidationScoreLayerDetails {
-    let mut grouped_by_day: std::collections::BTreeMap<
-        &str,
-        Vec<&crate::simulate::rule::RuleLayerSamplePoint>,
-    > = std::collections::BTreeMap::new();
-    for sample in samples {
-        let trade_date = sample.trade_date.trim();
-        if trade_date.is_empty()
-            || !sample.rule_score.is_finite()
-            || !sample.residual_return.is_finite()
-        {
-            continue;
-        }
-        grouped_by_day.entry(trade_date).or_default().push(sample);
-    }
-
-    let mut spread_values = Vec::new();
-    let mut summary_map = HashMap::<u64, ValidationScoreLayerAgg>::new();
-
-    for day_samples in grouped_by_day.into_values() {
-        if day_samples.len() < min_samples_per_day {
-            continue;
-        }
-
-        let mut ordered = day_samples
-            .into_iter()
-            .map(|sample| {
-                let score = if sample.rule_score.abs() < VALIDATION_EPS {
-                    0.0
-                } else {
-                    sample.rule_score
-                };
-                (score, sample.residual_return)
-            })
-            .collect::<Vec<_>>();
-        ordered.sort_by(|left, right| {
-            left.0
-                .partial_cmp(&right.0)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        let mut day_layer_returns = Vec::new();
-        let mut index = 0usize;
-        while index < ordered.len() {
-            let score = ordered[index].0;
-            let score_bits = score.to_bits();
-            let mut residuals = Vec::new();
-            while index < ordered.len() && ordered[index].0.to_bits() == score_bits {
-                residuals.push(ordered[index].1);
-                index += 1;
-            }
-
-            let Some(avg_residual_return) = mean_f64(&residuals) else {
-                continue;
-            };
-            day_layer_returns.push(avg_residual_return);
-            let agg = summary_map
-                .entry(score_bits)
-                .or_insert_with(|| ValidationScoreLayerAgg {
-                    score,
-                    point_count: 0,
-                    sample_count: 0,
-                    residual_sum: 0.0,
-                });
-            agg.point_count += 1;
-            agg.sample_count += residuals.len();
-            agg.residual_sum += avg_residual_return;
-        }
-
-        if let (Some(low), Some(high)) = (day_layer_returns.first(), day_layer_returns.last()) {
-            if day_layer_returns.len() >= 2 {
-                spread_values.push(high - low);
-            }
-        }
-    }
-
-    let mut layer_summaries = summary_map.into_values().collect::<Vec<_>>();
-    layer_summaries.sort_by(|left, right| {
-        left.score
-            .partial_cmp(&right.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    ValidationScoreLayerDetails {
-        spread_mean: mean_f64(&spread_values),
-        layer_summaries: layer_summaries
-            .into_iter()
-            .enumerate()
-            .map(|(index, item)| RankLayerBucketSummary {
-                layer_index: index + 1,
-                layer_label: format_validation_score_layer_label(item.score),
-                point_count: item.point_count,
-                sample_count: item.sample_count,
-                avg_score: Some(item.score),
-                avg_residual_return: if item.point_count == 0 {
-                    None
-                } else {
-                    Some(item.residual_sum / item.point_count as f64)
-                },
-                avg_er_change: None,
-            })
-            .collect(),
-    }
-}
-
-fn build_validation_score_layer_details_from_daily_layers(
-    mut daily_layers: Vec<RuleLayerDailyScoreLayers>,
-) -> ValidationScoreLayerDetails {
-    daily_layers.sort_by(|left, right| left.trade_date.cmp(&right.trade_date));
-    let mut spread_values = Vec::new();
-    let mut summary_map = HashMap::<u64, ValidationScoreLayerAgg>::new();
-
-    for day in daily_layers {
-        if day.groups.is_empty() {
-            continue;
-        }
-        for group in &day.groups {
-            let agg = summary_map.entry(group.score.to_bits()).or_insert_with(|| {
-                ValidationScoreLayerAgg {
-                    score: group.score,
-                    point_count: 0,
-                    sample_count: 0,
-                    residual_sum: 0.0,
-                }
-            });
-            agg.point_count += 1;
-            agg.sample_count += group.sample_count;
-            agg.residual_sum += group.avg_residual_return;
-        }
-
-        if day.groups.len() >= 2 {
-            spread_values.push(
-                day.groups
-                    .last()
-                    .expect("non-empty score groups")
-                    .avg_residual_return
-                    - day.groups[0].avg_residual_return,
-            );
-        }
-    }
-
-    let mut layer_summaries = summary_map.into_values().collect::<Vec<_>>();
-    layer_summaries.sort_by(|left, right| {
-        left.score
-            .partial_cmp(&right.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    ValidationScoreLayerDetails {
-        spread_mean: mean_f64(&spread_values),
-        layer_summaries: layer_summaries
-            .into_iter()
-            .enumerate()
-            .map(|(index, item)| RankLayerBucketSummary {
-                layer_index: index + 1,
-                layer_label: format_validation_score_layer_label(item.score),
-                point_count: item.point_count,
-                sample_count: item.sample_count,
-                avg_score: Some(item.score),
-                avg_residual_return: if item.point_count == 0 {
-                    None
-                } else {
-                    Some(item.residual_sum / item.point_count as f64)
-                },
-                avg_er_change: None,
-            })
-            .collect(),
-    }
-}
-
-fn build_validation_return_distribution(
-    samples: &[crate::simulate::rule::RuleLayerSamplePoint],
-) -> Vec<RuleValidationReturnDistributionBucket> {
-    let mut counts = [0usize; 7];
-    for sample in samples {
-        if !sample.residual_return.is_finite() {
-            continue;
-        }
-
-        let bucket_index = if sample.residual_return <= -10.0 {
-            0
-        } else if sample.residual_return <= -5.0 {
-            1
-        } else if sample.residual_return <= -2.0 {
-            2
-        } else if sample.residual_return <= 2.0 {
-            3
-        } else if sample.residual_return <= 5.0 {
-            4
-        } else if sample.residual_return <= 10.0 {
-            5
-        } else {
-            6
-        };
-        counts[bucket_index] += 1;
-    }
-
-    build_validation_return_distribution_from_counts(counts)
-}
-
-fn build_validation_return_distribution_from_counts(
-    counts: [usize; 7],
-) -> Vec<RuleValidationReturnDistributionBucket> {
-    let total = counts.iter().sum::<usize>();
-    ([
-        "<= -10%", "-10%~-5%", "-5%~-2%", "-2%~2%", "2%~5%", "5%~10%", ">= 10%",
-    ])
-    .into_iter()
-    .enumerate()
-    .map(|(index, label)| RuleValidationReturnDistributionBucket {
-        bucket_label: label.to_string(),
-        sample_count: counts[index],
-        sample_ratio: if total > 0 {
-            Some(counts[index] as f64 / total as f64)
-        } else {
-            None
-        },
-    })
-    .collect()
-}
-
-fn format_validation_score_layer_label(score: f64) -> String {
-    if (score.round() - score).abs() < VALIDATION_EPS {
-        format!("å¾—åˆ† {}", score.round() as i64)
-    } else {
-        format!("å¾—åˆ† {:.4}", score)
-    }
-}
-
-fn build_rule_backtest_payload(
-    combo_key: &str,
-    params: &RuleLayerBacktestRunParams,
-    metrics: crate::simulate::rule::RuleLayerMetrics,
-    layer_details: Option<ValidationScoreLayerDetails>,
-) -> RuleLayerBacktestData {
-    let decay_validations = build_rule_decay_validations(&metrics.points);
-    let (spread_mean, layer_count, layer_method, layer_method_label, layer_summaries) =
-        match layer_details {
-            Some(layer_details) => {
-                let layer_count = layer_details.layer_summaries.len();
-                (
-                    layer_details.spread_mean,
-                    Some(layer_count),
-                    Some("score_value".to_string()),
-                    Some("æŒ‰å¾—åˆ†å€¼åˆ†å±‚".to_string()),
-                    layer_details.layer_summaries,
-                )
-            }
-            None => (None, None, None, None, Vec::new()),
-        };
-
-    RuleLayerBacktestData {
-        rule_name: combo_key.to_string(),
-        stock_adj_type: params.stock_adj_type.clone(),
-        index_ts_code: params.index_ts_code.clone(),
-        index_beta: params.index_beta,
-        concept_beta: params.concept_beta,
-        industry_beta: params.industry_beta,
-        start_date: params.start_date.clone(),
-        end_date: params.end_date.clone(),
-        resolved_board: params.resolved_board.clone(),
-        exclude_st_board: params.exclude_st_board,
-        total_mv_min: params.total_mv_min,
-        total_mv_max: params.total_mv_max,
-        min_samples_per_rule_day: params.min_samples_per_day,
-        min_listed_trade_days: params.min_listed_trade_days,
-        backtest_period: params.backtest_period,
-        points: Vec::new(),
-        avg_residual_mean: metrics.avg_residual_mean,
-        avg_excess_residual_mean: metrics.avg_excess_residual_mean,
-        decay_validations,
-        avg_er_change: metrics.avg_er_change,
-        profit_loss_ratio: metrics.profit_loss_ratio,
-        spread_mean,
-        avg_contribution_score: None,
-        avg_contribution_per_trigger: None,
-        ic_mean: metrics.ic_mean,
-        ic_std: metrics.ic_std,
-        icir: metrics.icir,
-        ic_t_value: metrics.ic_t_value,
-        layer_count,
-        layer_method,
-        layer_method_label,
-        layer_summaries,
-        is_all_rules: false,
-        all_rule_summaries: Vec::new(),
-        rule_validation_details: Vec::new(),
-    }
-}
-
-#[derive(Debug, Clone)]
-struct ValidationSimilarityCache {
-    total_samples: f64,
-    rule_names: Vec<String>,
-    rule_hit_counts: Vec<usize>,
-    pair_to_rule_indices: HashMap<String, HashMap<String, Vec<usize>>>,
-}
-
-fn empty_validation_similarity_cache() -> ValidationSimilarityCache {
-    ValidationSimilarityCache {
-        total_samples: 0.0,
-        rule_names: Vec::new(),
-        rule_hit_counts: Vec::new(),
-        pair_to_rule_indices: HashMap::new(),
-    }
-}
-
-fn load_validation_similarity_cache_optional(
-    source_path: &str,
-    start_date: &str,
-    end_date: &str,
-) -> Result<ValidationSimilarityCache, String> {
-    let result_db = result_db_path(source_path);
-    if !result_db.exists() {
-        return Ok(empty_validation_similarity_cache());
-    }
-
-    let result_conn = open_result_conn(source_path)?;
-    match (|result_conn: &Connection,
-            start_date: &str,
-            end_date: &str|
-     -> Result<ValidationSimilarityCache, String> {
-        let total_samples = result_conn
-            .query_row(
-                r#"
-            SELECT COUNT(*)
-            FROM score_summary
-            WHERE trade_date >= ?
-              AND trade_date <= ?
-            "#,
-                params![start_date, end_date],
-                |row| row.get::<_, i64>(0),
-            )
-            .map_err(|e| format!("è¯»å–éªŒè¯æ ·æœ¬æ€»æ•°å¤±è´¥: {e}"))?
-            .max(0) as f64;
-
-        let mut stmt = result_conn
-            .prepare(
-                r#"
-            SELECT
-                rule_name,
-                ts_code,
-                trade_date
-            FROM rule_details
-            WHERE trade_date >= ?
-              AND trade_date <= ?
-              AND TRY_CAST(rule_score AS DOUBLE) IS NOT NULL
-              AND ABS(TRY_CAST(rule_score AS DOUBLE)) > 1e-12
-            "#,
-            )
-            .map_err(|e| format!("é¢„ç¼–è¯‘è§¦å‘ç›¸ä¼¼åº¦æŸ¥è¯¢å¤±è´¥: {e}"))?;
-        let mut rows = stmt
-            .query(params![start_date, end_date])
-            .map_err(|e| format!("æŸ¥è¯¢è§¦å‘ç›¸ä¼¼åº¦å¤±è´¥: {e}"))?;
-
-        let mut rule_names = Vec::new();
-        let mut rule_name_to_index = HashMap::<String, usize>::new();
-        let mut rule_hit_counts = Vec::new();
-        let mut pair_to_rule_indices = HashMap::<String, HashMap<String, Vec<usize>>>::new();
-
-        while let Some(row) = rows
-            .next()
-            .map_err(|e| format!("è¯»å–è§¦å‘ç›¸ä¼¼åº¦å¤±è´¥: {e}"))?
-        {
-            let rule_name: String = row.get(0).map_err(|e| format!("è¯»å–è§„åˆ™åå¤±è´¥: {e}"))?;
-            let ts_code: String = row.get(1).map_err(|e| format!("è¯»å–ä»£ç å¤±è´¥: {e}"))?;
-            let trade_date: String = row.get(2).map_err(|e| format!("è¯»å–äº¤æ˜“æ—¥å¤±è´¥: {e}"))?;
-            let rule_index = if let Some(index) = rule_name_to_index.get(&rule_name) {
-                *index
-            } else {
-                let index = rule_names.len();
-                rule_name_to_index.insert(rule_name.clone(), index);
-                rule_names.push(rule_name);
-                rule_hit_counts.push(0);
-                index
-            };
-
-            rule_hit_counts[rule_index] += 1;
-            pair_to_rule_indices
-                .entry(ts_code)
-                .or_default()
-                .entry(trade_date)
-                .or_default()
-                .push(rule_index);
-        }
-
-        Ok(ValidationSimilarityCache {
-            total_samples,
-            rule_names,
-            rule_hit_counts,
-            pair_to_rule_indices,
-        })
-    })(&result_conn, start_date, end_date)
-    {
-        Ok(cache) => Ok(cache),
-        Err(_) => Ok(empty_validation_similarity_cache()),
-    }
-}
-
-#[cfg(test)]
-fn build_validation_similarity_rows(
-    similarity_cache: &ValidationSimilarityCache,
-    triggered_samples: &[crate::simulate::rule::RuleLayerSamplePoint],
-    exclude_rule_name: Option<&str>,
-    explain_map: &HashMap<String, String>,
-) -> Vec<RuleValidationSimilarityRow> {
-    let mut overlap_hit_count = HashMap::<usize, usize>::new();
-
-    for sample in triggered_samples {
-        let Some(date_map) = similarity_cache.pair_to_rule_indices.get(&sample.ts_code) else {
-            continue;
-        };
-        let Some(rule_indices) = date_map.get(&sample.trade_date) else {
-            continue;
-        };
-
-        for rule_index in rule_indices {
-            *overlap_hit_count.entry(*rule_index).or_default() += 1;
-        }
-    }
-
-    build_validation_similarity_rows_from_overlap(
-        similarity_cache,
-        triggered_samples.len(),
-        overlap_hit_count,
-        exclude_rule_name,
-        explain_map,
-    )
-}
-
-fn build_validation_similarity_rows_from_overlap(
-    similarity_cache: &ValidationSimilarityCache,
-    combo_hit_count: usize,
-    overlap_hit_count: HashMap<usize, usize>,
-    exclude_rule_name: Option<&str>,
-    explain_map: &HashMap<String, String>,
-) -> Vec<RuleValidationSimilarityRow> {
-    let combo_hit_count = combo_hit_count as f64;
-    if combo_hit_count <= 0.0 {
-        return Vec::new();
-    }
-
-    let excluded_rule_name = exclude_rule_name
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-
-    let mut out = overlap_hit_count
-        .into_iter()
-        .filter_map(|(rule_index, overlap_samples)| {
-            if overlap_samples == 0 {
-                return None;
-            }
-
-            let rule_name = similarity_cache.rule_names.get(rule_index)?;
-            if excluded_rule_name.is_some_and(|excluded| rule_name == excluded) {
-                return None;
-            }
-
-            let existing_count = similarity_cache
-                .rule_hit_counts
-                .get(rule_index)
-                .copied()
-                .unwrap_or(0) as f64;
-            let overlap_rate_vs_validation = Some(overlap_samples as f64 / combo_hit_count);
-            let overlap_rate_vs_existing = if existing_count > 0.0 {
-                Some(overlap_samples as f64 / existing_count)
-            } else {
-                None
-            };
-            let overlap_lift = if similarity_cache.total_samples > 0.0 && existing_count > 0.0 {
-                Some(
-                    overlap_samples as f64 * similarity_cache.total_samples
-                        / (combo_hit_count * existing_count),
-                )
-            } else {
-                None
-            };
-
-            Some(RuleValidationSimilarityRow {
-                rule_name: rule_name.clone(),
-                explain: explain_map.get(rule_name).cloned(),
-                overlap_samples,
-                overlap_rate_vs_validation,
-                overlap_rate_vs_existing,
-                overlap_lift,
-            })
-        })
-        .collect::<Vec<_>>();
-
-    out.sort_by(|left, right| {
-        right
-            .overlap_samples
-            .cmp(&left.overlap_samples)
-            .then_with(|| left.rule_name.cmp(&right.rule_name))
-    });
-    out.truncate(20);
-    out
-}
-
-fn compare_option_f64_desc(left: Option<f64>, right: Option<f64>) -> std::cmp::Ordering {
-    match (left, right) {
-        (Some(l), Some(r)) => r.partial_cmp(&l).unwrap_or(std::cmp::Ordering::Equal),
-        (Some(_), None) => std::cmp::Ordering::Less,
-        (None, Some(_)) => std::cmp::Ordering::Greater,
-        (None, None) => std::cmp::Ordering::Equal,
-    }
-}
-
-#[derive(Debug, Clone)]
-struct ValidationSampleRawRow {
-    ts_code: String,
-    trade_date: String,
-    trigger_count: usize,
-    rule_score: f64,
-    residual_return: f64,
-}
-
-#[derive(Debug, Clone)]
-struct ValidationSampleStockMeta {
-    name: Option<String>,
-    board: String,
-    volatility_group: String,
-}
-
-struct ValidationSampleAccumulator<'a> {
-    sample_limit_per_group: usize,
-    stock_meta_map: &'a HashMap<String, ValidationSampleStockMeta>,
-    similarity_cache: &'a ValidationSimilarityCache,
-    is_each: bool,
-    trigger_unit_points: f64,
-    has_dist_points: bool,
-    total_triggers: usize,
-    triggered_days: HashSet<String>,
-    sample_by_stock: HashMap<String, ValidationSampleRawRow>,
-    overlap_hit_count: HashMap<usize, usize>,
-}
-
-impl<'a> ValidationSampleAccumulator<'a> {
-    fn new(
-        sample_limit_per_group: usize,
-        stock_meta_map: &'a HashMap<String, ValidationSampleStockMeta>,
-        similarity_cache: &'a ValidationSimilarityCache,
-        is_each: bool,
-        trigger_unit_points: f64,
-        has_dist_points: bool,
-    ) -> Self {
-        Self {
-            sample_limit_per_group,
-            stock_meta_map,
-            similarity_cache,
-            is_each,
-            trigger_unit_points,
-            has_dist_points,
-            total_triggers: 0,
-            triggered_days: HashSet::new(),
-            sample_by_stock: HashMap::new(),
-            overlap_hit_count: HashMap::new(),
-        }
-    }
-
-    fn push(&mut self, sample: crate::simulate::rule::RuleLayerSamplePointRef<'_>) {
-        self.total_triggers += 1;
-        self.triggered_days.insert(sample.trade_date.to_string());
-        self.update_similarity_overlap(sample.ts_code, sample.trade_date);
-
-        let row = ValidationSampleRawRow {
-            ts_code: sample.ts_code.to_string(),
-            trade_date: sample.trade_date.to_string(),
-            trigger_count: resolve_validation_trigger_count(
-                sample.rule_score,
-                self.is_each,
-                self.trigger_unit_points,
-                self.has_dist_points,
-            ),
-            rule_score: sample.rule_score,
-            residual_return: sample.residual_return,
-        };
-
-        let sample_key = format!("{}__{}", row.trigger_count, row.ts_code);
-        self.sample_by_stock
-            .entry(sample_key)
-            .and_modify(|current| {
-                if (|current: &ValidationSampleRawRow,
-                     candidate: &ValidationSampleRawRow|
-                 -> bool {
-                    let strength_order = candidate
-                        .residual_return
-                        .abs()
-                        .partial_cmp(&current.residual_return.abs())
-                        .unwrap_or(Ordering::Equal);
-                    if strength_order != Ordering::Equal {
-                        return strength_order == Ordering::Greater;
-                    }
-
-                    let date_order = candidate.trade_date.cmp(&current.trade_date);
-                    if date_order != Ordering::Equal {
-                        return date_order == Ordering::Greater;
-                    }
-
-                    candidate
-                        .rule_score
-                        .abs()
-                        .partial_cmp(&current.rule_score.abs())
-                        .unwrap_or(Ordering::Equal)
-                        == Ordering::Greater
-                })(current, &row)
-                {
-                    *current = row.clone();
-                }
-            })
-            .or_insert(row);
-    }
-
-    fn update_similarity_overlap(&mut self, ts_code: &str, trade_date: &str) {
-        let Some(date_map) = self.similarity_cache.pair_to_rule_indices.get(ts_code) else {
-            return;
-        };
-        let Some(rule_indices) = date_map.get(trade_date) else {
-            return;
-        };
-
-        for rule_index in rule_indices {
-            *self.overlap_hit_count.entry(*rule_index).or_default() += 1;
-        }
-    }
-
-    fn into_parts(
-        self,
-    ) -> (
-        usize,
-        usize,
-        RuleValidationSampleStats,
-        Vec<RuleValidationTriggerCountStats>,
-        RuleValidationSampleGroups,
-        HashMap<usize, usize>,
-    ) {
-        let unique_samples = self.sample_by_stock.into_values().collect::<Vec<_>>();
-        let unique_sample_count = unique_samples.len();
-        let positive_count = unique_samples
-            .iter()
-            .filter(|row| row.residual_return > 0.0)
-            .count();
-        let negative_count = unique_samples
-            .iter()
-            .filter(|row| row.residual_return < 0.0)
-            .count();
-        let mut trigger_count_stats_map = HashMap::<usize, RuleValidationTriggerCountStats>::new();
-        for row in &unique_samples {
-            let stats = trigger_count_stats_map
-                .entry(row.trigger_count)
-                .or_insert_with(|| RuleValidationTriggerCountStats {
-                    trigger_count: row.trigger_count,
-                    positive_count: 0,
-                    negative_count: 0,
-                    random_count: 0,
-                    total_samples: 0,
-                });
-            stats.total_samples += 1;
-            stats.random_count += 1;
-            if row.residual_return > 0.0 {
-                stats.positive_count += 1;
-            } else if row.residual_return < 0.0 {
-                stats.negative_count += 1;
-            }
-        }
-        let mut trigger_count_stats = trigger_count_stats_map.into_values().collect::<Vec<_>>();
-        trigger_count_stats.sort_by_key(|item| item.trigger_count);
-
-        let mut positive_by_board: HashMap<(usize, String), Vec<ValidationSampleRawRow>> =
-            HashMap::new();
-        let mut negative_by_board: HashMap<(usize, String), Vec<ValidationSampleRawRow>> =
-            HashMap::new();
-        let mut random_by_board: HashMap<(usize, String), Vec<(u64, ValidationSampleRawRow)>> =
-            HashMap::new();
-
-        for row in unique_samples {
-            let board = sample_board(&row.ts_code, self.stock_meta_map);
-            let bucket_key = (row.trigger_count, board);
-            if row.residual_return > 0.0 {
-                push_limited_sample(
-                    positive_by_board.entry(bucket_key.clone()).or_default(),
-                    row.clone(),
-                    self.sample_limit_per_group,
-                    compare_positive_validation_sample,
-                );
-            } else if row.residual_return < 0.0 {
-                push_limited_sample(
-                    negative_by_board.entry(bucket_key.clone()).or_default(),
-                    row.clone(),
-                    self.sample_limit_per_group,
-                    compare_negative_validation_sample,
-                );
-            }
-
-            push_limited_random_sample(
-                random_by_board.entry(bucket_key).or_default(),
-                random::<u64>(),
-                row,
-                self.sample_limit_per_group,
-            );
-        }
-
-        let mut positive = positive_by_board
-            .into_values()
-            .flatten()
-            .collect::<Vec<_>>();
-        let mut negative = negative_by_board
-            .into_values()
-            .flatten()
-            .collect::<Vec<_>>();
-        let mut random = random_by_board.into_values().flatten().collect::<Vec<_>>();
-
-        positive.sort_by(compare_positive_validation_sample);
-        negative.sort_by(compare_negative_validation_sample);
-        random.sort_by(|left, right| {
-            left.0
-                .cmp(&right.0)
-                .then_with(|| compare_random_validation_sample(&left.1, &right.1))
-        });
-
-        let groups = RuleValidationSampleGroups {
-            positive: validation_sample_rows_to_payload(positive, self.stock_meta_map),
-            negative: validation_sample_rows_to_payload(negative, self.stock_meta_map),
-            random: validation_sample_rows_to_payload(
-                random.into_iter().map(|(_, row)| row),
-                self.stock_meta_map,
-            ),
-        };
-        let stats = RuleValidationSampleStats {
-            positive_count,
-            negative_count,
-            random_count: unique_sample_count,
-            total_samples: unique_sample_count,
-        };
-
-        (
-            self.total_triggers,
-            self.triggered_days.len(),
-            stats,
-            trigger_count_stats,
-            groups,
-            self.overlap_hit_count,
-        )
-    }
-}
-
-fn resolve_validation_trigger_count(
-    rule_score: f64,
-    is_each: bool,
-    trigger_unit_points: f64,
-    has_dist_points: bool,
-) -> usize {
-    if !is_each || has_dist_points || trigger_unit_points.abs() <= VALIDATION_EPS {
-        return 1;
-    }
-
-    let count = (rule_score / trigger_unit_points).abs().round();
-    if count.is_finite() && count >= 1.0 {
-        count as usize
-    } else {
-        1
-    }
-}
-
-fn sample_board(
-    ts_code: &str,
-    stock_meta_map: &HashMap<String, ValidationSampleStockMeta>,
-) -> String {
-    stock_meta_map
-        .get(ts_code)
-        .map(|meta| meta.board.clone())
-        .unwrap_or_else(|| "å…¶ä»–".to_string())
-}
-
-fn compare_positive_validation_sample(
-    left: &ValidationSampleRawRow,
-    right: &ValidationSampleRawRow,
-) -> Ordering {
-    right
-        .residual_return
-        .partial_cmp(&left.residual_return)
-        .unwrap_or(Ordering::Equal)
-        .then_with(|| left.trade_date.cmp(&right.trade_date))
-        .then_with(|| left.ts_code.cmp(&right.ts_code))
-}
-
-fn compare_negative_validation_sample(
-    left: &ValidationSampleRawRow,
-    right: &ValidationSampleRawRow,
-) -> Ordering {
-    left.residual_return
-        .partial_cmp(&right.residual_return)
-        .unwrap_or(Ordering::Equal)
-        .then_with(|| left.trade_date.cmp(&right.trade_date))
-        .then_with(|| left.ts_code.cmp(&right.ts_code))
-}
-
-fn compare_random_validation_sample(
-    left: &ValidationSampleRawRow,
-    right: &ValidationSampleRawRow,
-) -> Ordering {
-    left.trade_date
-        .cmp(&right.trade_date)
-        .then_with(|| left.ts_code.cmp(&right.ts_code))
-}
-
-fn push_limited_sample(
-    rows: &mut Vec<ValidationSampleRawRow>,
-    row: ValidationSampleRawRow,
-    limit: usize,
-    compare: fn(&ValidationSampleRawRow, &ValidationSampleRawRow) -> Ordering,
-) {
-    if limit == 0 {
-        return;
-    }
-
-    rows.push(row);
-    rows.sort_by(compare);
-    rows.truncate(limit);
-}
-
-fn push_limited_random_sample(
-    rows: &mut Vec<(u64, ValidationSampleRawRow)>,
-    key: u64,
-    row: ValidationSampleRawRow,
-    limit: usize,
-) {
-    if limit == 0 {
-        return;
-    }
-
-    if rows.len() < limit {
-        rows.push((key, row));
-        return;
-    }
-
-    let Some((worst_index, _)) = rows.iter().enumerate().max_by(|(_, left), (_, right)| {
-        left.0
-            .cmp(&right.0)
-            .then_with(|| compare_random_validation_sample(&left.1, &right.1))
-    }) else {
-        return;
-    };
-
-    if key < rows[worst_index].0 {
-        rows[worst_index] = (key, row);
-    }
-}
-
-fn validation_sample_rows_to_payload(
-    rows: impl IntoIterator<Item = ValidationSampleRawRow>,
-    stock_meta_map: &HashMap<String, ValidationSampleStockMeta>,
-) -> Vec<RuleValidationSampleRow> {
-    rows.into_iter()
-        .map(|row| RuleValidationSampleRow {
-            name: stock_meta_map
-                .get(&row.ts_code)
-                .and_then(|meta| meta.name.clone()),
-            board: stock_meta_map
-                .get(&row.ts_code)
-                .map(|meta| meta.board.clone())
-                .unwrap_or_else(|| "å…¶ä»–".to_string()),
-            volatility_group: stock_meta_map
-                .get(&row.ts_code)
-                .map(|meta| meta.volatility_group.clone())
-                .unwrap_or_else(|| "å…¶ä»–æ³¢åŠ¨".to_string()),
-            ts_code: row.ts_code,
-            trade_date: row.trade_date,
-            trigger_count: row.trigger_count,
-            rule_score: row.rule_score,
-            residual_return: row.residual_return,
-        })
-        .collect()
-}
-
-#[cfg(test)]
-fn build_validation_sample_groups(
-    samples: &[ValidationSampleRawRow],
-    sample_limit_per_group: usize,
-    stock_meta_map: &HashMap<String, ValidationSampleStockMeta>,
-) -> (RuleValidationSampleStats, RuleValidationSampleGroups) {
-    let mut positive = Vec::new();
-    let mut negative = Vec::new();
-
-    for row in samples {
-        if row.residual_return > 0.0 {
-            positive.push(row.clone());
-        } else if row.residual_return < 0.0 {
-            negative.push(row.clone());
-        }
-    }
-
-    positive.par_sort_by(|left, right| {
-        right
-            .residual_return
-            .partial_cmp(&left.residual_return)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| left.trade_date.cmp(&right.trade_date))
-            .then_with(|| left.ts_code.cmp(&right.ts_code))
-    });
-    negative.par_sort_by(|left, right| {
-        left.residual_return
-            .partial_cmp(&right.residual_return)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| left.trade_date.cmp(&right.trade_date))
-            .then_with(|| left.ts_code.cmp(&right.ts_code))
-    });
-
-    let mut rng = StdRng::seed_from_u64(0x9E37_79B9_7F4A_7C15);
-    let mut random_pool = samples.to_vec();
-    random_pool.par_sort_by(|left, right| {
-        left.trade_date
-            .cmp(&right.trade_date)
-            .then_with(|| left.ts_code.cmp(&right.ts_code))
-    });
-    if random_pool.len() > 1 {
-        for index in (1..random_pool.len()).rev() {
-            let swap_index = rng.random_range(0..=index);
-            random_pool.swap(index, swap_index);
-        }
-    }
-
-    let limit_rows_per_board = |rows: Vec<ValidationSampleRawRow>| {
-        let mut board_counts = HashMap::<String, usize>::new();
-        let mut limited = Vec::new();
-
-        for row in rows {
-            let board = stock_meta_map
-                .get(&row.ts_code)
-                .map(|meta| meta.board.clone())
-                .unwrap_or_else(|| "å…¶ä»–".to_string());
-            let count = board_counts.entry(board).or_insert(0);
-            if *count >= sample_limit_per_group {
-                continue;
-            }
-            *count += 1;
-            limited.push(row);
-        }
-
-        limited
-    };
-
-    let to_payload = |rows: Vec<ValidationSampleRawRow>| {
-        limit_rows_per_board(rows)
-            .into_iter()
-            .map(|row| RuleValidationSampleRow {
-                name: stock_meta_map
-                    .get(&row.ts_code)
-                    .and_then(|meta| meta.name.clone()),
-                board: stock_meta_map
-                    .get(&row.ts_code)
-                    .map(|meta| meta.board.clone())
-                    .unwrap_or_else(|| "å…¶ä»–".to_string()),
-                volatility_group: stock_meta_map
-                    .get(&row.ts_code)
-                    .map(|meta| meta.volatility_group.clone())
-                    .unwrap_or_else(|| "å…¶ä»–æ³¢åŠ¨".to_string()),
-                ts_code: row.ts_code,
-                trade_date: row.trade_date,
-                trigger_count: row.trigger_count,
-                rule_score: row.rule_score,
-                residual_return: row.residual_return,
-            })
-            .collect::<Vec<_>>()
-    };
-
-    let stats = RuleValidationSampleStats {
-        positive_count: positive.len(),
-        negative_count: negative.len(),
-        random_count: random_pool.len(),
-        total_samples: samples.len(),
-    };
-
-    let groups = RuleValidationSampleGroups {
-        positive: to_payload(positive),
-        negative: to_payload(negative),
-        random: to_payload(random_pool),
-    };
-
-    (stats, groups)
-}
-
-pub fn run_rule_expression_validation(
-    source_path: String,
-    import_rule_name: String,
-    when: Option<String>,
-    scope_way: Option<String>,
-    scope_windows: Option<usize>,
-    stock_adj_type: Option<String>,
-    index_ts_code: String,
-    index_beta: Option<f64>,
-    concept_beta: Option<f64>,
-    industry_beta: Option<f64>,
-    start_date: String,
-    end_date: String,
-    min_samples_per_rule_day: Option<usize>,
-    min_listed_trade_days: Option<usize>,
-    backtest_period: Option<usize>,
-    manual_strategy: Option<RuleExpressionValidationManualStrategy>,
-    unknown_configs: Option<Vec<RuleValidationUnknownConfig>>,
-    sample_limit_per_group: Option<usize>,
-    board: Option<String>,
-    exclude_st_board: Option<bool>,
-    total_mv_min: Option<f64>,
-    total_mv_max: Option<f64>,
-) -> Result<RuleExpressionValidationData, String> {
-    let source_path = source_path.trim().to_string();
-    if source_path.is_empty() {
-        return Err("æ•°æ®ç›®å½•ä¸èƒ½ä¸ºç©º".to_string());
-    }
-
-    let import_rule_name = import_rule_name.trim().to_string();
-    let all_rules = ScoreRule::load_rules(&source_path)?;
-    let seed_rule = (|import_rule_name_raw: &str,
-                      manual_strategy: Option<&RuleExpressionValidationManualStrategy>,
-                      when: Option<&str>,
-                      scope_way: Option<&str>,
-                      scope_windows: Option<usize>,
-                      all_rules: &[ScoreRule]|
-     -> Result<ValidationSeedRule, String> {
-        let import_rule_name = import_rule_name_raw.trim();
-        let import_rule = if import_rule_name.is_empty() {
-            None
-        } else {
-            all_rules
-                .iter()
-                .find(|rule| rule.name.trim() == import_rule_name)
-                .cloned()
-        };
-
-        let top_formula = read_non_empty_owned(when);
-        let top_scope_way = read_non_empty_owned(scope_way);
-
-        let manual_name =
-            manual_strategy.and_then(|strategy| read_non_empty_owned(strategy.name.as_deref()));
-        let manual_formula =
-            manual_strategy.and_then(|strategy| read_non_empty_owned(strategy.when.as_deref()));
-        let manual_explain =
-            manual_strategy.and_then(|strategy| read_non_empty_owned(strategy.explain.as_deref()));
-        let manual_scope_windows = manual_strategy.and_then(|strategy| strategy.scope_windows);
-        let manual_points = (|raw: Option<f64>| -> Result<f64, String> {
-            match raw {
-                Some(value) if !value.is_finite() => Err("æ‰‹åŠ¨ç­–ç•¥ points éžæ³•".to_string()),
-                Some(value) if value < 0.0 => Ok(-1.0),
-                Some(_) | None => Ok(1.0),
-            }
-        })(manual_strategy.and_then(|strategy| strategy.points))?;
-        let manual_dist_points = manual_strategy
-            .and_then(|strategy| strategy.dist_points.clone())
-            .and_then(|items| if items.is_empty() { None } else { Some(items) });
-
-        if import_rule
-            .as_ref()
-            .is_some_and(|rule| rule.kind == RuleKind::Combination)
-            && top_formula.is_none()
-            && manual_formula.is_none()
-        {
-            return Err("ç»„åˆç­–ç•¥ä¸èƒ½å¯¼å…¥åˆ°å•è¡¨è¾¾å¼éªŒè¯ï¼Œè¯·ç›´æŽ¥åœ¨â€œç­–ç•¥å›žæµ‹â€ä¸­éªŒè¯".to_string());
-        }
-
-        let manual_scope_way = match manual_strategy
-            .and_then(|strategy| read_non_empty_owned(strategy.scope_way.as_deref()))
-        {
-            Some(raw) => Some(parse_scope_way_input(&raw)?),
-            None => None,
-        };
-
-        let manual_tag = match manual_strategy.and_then(|strategy| strategy.tag.as_deref()) {
-            Some(raw) if !raw.trim().is_empty() => {
-                Some((|tag_raw: &str| -> Result<RuleTag, String> {
-                    match tag_raw.trim().to_ascii_lowercase().as_str() {
-                        "" | "normal" => Ok(RuleTag::Normal),
-                        "opportunity" => Ok(RuleTag::Opportunity),
-                        "rare" => Ok(RuleTag::Rare),
-                        _ => Err(format!(
-                            "tag ä¸æ”¯æŒ: {tag_raw}ï¼Œä»…æ”¯æŒ normal/opportunity/rare"
-                        )),
-                    }
-                })(raw)?)
-            }
-            _ => None,
-        };
-
-        if let Some(stage_raw) = manual_strategy.and_then(|strategy| strategy.stage.as_deref()) {
-            if !stage_raw.trim().is_empty() {
-                let _ = (|stage_raw: &str| -> Result<RuleStage, String> {
-                    match stage_raw.trim().to_ascii_lowercase().as_str() {
-                        "base" => Ok(RuleStage::Base),
-                        "trigger" => Ok(RuleStage::Trigger),
-                        "confirm" => Ok(RuleStage::Confirm),
-                        "risk" => Ok(RuleStage::Risk),
-                        "fail" => Ok(RuleStage::Fail),
-                        _ => Err(format!(
-                            "stage ä¸æ”¯æŒ: {stage_raw}ï¼Œä»…æ”¯æŒ base/trigger/confirm/risk/fail"
-                        )),
-                    }
-                })(stage_raw)?;
-            }
-        }
-
-        let has_manual_override = manual_name.is_some()
-            || manual_formula.is_some()
-            || manual_scope_way.is_some()
-            || manual_scope_windows.is_some()
-            || manual_dist_points.is_some()
-            || manual_explain.is_some()
-            || manual_tag.is_some()
-            || manual_strategy
-                .and_then(|strategy| strategy.scene_name.as_deref())
-                .map(str::trim)
-                .is_some_and(|value| !value.is_empty())
-            || manual_strategy
-                .and_then(|strategy| strategy.stage.as_deref())
-                .map(str::trim)
-                .is_some_and(|value| !value.is_empty());
-
-        if !import_rule_name.is_empty() && import_rule.is_none() && !has_manual_override {
-            return Err(format!("æœªæ‰¾åˆ°ç­–ç•¥: {import_rule_name}"));
-        }
-
-        let formula = top_formula
-            .or(manual_formula)
-            .or_else(|| {
-                import_rule
-                    .as_ref()
-                    .map(|rule| rule.when.trim().to_string())
-            })
-            .ok_or_else(|| "è¡¨è¾¾å¼ä¸èƒ½ä¸ºç©º".to_string())?;
-
-        let resolved_scope_way = if let Some(raw) = top_scope_way {
-            parse_scope_way_input(&raw)?
-        } else if let Some(value) = manual_scope_way {
-            value
-        } else if let Some(rule) = import_rule.as_ref() {
-            rule.scope_way
-        } else {
-            ScopeWay::Any
-        };
-
-        let resolved_scope_windows = scope_windows
-            .or(manual_scope_windows)
-            .or_else(|| import_rule.as_ref().map(|rule| rule.scope_windows))
-            .unwrap_or(1)
-            .max(1);
-
-        if let ScopeWay::Consec(threshold) = resolved_scope_way {
-            if resolved_scope_windows < threshold {
-                return Err(format!(
-                    "scope_windows({resolved_scope_windows}) ä¸èƒ½å°äºŽ CONSEC é˜ˆå€¼ {threshold}"
-                ));
-            }
-        }
-
-        let rule_name = manual_name
-            .or_else(|| {
-                import_rule
-                    .as_ref()
-                    .map(|rule| rule.name.trim().to_string())
-            })
-            .or_else(|| read_non_empty_owned(Some(import_rule_name)))
-            .unwrap_or_else(|| "manual_validation_rule".to_string());
-
-        let rule_explain = manual_explain
-            .or_else(|| {
-                import_rule
-                    .as_ref()
-                    .map(|rule| rule.explain.trim().to_string())
-            })
-            .unwrap_or_else(|| format!("è¡¨è¾¾å¼éªŒè¯ç­–ç•¥: {rule_name}"));
-
-        let points = manual_points;
-        if !points.is_finite() {
-            return Err("ç­–ç•¥ points éžæ³•".to_string());
-        }
-
-        let dist_points = manual_dist_points;
-
-        let tag = manual_tag
-            .or_else(|| import_rule.as_ref().map(|rule| rule.tag))
-            .unwrap_or(RuleTag::Normal);
-
-        let exclude_rule_name = if let Some(rule) = import_rule.as_ref() {
-            Some(rule.name.clone())
-        } else if all_rules.iter().any(|rule| rule.name.trim() == rule_name) {
-            Some(rule_name.clone())
-        } else {
-            None
-        };
-
-        Ok(ValidationSeedRule {
-            rule_name,
-            rule_explain,
-            scope_way: resolved_scope_way,
-            scope_windows: resolved_scope_windows,
-            formula,
-            points,
-            dist_points,
-            tag,
-            exclude_rule_name,
-        })
-    })(
-        &import_rule_name,
-        manual_strategy.as_ref(),
-        when.as_deref(),
-        scope_way.as_deref(),
-        scope_windows,
-        &all_rules,
-    )?;
-    let start_date = start_date.trim().to_string();
-    let end_date = end_date.trim().to_string();
-    let variants = (|formula: &str,
-                     unknown_configs: &[RuleValidationUnknownConfig]|
-     -> Result<Vec<ValidationVariant>, String> {
-        let formula = formula.trim();
-        if formula.is_empty() {
-            return Err("è¡¨è¾¾å¼ä¸èƒ½ä¸ºç©º".to_string());
-        }
-
-        let mut unknown_groups = Vec::<(String, Vec<f64>)>::new();
-        let mut total_combinations = 1usize;
-        let mut seen = HashSet::new();
-
-        for config in unknown_configs {
-            let name = config.name.trim();
-            if name.is_empty() {
-                continue;
-            }
-            if !seen.insert(name.to_string()) {
-                return Err(format!("æœªçŸ¥æ•°åç§°é‡å¤: {name}"));
-            }
-
-            let values = (|config: &RuleValidationUnknownConfig| -> Result<Vec<f64>, String> {
-                let name = config.name.trim();
-                if name.is_empty() {
-                    return Err("æœªçŸ¥æ•°åç§°ä¸èƒ½ä¸ºç©º".to_string());
-                }
-                if !config.start.is_finite() || !config.end.is_finite() || !config.step.is_finite()
-                {
-                    return Err(format!("æœªçŸ¥æ•° {name} å­˜åœ¨éžæ³•æ•°å€¼"));
-                }
-                if config.step <= 0.0 {
-                    return Err(format!("æœªçŸ¥æ•° {name} çš„ step å¿…é¡» > 0"));
-                }
-                if config.end < config.start {
-                    return Err(format!("æœªçŸ¥æ•° {name} çš„ end ä¸èƒ½å°äºŽ start"));
-                }
-
-                let mut values = Vec::new();
-                let mut current = config.start;
-                let mut guard = 0usize;
-                while current <= config.end + config.step * 1e-9 {
-                    values.push(current.min(config.end));
-                    current += config.step;
-                    guard += 1;
-                    if guard > VALIDATION_MAX_COMBINATIONS * 8 {
-                        return Err(format!(
-                            "æœªçŸ¥æ•° {name} çš„å–å€¼æ•°é‡è¿‡å¤šï¼Œè¯·å¢žå¤§ step æˆ–ç¼©å°èŒƒå›´"
-                        ));
-                    }
-                }
-                if values.is_empty() {
-                    values.push(config.start);
-                }
-                Ok(values)
-            })(config)?;
-            total_combinations = total_combinations.saturating_mul(values.len().max(1));
-            if total_combinations > VALIDATION_MAX_COMBINATIONS {
-                return Err(format!(
-                    "æœªçŸ¥æ•°ç»„åˆè¿‡å¤š({total_combinations})ï¼Œå½“å‰ä¸Šé™ä¸º {VALIDATION_MAX_COMBINATIONS}"
-                ));
-            }
-
-            unknown_groups.push((name.to_string(), values));
-        }
-
-        let mut out = Vec::new();
-        let mut assignments = Vec::<(String, f64)>::new();
-
-        fn walk_variants(
-            index: usize,
-            unknown_groups: &[(String, Vec<f64>)],
-            assignments: &mut Vec<(String, f64)>,
-            formula: &str,
-            out: &mut Vec<ValidationVariant>,
-        ) {
-            if index >= unknown_groups.len() {
-                let mut sorted = assignments.clone();
-                sorted.sort_by(|left, right| {
-                    right
-                        .0
-                        .len()
-                        .cmp(&left.0.len())
-                        .then_with(|| left.0.cmp(&right.0))
-                });
-                let unknown_values = sorted
-                    .iter()
-                    .map(|(name, value)| RuleValidationUnknownValue {
-                        name: name.clone(),
-                        value: *value,
-                    })
-                    .collect::<Vec<_>>();
-                let replaced_formula = (|formula: &str, assignments: &[(String, f64)]| -> String {
-                    if assignments.is_empty() {
-                        return formula.to_string();
-                    }
-
-                    let replace_map = assignments
-                        .iter()
-                        .map(|(name, value)| (name.as_str(), format_validation_number(*value)))
-                        .collect::<HashMap<_, _>>();
-
-                    let tokens = lex_all(formula);
-                    let mut out = String::with_capacity(formula.len() + assignments.len() * 4);
-                    let mut cursor = 0usize;
-
-                    for token in tokens {
-                        if token.start > cursor {
-                            out.push_str(&formula[cursor..token.start]);
-                        }
-                        match token.kind {
-                            TokenKind::Ident(name) => {
-                                if let Some(replacement) = replace_map.get(name.as_str()) {
-                                    out.push_str(replacement);
-                                } else {
-                                    out.push_str(&formula[token.start..token.end]);
-                                }
-                            }
-                            TokenKind::Eof => {}
-                            _ => out.push_str(&formula[token.start..token.end]),
-                        }
-                        cursor = token.end;
-                    }
-
-                    if cursor < formula.len() {
-                        out.push_str(&formula[cursor..]);
-                    }
-
-                    out
-                })(formula, &sorted);
-                let combo_key = format!("validation_combo_{:03}", out.len() + 1);
-                let combo_label = if unknown_values.is_empty() {
-                    "é»˜è®¤å‚æ•°".to_string()
-                } else {
-                    unknown_values
-                        .iter()
-                        .map(|item| {
-                            format!("{}={}", item.name, format_validation_number(item.value))
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                };
-
-                out.push(ValidationVariant {
-                    combo_key,
-                    combo_label,
-                    formula: replaced_formula,
-                    unknown_values,
-                });
-                return;
-            }
-
-            let (name, values) = &unknown_groups[index];
-            for value in values {
-                assignments.push((name.clone(), *value));
-                walk_variants(index + 1, unknown_groups, assignments, formula, out);
-                assignments.pop();
-            }
-        }
-
-        walk_variants(0, &unknown_groups, &mut assignments, formula, &mut out);
-
-        if out.is_empty() {
-            out.push(ValidationVariant {
-                combo_key: "validation_combo_001".to_string(),
-                combo_label: "é»˜è®¤å‚æ•°".to_string(),
-                formula: formula.to_string(),
-                unknown_values: Vec::new(),
-            });
-        }
-
-        Ok(out)
-    })(&seed_rule.formula, &unknown_configs.unwrap_or_default())?;
-    let execution_plan = (|source_path: &str,
-                           start_date: &str,
-                           end_date: &str,
-                           seed_rule: &ValidationSeedRule,
-                           variants: Vec<ValidationVariant>|
-     -> Result<ValidationExecutionPlan, String> {
-        let mut max_warmup_need = 0usize;
-        let mut combos = Vec::with_capacity(variants.len());
-
-        for variant in variants {
-            let combo = (|seed_rule: &ValidationSeedRule,
-                          variant: ValidationVariant|
-             -> Result<PreparedValidationCombo, String> {
-                let cached_rule = build_validation_cached_rule(
-                    variant.combo_key.clone(),
-                    seed_rule.scope_way,
-                    seed_rule.scope_windows,
-                    seed_rule.points,
-                    seed_rule.dist_points.clone(),
-                    seed_rule.tag,
-                    &variant.formula,
-                )?;
-                let assigned_names = collect_validation_assigned_names(&cached_rule.when_ast);
-
-                Ok(PreparedValidationCombo {
-                    variant,
-                    cached_rule,
-                    assigned_names,
-                })
-            })(seed_rule, variant)?;
-            max_warmup_need = max_warmup_need.max(estimate_rule_warmup(
-                &combo.cached_rule.when_ast,
-                combo.cached_rule.scope_way,
-                combo.cached_rule.scope_windows,
-            )?);
-            combos.push(combo);
-        }
-
-        let need_rows = calc_query_need_rows(source_path, max_warmup_need, start_date, end_date)?;
-        let query_start_date = calc_query_start_date(source_path, max_warmup_need, start_date)?;
-        Ok(ValidationExecutionPlan {
-            combos,
-            need_rows,
-            query_start_date,
-        })
-    })(&source_path, &start_date, &end_date, &seed_rule, variants)?;
-
-    let (resolved_board, exclude_st_board, total_mv_min, total_mv_max, allowed_ts_codes) =
-        build_backtest_stock_filter(
-            &source_path,
-            board,
-            exclude_st_board,
-            total_mv_min,
-            total_mv_max,
-        )?;
-
-    let params = RuleLayerBacktestRunParams {
-        stock_adj_type: stock_adj_type
-            .unwrap_or_else(|| "qfq".to_string())
-            .trim()
-            .to_string(),
-        index_ts_code: index_ts_code.trim().to_string(),
-        index_beta: index_beta.unwrap_or(0.5),
-        concept_beta: concept_beta.unwrap_or(0.2),
-        industry_beta: industry_beta.unwrap_or(0.0),
-        start_date,
-        end_date,
-        min_samples_per_day: min_samples_per_rule_day.unwrap_or(5).max(1),
-        min_listed_trade_days: min_listed_trade_days
-            .unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
-        backtest_period: backtest_period.unwrap_or(1).max(1),
-        parallel_batch_size: DEFAULT_RULE_WITH_SAMPLES_PARALLEL_BATCH_SIZE,
-        resolved_board,
-        exclude_st_board,
-        total_mv_min,
-        total_mv_max,
-        allowed_ts_codes,
-    };
-
-    let sample_limit_per_group = sample_limit_per_group.unwrap_or(30).clamp(1, 200);
-    let source_db = source_db_path(&source_path);
-    let source_db_str = source_db
-        .to_str()
-        .ok_or_else(|| "åŽŸå§‹åº“è·¯å¾„ä¸æ˜¯æœ‰æ•ˆUTF-8".to_string())?;
-    let source_conn =
-        Connection::open(source_db_str).map_err(|e| format!("æ‰“å¼€åŽŸå§‹åº“å¤±è´¥: {e}"))?;
-    let layer_config = RuleLayerConfig {
-        min_samples_per_day: params.min_samples_per_day,
-        backtest_period: params.backtest_period,
-        min_listed_trade_days: params.min_listed_trade_days,
-    };
-    let runtime_cache = Arc::new(
-        build_rule_layer_runtime_cache_from_stock_data_with_ts_filter(
-            &source_conn,
-            &source_path,
-            &params.stock_adj_type,
-            &params.index_ts_code,
-            params.index_beta,
-            params.concept_beta,
-            params.industry_beta,
-            &params.start_date,
-            &params.end_date,
-            &layer_config,
-            params.allowed_ts_codes.as_ref(),
-        )?,
-    );
-    let validation_required_runtime_keys =
-        collect_rule_validation_runtime_keys(&execution_plan.combos);
-    let validation_reader =
-        DataReader::new_with_runtime_keys(&source_path, &validation_required_runtime_keys)?;
-    let mut validation_ts_codes = validation_reader.list_ts_code(
-        &params.stock_adj_type,
-        &params.start_date,
-        &params.end_date,
-    )?;
-    if let Some(allowed_ts_codes) = params.allowed_ts_codes.as_ref() {
-        validation_ts_codes
-            .retain(|ts_code| ts_code_allowed_by_filter(Some(allowed_ts_codes), ts_code));
-    }
-    let st_list = load_st_list(&source_path)?;
-    let explain_map = all_rules
-        .iter()
-        .map(|rule| (rule.name.clone(), rule.explain.clone()))
-        .collect::<HashMap<_, _>>();
-    let stock_meta_map = load_validation_sample_stock_meta_map(&source_path)?;
-    let similarity_cache = load_validation_similarity_cache_optional(
-        &source_path,
-        &params.start_date,
-        &params.end_date,
-    )?;
-    let mut combo_results = Vec::with_capacity(execution_plan.combos.len());
-    for combo_chunk in execution_plan.combos.chunks(16) {
-        let combo_triggered_maps = build_validation_triggered_scores_for_combos(
-            &source_path,
-            &params.stock_adj_type,
-            &execution_plan.query_start_date,
-            &params.start_date,
-            &params.end_date,
-            execution_plan.need_rows,
-            &validation_ts_codes,
-            &st_list,
-            combo_chunk,
-        )?;
-
-        for (combo, triggered_score_map) in combo_chunk.iter().zip(combo_triggered_maps.into_iter())
-        {
-            combo_results.push(
-                (|params: &RuleLayerBacktestRunParams,
-                  seed_rule: &ValidationSeedRule,
-                  combo: &PreparedValidationCombo,
-                  triggered_score_map: ValidationTriggeredScoreMap,
-                  runtime_cache: &RuleLayerRuntimeCache,
-                  layer_config: &RuleLayerConfig,
-                  similarity_cache: &ValidationSimilarityCache,
-                  explain_map: &HashMap<String, String>,
-                  stock_meta_map: &HashMap<String, ValidationSampleStockMeta>,
-                  sample_limit_per_group: usize|
-                 -> Result<RuleValidationComboResult, String> {
-                    let metrics_with_samples = calc_rule_layer_metrics_with_samples_from_cache(
-                        runtime_cache,
-                        &triggered_score_map,
-                        layer_config,
-                    )?;
-                    let validation_layer_details = build_validation_score_layer_details(
-                        &metrics_with_samples.samples,
-                        layer_config.min_samples_per_day,
-                    );
-                    let return_distribution =
-                        build_validation_return_distribution(&metrics_with_samples.samples);
-                    let mut sample_accumulator = ValidationSampleAccumulator::new(
-                        sample_limit_per_group,
-                        stock_meta_map,
-                        similarity_cache,
-                        matches!(seed_rule.scope_way, ScopeWay::Each),
-                        seed_rule.points,
-                        seed_rule.dist_points.is_some(),
-                    );
-                    visit_triggered_rule_samples_from_cache(
-                        runtime_cache,
-                        &triggered_score_map,
-                        |sample| {
-                            sample_accumulator.push(sample);
-                            Ok(())
-                        },
-                    )?;
-                    let (
-                        trigger_samples,
-                        triggered_days,
-                        sample_stats,
-                        trigger_count_stats,
-                        sample_groups,
-                        overlap_hit_count,
-                    ) = sample_accumulator.into_parts();
-                    let backtest = build_rule_backtest_payload(
-                        &combo.variant.combo_key,
-                        params,
-                        metrics_with_samples.metrics,
-                        Some(validation_layer_details),
-                    );
-                    let similarity_rows = build_validation_similarity_rows_from_overlap(
-                        similarity_cache,
-                        trigger_samples,
-                        overlap_hit_count,
-                        seed_rule.exclude_rule_name.as_deref(),
-                        explain_map,
-                    );
-
-                    Ok(RuleValidationComboResult {
-                        combo_key: combo.variant.combo_key.clone(),
-                        combo_label: combo.variant.combo_label.clone(),
-                        formula: combo.variant.formula.clone(),
-                        unknown_values: combo.variant.unknown_values.clone(),
-                        trigger_samples,
-                        triggered_days,
-                        avg_daily_trigger: if triggered_days > 0 {
-                            trigger_samples as f64 / triggered_days as f64
-                        } else {
-                            0.0
-                        },
-                        sample_stats,
-                        trigger_count_stats,
-                        sample_groups,
-                        return_distribution,
-                        backtest,
-                        similarity_rows,
-                    })
-                })(
-                    &params,
-                    &seed_rule,
-                    combo,
-                    triggered_score_map,
-                    runtime_cache.as_ref(),
-                    &layer_config,
-                    &similarity_cache,
-                    &explain_map,
-                    &stock_meta_map,
-                    sample_limit_per_group,
-                )?,
-            );
-        }
-    }
-
-    combo_results.sort_by(|left, right| {
-        compare_option_f64_desc(left.backtest.spread_mean, right.backtest.spread_mean)
-            .then_with(|| compare_option_f64_desc(left.backtest.icir, right.backtest.icir))
-            .then_with(|| right.trigger_samples.cmp(&left.trigger_samples))
-            .then_with(|| left.combo_key.cmp(&right.combo_key))
-    });
-
-    let best_combo_key = combo_results.first().map(|item| item.combo_key.clone());
-    let continuation_combos = execution_plan
-        .combos
-        .iter()
-        .map(|combo| {
-            (
-                combo.variant.combo_key.clone(),
-                ValidationContinuationCombo {
-                    combo_key: combo.variant.combo_key.clone(),
-                    combo_label: combo.variant.combo_label.clone(),
-                    formula: combo.variant.formula.clone(),
-                },
-            )
-        })
-        .collect::<HashMap<_, _>>();
-    let continuation_id = (|session: ValidationContinuationSession| -> Result<String, String> {
-        let mut cache = validation_continuation_cache()
-            .lock()
-            .map_err(|_| "ä¿å­˜è¡¨è¾¾å¼ç»§ç»­éªŒè¯åŸºç¡€æ•°æ®å¤±è´¥:ç¼“å­˜é”å·²æŸå".to_string())?;
-        cache.retain(|_, item| item.created_at.elapsed() <= VALIDATION_CONTINUATION_TTL);
-        while cache.len() >= (1) {
-            let Some(oldest_key) = cache
-                .iter()
-                .max_by_key(|(_, item)| item.created_at.elapsed())
-                .map(|(key, _)| key.clone())
-            else {
-                break;
-            };
-            cache.remove(&oldest_key);
-        }
-
-        let continuation_id = loop {
-            let candidate = format!(
-                "expr-calibration-{:016x}{:016x}",
-                random::<u64>(),
-                random::<u64>()
-            );
-            if !cache.contains_key(&candidate) {
-                break candidate;
-            }
-        };
-        cache.insert(continuation_id.clone(), Arc::new(session));
-        Ok(continuation_id)
-    })(ValidationContinuationSession {
-        created_at: Instant::now(),
-        source_path: source_path.clone(),
-        params: params.clone(),
-        runtime_cache: Arc::clone(&runtime_cache),
-        seed_rule: seed_rule.clone(),
-        validation_ts_codes,
-        combos: continuation_combos,
-    })
-    .ok();
-
-    Ok(RuleExpressionValidationData {
-        import_rule_name: seed_rule.rule_name,
-        import_rule_explain: seed_rule.rule_explain,
-        scope_way: scope_way_label(seed_rule.scope_way),
-        scope_windows: seed_rule.scope_windows,
-        sample_limit_per_group,
-        combo_results,
-        best_combo_key,
-        continuation_id,
-    })
-}
-
-#[derive(Debug, Clone)]
-struct ValidationCalibrationSpec {
-    candidate_key: String,
-    scope_way: ScopeWay,
-    scope_windows: usize,
-    scope_label: String,
-    dist_points: Option<Vec<crate::data::DistPoint>>,
-    is_current: bool,
-}
-
-#[derive(Debug, Default)]
-struct ValidationCalibrationBucketAgg {
-    score_multiplier: f64,
-    sample_count: usize,
-    residual_sum: f64,
-}
-
-fn scope_way_config_label(scope_way: ScopeWay) -> String {
-    match scope_way {
-        ScopeWay::Any => "ANY".to_string(),
-        ScopeWay::Last => "LAST".to_string(),
-        ScopeWay::Each => "EACH".to_string(),
-        ScopeWay::Recent => "RECENT".to_string(),
-        ScopeWay::Consec(threshold) => format!("CONSEC>={threshold}"),
-    }
-}
-
-fn build_recent_decay_dist_points(
-    scope_windows: usize,
-    direction_sign: f64,
-) -> Vec<crate::data::DistPoint> {
-    let half_life = ((scope_windows.max(2) - 1) as f64 / 2.0).max(1.0);
-    (0..scope_windows)
-        .map(|offset| crate::data::DistPoint {
-            min: offset,
-            max: offset,
-            points: direction_sign * 0.5_f64.powf(offset as f64 / half_life),
-        })
-        .collect()
-}
-
-fn build_validation_calibration_specs(
-    seed_rule: &ValidationSeedRule,
-) -> Vec<ValidationCalibrationSpec> {
-    let direction_sign = if seed_rule.points < 0.0 { -1.0 } else { 1.0 };
-    let current_scope_label = scope_way_config_label(seed_rule.scope_way);
-    let mut specs = vec![ValidationCalibrationSpec {
-        candidate_key: "current".to_string(),
-        scope_way: seed_rule.scope_way,
-        scope_windows: seed_rule.scope_windows,
-        scope_label: format!("{}ï¼ˆå½“å‰ï¼‰", current_scope_label),
-        dist_points: (|items: Option<Vec<crate::data::DistPoint>>,
-                       direction_sign: f64|
-         -> Option<Vec<crate::data::DistPoint>> {
-            let items = items?;
-            let max_abs = items
-                .iter()
-                .map(|item| item.points.abs())
-                .fold(0.0_f64, f64::max);
-            if max_abs <= VALIDATION_EPS {
-                return None;
-            }
-            Some(
-                items
-                    .into_iter()
-                    .map(|item| crate::data::DistPoint {
-                        min: item.min,
-                        max: item.max,
-                        points: direction_sign * item.points.abs() / max_abs,
-                    })
-                    .collect(),
-            )
-        })(seed_rule.dist_points.clone(), direction_sign),
-        is_current: true,
-    }];
-    let mut seen = HashSet::from([format!(
-        "{}:{}",
-        current_scope_label, seed_rule.scope_windows
-    )]);
-
-    let mut push_plain = |scope_way: ScopeWay, scope_windows: usize| {
-        let label = scope_way_config_label(scope_way);
-        let dedupe_key = format!("{label}:{scope_windows}");
-        if !seen.insert(dedupe_key) {
-            return;
-        }
-        specs.push(ValidationCalibrationSpec {
-            candidate_key: format!(
-                "{}-{}",
-                label.to_ascii_lowercase().replace(">=", "-"),
-                scope_windows
-            ),
-            scope_way,
-            scope_windows,
-            scope_label: label,
-            dist_points: None,
-            is_current: false,
-        });
-    };
-
-    push_plain(ScopeWay::Last, 1);
-    for window in [3, 5, 10] {
-        push_plain(ScopeWay::Any, window);
-    }
-    for window in [3, 5, 10] {
-        push_plain(ScopeWay::Each, window);
-    }
-    for (threshold, windows) in [(2, [3, 5, 10]), (3, [3, 5, 10])] {
-        for window in windows {
-            if window >= threshold {
-                push_plain(ScopeWay::Consec(threshold), window);
-            }
-        }
-    }
-    drop(push_plain);
-
-    for window in [3, 5, 10] {
-        specs.push(ValidationCalibrationSpec {
-            candidate_key: format!("recent-decay-{window}"),
-            scope_way: ScopeWay::Recent,
-            scope_windows: window,
-            scope_label: "RECENTï¼ˆè‡ªåŠ¨è¡°å‡ï¼‰".to_string(),
-            dist_points: Some(build_recent_decay_dist_points(window, direction_sign)),
-            is_current: false,
-        });
-    }
-    specs
-}
-
-fn sample_std_f64(values: &[f64]) -> Option<f64> {
-    if values.len() < 2 {
-        return None;
-    }
-    let mean = values.iter().sum::<f64>() / values.len() as f64;
-    let variance = values
-        .iter()
-        .map(|value| (value - mean).powi(2))
-        .sum::<f64>()
-        / (values.len() - 1) as f64;
-    variance.is_finite().then_some(variance.sqrt())
-}
-
-fn round_to_half(value: f64) -> f64 {
-    (value * 2.0).round() / 2.0
-}
-
-fn calibration_stability_factor(
-    direction_sign: f64,
-    early_mean: Option<f64>,
-    late_mean: Option<f64>,
-) -> f64 {
-    match (
-        early_mean.map(|value| value * direction_sign),
-        late_mean.map(|value| value * direction_sign),
-    ) {
-        (Some(early), Some(late)) if early > 0.0 && late > 0.0 => 1.0,
-        (Some(early), Some(late)) if early > 0.0 || late > 0.0 => 0.5,
-        _ => 0.0,
-    }
-}
-
-fn calibration_status_rank(status: &str) -> usize {
-    match status {
-        "reliable" => 0,
-        "unstable" => 1,
-        "no_edge" => 2,
-        _ => 3,
-    }
-}
-
-pub fn run_rule_expression_calibration(
-    continuation_id: String,
-    combo_key: String,
-) -> Result<RuleExpressionCalibrationData, String> {
-    let continuation_id = continuation_id.trim().to_string();
-    let combo_key = combo_key.trim().to_string();
-    if continuation_id.is_empty() || combo_key.is_empty() {
-        return Err("ç»§ç»­éªŒè¯æ ‡è¯†å’Œå‚æ•°ç»„åˆä¸èƒ½ä¸ºç©º".to_string());
-    }
-    let session = (|continuation_id: &str| -> Result<Arc<ValidationContinuationSession>, String> {
-        let mut cache = validation_continuation_cache()
-            .lock()
-            .map_err(|_| "è¯»å–è¡¨è¾¾å¼ç»§ç»­éªŒè¯åŸºç¡€æ•°æ®å¤±è´¥:ç¼“å­˜é”å·²æŸå".to_string())?;
-        cache.retain(|_, item| item.created_at.elapsed() <= VALIDATION_CONTINUATION_TTL);
-        cache
-            .get(continuation_id.trim())
-            .cloned()
-            .ok_or_else(|| "è¡¨è¾¾å¼åŸºç¡€éªŒè¯ç¼“å­˜å·²å¤±æ•ˆï¼Œè¯·é‡æ–°æ‰§è¡Œä¸€æ¬¡è¡¨è¾¾å¼éªŒè¯".to_string())
-    })(&continuation_id)?;
-    let combo = session
-        .combos
-        .get(&combo_key)
-        .cloned()
-        .ok_or_else(|| format!("ç»§ç»­éªŒè¯åŸºç¡€æ•°æ®ä¸­ä¸å­˜åœ¨å‚æ•°ç»„åˆ:{combo_key}"))?;
-    let direction_sign = if session.seed_rule.points < 0.0 {
-        -1.0
-    } else {
-        1.0
-    };
-    let specs = build_validation_calibration_specs(&session.seed_rule);
-    let mut prepared = Vec::with_capacity(specs.len());
-    for spec in &specs {
-        let cached_rule = build_validation_cached_rule(
-            format!("calibration__{}", spec.candidate_key),
-            spec.scope_way,
-            spec.scope_windows,
-            direction_sign,
-            spec.dist_points.clone(),
-            session.seed_rule.tag,
-            &combo.formula,
-        )?;
-        prepared.push(PreparedValidationCombo {
-            variant: ValidationVariant {
-                combo_key: spec.candidate_key.clone(),
-                combo_label: spec.scope_label.clone(),
-                formula: combo.formula.clone(),
-                unknown_values: Vec::new(),
-            },
-            assigned_names: collect_validation_assigned_names(&cached_rule.when_ast),
-            cached_rule,
-        });
-    }
-
-    let max_warmup_need = prepared.iter().try_fold(0usize, |current, item| {
-        estimate_rule_warmup(
-            &item.cached_rule.when_ast,
-            item.cached_rule.scope_way,
-            item.cached_rule.scope_windows,
-        )
-        .map(|need| current.max(need))
-    })?;
-    let need_rows = calc_query_need_rows(
-        &session.source_path,
-        max_warmup_need,
-        &session.params.start_date,
-        &session.params.end_date,
-    )?;
-    let query_start_date = calc_query_start_date(
-        &session.source_path,
-        max_warmup_need,
-        &session.params.start_date,
-    )?;
-    let st_list = load_st_list(&session.source_path)?;
-    let triggered_maps = build_validation_triggered_scores_for_combos(
-        &session.source_path,
-        &session.params.stock_adj_type,
-        &query_start_date,
-        &session.params.start_date,
-        &session.params.end_date,
-        need_rows,
-        &session.validation_ts_codes,
-        &st_list,
-        &prepared,
-    )?;
-    let layer_config = RuleLayerConfig {
-        min_samples_per_day: session.params.min_samples_per_day,
-        backtest_period: session.params.backtest_period,
-        min_listed_trade_days: session.params.min_listed_trade_days,
-    };
-    let mut candidates = Vec::with_capacity(specs.len());
-    for (spec, triggered_score_map) in specs.iter().zip(triggered_maps.iter()) {
-        let metrics = calc_rule_layer_metrics_from_cache(
-            session.runtime_cache.as_ref(),
-            triggered_score_map,
-            &layer_config,
-        )?;
-        candidates.push((|spec: &ValidationCalibrationSpec,
-                          direction_sign: f64,
-                          metrics: crate::simulate::rule::RuleLayerMetrics,
-                          runtime_cache: &RuleLayerRuntimeCache,
-                          triggered_score_map: &ValidationTriggeredScoreMap|
-         -> Result<
-            RuleExpressionCalibrationCandidate,
-            String,
-        > {
-            let mut daily_excess = metrics
-                .points
-                .iter()
-                .filter_map(|point| {
-                    point
-                        .avg_excess_residual_return
-                        .filter(|value| value.is_finite())
-                        .map(|value| (point.trade_date.clone(), value))
-                })
-                .collect::<Vec<_>>();
-            daily_excess.sort_by(|left, right| left.0.cmp(&right.0));
-            let daily_values = daily_excess
-                .iter()
-                .map(|(_, value)| *value)
-                .collect::<Vec<_>>();
-            let daily_mean = mean_f64(&daily_values);
-            let daily_std = sample_std_f64(&daily_values);
-            let standard_error = daily_std.map(|std| std / (daily_values.len() as f64).sqrt());
-            let conservative_edge = daily_mean.zip(standard_error).map(|(mean, se)| {
-                let oriented_lcb = mean * direction_sign - (1.28) * se;
-                direction_sign * oriented_lcb
-            });
-
-            let split_index = daily_excess.len() / 2;
-            let early_values = daily_excess[..split_index]
-                .iter()
-                .map(|(_, value)| *value)
-                .collect::<Vec<_>>();
-            let late_values = daily_excess[split_index..]
-                .iter()
-                .map(|(_, value)| *value)
-                .collect::<Vec<_>>();
-            let early_mean = mean_f64(&early_values);
-            let late_mean = mean_f64(&late_values);
-            let stability_factor =
-                calibration_stability_factor(direction_sign, early_mean, late_mean);
-
-            let mut trigger_samples = 0usize;
-            let mut triggered_days = HashSet::new();
-            let mut multiplier_sum = 0.0;
-            let mut bucket_map = HashMap::<u64, ValidationCalibrationBucketAgg>::new();
-            visit_triggered_rule_samples_from_cache(
-                runtime_cache,
-                triggered_score_map,
-                |sample| {
-                    let score_multiplier = sample.rule_score.abs();
-                    if !score_multiplier.is_finite() || score_multiplier <= VALIDATION_EPS {
-                        return Ok(());
-                    }
-                    trigger_samples += 1;
-                    triggered_days.insert(sample.trade_date.to_string());
-                    multiplier_sum += score_multiplier;
-                    let entry = bucket_map
-                        .entry(score_multiplier.to_bits())
-                        .or_insert_with(|| ValidationCalibrationBucketAgg {
-                            score_multiplier,
-                            ..ValidationCalibrationBucketAgg::default()
-                        });
-                    entry.sample_count += 1;
-                    entry.residual_sum += sample.residual_return;
-                    Ok(())
-                },
-            )?;
-            let triggered_day_count = triggered_days.len();
-            let avg_score_multiplier = if trigger_samples > 0 {
-                Some(multiplier_sum / trigger_samples as f64)
-            } else {
-                None
-            };
-
-            let mut score_buckets = bucket_map
-                .into_values()
-                .map(|bucket| RuleExpressionCalibrationBucket {
-                    score_multiplier: bucket.score_multiplier,
-                    sample_count: bucket.sample_count,
-                    avg_residual_return: (bucket.sample_count > 0)
-                        .then_some(bucket.residual_sum / bucket.sample_count as f64),
-                })
-                .collect::<Vec<_>>();
-            score_buckets.sort_by(|left, right| {
-                left.score_multiplier
-                    .partial_cmp(&right.score_multiplier)
-                    .unwrap_or(Ordering::Equal)
-            });
-            let monotonic_buckets = score_buckets
-                .iter()
-                .filter(|bucket| bucket.sample_count >= 30)
-                .filter_map(|bucket| {
-                    bucket
-                        .avg_residual_return
-                        .map(|value| value * direction_sign)
-                })
-                .collect::<Vec<_>>();
-            let score_monotonicity = if monotonic_buckets.len() >= 2 {
-                let monotonic_pairs = monotonic_buckets
-                    .windows(2)
-                    .filter(|window| window[1] + VALIDATION_EPS >= window[0])
-                    .count();
-                Some(monotonic_pairs as f64 / (monotonic_buckets.len() - 1) as f64)
-            } else {
-                None
-            };
-
-            let enough_samples = trigger_samples >= (100) && triggered_day_count >= (20);
-            let oriented_lcb = conservative_edge.map(|value| value * direction_sign);
-            let (status, status_label) = if !enough_samples {
-                ("insufficient", "æ ·æœ¬ä¸è¶³")
-            } else if oriented_lcb.is_none_or(|value| value <= 0.0) {
-                ("no_edge", "ä¿å®ˆè¾¹é™…ä¸è¶³")
-            } else if stability_factor < 1.0 {
-                ("unstable", "å‰åŽæ®µä¸ç¨³å®š")
-            } else {
-                ("reliable", "ç›¸å¯¹ç¨³å®š")
-            };
-
-            let normalized_edge = match (oriented_lcb, daily_std) {
-                (Some(edge), Some(std)) if edge > 0.0 && std > VALIDATION_EPS => edge / std,
-                _ => 0.0,
-            };
-            let structure_factor = (|scope_way: ScopeWay, monotonicity: Option<f64>| -> f64 {
-                match scope_way {
-                    ScopeWay::Each => monotonicity.unwrap_or(0.25).clamp(0.25, 1.0),
-                    ScopeWay::Recent => (0.5 + monotonicity.unwrap_or(0.5) * 0.5).clamp(0.5, 1.0),
-                    _ => 1.0,
-                }
-            })(spec.scope_way, score_monotonicity);
-            let ic_support = metrics
-                .ic_t_value
-                .filter(|value| value.is_finite() && *value > 0.0)
-                .map(|value| value / (daily_values.len().max(1) as f64).sqrt())
-                .unwrap_or(0.0);
-            let calibration_score = if enough_samples {
-                (normalized_edge + ic_support * 0.15) * stability_factor * structure_factor
-            } else {
-                0.0
-            };
-            let desired_total_points = if enough_samples && normalized_edge > 0.0 {
-                round_to_half(
-                    ((40.0) * normalized_edge * stability_factor * structure_factor)
-                        .clamp(0.0, 10.0),
-                )
-            } else {
-                0.0
-            };
-            let unit_points_abs = avg_score_multiplier
-                .filter(|value| *value > VALIDATION_EPS)
-                .map(|value| round_to_half((desired_total_points / value).clamp(0.0, 10.0)))
-                .unwrap_or(0.0);
-            let suggested_points = direction_sign * unit_points_abs;
-            let suggested_total_points = direction_sign * desired_total_points;
-            let suggested_dist_points = spec
-                .dist_points
-                .as_ref()
-                .map(|items| {
-                    items
-                        .iter()
-                        .map(|item| RuleExpressionCalibrationDistancePoint {
-                            min: item.min,
-                            max: item.max,
-                            points: suggested_points * item.points.abs(),
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-
-            Ok(RuleExpressionCalibrationCandidate {
-                candidate_key: spec.candidate_key.clone(),
-                scope_way: scope_way_config_label(spec.scope_way),
-                scope_label: spec.scope_label.clone(),
-                scope_windows: spec.scope_windows,
-                is_current: spec.is_current,
-                trigger_samples,
-                triggered_days: triggered_day_count,
-                avg_daily_trigger: if triggered_day_count > 0 {
-                    trigger_samples as f64 / triggered_day_count as f64
-                } else {
-                    0.0
-                },
-                avg_residual_mean: metrics.avg_residual_mean,
-                avg_excess_residual_mean: daily_mean,
-                daily_std,
-                standard_error,
-                conservative_edge,
-                early_excess_residual_mean: early_mean,
-                late_excess_residual_mean: late_mean,
-                ic_mean: metrics.ic_mean,
-                ic_t_value: metrics.ic_t_value,
-                score_monotonicity,
-                avg_score_multiplier,
-                suggested_points,
-                suggested_total_points,
-                calibration_score,
-                status: status.to_string(),
-                status_label: status_label.to_string(),
-                score_buckets,
-                suggested_dist_points,
-            })
-        })(
-            spec,
-            direction_sign,
-            metrics,
-            session.runtime_cache.as_ref(),
-            triggered_score_map,
-        )?);
-    }
-
-    let recommended_candidate_key = candidates
-        .iter()
-        .filter(|item| matches!(item.status.as_str(), "reliable" | "unstable"))
-        .max_by(|left, right| {
-            calibration_status_rank(right.status.as_str())
-                .cmp(&calibration_status_rank(left.status.as_str()))
-                .then_with(|| {
-                    left.calibration_score
-                        .partial_cmp(&right.calibration_score)
-                        .unwrap_or(Ordering::Equal)
-                })
-        })
-        .map(|item| item.candidate_key.clone());
-    candidates.sort_by(|left, right| {
-        calibration_status_rank(left.status.as_str())
-            .cmp(&calibration_status_rank(right.status.as_str()))
-            .then_with(|| {
-                right
-                    .calibration_score
-                    .partial_cmp(&left.calibration_score)
-                    .unwrap_or(Ordering::Equal)
-            })
-            .then_with(|| left.scope_label.cmp(&right.scope_label))
-            .then_with(|| left.scope_windows.cmp(&right.scope_windows))
-    });
-
-    Ok(RuleExpressionCalibrationData {
-        continuation_id,
-        combo_key: combo.combo_key,
-        combo_label: combo.combo_label,
-        direction: if direction_sign < 0.0 {
-            "negative".to_string()
-        } else {
-            "positive".to_string()
-        },
-        candidate_count: candidates.len(),
-        point_scale_description:
-            "å»ºè®®åˆ†ä½¿ç”¨æŒ‰äº¤æ˜“æ—¥è¶…é¢æ®‹å·®çš„90%ä¿å®ˆè¾¹é™…ï¼›4åˆ†çº¦å¯¹åº”0.1ä¸ªæ—¥åº¦æ ‡å‡†å·®ï¼ŒEACH/RECENTåŒæ—¶æŠ˜ç®—ä¸ºå•æ¬¡åŸºç¡€åˆ†"
-                .to_string(),
-        recommended_candidate_key,
-        candidates,
-    })
-}
-
-fn load_validation_sample_stock_meta_map(
-    source_path: &str,
-) -> Result<HashMap<String, ValidationSampleStockMeta>, String> {
-    let rows = load_stock_list(source_path)?;
-    let mut out = HashMap::with_capacity(rows.len());
-
-    for cols in rows {
-        let Some(ts_code_raw) = cols.first().map(|value| value.trim()) else {
-            continue;
-        };
-        if ts_code_raw.is_empty() {
-            continue;
-        }
-
-        let ts_code = ts_code_raw.to_ascii_uppercase();
-        let stock_name = cols
-            .get(2)
-            .map(|value| value.trim())
-            .filter(|value| !value.is_empty())
-            .map(|value| value.to_string());
-        let board = resolve_validation_sample_board_label(
-            &ts_code,
-            stock_name.as_deref(),
-            cols.get(14)
-                .map(|value| value.trim())
-                .filter(|value| !value.is_empty()),
-        );
-
-        out.insert(
-            ts_code,
-            ValidationSampleStockMeta {
-                name: stock_name,
-                volatility_group: derive_validation_volatility_group(&board).to_string(),
-                board,
-            },
-        );
-    }
-
-    Ok(out)
-}
-
-fn resolve_validation_sample_board_label(
-    ts_code: &str,
-    stock_name: Option<&str>,
-    market_label: Option<&str>,
-) -> String {
-    let category_board = board_category(ts_code, stock_name);
-    if category_board == "ST" {
-        return category_board.to_string();
-    }
-
-    if let Some(board) = market_label.and_then(|market_label: &str| -> Option<String> {
-        let market_label = market_label.trim();
-        if market_label.is_empty() {
-            return None;
-        }
-
-        if market_label.contains("åŒ—äº¤") {
-            return Some("åŒ—äº¤æ‰€".to_string());
-        }
-        if market_label.contains("ç§‘åˆ›") {
-            return Some("ç§‘åˆ›æ¿".to_string());
-        }
-        if market_label.contains("åˆ›ä¸š") {
-            return Some("åˆ›ä¸šæ¿".to_string());
-        }
-        if market_label.contains("ä¸»æ¿") {
-            return Some("ä¸»æ¿".to_string());
-        }
-
-        Some(market_label.to_string())
-    }) {
-        return board;
-    }
-
-    category_board.to_string()
-}
-
-fn derive_validation_volatility_group(board: &str) -> &'static str {
-    let board = board.trim();
-    if board.contains("åŒ—äº¤") || board.contains("åˆ›ä¸š") || board.contains("ç§‘åˆ›") {
-        "é«˜æ³¢åŠ¨"
-    } else if board == "ST" {
-        "å…¶ä»–æ³¢åŠ¨"
-    } else if board.contains("ä¸»æ¿") {
-        "å¸¸è§„æ³¢åŠ¨"
-    } else {
-        "å…¶ä»–æ³¢åŠ¨"
-    }
-}
-
-fn split_board_tags(board_raw: &str) -> Vec<String> {
-    board_raw
-        .split(|ch| matches!(ch, ',' | ';' | 'ï¼Œ' | 'ï¼›' | '|' | 'ã€' | '/' | '\n' | '\r'))
-        .map(|part| part.trim())
-        .filter(|part| !part.is_empty())
-        .map(|part| part.to_string())
-        .collect()
-}
-
-/// ç¼“å­˜ `build_board_maps` çš„è§£æžç»“æžœï¼Œé¿å…æ¯æ¬¡å›žæµ‹éƒ½è¯»å–å¹¶è§£æž stock_list.csvã€‚
-static BOARD_MAPS_CACHE: Mutex<Option<(String, Vec<String>, HashMap<String, Vec<String>>)>> =
-    Mutex::new(None);
-
-fn get_or_build_board_maps(
-    source_path: &str,
-) -> Result<(Vec<String>, HashMap<String, Vec<String>>), String> {
-    {
-        let cache = BOARD_MAPS_CACHE
-            .lock()
-            .map_err(|e| format!("è¯»å–æ¿å—æ˜ å°„ç¼“å­˜å¤±è´¥: {e}"))?;
-        if let Some((cached_path, board_options, ts_board_map)) = cache.as_ref() {
-            if cached_path == source_path {
-                return Ok((board_options.clone(), ts_board_map.clone()));
-            }
-        }
-    }
-    let (board_options, ts_board_map) = build_board_maps(source_path)?;
-    let mut cache = BOARD_MAPS_CACHE
-        .lock()
-        .map_err(|e| format!("å†™å…¥æ¿å—æ˜ å°„ç¼“å­˜å¤±è´¥: {e}"))?;
-    *cache = Some((
-        source_path.to_string(),
-        board_options.clone(),
-        ts_board_map.clone(),
-    ));
-    Ok((board_options, ts_board_map))
-}
-
-fn build_board_maps(
-    source_path: &str,
-) -> Result<(Vec<String>, HashMap<String, Vec<String>>), String> {
-    let stock_rows = load_stock_list(source_path)?;
-    let mut ts_board_map: HashMap<String, Vec<String>> = HashMap::with_capacity(stock_rows.len());
-    let mut board_set: HashSet<String> = HashSet::new();
-
-    for cols in stock_rows {
-        let Some(ts_code_raw) = cols.first().map(|value| value.trim()) else {
-            continue;
-        };
-        let ts_code = ts_code_raw.to_ascii_uppercase();
-        let stock_name = cols
-            .get(2)
-            .map(|value| value.trim())
-            .filter(|value| !value.is_empty());
-
-        let mut board_list = Vec::new();
-        let category_board = board_category(&ts_code, stock_name).to_string();
-        board_set.insert(category_board.clone());
-        board_list.push(category_board);
-
-        if let Some(board_raw) = cols.get(14).map(|value| value.trim()) {
-            if !board_raw.is_empty() {
-                let detail_boards = split_board_tags(board_raw);
-                for board in detail_boards {
-                    if board_list.iter().any(|item| item == &board) {
-                        continue;
-                    }
-                    board_set.insert(board.clone());
-                    board_list.push(board);
-                }
-            }
-        }
-
-        ts_board_map.insert(ts_code, board_list);
-    }
-
-    let mut board_options = board_set.into_iter().collect::<Vec<_>>();
-    board_options.sort();
-
-    Ok((board_options, ts_board_map))
-}
-
-fn resolve_board_filter(requested: Option<String>, board_options: &[String]) -> Option<String> {
-    let requested = requested
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    if let Some(board) = requested {
-        if board_options.iter().any(|item| item == &board) {
-            return Some(board);
-        }
-    }
-    None
-}
-
-fn match_board_filter_with_st(
-    board_list: &[String],
-    selected_board: Option<&str>,
-    exclude_st_board: bool,
-) -> bool {
-    if exclude_st_board && board_list.iter().any(|board| board == "ST") {
-        return false;
-    }
-    (|board_list: &[String], selected_board: Option<&str>| -> bool {
-        let Some(selected_board) = selected_board else {
-            return true;
-        };
-        board_list.iter().any(|board| board == selected_board)
-    })(board_list, selected_board)
-}
-
-fn build_backtest_stock_filter(
-    source_path: &str,
-    board: Option<String>,
-    exclude_st_board: Option<bool>,
-    total_mv_min: Option<f64>,
-    total_mv_max: Option<f64>,
-) -> Result<
-    (
-        Option<String>,
-        bool,
-        Option<f64>,
-        Option<f64>,
-        Option<HashSet<String>>,
-    ),
-    String,
-> {
-    let exclude_st_board = exclude_st_board.unwrap_or(false);
-    let requested_board = board
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty() && value != "å…¨éƒ¨");
-    let (total_mv_min, total_mv_max) = (|total_mv_min: Option<f64>,
-                                         total_mv_max: Option<f64>|
-     -> Result<(Option<f64>, Option<f64>), String> {
-        let total_mv_min = total_mv_min.filter(|value| value.is_finite());
-        let total_mv_max = total_mv_max.filter(|value| value.is_finite());
-        if let (Some(min_v), Some(max_v)) = (total_mv_min, total_mv_max) {
-            if min_v > max_v {
-                return Err("æ€»å¸‚å€¼æœ€å°å€¼ä¸èƒ½å¤§äºŽæœ€å¤§å€¼".to_string());
-            }
-        }
-        Ok((total_mv_min, total_mv_max))
-    })(total_mv_min, total_mv_max)?;
-    let has_mv_filter = total_mv_min.is_some() || total_mv_max.is_some();
-
-    if requested_board.is_none() && !exclude_st_board && !has_mv_filter {
-        return Ok((None, false, None, None, None));
-    }
-
-    let (board_options, ts_board_map) = get_or_build_board_maps(source_path)?;
-    let resolved_board = resolve_board_filter(requested_board, &board_options);
-    let total_mv_map = if has_mv_filter {
-        build_total_mv_map(source_path)?
-    } else {
-        HashMap::new()
-    };
-    let allowed_ts_codes = ts_board_map
-        .into_iter()
-        .filter_map(|(ts_code, board_list)| {
-            if match_board_filter_with_st(&board_list, resolved_board.as_deref(), exclude_st_board)
-                && filter_mv(&total_mv_map, &ts_code, total_mv_min, total_mv_max)
-            {
-                Some(ts_code)
-            } else {
-                None
-            }
-        })
-        .collect::<HashSet<_>>();
-
-    Ok((
-        resolved_board,
-        exclude_st_board,
-        total_mv_min,
-        total_mv_max,
-        Some(allowed_ts_codes),
-    ))
-}
-
-fn build_industry_maps_from_rows(
-    stock_rows: Vec<Vec<String>>,
-) -> (HashMap<String, Vec<String>>, HashMap<String, usize>) {
-    let mut ts_industry_map: HashMap<String, Vec<String>> =
-        HashMap::with_capacity(stock_rows.len());
-    let mut industry_stocks: HashMap<String, HashSet<String>> = HashMap::new();
-
-    for cols in stock_rows {
-        let Some(ts_code) = cols
-            .first()
-            .map(|value| value.trim().to_ascii_uppercase())
-            .filter(|value| !value.is_empty())
-        else {
-            continue;
-        };
-        let Some(industry_raw) = cols.get(4).map(|value| value.trim()) else {
-            continue;
-        };
-        if industry_raw.is_empty() {
-            continue;
-        }
-
-        let industries = split_board_tags(industry_raw);
-        for industry in &industries {
-            industry_stocks
-                .entry(industry.clone())
-                .or_default()
-                .insert(ts_code.clone());
-        }
-        if !industries.is_empty() {
-            ts_industry_map.insert(ts_code, industries);
-        }
-    }
-
-    let industry_stock_counts = industry_stocks
-        .into_iter()
-        .map(|(industry, stocks)| (industry, stocks.len()))
-        .collect();
-    (ts_industry_map, industry_stock_counts)
-}
-
-fn has_min_stock_count(
-    stock_counts: &HashMap<String, usize>,
-    name: &str,
-    min_stock_count: usize,
-) -> bool {
-    min_stock_count <= 1 || stock_counts.get(name).copied().unwrap_or(0) >= min_stock_count
-}
-
-fn estimate_net_money_flow_yuan(net_mf_vol: f64, vol: f64, amount: f64) -> Option<f64> {
-    if !net_mf_vol.is_finite()
-        || !vol.is_finite()
-        || !amount.is_finite()
-        || vol <= f64::EPSILON
-        || amount < 0.0
-    {
-        return None;
-    }
-
-    // Tushare æ—¥çº¿ amount çš„å•ä½ä¸ºåƒå…ƒï¼Œvol / net_mf_vol çš„å•ä½å‡ä¸ºæ‰‹ã€‚
-    // ç”¨æˆäº¤é¢ / æˆäº¤é‡å¾—åˆ°å½“æ—¥å‡ä»·åŽæŠ˜ç®—å‡€æµå…¥é‡‘é¢ï¼Œç»“æžœç»Ÿä¸€ä¸ºå…ƒã€‚
-    let value = net_mf_vol / vol * amount * 1_000.0;
-    value.is_finite().then_some(value)
-}
-
-fn accumulate_board_money_flow(
-    acc: &mut HashMap<String, f64>,
-    board_map: &HashMap<String, Vec<String>>,
-    ts_code: &str,
-    net_amount_yuan: f64,
-) {
-    let Some(boards) = board_map.get(ts_code) else {
-        return;
-    };
-    for board in boards {
-        *acc.entry(board.clone()).or_insert(0.0) += net_amount_yuan;
-    }
-}
-
-fn money_flow_rank_items(
-    acc: HashMap<String, f64>,
-    stock_counts: &HashMap<String, usize>,
-    min_stock_count: usize,
-) -> Vec<MarketRankItem> {
-    let mut items = acc
-        .into_iter()
-        .filter_map(|(name, value)| {
-            if value <= 0.0
-                || !value.is_finite()
-                || !has_min_stock_count(stock_counts, &name, min_stock_count)
-            {
-                return None;
-            }
-            Some(market_rank_item(name, value))
-        })
-        .collect::<Vec<_>>();
-    items.sort_by(|a, b| {
-        b.value
-            .partial_cmp(&a.value)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.name.cmp(&b.name))
-    });
-    items.truncate(20);
-    items
-}
-
-fn money_outflow_rank_items(
-    acc: HashMap<String, f64>,
-    stock_counts: &HashMap<String, usize>,
-    min_stock_count: usize,
-) -> Vec<MarketRankItem> {
-    let mut items = acc
-        .into_iter()
-        .filter_map(|(name, value)| {
-            if value >= 0.0
-                || !value.is_finite()
-                || !has_min_stock_count(stock_counts, &name, min_stock_count)
-            {
-                return None;
-            }
-            Some(market_rank_item(name, value))
-        })
-        .collect::<Vec<_>>();
-    items.sort_by(|a, b| {
-        a.value
-            .partial_cmp(&b.value)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.name.cmp(&b.name))
-    });
-    items.truncate(20);
-    items
-}
-
-pub fn get_market_analysis(
-    source_path: String,
-    lookback_period: Option<usize>,
-    reference_trade_date: Option<String>,
-    board: Option<String>,
-    exclude_st_board: Option<bool>,
-    min_listed_trade_days: Option<usize>,
-    stock_rank_limit: Option<usize>,
-    sub_interval_period: Option<usize>,
-    min_board_stock_count: Option<usize>,
-) -> Result<MarketAnalysisData, String> {
-    let lookback_period = lookback_period.unwrap_or(20).max(1);
-    let stock_rank_limit = stock_rank_limit.unwrap_or(20).clamp(1, 200);
-    let sub_interval_period = if lookback_period >= 3 {
-        sub_interval_period.unwrap_or(3).max(3).min(lookback_period)
-    } else {
-        3
-    };
-    let min_listed_trade_days =
-        min_listed_trade_days.unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS);
-    let min_board_stock_count = min_board_stock_count.unwrap_or(1).max(1);
-
-    let source_db = source_db_path(&source_path);
-    let source_db_str = source_db
-        .to_str()
-        .ok_or_else(|| "åŽŸå§‹åº“è·¯å¾„ä¸æ˜¯æœ‰æ•ˆUTF-8".to_string())?;
-    let source_conn =
-        Connection::open(source_db_str).map_err(|e| format!("æ‰“å¼€åŽŸå§‹åº“å¤±è´¥: {e}"))?;
-
-    let latest_trade_date: Option<String> = source_conn
-        .query_row(
-            "SELECT MAX(trade_date) FROM stock_data WHERE adj_type = 'qfq'",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|e| format!("æŸ¥è¯¢æœ€æ–°äº¤æ˜“æ—¥å¤±è´¥: {e}"))?;
-
-    let resolved_reference_trade_date = reference_trade_date
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .or_else(|| latest_trade_date.clone());
-
-    let (board_options, ts_board_map) = get_or_build_board_maps(&source_path)?;
-    let (ts_concept_map, concept_stock_counts) = (|source_path: &str| -> Result<
-        (HashMap<String, Vec<String>>, HashMap<String, usize>),
-        String,
-    > {
-        let rows = match load_ths_concepts_list(source_path) {
-            Ok(rows) => rows,
-            Err(error) if error.contains("æ‰“å¼€stock_concepts.csvå¤±è´¥") => {
-                return Ok((HashMap::new(), HashMap::new()));
-            }
-            Err(error) => return Err(error),
-        };
-        let mut ts_concept_map: HashMap<String, Vec<String>> = HashMap::new();
-        let mut concept_stocks: HashMap<String, HashSet<String>> = HashMap::new();
-
-        for cols in rows {
-            let Some(ts_code) = cols
-                .first()
-                .map(|value| value.trim().to_ascii_uppercase())
-                .filter(|value| !value.is_empty())
-            else {
-                continue;
-            };
-            let Some(concept_raw) = cols.get(2).map(|value| value.trim()) else {
-                continue;
-            };
-            if concept_raw.is_empty() {
-                continue;
-            }
-
-            let concepts = split_board_tags(concept_raw);
-            for concept in &concepts {
-                concept_stocks
-                    .entry(concept.clone())
-                    .or_default()
-                    .insert(ts_code.clone());
-            }
-            if !concepts.is_empty() {
-                ts_concept_map.entry(ts_code).or_default().extend(concepts);
-            }
-        }
-
-        for concepts in ts_concept_map.values_mut() {
-            concepts.sort();
-            concepts.dedup();
-        }
-        let concept_stock_counts = concept_stocks
-            .into_iter()
-            .map(|(concept, stocks)| (concept, stocks.len()))
-            .collect();
-        Ok((ts_concept_map, concept_stock_counts))
-    })(&source_path)?;
-    let (ts_industry_map, industry_stock_counts) = (|source_path: &str| -> Result<
-        (HashMap<String, Vec<String>>, HashMap<String, usize>),
-        String,
-    > {
-        let stock_rows = load_stock_list(source_path)?;
-        Ok(build_industry_maps_from_rows(stock_rows))
-    })(&source_path)?;
-    let resolved_board = resolve_board_filter(board, &board_options);
-    let exclude_st_board = exclude_st_board.unwrap_or(false);
-    let sample_eligibility =
-        build_backtest_sample_eligibility(&source_path, min_listed_trade_days)?;
-
-    let Some(ref_date) = resolved_reference_trade_date.clone() else {
-        return Ok(MarketAnalysisData {
-            lookback_period,
-            stock_rank_limit,
-            sub_interval_period,
-            min_board_stock_count,
-            latest_trade_date,
-            resolved_reference_trade_date: None,
-            board_options,
-            resolved_board,
-            interval: MarketAnalysisSnapshot {
-                trade_date: None,
-                concept_top: Vec::new(),
-                industry_top: Vec::new(),
-                concept_money_flow_top: Vec::new(),
-                industry_money_flow_top: Vec::new(),
-                concept_money_outflow_top: Vec::new(),
-                industry_money_outflow_top: Vec::new(),
-                gain_top: Vec::new(),
-                sub_interval_gain_top: Vec::new(),
-            },
-            daily: MarketAnalysisSnapshot {
-                trade_date: None,
-                concept_top: Vec::new(),
-                industry_top: Vec::new(),
-                concept_money_flow_top: Vec::new(),
-                industry_money_flow_top: Vec::new(),
-                concept_money_outflow_top: Vec::new(),
-                industry_money_outflow_top: Vec::new(),
-                gain_top: Vec::new(),
-                sub_interval_gain_top: Vec::new(),
-            },
-        });
-    };
-
-    let mut date_stmt = source_conn
-        .prepare(
-            r#"
-            SELECT trade_date
-            FROM (
-                SELECT DISTINCT trade_date
-                FROM stock_data
-                WHERE adj_type = 'qfq'
-                  AND trade_date <= ?
-                ORDER BY trade_date DESC
-                LIMIT ?
-            ) AS t
-            ORDER BY trade_date ASC
-            "#,
-        )
-        .map_err(|e| format!("é¢„ç¼–è¯‘å¸‚åœºåˆ†æžåŒºé—´æ—¥æœŸ SQL å¤±è´¥: {e}"))?;
-    let mut date_rows = date_stmt
-        .query(params![&ref_date, lookback_period as i64])
-        .map_err(|e| format!("æ‰§è¡Œå¸‚åœºåˆ†æžåŒºé—´æ—¥æœŸ SQL å¤±è´¥: {e}"))?;
-    let mut dates = Vec::new();
-    while let Some(row) = date_rows
-        .next()
-        .map_err(|e| format!("è¯»å–å¸‚åœºåˆ†æžåŒºé—´æ—¥æœŸå¤±è´¥: {e}"))?
-    {
-        let trade_date: String = row.get(0).map_err(|e| format!("è¯»å–äº¤æ˜“æ—¥å¤±è´¥: {e}"))?;
-        dates.push(trade_date);
-    }
-
-    if dates.is_empty() {
-        return Ok(MarketAnalysisData {
-            lookback_period,
-            stock_rank_limit,
-            sub_interval_period,
-            min_board_stock_count,
-            latest_trade_date,
-            resolved_reference_trade_date: Some(ref_date.clone()),
-            board_options,
-            resolved_board,
-            interval: MarketAnalysisSnapshot {
-                trade_date: None,
-                concept_top: Vec::new(),
-                industry_top: Vec::new(),
-                concept_money_flow_top: Vec::new(),
-                industry_money_flow_top: Vec::new(),
-                concept_money_outflow_top: Vec::new(),
-                industry_money_outflow_top: Vec::new(),
-                gain_top: Vec::new(),
-                sub_interval_gain_top: Vec::new(),
-            },
-            daily: MarketAnalysisSnapshot {
-                trade_date: Some(ref_date),
-                concept_top: Vec::new(),
-                industry_top: Vec::new(),
-                concept_money_flow_top: Vec::new(),
-                industry_money_flow_top: Vec::new(),
-                concept_money_outflow_top: Vec::new(),
-                industry_money_outflow_top: Vec::new(),
-                gain_top: Vec::new(),
-                sub_interval_gain_top: Vec::new(),
-            },
-        });
-    }
-
-    let interval_start = dates.first().cloned().unwrap_or_else(|| ref_date.clone());
-    let interval_end = dates.last().cloned().unwrap_or_else(|| ref_date.clone());
-
-    let concept_db = concept_performance_db_path(&source_path);
-    let concept_db_str = concept_db
-        .to_str()
-        .ok_or_else(|| "æ¦‚å¿µè¡¨çŽ°åº“è·¯å¾„ä¸æ˜¯æœ‰æ•ˆUTF-8".to_string())?;
-    let concept_conn =
-        Connection::open(concept_db_str).map_err(|e| format!("æ‰“å¼€æ¦‚å¿µè¡¨çŽ°åº“å¤±è´¥: {e}"))?;
-    let concept_interval_sql = r#"
-        SELECT concept, AVG(TRY_CAST(performance_pct AS DOUBLE)) AS avg_pct
-        FROM concept_performance
-        WHERE performance_type = 'concept'
-          AND trade_date >= ?
-          AND trade_date <= ?
-        GROUP BY 1
-        ORDER BY avg_pct DESC NULLS LAST, concept ASC
-        "#;
-
-    let mut concept_interval_stmt = concept_conn
-        .prepare(concept_interval_sql)
-        .map_err(|e| format!("é¢„ç¼–è¯‘æ¦‚å¿µåŒºé—´æ¦œ SQL å¤±è´¥: {e}"))?;
-    let mut concept_interval_rows = concept_interval_stmt
-        .query(params![&interval_start, &interval_end])
-        .map_err(|e| format!("æ‰§è¡Œæ¦‚å¿µåŒºé—´æ¦œ SQL å¤±è´¥: {e}"))?;
-    let mut interval_concept_top = Vec::new();
-    while let Some(row) = concept_interval_rows
-        .next()
-        .map_err(|e| format!("è¯»å–æ¦‚å¿µåŒºé—´æ¦œå¤±è´¥: {e}"))?
-    {
-        let name: String = row.get(0).map_err(|e| format!("è¯»å–æ¦‚å¿µåå¤±è´¥: {e}"))?;
-        if !has_min_stock_count(&concept_stock_counts, &name, min_board_stock_count) {
-            continue;
-        }
-        let value: Option<f64> = row.get(1).map_err(|e| format!("è¯»å–æ¦‚å¿µå€¼å¤±è´¥: {e}"))?;
-        if let Some(value) = value.filter(|v| v.is_finite()) {
-            interval_concept_top.push(market_rank_item(name, value));
-        }
-    }
-    interval_concept_top.truncate(20);
-
-    let mut interval_industry_stmt = source_conn
-        .prepare(
-            r#"
-            SELECT ts_code, AVG(TRY_CAST(pct_chg AS DOUBLE)) AS avg_pct
-            FROM stock_data
-            WHERE adj_type = 'qfq'
-              AND trade_date >= ?
-              AND trade_date <= ?
-            GROUP BY 1
-            "#,
-        )
-        .map_err(|e| format!("é¢„ç¼–è¯‘è¡Œä¸šåŒºé—´æ¦œ SQL å¤±è´¥: {e}"))?;
-    let mut interval_industry_rows = interval_industry_stmt
-        .query(params![&interval_start, &interval_end])
-        .map_err(|e| format!("æ‰§è¡Œè¡Œä¸šåŒºé—´æ¦œ SQL å¤±è´¥: {e}"))?;
-    let mut interval_industry_acc: HashMap<String, (f64, usize)> = HashMap::new();
-    while let Some(row) = interval_industry_rows
-        .next()
-        .map_err(|e| format!("è¯»å–è¡Œä¸šåŒºé—´æ¦œå¤±è´¥: {e}"))?
-    {
-        let ts_code: String = row.get(0).map_err(|e| format!("è¯»å–ä»£ç å¤±è´¥: {e}"))?;
-        let avg_pct: Option<f64> = row.get(1).map_err(|e| format!("è¯»å–è¡Œä¸šå€¼å¤±è´¥: {e}"))?;
-        let Some(avg_pct) = avg_pct.filter(|v| v.is_finite()) else {
-            continue;
-        };
-        let ts_code = ts_code.to_ascii_uppercase();
-        let Some(industry_list) = ts_industry_map.get(&ts_code) else {
-            continue;
-        };
-        for industry in industry_list {
-            let entry = interval_industry_acc
-                .entry(industry.clone())
-                .or_insert((0.0, 0));
-            entry.0 += avg_pct;
-            entry.1 += 1;
-        }
-    }
-    let mut interval_industry_top = interval_industry_acc
-        .into_iter()
-        .filter_map(|(name, (sum, cnt))| {
-            if cnt == 0 {
-                return None;
-            }
-            if !has_min_stock_count(&industry_stock_counts, &name, min_board_stock_count) {
-                return None;
-            }
-            let value = sum / cnt as f64;
-            if !value.is_finite() {
-                return None;
-            }
-            Some(market_rank_item(name, value))
-        })
-        .collect::<Vec<_>>();
-    interval_industry_top.sort_by(|a, b| {
-        b.value
-            .partial_cmp(&a.value)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.name.cmp(&b.name))
-    });
-    interval_industry_top.truncate(20);
-
-    let stock_name_map = (|source_path: &str| -> Result<HashMap<String, String>, String> {
-        let rows = load_stock_list(source_path)?;
-        let mut out = HashMap::with_capacity(rows.len());
-
-        for cols in rows {
-            let Some(ts_code) = cols.first().map(|value| value.trim()) else {
-                continue;
-            };
-            let Some(name_raw) = cols.get(2).map(|value| value.trim()) else {
-                continue;
-            };
-            if ts_code.is_empty() || name_raw.is_empty() {
-                continue;
-            }
-
-            out.insert(ts_code.to_string(), name_raw.to_string());
-        }
-
-        Ok(out)
-    })(&source_path)?;
-
-    let mut interval_gain_stmt = source_conn
-        .prepare(
-            r#"
-            SELECT ts_code, trade_date, TRY_CAST(close AS DOUBLE) AS close_price
-            FROM stock_data
-            WHERE adj_type = 'qfq'
-              AND trade_date >= ?
-              AND trade_date <= ?
-            ORDER BY trade_date ASC, ts_code ASC
-            "#,
-        )
-        .map_err(|e| format!("é¢„ç¼–è¯‘æ¶¨å¹…åŒºé—´æ¦œ SQL å¤±è´¥: {e}"))?;
-    let mut interval_gain_rows = interval_gain_stmt
-        .query(params![&interval_start, &interval_end])
-        .map_err(|e| format!("æ‰§è¡Œæ¶¨å¹…åŒºé—´æ¦œ SQL å¤±è´¥: {e}"))?;
-    let mut interval_gain_acc: HashMap<String, Vec<(String, f64)>> = HashMap::new();
-    while let Some(row) = interval_gain_rows
-        .next()
-        .map_err(|e| format!("è¯»å–æ¶¨å¹…åŒºé—´æ¦œå¤±è´¥: {e}"))?
-    {
-        let ts_code: String = row.get(0).map_err(|e| format!("è¯»å–ä»£ç å¤±è´¥: {e}"))?;
-        let trade_date: String = row.get(1).map_err(|e| format!("è¯»å–äº¤æ˜“æ—¥å¤±è´¥: {e}"))?;
-        let close_price: Option<f64> = row.get(2).map_err(|e| format!("è¯»å–æ”¶ç›˜ä»·å¤±è´¥: {e}"))?;
-        let Some(close_price) = close_price.filter(|v| v.is_finite() && *v > f64::EPSILON) else {
-            continue;
-        };
-        let ts_code = ts_code.to_ascii_uppercase();
-        if !sample_eligibility.allows_sample(&ts_code, &trade_date) {
-            continue;
-        }
-        let Some(board_list) = ts_board_map.get(&ts_code) else {
-            continue;
-        };
-        if !match_board_filter_with_st(board_list, resolved_board.as_deref(), exclude_st_board) {
-            continue;
-        }
-        interval_gain_acc
-            .entry(ts_code)
-            .or_default()
-            .push((trade_date, close_price));
-    }
-    let mut interval_gain_top = interval_gain_acc
-        .iter()
-        .filter_map(|(ts_code, rows)| {
-            let (start_date, start_close) = rows.first()?;
-            let (end_date, end_close) = rows.last()?;
-            if *start_close <= f64::EPSILON {
-                return None;
-            }
-            let value = (*end_close / *start_close - 1.0) * 100.0;
-            if !value.is_finite() {
-                return None;
-            }
-            let mut rank_item = market_stock_rank_item(
-                &stock_name_map,
-                ts_code.clone(),
-                value,
-                Some(start_date.clone()),
-                Some(end_date.clone()),
-            );
-            rank_item.concepts = ts_concept_map
-                .get(ts_code)
-                .map(|items| items.join(" / "))
-                .filter(|value| !value.is_empty());
-            Some(rank_item)
-        })
-        .collect::<Vec<_>>();
-    interval_gain_top.sort_by(|a, b| {
-        b.value
-            .partial_cmp(&a.value)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.name.cmp(&b.name))
-    });
-    interval_gain_top.truncate(stock_rank_limit);
-
-    let mut sub_interval_gain_top = if dates.len() >= sub_interval_period {
-        interval_gain_acc
-            .iter()
-            .filter_map(|(ts_code, rows)| {
-                if rows.len() < sub_interval_period {
-                    return None;
-                }
-                let mut best: Option<(f64, String, String)> = None;
-                for window in rows.windows(sub_interval_period) {
-                    let Some((start_date, start_close)) = window.first() else {
-                        continue;
-                    };
-                    let Some((end_date, end_close)) = window.last() else {
-                        continue;
-                    };
-                    if *start_close <= f64::EPSILON {
-                        continue;
-                    }
-                    let value = (end_close / start_close - 1.0) * 100.0;
-                    if !value.is_finite() {
-                        continue;
-                    }
-                    let should_replace = best
-                        .as_ref()
-                        .is_none_or(|(best_value, _, _)| value > *best_value);
-                    if should_replace {
-                        best = Some((value, start_date.clone(), end_date.clone()));
-                    }
-                }
-                let (value, start_date, end_date) = best?;
-                Some(market_stock_rank_item(
-                    &stock_name_map,
-                    ts_code.clone(),
-                    value,
-                    Some(start_date),
-                    Some(end_date),
-                ))
-            })
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-    sub_interval_gain_top.sort_by(|a, b| {
-        b.value
-            .partial_cmp(&a.value)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.name.cmp(&b.name))
-    });
-    sub_interval_gain_top.truncate(stock_rank_limit);
-
-    let daily_concept_sql = r#"
-        SELECT concept, TRY_CAST(performance_pct AS DOUBLE)
-        FROM concept_performance
-        WHERE performance_type = 'concept'
-          AND trade_date = ?
-        ORDER BY TRY_CAST(performance_pct AS DOUBLE) DESC NULLS LAST, concept ASC
-        "#;
-
-    let mut daily_concept_stmt = concept_conn
-        .prepare(daily_concept_sql)
-        .map_err(|e| format!("é¢„ç¼–è¯‘æ¦‚å¿µå½“æ—¥æ¦œ SQL å¤±è´¥: {e}"))?;
-    let mut daily_concept_rows = daily_concept_stmt
-        .query(params![&ref_date])
-        .map_err(|e| format!("æ‰§è¡Œæ¦‚å¿µå½“æ—¥æ¦œ SQL å¤±è´¥: {e}"))?;
-    let mut daily_concept_top = Vec::new();
-    while let Some(row) = daily_concept_rows
-        .next()
-        .map_err(|e| format!("è¯»å–æ¦‚å¿µå½“æ—¥æ¦œå¤±è´¥: {e}"))?
-    {
-        let name: String = row.get(0).map_err(|e| format!("è¯»å–æ¦‚å¿µåå¤±è´¥: {e}"))?;
-        if !has_min_stock_count(&concept_stock_counts, &name, min_board_stock_count) {
-            continue;
-        }
-        let value: Option<f64> = row.get(1).map_err(|e| format!("è¯»å–æ¦‚å¿µå€¼å¤±è´¥: {e}"))?;
-        if let Some(value) = value.filter(|v| v.is_finite()) {
-            daily_concept_top.push(market_rank_item(name, value));
-        }
-    }
-    daily_concept_top.truncate(20);
-
-    let mut daily_industry_stmt = source_conn
-        .prepare(
-            r#"
-            SELECT ts_code, TRY_CAST(pct_chg AS DOUBLE) AS pct
-            FROM stock_data
-            WHERE adj_type = 'qfq'
-              AND trade_date = ?
-            "#,
-        )
-        .map_err(|e| format!("é¢„ç¼–è¯‘è¡Œä¸šå½“æ—¥æ¦œ SQL å¤±è´¥: {e}"))?;
-    let mut daily_industry_rows = daily_industry_stmt
-        .query(params![&ref_date])
-        .map_err(|e| format!("æ‰§è¡Œè¡Œä¸šå½“æ—¥æ¦œ SQL å¤±è´¥: {e}"))?;
-    let mut daily_industry_acc: HashMap<String, (f64, usize)> = HashMap::new();
-    while let Some(row) = daily_industry_rows
-        .next()
-        .map_err(|e| format!("è¯»å–è¡Œä¸šå½“æ—¥æ¦œå¤±è´¥: {e}"))?
-    {
-        let ts_code: String = row.get(0).map_err(|e| format!("è¯»å–ä»£ç å¤±è´¥: {e}"))?;
-        let pct: Option<f64> = row.get(1).map_err(|e| format!("è¯»å–è¡Œä¸šå€¼å¤±è´¥: {e}"))?;
-        let Some(pct) = pct.filter(|v| v.is_finite()) else {
-            continue;
-        };
-        let ts_code = ts_code.to_ascii_uppercase();
-        let Some(industry_list) = ts_industry_map.get(&ts_code) else {
-            continue;
-        };
-        for industry in industry_list {
-            let entry = daily_industry_acc
-                .entry(industry.clone())
-                .or_insert((0.0, 0));
-            entry.0 += pct;
-            entry.1 += 1;
-        }
-    }
-    let mut daily_industry_top = daily_industry_acc
-        .into_iter()
-        .filter_map(|(name, (sum, cnt))| {
-            if cnt == 0 {
-                return None;
-            }
-            if !has_min_stock_count(&industry_stock_counts, &name, min_board_stock_count) {
-                return None;
-            }
-            let value = sum / cnt as f64;
-            if !value.is_finite() {
-                return None;
-            }
-            Some(market_rank_item(name, value))
-        })
-        .collect::<Vec<_>>();
-    daily_industry_top.sort_by(|a, b| {
-        b.value
-            .partial_cmp(&a.value)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.name.cmp(&b.name))
-    });
-    daily_industry_top.truncate(20);
-
-    let mut trailing_gain_stmt = source_conn
-        .prepare(
-            r#"
-            SELECT ts_code, trade_date, TRY_CAST(close AS DOUBLE) AS close_price
-            FROM stock_data
-            WHERE adj_type = 'qfq'
-              AND trade_date IN (
-                  SELECT trade_date
-                  FROM (
-                      SELECT DISTINCT trade_date
-                      FROM stock_data
-                      WHERE adj_type = 'qfq'
-                        AND trade_date <= ?
-                      ORDER BY trade_date DESC
-                      LIMIT 6
-                  ) AS recent_dates
-              )
-            ORDER BY ts_code ASC, trade_date ASC
-            "#,
-        )
-        .map_err(|e| format!("é¢„ç¼–è¯‘å½“æ—¥å¤šå‘¨æœŸæ¶¨å¹… SQL å¤±è´¥: {e}"))?;
-    let mut trailing_gain_rows = trailing_gain_stmt
-        .query(params![&ref_date])
-        .map_err(|e| format!("æ‰§è¡Œå½“æ—¥å¤šå‘¨æœŸæ¶¨å¹… SQL å¤±è´¥: {e}"))?;
-    let mut trailing_gain_acc: HashMap<String, Vec<(String, f64)>> = HashMap::new();
-    while let Some(row) = trailing_gain_rows
-        .next()
-        .map_err(|e| format!("è¯»å–å½“æ—¥å¤šå‘¨æœŸæ¶¨å¹…å¤±è´¥: {e}"))?
-    {
-        let ts_code: String = row
-            .get(0)
-            .map_err(|e| format!("è¯»å–å¤šå‘¨æœŸæ¶¨å¹…ä»£ç å¤±è´¥: {e}"))?;
-        let trade_date: String = row
-            .get(1)
-            .map_err(|e| format!("è¯»å–å¤šå‘¨æœŸæ¶¨å¹…æ—¥æœŸå¤±è´¥: {e}"))?;
-        let close_price: Option<f64> = row
-            .get(2)
-            .map_err(|e| format!("è¯»å–å¤šå‘¨æœŸæ”¶ç›˜ä»·å¤±è´¥: {e}"))?;
-        let Some(close_price) = close_price.filter(|value| value.is_finite() && *value > 0.0)
-        else {
-            continue;
-        };
-        trailing_gain_acc
-            .entry(ts_code.trim().to_ascii_uppercase())
-            .or_default()
-            .push((trade_date, close_price));
-    }
-
-    let mut daily_gain_stmt = source_conn
-        .prepare(
-            r#"
-            SELECT ts_code, TRY_CAST(pct_chg AS DOUBLE)
-            FROM stock_data
-            WHERE adj_type = 'qfq'
-              AND trade_date = ?
-            ORDER BY TRY_CAST(pct_chg AS DOUBLE) DESC NULLS LAST, ts_code ASC
-            "#,
-        )
-        .map_err(|e| format!("é¢„ç¼–è¯‘æ¶¨å¹…å½“æ—¥æ¦œ SQL å¤±è´¥: {e}"))?;
-    let mut daily_gain_rows = daily_gain_stmt
-        .query(params![&ref_date])
-        .map_err(|e| format!("æ‰§è¡Œæ¶¨å¹…å½“æ—¥æ¦œ SQL å¤±è´¥: {e}"))?;
-    let mut daily_gain_top = Vec::new();
-    while let Some(row) = daily_gain_rows
-        .next()
-        .map_err(|e| format!("è¯»å–æ¶¨å¹…å½“æ—¥æ¦œå¤±è´¥: {e}"))?
-    {
-        let ts_code: String = row.get(0).map_err(|e| format!("è¯»å–ä»£ç å¤±è´¥: {e}"))?;
-        let value: Option<f64> = row.get(1).map_err(|e| format!("è¯»å–æ¶¨å¹…å€¼å¤±è´¥: {e}"))?;
-        let Some(value) = value.filter(|v| v.is_finite()) else {
-            continue;
-        };
-        let ts_code = ts_code.to_ascii_uppercase();
-        if !sample_eligibility.allows_sample(&ts_code, &ref_date) {
-            continue;
-        }
-        let Some(board_list) = ts_board_map.get(&ts_code) else {
-            continue;
-        };
-        if !match_board_filter_with_st(board_list, resolved_board.as_deref(), exclude_st_board) {
-            continue;
-        }
-
-        let concepts = ts_concept_map
-            .get(&ts_code)
-            .map(|items| items.join(" / "))
-            .filter(|value| !value.is_empty());
-        let trailing_rows = trailing_gain_acc
-            .get(&ts_code)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        let mut rank_item = market_stock_rank_item(
-            &stock_name_map,
-            ts_code,
-            value,
-            Some(ref_date.clone()),
-            Some(ref_date.clone()),
-        );
-        rank_item.concepts = concepts;
-        rank_item.three_day_gain = trailing_period_gain(trailing_rows, 3);
-        rank_item.five_day_gain = trailing_period_gain(trailing_rows, 5);
-        daily_gain_top.push(rank_item);
-        if daily_gain_top.len() >= stock_rank_limit {
-            break;
-        }
-    }
-
-    let (
-        interval_concept_money_flow_top,
-        interval_industry_money_flow_top,
-        daily_concept_money_flow_top,
-        daily_industry_money_flow_top,
-        interval_concept_money_outflow_top,
-        interval_industry_money_outflow_top,
-        daily_concept_money_outflow_top,
-        daily_industry_money_outflow_top,
-    ) = if (|conn: &Connection| -> Result<bool, String> {
-        let mut stmt = conn
-            .prepare(
-                r#"
-            SELECT LOWER(column_name)
-            FROM information_schema.columns
-            WHERE LOWER(table_name) = 'stock_data'
-            "#,
-            )
-            .map_err(|e| format!("é¢„ç¼–è¯‘èµ„é‡‘æµå‘åˆ—æ£€æŸ¥å¤±è´¥: {e}"))?;
-        let mut rows = stmt
-            .query([])
-            .map_err(|e| format!("æ‰§è¡Œèµ„é‡‘æµå‘åˆ—æ£€æŸ¥å¤±è´¥: {e}"))?;
-        let mut columns = HashSet::new();
-        while let Some(row) = rows
-            .next()
-            .map_err(|e| format!("è¯»å–èµ„é‡‘æµå‘åˆ—æ£€æŸ¥å¤±è´¥: {e}"))?
-        {
-            let name: String = row
-                .get(0)
-                .map_err(|e| format!("è¯»å–èµ„é‡‘æµå‘åˆ—åå¤±è´¥: {e}"))?;
-            columns.insert(name);
-        }
-        Ok(["net_mf_v", "vol", "amount"]
-            .iter()
-            .all(|name| columns.contains(*name)))
-    })(&source_conn)?
-    {
-        let mut money_flow_stmt = source_conn
-            .prepare(
-                r#"
-                SELECT
-                    ts_code,
-                    trade_date,
-                    TRY_CAST(net_mf_v AS DOUBLE) AS net_mf_vol,
-                    TRY_CAST(vol AS DOUBLE) AS trade_vol,
-                    TRY_CAST(amount AS DOUBLE) AS trade_amount
-                FROM stock_data
-                WHERE adj_type = 'qfq'
-                  AND trade_date >= ?
-                  AND trade_date <= ?
-                  AND net_mf_v IS NOT NULL
-                "#,
-            )
-            .map_err(|e| format!("é¢„ç¼–è¯‘èµ„é‡‘æµå‘ç»Ÿè®¡ SQL å¤±è´¥: {e}"))?;
-        let mut money_flow_rows = money_flow_stmt
-            .query(params![&interval_start, &interval_end])
-            .map_err(|e| format!("æ‰§è¡Œèµ„é‡‘æµå‘ç»Ÿè®¡ SQL å¤±è´¥: {e}"))?;
-        let mut interval_concept_acc = HashMap::new();
-        let mut interval_industry_acc = HashMap::new();
-        let mut daily_concept_acc = HashMap::new();
-        let mut daily_industry_acc = HashMap::new();
-
-        while let Some(row) = money_flow_rows
-            .next()
-            .map_err(|e| format!("è¯»å–èµ„é‡‘æµå‘ç»Ÿè®¡å¤±è´¥: {e}"))?
-        {
-            let ts_code: String = row
-                .get(0)
-                .map_err(|e| format!("è¯»å–èµ„é‡‘æµå‘ä»£ç å¤±è´¥: {e}"))?;
-            let trade_date: String = row
-                .get(1)
-                .map_err(|e| format!("è¯»å–èµ„é‡‘æµå‘æ—¥æœŸå¤±è´¥: {e}"))?;
-            let net_mf_vol: Option<f64> =
-                row.get(2).map_err(|e| format!("è¯»å–å‡€æµå…¥é‡å¤±è´¥: {e}"))?;
-            let vol: Option<f64> = row.get(3).map_err(|e| format!("è¯»å–æˆäº¤é‡å¤±è´¥: {e}"))?;
-            let amount: Option<f64> = row.get(4).map_err(|e| format!("è¯»å–æˆäº¤é¢å¤±è´¥: {e}"))?;
-            let Some(net_amount_yuan) =
-                net_mf_vol
-                    .zip(vol)
-                    .zip(amount)
-                    .and_then(|((net_mf_vol, vol), amount)| {
-                        estimate_net_money_flow_yuan(net_mf_vol, vol, amount)
-                    })
-            else {
-                continue;
-            };
-            let ts_code = ts_code.trim().to_ascii_uppercase();
-            accumulate_board_money_flow(
-                &mut interval_concept_acc,
-                &ts_concept_map,
-                &ts_code,
-                net_amount_yuan,
-            );
-            accumulate_board_money_flow(
-                &mut interval_industry_acc,
-                &ts_industry_map,
-                &ts_code,
-                net_amount_yuan,
-            );
-            if trade_date == ref_date {
-                accumulate_board_money_flow(
-                    &mut daily_concept_acc,
-                    &ts_concept_map,
-                    &ts_code,
-                    net_amount_yuan,
-                );
-                accumulate_board_money_flow(
-                    &mut daily_industry_acc,
-                    &ts_industry_map,
-                    &ts_code,
-                    net_amount_yuan,
-                );
-            }
-        }
-
-        (
-            money_flow_rank_items(
-                interval_concept_acc.clone(),
-                &concept_stock_counts,
-                min_board_stock_count,
-            ),
-            money_flow_rank_items(
-                interval_industry_acc.clone(),
-                &industry_stock_counts,
-                min_board_stock_count,
-            ),
-            money_flow_rank_items(
-                daily_concept_acc.clone(),
-                &concept_stock_counts,
-                min_board_stock_count,
-            ),
-            money_flow_rank_items(
-                daily_industry_acc.clone(),
-                &industry_stock_counts,
-                min_board_stock_count,
-            ),
-            money_outflow_rank_items(
-                interval_concept_acc,
-                &concept_stock_counts,
-                min_board_stock_count,
-            ),
-            money_outflow_rank_items(
-                interval_industry_acc,
-                &industry_stock_counts,
-                min_board_stock_count,
-            ),
-            money_outflow_rank_items(
-                daily_concept_acc,
-                &concept_stock_counts,
-                min_board_stock_count,
-            ),
-            money_outflow_rank_items(
-                daily_industry_acc,
-                &industry_stock_counts,
-                min_board_stock_count,
-            ),
-        )
-    } else {
-        (
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        )
-    };
-
-    Ok(MarketAnalysisData {
-        lookback_period,
-        stock_rank_limit,
-        sub_interval_period,
-        min_board_stock_count,
-        latest_trade_date,
-        resolved_reference_trade_date: Some(ref_date.clone()),
-        board_options,
-        resolved_board,
-        interval: MarketAnalysisSnapshot {
-            trade_date: Some(format!("{}~{}", interval_start, interval_end)),
-            concept_top: interval_concept_top,
-            industry_top: interval_industry_top,
-            concept_money_flow_top: interval_concept_money_flow_top,
-            industry_money_flow_top: interval_industry_money_flow_top,
-            concept_money_outflow_top: interval_concept_money_outflow_top,
-            industry_money_outflow_top: interval_industry_money_outflow_top,
-            gain_top: interval_gain_top,
-            sub_interval_gain_top,
-        },
-        daily: MarketAnalysisSnapshot {
-            trade_date: Some(ref_date),
-            concept_top: daily_concept_top,
-            industry_top: daily_industry_top,
-            concept_money_flow_top: daily_concept_money_flow_top,
-            industry_money_flow_top: daily_industry_money_flow_top,
-            concept_money_outflow_top: daily_concept_money_outflow_top,
-            industry_money_outflow_top: daily_industry_money_outflow_top,
-            gain_top: daily_gain_top,
-            sub_interval_gain_top: Vec::new(),
-        },
-    })
-}
-
-pub fn get_market_contribution(
-    source_path: String,
-    scope: String,
-    kind: String,
-    name: String,
-    lookback_period: Option<usize>,
-    reference_trade_date: Option<String>,
-) -> Result<MarketContributionData, String> {
-    let scope = scope.trim().to_ascii_lowercase();
-    let kind = kind.trim().to_ascii_lowercase();
-    let target_name = name.trim().to_string();
-    if !matches!(scope.as_str(), "interval" | "daily") {
-        return Err("scope ä»…æ”¯æŒ interval/daily".to_string());
-    }
-    let kind = match kind.as_str() {
-        "concept" => "concept".to_string(),
-        "industry" | "board" | "market" => "industry".to_string(),
-        _ => return Err("kind ä»…æ”¯æŒ concept/industry".to_string()),
-    };
-    if target_name.is_empty() {
-        return Err("åç§°ä¸èƒ½ä¸ºç©º".to_string());
-    }
-
-    let lookback_period = lookback_period.unwrap_or(20).max(1);
-    let source_db = source_db_path(&source_path);
-    let source_db_str = source_db
-        .to_str()
-        .ok_or_else(|| "åŽŸå§‹åº“è·¯å¾„ä¸æ˜¯æœ‰æ•ˆUTF-8".to_string())?;
-    let source_conn =
-        Connection::open(source_db_str).map_err(|e| format!("æ‰“å¼€åŽŸå§‹åº“å¤±è´¥: {e}"))?;
-
-    let latest_trade_date: Option<String> = source_conn
-        .query_row(
-            "SELECT MAX(trade_date) FROM stock_data WHERE adj_type = 'qfq'",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|e| format!("æŸ¥è¯¢æœ€æ–°äº¤æ˜“æ—¥å¤±è´¥: {e}"))?;
-    let ref_date = reference_trade_date
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .or(latest_trade_date)
-        .ok_or_else(|| "ç¼ºå°‘æœ‰æ•ˆå‚è€ƒæ—¥".to_string())?;
-
-    let mut date_stmt = source_conn
-        .prepare(
-            r#"
-            SELECT trade_date
-            FROM (
-                SELECT DISTINCT trade_date
-                FROM stock_data
-                WHERE adj_type = 'qfq'
-                  AND trade_date <= ?
-                ORDER BY trade_date DESC
-                LIMIT ?
-            ) AS t
-            ORDER BY trade_date ASC
-            "#,
-        )
-        .map_err(|e| format!("é¢„ç¼–è¯‘å¸‚åœºè´¡çŒ®åŒºé—´æ—¥æœŸ SQL å¤±è´¥: {e}"))?;
-    let mut date_rows = date_stmt
-        .query(params![&ref_date, lookback_period as i64])
-        .map_err(|e| format!("æ‰§è¡Œå¸‚åœºè´¡çŒ®åŒºé—´æ—¥æœŸ SQL å¤±è´¥: {e}"))?;
-    let mut dates = Vec::new();
-    while let Some(row) = date_rows
-        .next()
-        .map_err(|e| format!("è¯»å–å¸‚åœºè´¡çŒ®åŒºé—´æ—¥æœŸå¤±è´¥: {e}"))?
-    {
-        let trade_date: String = row.get(0).map_err(|e| format!("è¯»å–äº¤æ˜“æ—¥å¤±è´¥: {e}"))?;
-        dates.push(trade_date);
-    }
-
-    if dates.is_empty() {
-        return Ok(MarketContributionData {
-            scope,
-            kind,
-            name: target_name,
-            trade_date: Some(ref_date),
-            start_date: None,
-            end_date: None,
-            lookback_period,
-            contributors: Vec::new(),
-        });
-    }
-
-    let interval_start = dates.first().cloned();
-    let interval_end = dates.last().cloned();
-
-    let stock_rows = load_stock_list(&source_path)?;
-    let mut ts_name_map: HashMap<String, String> = HashMap::with_capacity(stock_rows.len());
-    let mut ts_industry_map: HashMap<String, String> = HashMap::with_capacity(stock_rows.len());
-    let mut target_codes: HashSet<String> = HashSet::new();
-
-    for cols in stock_rows {
-        let Some(ts_code) = cols.first().map(|value| value.trim()) else {
-            continue;
-        };
-        if ts_code.is_empty() {
-            continue;
-        }
-
-        let stock_name = cols
-            .get(2)
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty());
-        if let Some(stock_name) = stock_name {
-            ts_name_map.insert(ts_code.to_string(), stock_name);
-        }
-
-        let industry_name = cols
-            .get(4)
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty());
-        if let Some(industry_name) = industry_name.clone() {
-            ts_industry_map.insert(ts_code.to_string(), industry_name.clone());
-        }
-
-        if kind == "industry" {
-            let is_match = industry_name
-                .as_deref()
-                .map(|value| {
-                    value
-                        .split(|ch| {
-                            matches!(ch, ',' | ';' | 'ï¼Œ' | 'ï¼›' | '|' | 'ã€' | '/' | '\n' | '\r')
-                        })
-                        .map(|part| part.trim())
-                        .any(|part| !part.is_empty() && part == target_name)
-                })
-                .unwrap_or(false);
-            if is_match {
-                target_codes.insert(ts_code.to_string());
-            }
-        }
-    }
-
-    if kind == "concept" {
-        let concept_rows = load_ths_concepts_list(&source_path)?;
-        for cols in concept_rows {
-            let Some(ts_code) = cols.first().map(|value| value.trim()) else {
-                continue;
-            };
-            let Some(concept_raw) = cols.get(2).map(|value| value.trim()) else {
-                continue;
-            };
-            if ts_code.is_empty() || concept_raw.is_empty() {
-                continue;
-            }
-            let is_match = concept_raw
-                .split(|ch| matches!(ch, ',' | ';' | 'ï¼Œ' | 'ï¼›' | '|' | 'ã€' | '/' | '\n' | '\r'))
-                .map(|part| part.trim())
-                .any(|part| !part.is_empty() && part == target_name);
-            if is_match {
-                target_codes.insert(ts_code.to_string());
-            }
-        }
-    }
-
-    if target_codes.is_empty() {
-        return Ok(MarketContributionData {
-            scope,
-            kind,
-            name: target_name,
-            trade_date: Some(ref_date),
-            start_date: interval_start,
-            end_date: interval_end,
-            lookback_period,
-            contributors: Vec::new(),
-        });
-    }
-
-    let mut contributors = Vec::new();
-    if scope == "daily" {
-        let mut stmt = source_conn
-            .prepare(
-                r#"
-                SELECT ts_code, TRY_CAST(pct_chg AS DOUBLE) AS pct
-                FROM stock_data
-                WHERE adj_type = 'qfq'
-                  AND trade_date = ?
-                "#,
-            )
-            .map_err(|e| format!("é¢„ç¼–è¯‘å¸‚åœºè´¡çŒ®å½“æ—¥ SQL å¤±è´¥: {e}"))?;
-        let mut rows = stmt
-            .query(params![&ref_date])
-            .map_err(|e| format!("æ‰§è¡Œå¸‚åœºè´¡çŒ®å½“æ—¥ SQL å¤±è´¥: {e}"))?;
-
-        while let Some(row) = rows
-            .next()
-            .map_err(|e| format!("è¯»å–å¸‚åœºè´¡çŒ®å½“æ—¥æ•°æ®å¤±è´¥: {e}"))?
-        {
-            let ts_code: String = row.get(0).map_err(|e| format!("è¯»å–ä»£ç å¤±è´¥: {e}"))?;
-            if !target_codes.contains(&ts_code) {
-                continue;
-            }
-            let pct: Option<f64> = row.get(1).map_err(|e| format!("è¯»å–æ¶¨å¹…å¤±è´¥: {e}"))?;
-            let Some(contribution_pct) = pct.filter(|v| v.is_finite()) else {
-                continue;
-            };
-            contributors.push(MarketContributorItem {
-                ts_code: ts_code.clone(),
-                name: ts_name_map.get(&ts_code).cloned(),
-                industry: ts_industry_map.get(&ts_code).cloned(),
-                contribution_pct,
-            });
-        }
-    } else {
-        let start = interval_start.clone().unwrap_or_else(|| ref_date.clone());
-        let end = interval_end.clone().unwrap_or_else(|| ref_date.clone());
-        let mut stmt = source_conn
-            .prepare(
-                r#"
-                SELECT ts_code, AVG(TRY_CAST(pct_chg AS DOUBLE)) AS avg_pct
-                FROM stock_data
-                WHERE adj_type = 'qfq'
-                  AND trade_date >= ?
-                  AND trade_date <= ?
-                GROUP BY 1
-                "#,
-            )
-            .map_err(|e| format!("é¢„ç¼–è¯‘å¸‚åœºè´¡çŒ®åŒºé—´ SQL å¤±è´¥: {e}"))?;
-        let mut rows = stmt
-            .query(params![&start, &end])
-            .map_err(|e| format!("æ‰§è¡Œå¸‚åœºè´¡çŒ®åŒºé—´ SQL å¤±è´¥: {e}"))?;
-
-        while let Some(row) = rows
-            .next()
-            .map_err(|e| format!("è¯»å–å¸‚åœºè´¡çŒ®åŒºé—´æ•°æ®å¤±è´¥: {e}"))?
-        {
-            let ts_code: String = row.get(0).map_err(|e| format!("è¯»å–ä»£ç å¤±è´¥: {e}"))?;
-            if !target_codes.contains(&ts_code) {
-                continue;
-            }
-            let pct: Option<f64> = row.get(1).map_err(|e| format!("è¯»å–æ¶¨å¹…å¤±è´¥: {e}"))?;
-            let Some(contribution_pct) = pct.filter(|v| v.is_finite()) else {
-                continue;
-            };
-            contributors.push(MarketContributorItem {
-                ts_code: ts_code.clone(),
-                name: ts_name_map.get(&ts_code).cloned(),
-                industry: ts_industry_map.get(&ts_code).cloned(),
-                contribution_pct,
-            });
-        }
-    }
-
-    contributors.sort_by(|a, b| {
-        b.contribution_pct
-            .partial_cmp(&a.contribution_pct)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.ts_code.cmp(&b.ts_code))
-    });
-    contributors.truncate(100);
-
-    Ok(MarketContributionData {
-        scope,
-        kind,
-        name: target_name,
-        trade_date: Some(ref_date),
-        start_date: interval_start,
-        end_date: interval_end,
-        lookback_period,
-        contributors,
-    })
-}
-
-pub fn get_scene_layer_backtest_defaults(
-    source_path: String,
-) -> Result<SceneLayerBacktestDefaultsData, String> {
-    let scene_options = load_scene_options(&source_path)?;
-
-    let conn = open_result_conn(&source_path)?;
-    let mut stmt = conn
-        .prepare(
-            r#"
-            SELECT
-                MIN(trade_date) AS min_trade_date,
-                MAX(trade_date) AS max_trade_date
-            FROM scene_details
-            "#,
-        )
-        .map_err(|e| format!("é¢„ç¼–è¯‘ scene_details æ—¥æœŸåŒºé—´ SQL å¤±è´¥: {e}"))?;
-
-    let mut rows = stmt
-        .query([])
-        .map_err(|e| format!("æ‰§è¡Œ scene_details æ—¥æœŸåŒºé—´ SQL å¤±è´¥: {e}"))?;
-
-    let (start_date, end_date) = if let Some(row) = rows
-        .next()
-        .map_err(|e| format!("è¯»å– scene_details æ—¥æœŸåŒºé—´å¤±è´¥: {e}"))?
-    {
-        let min_trade_date: Option<String> =
-            row.get(0).map_err(|e| format!("è¯»å–æœ€å°äº¤æ˜“æ—¥å¤±è´¥: {e}"))?;
-        let _max_trade_date: Option<String> =
-            row.get(1).map_err(|e| format!("è¯»å–æœ€å¤§äº¤æ˜“æ—¥å¤±è´¥: {e}"))?;
-        (
-            min_trade_date,
-            query_score_summary_latest_trade_date(&conn)?,
-        )
-    } else {
-        (None, query_score_summary_latest_trade_date(&conn)?)
-    };
-
-    Ok(SceneLayerBacktestDefaultsData {
-        resolved_scene_name: scene_options.first().cloned(),
-        scene_options,
-        start_date,
-        end_date,
-    })
-}
-
-pub fn get_rule_layer_backtest_defaults(
-    source_path: String,
-) -> Result<RuleLayerBacktestDefaultsData, String> {
-    let (rule_options, _) = load_rule_meta(&source_path)?;
-
-    let conn = open_result_conn(&source_path)?;
-    let mut stmt = conn
-        .prepare(
-            r#"
-            SELECT
-                MIN(trade_date) AS min_trade_date,
-                MAX(trade_date) AS max_trade_date
-            FROM rule_details
-            "#,
-        )
-        .map_err(|e| format!("é¢„ç¼–è¯‘ rule_details æ—¥æœŸåŒºé—´ SQL å¤±è´¥: {e}"))?;
-
-    let mut rows = stmt
-        .query([])
-        .map_err(|e| format!("æ‰§è¡Œ rule_details æ—¥æœŸåŒºé—´ SQL å¤±è´¥: {e}"))?;
-
-    let (start_date, end_date) = if let Some(row) = rows
-        .next()
-        .map_err(|e| format!("è¯»å– rule_details æ—¥æœŸåŒºé—´å¤±è´¥: {e}"))?
-    {
-        let min_trade_date: Option<String> =
-            row.get(0).map_err(|e| format!("è¯»å–æœ€å°äº¤æ˜“æ—¥å¤±è´¥: {e}"))?;
-        let _max_trade_date: Option<String> =
-            row.get(1).map_err(|e| format!("è¯»å–æœ€å¤§äº¤æ˜“æ—¥å¤±è´¥: {e}"))?;
-        (
-            min_trade_date,
-            query_score_summary_latest_trade_date(&conn)?,
-        )
-    } else {
-        (None, query_score_summary_latest_trade_date(&conn)?)
-    };
-
-    Ok(RuleLayerBacktestDefaultsData {
-        resolved_rule_name: rule_options.first().cloned(),
-        rule_options,
-        start_date,
-        end_date,
-    })
-}
-
-fn query_score_summary_latest_trade_date(conn: &Connection) -> Result<Option<String>, String> {
-    let mut stmt = conn
-        .prepare("SELECT MAX(trade_date) FROM score_summary")
-        .map_err(|e| format!("é¢„ç¼–è¯‘ score_summary æœ€æ–°æ—¥æœŸ SQL å¤±è´¥: {e}"))?;
-    let mut rows = stmt
-        .query([])
-        .map_err(|e| format!("æ‰§è¡Œ score_summary æœ€æ–°æ—¥æœŸ SQL å¤±è´¥: {e}"))?;
-
-    if let Some(row) = rows
-        .next()
-        .map_err(|e| format!("è¯»å– score_summary æœ€æ–°æ—¥æœŸå¤±è´¥: {e}"))?
-    {
-        let latest_trade_date: Option<String> = row
-            .get(0)
-            .map_err(|e| format!("è¯»å– score_summary æœ€æ–°æ—¥æœŸå­—æ®µå¤±è´¥: {e}"))?;
-        return Ok(latest_trade_date.and_then(|value| {
-            let trimmed = value.trim().to_string();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed)
-            }
-        }));
-    }
-
-    Ok(None)
-}
-
-#[derive(Debug, Clone)]
-struct SceneLayerBacktestRunParams {
-    stock_adj_type: String,
-    index_ts_code: String,
-    index_beta: f64,
-    concept_beta: f64,
-    industry_beta: f64,
-    start_date: String,
-    end_date: String,
-    min_samples_per_day: usize,
-    min_listed_trade_days: usize,
-    backtest_period: usize,
-    resolved_board: Option<String>,
-    exclude_st_board: bool,
-    total_mv_min: Option<f64>,
-    total_mv_max: Option<f64>,
-    allowed_ts_codes: Option<HashSet<String>>,
-}
-
-#[derive(Debug, Clone)]
-struct RuleLayerBacktestRunParams {
-    stock_adj_type: String,
-    index_ts_code: String,
-    index_beta: f64,
-    concept_beta: f64,
-    industry_beta: f64,
-    start_date: String,
-    end_date: String,
-    min_samples_per_day: usize,
-    min_listed_trade_days: usize,
-    backtest_period: usize,
-    parallel_batch_size: usize,
-    resolved_board: Option<String>,
-    exclude_st_board: bool,
-    total_mv_min: Option<f64>,
-    total_mv_max: Option<f64>,
-    allowed_ts_codes: Option<HashSet<String>>,
-}
-
-#[derive(Debug, Clone)]
-struct RankLayerBacktestRunParams {
-    stock_adj_type: String,
-    index_ts_code: String,
-    index_beta: f64,
-    concept_beta: f64,
-    industry_beta: f64,
-    start_date: String,
-    end_date: String,
-    min_samples_per_day: usize,
-    min_listed_trade_days: usize,
-    backtest_period: usize,
-    layer_count: usize,
-    layer_method: RankLayerMethod,
-    resolved_board: Option<String>,
-    exclude_st_board: bool,
-    allowed_ts_codes: Option<HashSet<String>>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct RuleContributionAverages {
-    avg_contribution_score: Option<f64>,
-    avg_contribution_per_trigger: Option<f64>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct RuleContributionAccumulator {
-    contribution_sum: f64,
-    contribution_days: usize,
-    trigger_count: i64,
-}
-
-fn build_rule_contribution_averages(
-    source_path: &str,
-    rule_options: &[String],
-    start_date: &str,
-    end_date: &str,
-) -> Result<HashMap<String, RuleContributionAverages>, String> {
-    if rule_options.is_empty() {
-        return Ok(HashMap::new());
-    }
-
-    let result_conn = open_result_conn(source_path)?;
-    let placeholders = std::iter::repeat_n("?", rule_options.len())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        r#"
-        WITH daily_rank_bounds AS (
-            SELECT trade_date, MAX(rank) AS max_rank
-            FROM score_summary
-            WHERE trade_date >= ?
-              AND trade_date <= ?
-            GROUP BY trade_date
-        ),
-        triggered_rule_rows AS (
-            SELECT
-                rule_name,
-                ts_code,
-                trade_date,
-                TRY_CAST(rule_score AS DOUBLE) AS rule_score
-            FROM rule_details
-            WHERE trade_date >= ?
-              AND trade_date <= ?
-              AND rule_name IN ({placeholders})
-              AND TRY_CAST(rule_score AS DOUBLE) IS NOT NULL
-              AND ABS(TRY_CAST(rule_score AS DOUBLE)) > 1e-12
-        )
-        SELECT
-            d.rule_name,
-            SUM(
-                CASE
-                    WHEN s.rank IS NOT NULL
-                      AND b.max_rank IS NOT NULL
-                      AND b.max_rank > 0
-                    THEN d.rule_score * CAST((b.max_rank + 1 - s.rank) AS DOUBLE)
-                         / CAST(b.max_rank AS DOUBLE)
-                    ELSE 0
-                END
-            ) AS contribution_sum,
-            COUNT(DISTINCT d.trade_date) AS contribution_days,
-            COUNT(*) AS trigger_count
-        FROM triggered_rule_rows AS d
-        LEFT JOIN score_summary AS s
-          ON s.ts_code = d.ts_code
-         AND s.trade_date = d.trade_date
-        LEFT JOIN daily_rank_bounds AS b
-          ON b.trade_date = d.trade_date
-        GROUP BY d.rule_name
-        "#
-    );
-    let mut stmt = result_conn
-        .prepare(&sql)
-        .map_err(|e| format!("é¢„ç¼–è¯‘ç­–ç•¥å›žæµ‹è´¡çŒ®åº¦æŸ¥è¯¢å¤±è´¥: {e}"))?;
-    let query_params = [start_date, end_date, start_date, end_date]
-        .into_iter()
-        .chain(rule_options.iter().map(String::as_str));
-    let mut rows = stmt
-        .query(params_from_iter(query_params))
-        .map_err(|e| format!("æŸ¥è¯¢ç­–ç•¥å›žæµ‹è´¡çŒ®åº¦å¤±è´¥: {e}"))?;
-    let mut out = HashMap::with_capacity(rule_options.len());
-
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| format!("è¯»å–ç­–ç•¥å›žæµ‹è´¡çŒ®åº¦å¤±è´¥: {e}"))?
-    {
-        let rule_name: String = row.get(0).map_err(|e| format!("è¯»å–ç­–ç•¥åå¤±è´¥: {e}"))?;
-        let contribution_sum = row
-            .get::<usize, Option<f64>>(1)
-            .map_err(|e| format!("è¯»å–ç­–ç•¥è´¡çŒ®åº¦å¤±è´¥: {e}"))?
-            .unwrap_or(0.0);
-        let contribution_days: i64 = row.get(2).map_err(|e| format!("è¯»å–è´¡çŒ®å¤©æ•°å¤±è´¥: {e}"))?;
-        let trigger_count: i64 = row.get(3).map_err(|e| format!("è¯»å–è§¦å‘æ¬¡æ•°å¤±è´¥: {e}"))?;
-        out.insert(
-            rule_name,
-            RuleContributionAverages {
-                avg_contribution_score: (contribution_days > 0)
-                    .then_some(contribution_sum / contribution_days as f64),
-                avg_contribution_per_trigger: (trigger_count > 0)
-                    .then_some(contribution_sum / trigger_count as f64),
-            },
-        );
-    }
-
-    Ok(out)
-}
-
-fn ts_code_allowed_by_filter(allowed_ts_codes: Option<&HashSet<String>>, ts_code: &str) -> bool {
-    let Some(allowed_ts_codes) = allowed_ts_codes else {
-        return true;
-    };
-    allowed_ts_codes.contains(ts_code.trim())
-        || allowed_ts_codes.contains(ts_code.trim().to_ascii_uppercase().as_str())
-}
-
-fn filter_score_summary_rows_by_ts_codes(
-    rows: Vec<ScoreSummary>,
-    allowed_ts_codes: Option<&HashSet<String>>,
-) -> Vec<ScoreSummary> {
-    if allowed_ts_codes.is_none() {
-        return rows;
-    }
-    rows.into_iter()
-        .filter(|row| ts_code_allowed_by_filter(allowed_ts_codes, &row.ts_code))
-        .collect()
-}
-
-fn load_score_summary_rows_from_db(
-    source_path: &str,
-    start_date: &str,
-    end_date: &str,
-    allowed_ts_codes: Option<&HashSet<String>>,
-) -> Result<Vec<ScoreSummary>, String> {
-    let result_conn = open_result_conn(source_path)?;
-
-    let mut summary_stmt = result_conn
-        .prepare(
-            r#"
-            SELECT ts_code, trade_date, total_score, rank
-            FROM score_summary
-            WHERE trade_date >= ?
-              AND trade_date <= ?
-            ORDER BY trade_date ASC, ts_code ASC
-            "#,
-        )
-        .map_err(|e| format!("é¢„ç¼–è¯‘ç­–ç•¥å›žæµ‹æ€»æ¦œåŽŸå§‹è¡Œå¤±è´¥: {e}"))?;
-    let mut summary_rows = summary_stmt
-        .query(params![start_date, end_date])
-        .map_err(|e| format!("æŸ¥è¯¢ç­–ç•¥å›žæµ‹æ€»æ¦œåŽŸå§‹è¡Œå¤±è´¥: {e}"))?;
-    let mut summaries = Vec::new();
-    while let Some(row) = summary_rows
-        .next()
-        .map_err(|e| format!("è¯»å–ç­–ç•¥å›žæµ‹æ€»æ¦œåŽŸå§‹è¡Œå¤±è´¥: {e}"))?
-    {
-        let item = ScoreSummary {
-            ts_code: row.get(0).map_err(|e| format!("è¯»å–æ€»æ¦œä»£ç å¤±è´¥: {e}"))?,
-            trade_date: row.get(1).map_err(|e| format!("è¯»å–æ€»æ¦œæ—¥æœŸå¤±è´¥: {e}"))?,
-            total_score: row.get(2).map_err(|e| format!("è¯»å–æ€»æ¦œåˆ†æ•°å¤±è´¥: {e}"))?,
-            rank: row.get(3).map_err(|e| format!("è¯»å–æ€»æ¦œæŽ’åå¤±è´¥: {e}"))?,
-        };
-        if ts_code_allowed_by_filter(allowed_ts_codes, &item.ts_code) {
-            summaries.push(item);
-        }
-    }
-
-    Ok(summaries)
-}
-
-fn build_rule_contribution_averages_from_rows(
-    summary_rows: &[ScoreSummary],
-    detail_rows: &[ScoreDetails],
-    start_date: &str,
-    end_date: &str,
-) -> HashMap<String, RuleContributionAverages> {
-    let mut daily_max_rank: HashMap<String, i64> = HashMap::new();
-    let mut rank_by_sample: HashMap<(String, String), i64> = HashMap::new();
-
-    for row in summary_rows {
-        if row.trade_date.as_str() < start_date || row.trade_date.as_str() > end_date {
-            continue;
-        }
-        let Some(rank) = row.rank.filter(|value| *value > 0) else {
-            continue;
-        };
-
-        daily_max_rank
-            .entry(row.trade_date.clone())
-            .and_modify(|max_rank| *max_rank = (*max_rank).max(rank))
-            .or_insert(rank);
-        rank_by_sample.insert((row.ts_code.clone(), row.trade_date.clone()), rank);
-    }
-
-    let mut daily_agg_map: HashMap<(String, String), RuleDayAgg> = HashMap::new();
-    for row in detail_rows {
-        if row.trade_date.as_str() < start_date || row.trade_date.as_str() > end_date {
-            continue;
-        }
-        if !row.rule_score.is_finite() || row.rule_score.abs() <= RULE_BACKTEST_EPS {
-            continue;
-        }
-
-        let agg = daily_agg_map
-            .entry((row.trade_date.clone(), row.rule_name.clone()))
-            .or_default();
-        agg.trigger_count += 1;
-
-        let Some(rank) = rank_by_sample.get(&(row.ts_code.clone(), row.trade_date.clone())) else {
-            continue;
-        };
-        let Some(max_rank) = daily_max_rank.get(&row.trade_date) else {
-            continue;
-        };
-        if *max_rank <= 0 {
-            continue;
-        }
-
-        agg.contribution_score +=
-            row.rule_score * (*max_rank + 1 - *rank) as f64 / *max_rank as f64;
-    }
-
-    let mut acc_map: HashMap<String, RuleContributionAccumulator> = HashMap::new();
-    for ((_trade_date, rule_name), agg) in daily_agg_map {
-        if agg.trigger_count <= 0 {
-            continue;
-        }
-        let acc = acc_map.entry(rule_name).or_default();
-        acc.contribution_sum += agg.contribution_score;
-        acc.contribution_days += 1;
-        acc.trigger_count += agg.trigger_count.max(0);
-    }
-
-    (|acc_map : HashMap < String , RuleContributionAccumulator >| -> HashMap < String , RuleContributionAverages > {
-    acc_map
-        .into_iter()
-        .map(|(rule_name, acc)| {
-            let avg_contribution_score = if acc.contribution_days > 0 {
-                Some(acc.contribution_sum / acc.contribution_days as f64)
-            } else {
-                None
-            };
-            let avg_contribution_per_trigger = if acc.trigger_count > 0 {
-                Some(acc.contribution_sum / acc.trigger_count as f64)
-            } else {
-                None
-            };
-
-            (
-                rule_name,
-                RuleContributionAverages {
-                    avg_contribution_score,
-                    avg_contribution_per_trigger,
-                },
-            )
-        })
-        .collect()
-})(acc_map)
-}
-
-fn weighted_rule_summary_metric(
-    summaries: &[RuleLayerRuleSummary],
-    value: impl Fn(&RuleLayerRuleSummary) -> Option<f64>,
-) -> Option<f64> {
-    let mut weighted_sum = 0.0;
-    let mut total_weight = 0usize;
-
-    for summary in summaries {
-        if summary.point_count == 0 {
-            continue;
-        }
-        let Some(metric_value) = value(summary) else {
-            continue;
-        };
-        if !metric_value.is_finite() {
-            continue;
-        }
-
-        weighted_sum += metric_value * summary.point_count as f64;
-        total_weight += summary.point_count;
-    }
-
-    if total_weight == 0 {
-        None
-    } else {
-        Some(weighted_sum / total_weight as f64)
-    }
-}
-
-fn aggregate_all_rule_summary_metrics(
-    summaries: &[RuleLayerRuleSummary],
-) -> (
-    Option<f64>,
-    Option<f64>,
-    Option<f64>,
-    Option<f64>,
-    Option<f64>,
-    Option<f64>,
-    Option<f64>,
-    Option<f64>,
-    Option<f64>,
-) {
-    let avg_residual_mean = weighted_rule_summary_metric(summaries, |item| item.avg_residual_mean);
-    let avg_excess_residual_mean =
-        weighted_rule_summary_metric(summaries, |item| item.avg_excess_residual_mean);
-    let avg_er_change = (|summaries: &[RuleLayerRuleSummary]| -> Option<f64> {
-        let mut weighted_sum = 0.0;
-        let mut total_weight = 0usize;
-
-        for summary in summaries {
-            let Some(avg_er_change) = summary.avg_er_change.filter(|value| value.is_finite())
-            else {
-                continue;
-            };
-            if summary.er_change_sample_count == 0 {
-                continue;
-            }
-            weighted_sum += avg_er_change * summary.er_change_sample_count as f64;
-            total_weight += summary.er_change_sample_count;
-        }
-
-        if total_weight == 0 {
-            None
-        } else {
-            Some(weighted_sum / total_weight as f64)
-        }
-    })(summaries);
-    let profit_loss_ratio = weighted_rule_summary_metric(summaries, |item| item.profit_loss_ratio);
-    let spread_mean = weighted_rule_summary_metric(summaries, |item| item.spread_mean);
-    let ic_mean = weighted_rule_summary_metric(summaries, |item| item.ic_mean);
-    let ic_std = weighted_rule_summary_metric(summaries, |item| item.ic_std);
-    let icir = match (ic_mean, ic_std) {
-        (Some(mean), Some(std)) if std.abs() >= RULE_BACKTEST_EPS => Some(mean / std),
-        _ => weighted_rule_summary_metric(summaries, |item| item.icir),
-    };
-    let total_points = summaries.iter().map(|item| item.point_count).sum::<usize>();
-    let ic_t_value = match (ic_mean, ic_std) {
-        (Some(mean), Some(std)) if total_points > 1 && std.abs() >= RULE_BACKTEST_EPS => {
-            Some(mean * (total_points as f64).sqrt() / std)
-        }
-        _ => weighted_rule_summary_metric(summaries, |item| item.ic_t_value),
-    };
-
-    (
-        avg_residual_mean,
-        avg_excess_residual_mean,
-        avg_er_change,
-        profit_loss_ratio,
-        spread_mean,
-        ic_mean,
-        ic_std,
-        icir,
-        ic_t_value,
-    )
-}
-
-fn build_decay_validations_from_daily_values(
-    mut daily_values: Vec<(String, f64)>,
-) -> Vec<RuleDecayValidation> {
-    daily_values.retain(|(_, value)| value.is_finite());
-    daily_values.sort_by(|left, right| left.0.cmp(&right.0));
-
-    ([20, 40, 60])
-        .into_iter()
-        .map(|window_days| {
-            let recent_day_count = daily_values.len().min(window_days);
-            let recent_start_index = daily_values.len().saturating_sub(recent_day_count);
-            let prior_day_count = recent_start_index;
-            let recent_start_date = daily_values
-                .get(recent_start_index)
-                .map(|(trade_date, _)| trade_date.clone());
-            let recent_end_date = daily_values
-                .last()
-                .map(|(trade_date, _)| trade_date.clone());
-
-            if recent_day_count < window_days || prior_day_count < (10) {
-                return RuleDecayValidation {
-                    window_days,
-                    recent_start_date,
-                    recent_end_date,
-                    recent_day_count,
-                    prior_day_count,
-                    recent_directional_excess_mean: None,
-                    prior_directional_excess_mean: None,
-                    decay_change: None,
-                    decay_t_value: None,
-                    status: "insufficient".to_string(),
-                    status_label: "æ ·æœ¬ä¸è¶³".to_string(),
-                };
-            }
-
-            let prior = daily_values[..recent_start_index]
-                .iter()
-                .map(|(_, value)| *value)
-                .collect::<Vec<_>>();
-            let recent = daily_values[recent_start_index..]
-                .iter()
-                .map(|(_, value)| *value)
-                .collect::<Vec<_>>();
-            let recent_mean = mean_f64(&recent).unwrap_or_default();
-            let prior_mean = mean_f64(&prior).unwrap_or_default();
-            let change = recent_mean - prior_mean;
-            let t_value = (|recent: &[f64], prior: &[f64], change: f64| -> Option<f64> {
-                let recent_std = sample_std_f64(recent)?;
-                let prior_std = sample_std_f64(prior)?;
-                let standard_error = ((recent_std * recent_std / recent.len() as f64)
-                    + (prior_std * prior_std / prior.len() as f64))
-                    .sqrt();
-                if !standard_error.is_finite() || standard_error <= RULE_BACKTEST_EPS {
-                    None
-                } else {
-                    Some(change / standard_error)
-                }
-            })(&recent, &prior, change);
-            let (status, status_label) = (|recent_mean: f64,
-                                           change: f64,
-                                           t_value: Option<f64>|
-             -> (&'static str, &'static str) {
-                if change < 0.0 && t_value.is_some_and(|value| value <= -2.0) {
-                    ("significant_decay", "æ˜¾è‘—è¡°å‡")
-                } else if change < 0.0 && recent_mean < 0.0 {
-                    ("decay", "è¡°å‡")
-                } else if change < 0.0 {
-                    ("weakening", "èµ°å¼±")
-                } else if recent_mean < 0.0 {
-                    ("weak", "è¿‘æœŸåå¼±")
-                } else if change > 0.0 {
-                    ("improving", "æ”¹å–„")
-                } else {
-                    ("stable", "ç¨³å®š")
-                }
-            })(recent_mean, change, t_value);
-
-            RuleDecayValidation {
-                window_days,
-                recent_start_date,
-                recent_end_date,
-                recent_day_count,
-                prior_day_count,
-                recent_directional_excess_mean: Some(recent_mean),
-                prior_directional_excess_mean: Some(prior_mean),
-                decay_change: Some(change),
-                decay_t_value: t_value,
-                status: status.to_string(),
-                status_label: status_label.to_string(),
-            }
-        })
-        .collect()
-}
-
-fn build_rule_directional_excess_daily_values(
-    points: &[crate::simulate::rule::RuleLayerPoint],
-) -> Vec<(String, f64)> {
-    let direction_score_sum = points
-        .iter()
-        .filter_map(|point| point.avg_rule_score.filter(|value| value.is_finite()))
-        .sum::<f64>();
-    let direction_sign = if direction_score_sum < 0.0 { -1.0 } else { 1.0 };
-    points
-        .iter()
-        .filter_map(|point| {
-            point
-                .avg_excess_residual_return
-                .filter(|value| value.is_finite())
-                .map(|value| (point.trade_date.clone(), value * direction_sign))
-        })
-        .collect()
-}
-
-fn build_rule_decay_validations(
-    points: &[crate::simulate::rule::RuleLayerPoint],
-) -> Vec<RuleDecayValidation> {
-    build_decay_validations_from_daily_values(build_rule_directional_excess_daily_values(points))
-}
-
-fn build_rule_basket_decay_from_daily_groups<'a>(
-    daily_groups: impl IntoIterator<Item = &'a [(String, f64)]>,
-) -> Vec<RuleDecayValidation> {
-    let mut daily_aggregates = HashMap::<String, (f64, usize)>::new();
-    for (trade_date, value) in daily_groups.into_iter().flatten() {
-        if !value.is_finite() {
-            continue;
-        }
-        let aggregate = daily_aggregates.entry(trade_date.clone()).or_default();
-        aggregate.0 += *value;
-        aggregate.1 += 1;
-    }
-    build_decay_validations_from_daily_values(
-        daily_aggregates
-            .into_iter()
-            .filter_map(|(trade_date, (sum, count))| {
-                (count > 0).then_some((trade_date, sum / count as f64))
-            })
-            .collect(),
-    )
-}
-
-fn build_all_rule_decay_validations(
-    summaries: &[RuleLayerRuleSummary],
-) -> Vec<RuleDecayValidation> {
-    build_rule_basket_decay_from_daily_groups(
-        summaries
-            .iter()
-            .map(|summary| summary.decay_daily_values.as_slice()),
-    )
-}
-
-fn build_one_rule_backtest_summary_and_detail(
-    one_rule_name: &str,
-    validation: RuleLayerMetricsWithValidation,
-    rule_meta_map: &HashMap<String, RuleMeta>,
-    contribution_averages: &HashMap<String, RuleContributionAverages>,
-    explain_map: &HashMap<String, String>,
-    params: &RuleLayerBacktestRunParams,
-    similarity_cache: &ValidationSimilarityCache,
-    stock_meta_map: &HashMap<String, ValidationSampleStockMeta>,
-) -> (RuleLayerRuleSummary, Option<RuleValidationComboResult>) {
-    let metrics = &validation.metrics;
-    let contribution_average = contribution_averages
-        .get(one_rule_name)
-        .cloned()
-        .unwrap_or_default();
-    let decay_daily_values = build_rule_directional_excess_daily_values(&metrics.points);
-    let decay_validations = build_decay_validations_from_daily_values(decay_daily_values.clone());
-    let summary = RuleLayerRuleSummary {
-        rule_name: one_rule_name.to_string(),
-        point_count: metrics.points.len(),
-        avg_residual_mean: metrics.avg_residual_mean,
-        avg_excess_residual_mean: metrics.avg_excess_residual_mean,
-        avg_er_change: metrics.avg_er_change,
-        er_change_sample_count: metrics.er_change_sample_count,
-        profit_loss_ratio: metrics.profit_loss_ratio,
-        spread_mean: None,
-        avg_contribution_score: contribution_average.avg_contribution_score,
-        avg_contribution_per_trigger: contribution_average.avg_contribution_per_trigger,
-        ic_mean: metrics.ic_mean,
-        ic_std: metrics.ic_std,
-        icir: metrics.icir,
-        ic_t_value: metrics.ic_t_value,
-        decay_validations,
-        decay_daily_values,
-    };
-    let detail = rule_meta_map.get(one_rule_name).map(|rule_meta| {
-        (|params: &RuleLayerBacktestRunParams,
-          rule_name: &str,
-          rule_meta: &RuleMeta,
-          validation: RuleLayerMetricsWithValidation,
-          similarity_cache: &ValidationSimilarityCache,
-          explain_map: &HashMap<String, String>,
-          stock_meta_map: &HashMap<String, ValidationSampleStockMeta>|
-         -> RuleValidationComboResult {
-            let RuleLayerMetricsWithValidation {
-                metrics,
-                triggered_samples,
-                daily_score_layers,
-                return_distribution_counts,
-            } = validation;
-            let validation_layer_details =
-                build_validation_score_layer_details_from_daily_layers(daily_score_layers);
-            let return_distribution =
-                build_validation_return_distribution_from_counts(return_distribution_counts);
-            let mut sample_accumulator = ValidationSampleAccumulator::new(
-                5,
-                stock_meta_map,
-                similarity_cache,
-                rule_meta.is_each,
-                rule_meta.points,
-                false,
-            );
-            for sample in &triggered_samples {
-                if sample.rule_score.abs() <= RULE_BACKTEST_EPS {
-                    continue;
-                }
-                sample_accumulator.push(RuleLayerSamplePointRef {
-                    ts_code: &sample.ts_code,
-                    trade_date: &sample.trade_date,
-                    rule_score: sample.rule_score,
-                    residual_return: sample.residual_return,
-                });
-            }
-
-            let (
-                trigger_samples,
-                triggered_days,
-                sample_stats,
-                trigger_count_stats,
-                sample_groups,
-                overlap_hit_count,
-            ) = sample_accumulator.into_parts();
-            let backtest = build_rule_backtest_payload(
-                rule_name,
-                params,
-                metrics,
-                Some(validation_layer_details),
-            );
-            let similarity_rows = build_validation_similarity_rows_from_overlap(
-                similarity_cache,
-                trigger_samples,
-                overlap_hit_count,
-                Some(rule_name),
-                explain_map,
-            );
-
-            RuleValidationComboResult {
-                combo_key: rule_name.to_string(),
-                combo_label: rule_name.to_string(),
-                formula: rule_meta.when.clone(),
-                unknown_values: Vec::new(),
-                trigger_samples,
-                triggered_days,
-                avg_daily_trigger: if triggered_days > 0 {
-                    trigger_samples as f64 / triggered_days as f64
-                } else {
-                    0.0
-                },
-                sample_stats,
-                trigger_count_stats,
-                sample_groups,
-                return_distribution,
-                backtest,
-                similarity_rows,
-            }
-        })(
-            params,
-            one_rule_name,
-            rule_meta,
-            validation,
-            similarity_cache,
-            explain_map,
-            stock_meta_map,
-        )
-    });
-
-    (summary, detail)
-}
-
-fn split_and_sort_rule_backtest_summaries_and_details(
-    items: Vec<(RuleLayerRuleSummary, Option<RuleValidationComboResult>)>,
-) -> (Vec<RuleLayerRuleSummary>, Vec<RuleValidationComboResult>) {
-    let mut all_rule_summaries = Vec::with_capacity(items.len());
-    let mut rule_validation_details = Vec::new();
-
-    for (summary, detail) in items {
-        all_rule_summaries.push(summary);
-        if let Some(detail) = detail {
-            rule_validation_details.push(detail);
-        }
-    }
-
-    all_rule_summaries.sort_by(|a, b| {
-        b.profit_loss_ratio
-            .unwrap_or(f64::NEG_INFINITY)
-            .partial_cmp(&a.profit_loss_ratio.unwrap_or(f64::NEG_INFINITY))
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| b.point_count.cmp(&a.point_count))
-            .then_with(|| a.rule_name.cmp(&b.rule_name))
-    });
-
-    (all_rule_summaries, rule_validation_details)
-}
-
-fn rank_layer_label(layer_index: usize, layer_count: usize) -> String {
-    if layer_index == 1 {
-        "ç¬¬1å±‚ï¼ˆä½Žåˆ†ï¼‰".to_string()
-    } else if layer_index == layer_count {
-        format!("ç¬¬{layer_index}å±‚ï¼ˆé«˜åˆ†ï¼‰")
-    } else {
-        format!("ç¬¬{layer_index}å±‚")
-    }
-}
-
-fn rank_layer_method_label(layer_method: RankLayerMethod) -> &'static str {
-    match layer_method {
-        RankLayerMethod::Score => "æŒ‰åˆ†æ•°åˆ†å±‚",
-        RankLayerMethod::SampleCount => "æŒ‰æ ·æœ¬æ•°åˆ†å±‚ï¼ˆåŒåˆ†æŒ‰æ•°æ®åº“æŽ’åï¼‰",
-        RankLayerMethod::Rank => "æŒ‰æ•°æ®åº“æŽ’ååˆ†å±‚",
-    }
-}
-
-fn rank_top_k_summary_data(
-    items: Vec<crate::simulate::rank::RankTopKSummary>,
-) -> Vec<RankTopKSummaryData> {
-    items
-        .into_iter()
-        .map(|item| RankTopKSummaryData {
-            top_k: item.top_k,
-            point_count: item.point_count,
-            sample_count: item.sample_count,
-            avg_daily_residual_return: item.avg_daily_residual_return,
-            median_daily_residual_return: item.median_daily_residual_return,
-            positive_day_ratio: item.positive_day_ratio,
-            daily_std: item.daily_std,
-            hac_t_value: item.hac_t_value,
-            hac_lag: item.hac_lag,
-        })
-        .collect()
-}
-
-fn rank_top_k_period_summary_data(
-    items: Vec<crate::simulate::rank::RankTopKPeriodSummary>,
-) -> Vec<RankTopKPeriodSummaryData> {
-    items
-        .into_iter()
-        .map(|item| RankTopKPeriodSummaryData {
-            period_label: item.period_label,
-            start_date: item.start_date,
-            end_date: item.end_date,
-            top_k: item.top_k,
-            point_count: item.point_count,
-            sample_count: item.sample_count,
-            avg_daily_residual_return: item.avg_daily_residual_return,
-            median_daily_residual_return: item.median_daily_residual_return,
-            positive_day_ratio: item.positive_day_ratio,
-            hac_t_value: item.hac_t_value,
-            hac_lag: item.hac_lag,
-        })
-        .collect()
-}
-
-fn stock_total_mv(total_mv_map: &HashMap<String, f64>, ts_code: &str) -> Option<f64> {
-    let ts_code = ts_code.trim();
-    total_mv_map.get(ts_code).copied().or_else(|| {
-        total_mv_map
-            .get(ts_code.to_ascii_uppercase().as_str())
-            .copied()
-    })
-}
-
-fn build_rank_market_value_summaries(
-    source_path: &str,
-    input: &RankLayerFromDbInput,
-    summary_rows: &[ScoreSummary],
-    samples: &[crate::simulate::rank::RankLayerSamplePoint],
-) -> Result<Vec<RankLayerMarketValueSummary>, String> {
-    let total_mv_map = build_total_mv_map(source_path)?;
-    let mut out = Vec::new();
-
-    for (group_label, total_mv_min, total_mv_max) in
-        (|| -> [(&'static str, Option<f64>, Option<f64>); 3] {
-            [
-                ("å°å¸‚å€¼(<50äº¿)", None, Some(50.0)),
-                ("ä¸­å¸‚å€¼(50-200äº¿)", Some(50.0), Some(200.0)),
-                ("å¤§å¸‚å€¼(>=200äº¿)", Some(200.0), None),
-            ]
-        })()
-    {
-        let group_rows = summary_rows
-            .iter()
-            .filter(|row| {
-                (|total_mv_map: &HashMap<String, f64>,
-                  row: &ScoreSummary,
-                  min_value: Option<f64>,
-                  max_value: Option<f64>|
-                 -> bool {
-                    let Some(total_mv) = stock_total_mv(total_mv_map, &row.ts_code) else {
-                        return false;
-                    };
-                    if let Some(min_value) = min_value {
-                        if total_mv < min_value {
-                            return false;
-                        }
-                    }
-                    if let Some(max_value) = max_value {
-                        if total_mv >= max_value {
-                            return false;
-                        }
-                    }
-                    true
-                })(&total_mv_map, row, total_mv_min, total_mv_max)
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        let group_samples = samples
-            .iter()
-            .filter(|sample| {
-                stock_total_mv(&total_mv_map, &sample.ts_code).is_some_and(|total_mv| {
-                    total_mv_min.is_none_or(|min_value| total_mv >= min_value)
-                        && total_mv_max.is_none_or(|max_value| total_mv < max_value)
-                })
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        let metrics = calc_rank_layer_metrics_from_rank_samples(
-            &group_samples,
-            &input.layer_config,
-            &group_rows,
-        )?;
-        out.push(RankLayerMarketValueSummary {
-            group_label: group_label.to_string(),
-            total_mv_min,
-            total_mv_max,
-            point_count: metrics.point_count,
-            sample_count: metrics.sample_count,
-            avg_er_change: metrics.avg_er_change,
-            spread_mean: metrics.spread_mean,
-            ic_mean: metrics.ic_mean,
-            ic_t_value: metrics.ic_t_value,
-            icir: metrics.icir,
-        });
-    }
-
-    Ok(out)
-}
-
-#[derive(Default)]
-struct RankLayerSampleGroupAccumulator {
-    total_samples: usize,
-    positive_count: usize,
-    negative_count: usize,
-    trade_dates: HashSet<String>,
-    positive_by_board: HashMap<String, Vec<ValidationSampleRawRow>>,
-    negative_by_board: HashMap<String, Vec<ValidationSampleRawRow>>,
-    random_by_board: HashMap<String, Vec<(u64, ValidationSampleRawRow)>>,
-}
-
-fn build_rank_layer_sample_groups(
-    samples: &[crate::simulate::rank::RankLayerSamplePoint],
-    layer_count: usize,
-    stock_meta_map: &HashMap<String, ValidationSampleStockMeta>,
-) -> Vec<RankLayerSampleGroup> {
-    let mut groups = (0..layer_count)
-        .map(|_| RankLayerSampleGroupAccumulator::default())
-        .collect::<Vec<_>>();
-
-    for sample in samples {
-        if sample.layer_index == 0 || sample.layer_index > layer_count {
-            continue;
-        }
-        let group = &mut groups[sample.layer_index - 1];
-        let row = ValidationSampleRawRow {
-            ts_code: sample.ts_code.clone(),
-            trade_date: sample.trade_date.clone(),
-            trigger_count: 1,
-            rule_score: sample.score,
-            residual_return: sample.residual_return,
-        };
-
-        group.total_samples += 1;
-        group.trade_dates.insert(row.trade_date.clone());
-        let board = sample_board(&row.ts_code, stock_meta_map);
-        if row.residual_return > 0.0 {
-            group.positive_count += 1;
-            push_limited_sample(
-                group.positive_by_board.entry(board.clone()).or_default(),
-                row.clone(),
-                RANK_BACKTEST_LAYER_SAMPLE_LIMIT_PER_GROUP,
-                compare_positive_validation_sample,
-            );
-        } else if row.residual_return < 0.0 {
-            group.negative_count += 1;
-            push_limited_sample(
-                group.negative_by_board.entry(board.clone()).or_default(),
-                row.clone(),
-                RANK_BACKTEST_LAYER_SAMPLE_LIMIT_PER_GROUP,
-                compare_negative_validation_sample,
-            );
-        }
-        push_limited_random_sample(
-            group.random_by_board.entry(board).or_default(),
-            random::<u64>(),
-            row,
-            RANK_BACKTEST_LAYER_SAMPLE_LIMIT_PER_GROUP,
-        );
-    }
-
-    groups
-        .into_iter()
-        .enumerate()
-        .map(|(index, group)| {
-            let triggered_days = group.trade_dates.len();
-            let mut positive = group
-                .positive_by_board
-                .into_values()
-                .flatten()
-                .collect::<Vec<_>>();
-            let mut negative = group
-                .negative_by_board
-                .into_values()
-                .flatten()
-                .collect::<Vec<_>>();
-            let mut random = group
-                .random_by_board
-                .into_values()
-                .flatten()
-                .collect::<Vec<_>>();
-            positive.sort_by(compare_positive_validation_sample);
-            negative.sort_by(compare_negative_validation_sample);
-            random.sort_by(|left, right| {
-                left.0
-                    .cmp(&right.0)
-                    .then_with(|| compare_random_validation_sample(&left.1, &right.1))
-            });
-
-            RankLayerSampleGroup {
-                layer_index: index + 1,
-                layer_label: rank_layer_label(index + 1, layer_count),
-                total_samples: group.total_samples,
-                triggered_days,
-                positive_count: group.positive_count,
-                negative_count: group.negative_count,
-                random_count: group.total_samples,
-                positive: validation_sample_rows_to_payload(positive, stock_meta_map),
-                negative: validation_sample_rows_to_payload(negative, stock_meta_map),
-                random: validation_sample_rows_to_payload(
-                    random.into_iter().map(|(_, row)| row),
-                    stock_meta_map,
-                ),
-            }
-        })
-        .collect()
-}
-
-fn validate_backtest_strategy_expressions(source_path: &str) -> Result<(), String> {
-    let rules_cache = build_scoring_rule_cache(source_path, None)?;
-    let programs = rules_cache
-        .iter()
-        .flat_map(CachedRule::expression_programs)
-        .collect::<Vec<_>>();
-    let cyq_chen_keys = cyq_chen_runtime_key_names();
-    let injected_keys = (["ZHANG", "TOTAL_MV_YI", "S_RANK"])
-        .iter()
-        .copied()
-        .chain(cyq_chen_keys)
-        .collect::<Vec<_>>();
-    let required_runtime_keys = collect_runtime_keys_from_expr_programs(
-        &programs,
-        RuntimeKeyCollectOptions {
-            always_keys: &[],
-            injected_keys: &injected_keys,
-            aliases: &([]),
-        },
-    );
-
-    DataReader::new_with_runtime_keys(source_path, &required_runtime_keys)
-        .map(|_| ())
-        .map_err(|error| format!("ç­–ç•¥è¡¨è¾¾å¼é¢„æ£€å¤±è´¥: {error}"))
-}
-
-pub fn run_scene_layer_backtest(
-    source_path: String,
-    stock_adj_type: Option<String>,
-    index_ts_code: String,
-    index_beta: Option<f64>,
-    concept_beta: Option<f64>,
-    industry_beta: Option<f64>,
-    start_date: String,
-    end_date: String,
-    min_samples_per_scene_day: Option<usize>,
-    min_listed_trade_days: Option<usize>,
-    backtest_period: Option<usize>,
-    board: Option<String>,
-    exclude_st_board: Option<bool>,
-    total_mv_min: Option<f64>,
-    total_mv_max: Option<f64>,
-) -> Result<SceneLayerBacktestData, String> {
-    validate_backtest_strategy_expressions(&source_path)?;
-    let source_db = source_db_path(&source_path);
-    let source_db_str = source_db
-        .to_str()
-        .ok_or_else(|| "åŽŸå§‹åº“è·¯å¾„ä¸æ˜¯æœ‰æ•ˆUTF-8".to_string())?;
-    let source_conn =
-        Connection::open(source_db_str).map_err(|e| format!("æ‰“å¼€åŽŸå§‹åº“å¤±è´¥: {e}"))?;
-    let (resolved_board, exclude_st_board, total_mv_min, total_mv_max, allowed_ts_codes) =
-        build_backtest_stock_filter(
-            &source_path,
-            board,
-            exclude_st_board,
-            total_mv_min,
-            total_mv_max,
-        )?;
-
-    let params = SceneLayerBacktestRunParams {
-        stock_adj_type: stock_adj_type
-            .unwrap_or_else(|| "qfq".to_string())
-            .trim()
-            .to_string(),
-        index_ts_code: index_ts_code.trim().to_string(),
-        index_beta: index_beta.unwrap_or(0.5),
-        concept_beta: concept_beta.unwrap_or(0.2),
-        industry_beta: industry_beta.unwrap_or(0.0),
-        start_date: start_date.trim().to_string(),
-        end_date: end_date.trim().to_string(),
-        min_samples_per_day: min_samples_per_scene_day.unwrap_or(5),
-        min_listed_trade_days: min_listed_trade_days
-            .unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
-        backtest_period: backtest_period.unwrap_or(1),
-        resolved_board,
-        exclude_st_board,
-        total_mv_min,
-        total_mv_max,
-        allowed_ts_codes,
-    };
-
-    // å½“å‰å…¥å£å›ºå®šå…¨é‡ï¼›åŽç»­å¦‚éœ€æ¢å¤å•åœºæ™¯ï¼Œä»…éœ€ä¼ å…¥ Some(scene_name)ã€‚
-    (|source_conn: &Connection,
-      source_path: &str,
-      scene_name: Option<&str>,
-      params: &SceneLayerBacktestRunParams|
-     -> Result<SceneLayerBacktestData, String> {
-        let layer_config = SceneLayerConfig {
-            min_samples_per_day: params.min_samples_per_day,
-            backtest_period: params.backtest_period,
-            min_listed_trade_days: params.min_listed_trade_days,
-        };
-
-        if let Some(scene_name) = scene_name {
-            let scene_name = scene_name.trim();
-            if scene_name.is_empty() {
-                return Err("scene_nameä¸èƒ½ä¸ºç©º".to_string());
-            }
-
-            let input = SceneLayerFromDbInput {
-                scene_name: scene_name.to_string(),
-                stock_adj_type: params.stock_adj_type.clone(),
-                index_ts_code: params.index_ts_code.clone(),
-                index_beta: params.index_beta,
-                concept_beta: params.concept_beta,
-                industry_beta: params.industry_beta,
-                start_date: params.start_date.clone(),
-                end_date: params.end_date.clone(),
-                layer_config,
-            };
-
-            let metrics = calc_scene_layer_metrics_from_db_with_ts_filter(
-                source_conn,
-                source_path,
-                &input,
-                params.allowed_ts_codes.as_ref(),
-            )?;
-
-            return Ok(SceneLayerBacktestData {
-                scene_name: input.scene_name,
-                stock_adj_type: input.stock_adj_type,
-                index_ts_code: input.index_ts_code,
-                index_beta: input.index_beta,
-                concept_beta: input.concept_beta,
-                industry_beta: input.industry_beta,
-                start_date: input.start_date,
-                end_date: input.end_date,
-                resolved_board: params.resolved_board.clone(),
-                exclude_st_board: params.exclude_st_board,
-                total_mv_min: params.total_mv_min,
-                total_mv_max: params.total_mv_max,
-                min_samples_per_scene_day: input.layer_config.min_samples_per_day,
-                min_listed_trade_days: input.layer_config.min_listed_trade_days,
-                backtest_period: input.layer_config.backtest_period,
-                points: metrics
-                    .points
-                    .into_iter()
-                    .map(|point| SceneLayerPointPayload {
-                        trade_date: point.trade_date,
-                        state_avg_residual_returns: point
-                            .state_avg_residual_returns
-                            .into_iter()
-                            .map(|(scene_state, avg_residual_return)| {
-                                SceneLayerStateAvgResidualReturn {
-                                    scene_state,
-                                    avg_residual_return: Some(avg_residual_return),
-                                }
-                            })
-                            .collect(),
-                        top_bottom_spread: point.top_bottom_spread,
-                        ic: point.ic,
-                    })
-                    .collect(),
-                spread_mean: metrics.spread_mean,
-                ic_mean: metrics.ic_mean,
-                ic_std: metrics.ic_std,
-                icir: metrics.icir,
-                ic_t_value: metrics.ic_t_value,
-                is_all_scenes: false,
-                all_scene_summaries: Vec::new(),
-            });
-        }
-
-        let scene_options = load_scene_options(source_path)?;
-        let all_metrics = calc_all_scene_layer_metrics_from_db_with_ts_filter(
-            source_conn,
-            source_path,
-            &scene_options,
-            &params.stock_adj_type,
-            &params.index_ts_code,
-            params.index_beta,
-            params.concept_beta,
-            params.industry_beta,
-            &params.start_date,
-            &params.end_date,
-            &layer_config,
-            params.allowed_ts_codes.as_ref(),
-        )?;
-        let mut all_scene_summaries = Vec::with_capacity(all_metrics.len());
-
-        for (one_scene_name, metrics) in all_metrics {
-            all_scene_summaries.push(SceneLayerSceneSummary {
-                scene_name: one_scene_name,
-                point_count: metrics.points.len(),
-                spread_mean: metrics.spread_mean,
-                ic_mean: metrics.ic_mean,
-                ic_std: metrics.ic_std,
-                icir: metrics.icir,
-                ic_t_value: metrics.ic_t_value,
-            });
-        }
-
-        all_scene_summaries.sort_by(|a, b| {
-            b.spread_mean
-                .unwrap_or(f64::NEG_INFINITY)
-                .partial_cmp(&a.spread_mean.unwrap_or(f64::NEG_INFINITY))
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| b.point_count.cmp(&a.point_count))
-                .then_with(|| a.scene_name.cmp(&b.scene_name))
-        });
-
-        Ok(SceneLayerBacktestData {
-            scene_name: String::new(),
-            stock_adj_type: params.stock_adj_type.clone(),
-            index_ts_code: params.index_ts_code.clone(),
-            index_beta: params.index_beta,
-            concept_beta: params.concept_beta,
-            industry_beta: params.industry_beta,
-            start_date: params.start_date.clone(),
-            end_date: params.end_date.clone(),
-            resolved_board: params.resolved_board.clone(),
-            exclude_st_board: params.exclude_st_board,
-            total_mv_min: params.total_mv_min,
-            total_mv_max: params.total_mv_max,
-            min_samples_per_scene_day: params.min_samples_per_day,
-            min_listed_trade_days: params.min_listed_trade_days,
-            backtest_period: params.backtest_period,
-            points: Vec::new(),
-            spread_mean: None,
-            ic_mean: None,
-            ic_std: None,
-            icir: None,
-            ic_t_value: None,
-            is_all_scenes: true,
-            all_scene_summaries,
-        })
-    })(&source_conn, &source_path, None, &params)
-}
-
-pub fn run_rule_layer_backtest(
-    source_path: String,
-    stock_adj_type: Option<String>,
-    index_ts_code: String,
-    index_beta: Option<f64>,
-    concept_beta: Option<f64>,
-    industry_beta: Option<f64>,
-    start_date: String,
-    end_date: String,
-    min_samples_per_rule_day: Option<usize>,
-    min_listed_trade_days: Option<usize>,
-    backtest_period: Option<usize>,
-    parallel_batch_size: Option<usize>,
-    board: Option<String>,
-    exclude_st_board: Option<bool>,
-    total_mv_min: Option<f64>,
-    total_mv_max: Option<f64>,
-) -> Result<RuleLayerBacktestData, String> {
-    validate_backtest_strategy_expressions(&source_path)?;
-    let source_db = source_db_path(&source_path);
-    let source_db_str = source_db
-        .to_str()
-        .ok_or_else(|| "åŽŸå§‹åº“è·¯å¾„ä¸æ˜¯æœ‰æ•ˆUTF-8".to_string())?;
-    let source_conn =
-        Connection::open(source_db_str).map_err(|e| format!("æ‰“å¼€åŽŸå§‹åº“å¤±è´¥: {e}"))?;
-    let (resolved_board, exclude_st_board, total_mv_min, total_mv_max, allowed_ts_codes) =
-        build_backtest_stock_filter(
-            &source_path,
-            board,
-            exclude_st_board,
-            total_mv_min,
-            total_mv_max,
-        )?;
-
-    let params = RuleLayerBacktestRunParams {
-        stock_adj_type: stock_adj_type
-            .unwrap_or_else(|| "qfq".to_string())
-            .trim()
-            .to_string(),
-        index_ts_code: index_ts_code.trim().to_string(),
-        index_beta: index_beta.unwrap_or(0.5),
-        concept_beta: concept_beta.unwrap_or(0.2),
-        industry_beta: industry_beta.unwrap_or(0.0),
-        start_date: start_date.trim().to_string(),
-        end_date: end_date.trim().to_string(),
-        min_samples_per_day: min_samples_per_rule_day.unwrap_or(5),
-        min_listed_trade_days: min_listed_trade_days
-            .unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
-        backtest_period: backtest_period.unwrap_or(1),
-        parallel_batch_size: parallel_batch_size
-            .unwrap_or(DEFAULT_RULE_WITH_SAMPLES_PARALLEL_BATCH_SIZE)
-            .max(1),
-        resolved_board,
-        exclude_st_board,
-        total_mv_min,
-        total_mv_max,
-        allowed_ts_codes,
-    };
-
-    // å½“å‰å…¥å£å›ºå®šå…¨é‡ï¼›åŽç»­å¦‚éœ€æ¢å¤å•ç­–ç•¥ï¼Œä»…éœ€ä¼ å…¥ Some(rule_name)ã€‚
-    (|source_conn: &Connection,
-      source_path: &str,
-      rule_name: Option<&str>,
-      params: &RuleLayerBacktestRunParams|
-     -> Result<RuleLayerBacktestData, String> {
-        let layer_config = RuleLayerConfig {
-            min_samples_per_day: params.min_samples_per_day,
-            backtest_period: params.backtest_period,
-            min_listed_trade_days: params.min_listed_trade_days,
-        };
-
-        if let Some(rule_name) = rule_name {
-            let rule_name = rule_name.trim();
-            if rule_name.is_empty() {
-                return Err("rule_nameä¸èƒ½ä¸ºç©º".to_string());
-            }
-
-            let input = RuleLayerFromDbInput {
-                rule_name: rule_name.to_string(),
-                stock_adj_type: params.stock_adj_type.clone(),
-                index_ts_code: params.index_ts_code.clone(),
-                index_beta: params.index_beta,
-                concept_beta: params.concept_beta,
-                industry_beta: params.industry_beta,
-                start_date: params.start_date.clone(),
-                end_date: params.end_date.clone(),
-                layer_config,
-            };
-
-            let metrics = calc_rule_layer_metrics_from_db_with_ts_filter(
-                source_conn,
-                source_path,
-                &input,
-                params.allowed_ts_codes.as_ref(),
-            )?;
-            let decay_validations = build_rule_decay_validations(&metrics.points);
-
-            return Ok(RuleLayerBacktestData {
-                rule_name: input.rule_name,
-                stock_adj_type: input.stock_adj_type,
-                index_ts_code: input.index_ts_code,
-                index_beta: input.index_beta,
-                concept_beta: input.concept_beta,
-                industry_beta: input.industry_beta,
-                start_date: input.start_date,
-                end_date: input.end_date,
-                resolved_board: params.resolved_board.clone(),
-                exclude_st_board: params.exclude_st_board,
-                total_mv_min: params.total_mv_min,
-                total_mv_max: params.total_mv_max,
-                min_samples_per_rule_day: input.layer_config.min_samples_per_day,
-                min_listed_trade_days: input.layer_config.min_listed_trade_days,
-                backtest_period: input.layer_config.backtest_period,
-                points: metrics
-                    .points
-                    .into_iter()
-                    .map(|point| RuleLayerPointPayload {
-                        trade_date: point.trade_date,
-                        sample_count: point.sample_count,
-                        avg_rule_score: point.avg_rule_score,
-                        avg_residual_return: point.avg_residual_return,
-                        avg_excess_residual_return: point.avg_excess_residual_return,
-                        top_bottom_spread: None,
-                        ic: point.ic,
-                    })
-                    .collect(),
-                avg_residual_mean: metrics.avg_residual_mean,
-                avg_excess_residual_mean: metrics.avg_excess_residual_mean,
-                decay_validations,
-                avg_er_change: metrics.avg_er_change,
-                profit_loss_ratio: metrics.profit_loss_ratio,
-                spread_mean: None,
-                avg_contribution_score: None,
-                avg_contribution_per_trigger: None,
-                ic_mean: metrics.ic_mean,
-                ic_std: metrics.ic_std,
-                icir: metrics.icir,
-                ic_t_value: metrics.ic_t_value,
-                layer_count: None,
-                layer_method: None,
-                layer_method_label: None,
-                layer_summaries: Vec::new(),
-                is_all_rules: false,
-                all_rule_summaries: Vec::new(),
-                rule_validation_details: Vec::new(),
-            });
-        }
-
-        let (rule_options, rule_meta_map) = load_rule_meta(source_path)?;
-        let explain_map = rule_meta_map
-            .iter()
-            .map(|(rule_name, meta)| (rule_name.clone(), meta.explain.clone()))
-            .collect::<HashMap<_, _>>();
-        let has_rule_meta_match = rule_options
-            .iter()
-            .any(|rule_name| rule_meta_map.contains_key(rule_name));
-        let stock_meta_map = if has_rule_meta_match {
-            load_validation_sample_stock_meta_map(source_path)?
-        } else {
-            HashMap::new()
-        };
-        let similarity_cache = if has_rule_meta_match {
-            load_validation_similarity_cache_optional(
-                source_path,
-                &params.start_date,
-                &params.end_date,
-            )?
-        } else {
-            empty_validation_similarity_cache()
-        };
-        let contribution_averages = if params.allowed_ts_codes.is_some() {
-            // è‚¡ç¥¨èŒƒå›´è¿‡æ»¤éœ€è¦é€è¡Œè®¡ç®—è´¡çŒ®åº¦ï¼›æŠŠåŽŸå§‹è¡Œé™åˆ¶åœ¨è¿™ä¸ªä½œç”¨åŸŸå†…ï¼Œç¡®ä¿åœ¨
-            // è¿›å…¥ç­–ç•¥å¹¶å‘å‰é‡Šæ”¾ï¼Œé¿å…ä¸Žè¿è¡Œæ—¶ç¼“å­˜åŠæ¯ç­–ç•¥æ ¡éªŒæ•°æ®åŒæ—¶å¸¸é©»ã€‚
-            let (summary_rows, detail_rows) =
-                (|source_path: &str,
-                  start_date: &str,
-                  end_date: &str,
-                  allowed_ts_codes: Option<&HashSet<String>>|
-                 -> Result<(Vec<ScoreSummary>, Vec<ScoreDetails>), String> {
-                    let result_conn = open_result_conn(source_path)?;
-                    let summaries = load_score_summary_rows_from_db(
-                        source_path,
-                        start_date,
-                        end_date,
-                        allowed_ts_codes,
-                    )?;
-
-                    let mut detail_stmt = result_conn
-                        .prepare(
-                            r#"
-            SELECT ts_code, trade_date, rule_name, TRY_CAST(rule_score AS DOUBLE)
-            FROM rule_details
-            WHERE trade_date >= ?
-              AND trade_date <= ?
-              AND TRY_CAST(rule_score AS DOUBLE) IS NOT NULL
-            ORDER BY trade_date ASC, rule_name ASC, ts_code ASC
-            "#,
-                        )
-                        .map_err(|e| format!("é¢„ç¼–è¯‘ç­–ç•¥å›žæµ‹è§„åˆ™åŽŸå§‹è¡Œå¤±è´¥: {e}"))?;
-                    let mut detail_rows = detail_stmt
-                        .query(params![start_date, end_date])
-                        .map_err(|e| format!("æŸ¥è¯¢ç­–ç•¥å›žæµ‹è§„åˆ™åŽŸå§‹è¡Œå¤±è´¥: {e}"))?;
-                    let mut details = Vec::new();
-                    while let Some(row) = detail_rows
-                        .next()
-                        .map_err(|e| format!("è¯»å–ç­–ç•¥å›žæµ‹è§„åˆ™åŽŸå§‹è¡Œå¤±è´¥: {e}"))?
-                    {
-                        let rule_score: f64 =
-                            row.get(3).map_err(|e| format!("è¯»å–è§„åˆ™åˆ†æ•°å¤±è´¥: {e}"))?;
-                        let item = ScoreDetails {
-                            ts_code: row.get(0).map_err(|e| format!("è¯»å–è§„åˆ™ä»£ç å¤±è´¥: {e}"))?,
-                            trade_date: row.get(1).map_err(|e| format!("è¯»å–è§„åˆ™æ—¥æœŸå¤±è´¥: {e}"))?,
-                            rule_name: row.get(2).map_err(|e| format!("è¯»å–è§„åˆ™åç§°å¤±è´¥: {e}"))?,
-                            rule_score,
-                        };
-                        if rule_score.is_finite()
-                            && ts_code_allowed_by_filter(allowed_ts_codes, &item.ts_code)
-                        {
-                            details.push(item);
-                        }
-                    }
-
-                    Ok((summaries, details))
-                })(
-                    source_path,
-                    &params.start_date,
-                    &params.end_date,
-                    params.allowed_ts_codes.as_ref(),
-                )?;
-            build_rule_contribution_averages_from_rows(
-                &summary_rows,
-                &detail_rows,
-                &params.start_date,
-                &params.end_date,
-            )
-        } else {
-            build_rule_contribution_averages(
-                source_path,
-                &rule_options,
-                &params.start_date,
-                &params.end_date,
-            )?
-        };
-        let summary_detail_items =
-            calc_all_rule_layer_metrics_with_validation_from_db_map_with_ts_filter(
-                source_conn,
-                source_path,
-                &rule_options,
-                &params.stock_adj_type,
-                &params.index_ts_code,
-                params.index_beta,
-                params.concept_beta,
-                params.industry_beta,
-                &params.start_date,
-                &params.end_date,
-                &layer_config,
-                params.allowed_ts_codes.as_ref(),
-                params.parallel_batch_size,
-                |one_rule_name, validation| {
-                    Ok(build_one_rule_backtest_summary_and_detail(
-                        one_rule_name,
-                        validation,
-                        &rule_meta_map,
-                        &contribution_averages,
-                        &explain_map,
-                        params,
-                        &similarity_cache,
-                        &stock_meta_map,
-                    ))
-                },
-            );
-        let (all_rule_summaries, rule_validation_details) =
-            split_and_sort_rule_backtest_summaries_and_details(summary_detail_items?);
-        let decay_validations = build_all_rule_decay_validations(&all_rule_summaries);
-
-        let (
-            avg_residual_mean,
-            avg_excess_residual_mean,
-            avg_er_change,
-            profit_loss_ratio,
-            _spread_mean,
-            ic_mean,
-            ic_std,
-            icir,
-            ic_t_value,
-        ) = aggregate_all_rule_summary_metrics(&all_rule_summaries);
-        Ok(RuleLayerBacktestData {
-            rule_name: String::new(),
-            stock_adj_type: params.stock_adj_type.clone(),
-            index_ts_code: params.index_ts_code.clone(),
-            index_beta: params.index_beta,
-            concept_beta: params.concept_beta,
-            industry_beta: params.industry_beta,
-            start_date: params.start_date.clone(),
-            end_date: params.end_date.clone(),
-            resolved_board: params.resolved_board.clone(),
-            exclude_st_board: params.exclude_st_board,
-            total_mv_min: params.total_mv_min,
-            total_mv_max: params.total_mv_max,
-            min_samples_per_rule_day: params.min_samples_per_day,
-            min_listed_trade_days: params.min_listed_trade_days,
-            backtest_period: params.backtest_period,
-            points: Vec::new(),
-            avg_residual_mean,
-            avg_excess_residual_mean,
-            decay_validations,
-            avg_er_change,
-            profit_loss_ratio,
-            spread_mean: None,
-            avg_contribution_score: weighted_rule_summary_metric(&all_rule_summaries, |item| {
-                item.avg_contribution_score
-            }),
-            avg_contribution_per_trigger: weighted_rule_summary_metric(
-                &all_rule_summaries,
-                |item| item.avg_contribution_per_trigger,
-            ),
-            ic_mean,
-            ic_std,
-            icir,
-            ic_t_value,
-            layer_count: None,
-            layer_method: None,
-            layer_method_label: None,
-            layer_summaries: Vec::new(),
-            is_all_rules: true,
-            all_rule_summaries,
-            rule_validation_details,
-        })
-    })(&source_conn, &source_path, None, &params)
-}
-
-pub fn run_rank_layer_backtest(
-    source_path: String,
-    stock_adj_type: Option<String>,
-    index_ts_code: String,
-    index_beta: Option<f64>,
-    concept_beta: Option<f64>,
-    industry_beta: Option<f64>,
-    start_date: String,
-    end_date: String,
-    min_samples_per_rank_day: Option<usize>,
-    min_listed_trade_days: Option<usize>,
-    backtest_period: Option<usize>,
-    layer_count: Option<usize>,
-    layer_method: Option<String>,
-    board: Option<String>,
-    exclude_st_board: Option<bool>,
-) -> Result<RankLayerBacktestData, String> {
-    validate_backtest_strategy_expressions(&source_path)?;
-    let source_db = source_db_path(&source_path);
-    let source_db_str = source_db
-        .to_str()
-        .ok_or_else(|| "åŽŸå§‹åº“è·¯å¾„ä¸æ˜¯æœ‰æ•ˆUTF-8".to_string())?;
-    let source_conn =
-        Connection::open(source_db_str).map_err(|e| format!("æ‰“å¼€åŽŸå§‹åº“å¤±è´¥: {e}"))?;
-    let (resolved_board, exclude_st_board, _total_mv_min, _total_mv_max, allowed_ts_codes) =
-        build_backtest_stock_filter(&source_path, board, exclude_st_board, None, None)?;
-
-    let params = RankLayerBacktestRunParams {
-        stock_adj_type: stock_adj_type
-            .unwrap_or_else(|| "qfq".to_string())
-            .trim()
-            .to_string(),
-        index_ts_code: index_ts_code.trim().to_string(),
-        index_beta: index_beta.unwrap_or(0.5),
-        concept_beta: concept_beta.unwrap_or(0.2),
-        industry_beta: industry_beta.unwrap_or(0.0),
-        start_date: start_date.trim().to_string(),
-        end_date: end_date.trim().to_string(),
-        min_samples_per_day: min_samples_per_rank_day.unwrap_or(5),
-        min_listed_trade_days: min_listed_trade_days
-            .unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
-        backtest_period: backtest_period.unwrap_or(1),
-        layer_count: layer_count.unwrap_or_else(RankLayerConfig::default_layer_count),
-        layer_method: match layer_method {
-            Some(value) => RankLayerMethod::from_str(&value)?,
-            None => RankLayerMethod::SampleCount,
-        },
-        resolved_board,
-        exclude_st_board,
-        allowed_ts_codes,
-    };
-
-    (|source_conn: &Connection,
-      source_path: &str,
-      params: &RankLayerBacktestRunParams|
-     -> Result<RankLayerBacktestData, String> {
-        let layer_config = RankLayerConfig {
-            min_samples_per_day: params.min_samples_per_day,
-            backtest_period: params.backtest_period,
-            min_listed_trade_days: params.min_listed_trade_days,
-            layer_count: params.layer_count,
-            layer_method: params.layer_method,
-        };
-        let input = RankLayerFromDbInput {
-            stock_adj_type: params.stock_adj_type.clone(),
-            index_ts_code: params.index_ts_code.clone(),
-            index_beta: params.index_beta,
-            concept_beta: params.concept_beta,
-            industry_beta: params.industry_beta,
-            start_date: params.start_date.clone(),
-            end_date: params.end_date.clone(),
-            layer_config,
-        };
-        let summary_rows = load_score_summary_rows_from_db(
-            source_path,
-            &params.start_date,
-            &params.end_date,
-            params.allowed_ts_codes.as_ref(),
-        )?;
-        let metrics = calc_rank_layer_metrics_from_score_rows(
-            source_conn,
-            source_path,
-            &input,
-            &summary_rows,
-        )?;
-        let market_value_summaries = build_rank_market_value_summaries(
-            source_path,
-            &input,
-            &summary_rows,
-            &metrics.layer_samples,
-        )?;
-        let stock_meta_map = load_validation_sample_stock_meta_map(source_path)?;
-        let layer_sample_groups = build_rank_layer_sample_groups(
-            &metrics.layer_samples,
-            input.layer_config.layer_count,
-            &stock_meta_map,
-        );
-        Ok(RankLayerBacktestData {
-            stock_adj_type: input.stock_adj_type,
-            index_ts_code: input.index_ts_code,
-            index_beta: input.index_beta,
-            concept_beta: input.concept_beta,
-            industry_beta: input.industry_beta,
-            start_date: input.start_date,
-            end_date: input.end_date,
-            resolved_board: params.resolved_board.clone(),
-            exclude_st_board: params.exclude_st_board,
-            market_value_grouping: true,
-            min_samples_per_rank_day: input.layer_config.effective_min_samples_per_day(),
-            min_listed_trade_days: input.layer_config.min_listed_trade_days,
-            backtest_period: input.layer_config.backtest_period,
-            layer_count: input.layer_config.layer_count,
-            layer_method: input.layer_config.layer_method.as_str().to_string(),
-            layer_method_label: rank_layer_method_label(input.layer_config.layer_method)
-                .to_string(),
-            point_count: metrics.point_count,
-            sample_count: metrics.sample_count,
-            avg_er_change: metrics.avg_er_change,
-            spread_mean: metrics.spread_mean,
-            ic_mean: metrics.ic_mean,
-            ic_std: metrics.ic_std,
-            icir: metrics.icir,
-            ic_t_value: metrics.ic_t_value,
-            top_k_summaries: rank_top_k_summary_data(metrics.top_k_summaries),
-            top_k_period_summaries: rank_top_k_period_summary_data(metrics.top_k_period_summaries),
-            layer_summaries: metrics
-                .layers
-                .into_iter()
-                .map(|item| RankLayerBucketSummary {
-                    layer_index: item.layer_index,
-                    layer_label: rank_layer_label(item.layer_index, input.layer_config.layer_count),
-                    point_count: item.point_count,
-                    sample_count: item.sample_count,
-                    avg_score: item.avg_score,
-                    avg_residual_return: item.avg_residual_return,
-                    avg_er_change: item.avg_er_change,
-                })
-                .collect(),
-            layer_sample_groups,
-            market_value_summaries,
-        })
-    })(&source_conn, &source_path, &params)
-}
-
-pub fn run_transient_scene_layer_backtest(
-    source_path: String,
-    stock_adj_type: Option<String>,
-    index_ts_code: String,
-    index_beta: Option<f64>,
-    concept_beta: Option<f64>,
-    industry_beta: Option<f64>,
-    start_date: String,
-    end_date: String,
-    min_samples_per_scene_day: Option<usize>,
-    min_listed_trade_days: Option<usize>,
-    backtest_period: Option<usize>,
-    board: Option<String>,
-    exclude_st_board: Option<bool>,
-    total_mv_min: Option<f64>,
-    total_mv_max: Option<f64>,
-) -> Result<SceneLayerBacktestData, String> {
-    validate_backtest_strategy_expressions(&source_path)?;
-    let source_db = source_db_path(&source_path);
-    let source_db_str = source_db
-        .to_str()
-        .ok_or_else(|| "åŽŸå§‹åº“è·¯å¾„ä¸æ˜¯æœ‰æ•ˆUTF-8".to_string())?;
-    let source_conn =
-        Connection::open(source_db_str).map_err(|e| format!("æ‰“å¼€åŽŸå§‹åº“å¤±è´¥: {e}"))?;
-    let (resolved_board, exclude_st_board, total_mv_min, total_mv_max, allowed_ts_codes) =
-        build_backtest_stock_filter(
-            &source_path,
-            board,
-            exclude_st_board,
-            total_mv_min,
-            total_mv_max,
-        )?;
-
-    let params = SceneLayerBacktestRunParams {
-        stock_adj_type: stock_adj_type
-            .unwrap_or_else(|| "qfq".to_string())
-            .trim()
-            .to_string(),
-        index_ts_code: index_ts_code.trim().to_string(),
-        index_beta: index_beta.unwrap_or(0.5),
-        concept_beta: concept_beta.unwrap_or(0.2),
-        industry_beta: industry_beta.unwrap_or(0.0),
-        start_date: start_date.trim().to_string(),
-        end_date: end_date.trim().to_string(),
-        min_samples_per_day: min_samples_per_scene_day.unwrap_or(5),
-        min_listed_trade_days: min_listed_trade_days
-            .unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
-        backtest_period: backtest_period.unwrap_or(1),
-        resolved_board,
-        exclude_st_board,
-        total_mv_min,
-        total_mv_max,
-        allowed_ts_codes,
-    };
-    let layer_config = SceneLayerConfig {
-        min_samples_per_day: params.min_samples_per_day,
-        backtest_period: params.backtest_period,
-        min_listed_trade_days: params.min_listed_trade_days,
-    };
-    let (score_batch, _) = scoring_all_to_memory_with_mode(
-        &source_path,
-        None,
-        &params.stock_adj_type,
-        &params.start_date,
-        &params.end_date,
-        ScoringMemoryMode::SceneOnly,
-    )?;
-    let scene_rows = (|rows: Vec<SceneBacktestRow>,
-                       allowed_ts_codes: Option<&HashSet<String>>|
-     -> Vec<SceneBacktestRow> {
-        if allowed_ts_codes.is_none() {
-            return rows;
-        }
-        rows.into_iter()
-            .filter(|row| ts_code_allowed_by_filter(allowed_ts_codes, &row.ts_code))
-            .collect()
-    })(
-        score_batch.scene_backtest_rows,
-        params.allowed_ts_codes.as_ref(),
-    );
-    let scene_options = load_scene_options(&source_path)?;
-    let all_metrics = calc_all_scene_layer_metrics_from_rows(
-        &source_conn,
-        &source_path,
-        &scene_options,
-        scene_rows,
-        &params.stock_adj_type,
-        &params.index_ts_code,
-        params.index_beta,
-        params.concept_beta,
-        params.industry_beta,
-        &params.start_date,
-        &params.end_date,
-        &layer_config,
-    )?;
-    let mut all_scene_summaries = Vec::with_capacity(all_metrics.len());
-    for (one_scene_name, metrics) in all_metrics {
-        all_scene_summaries.push(SceneLayerSceneSummary {
-            scene_name: one_scene_name,
-            point_count: metrics.points.len(),
-            spread_mean: metrics.spread_mean,
-            ic_mean: metrics.ic_mean,
-            ic_std: metrics.ic_std,
-            icir: metrics.icir,
-            ic_t_value: metrics.ic_t_value,
-        });
-    }
-    all_scene_summaries.sort_by(|a, b| {
-        b.spread_mean
-            .unwrap_or(f64::NEG_INFINITY)
-            .partial_cmp(&a.spread_mean.unwrap_or(f64::NEG_INFINITY))
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| b.point_count.cmp(&a.point_count))
-            .then_with(|| a.scene_name.cmp(&b.scene_name))
-    });
-
-    Ok(SceneLayerBacktestData {
-        scene_name: String::new(),
-        stock_adj_type: params.stock_adj_type,
-        index_ts_code: params.index_ts_code,
-        index_beta: params.index_beta,
-        concept_beta: params.concept_beta,
-        industry_beta: params.industry_beta,
-        start_date: params.start_date,
-        end_date: params.end_date,
-        resolved_board: params.resolved_board,
-        exclude_st_board: params.exclude_st_board,
-        total_mv_min: params.total_mv_min,
-        total_mv_max: params.total_mv_max,
-        min_samples_per_scene_day: params.min_samples_per_day,
-        min_listed_trade_days: params.min_listed_trade_days,
-        backtest_period: params.backtest_period,
-        points: Vec::new(),
-        spread_mean: None,
-        ic_mean: None,
-        ic_std: None,
-        icir: None,
-        ic_t_value: None,
-        is_all_scenes: true,
-        all_scene_summaries,
-    })
-}
-
-pub fn run_transient_rule_layer_backtest(
-    source_path: String,
-    stock_adj_type: Option<String>,
-    index_ts_code: String,
-    index_beta: Option<f64>,
-    concept_beta: Option<f64>,
-    industry_beta: Option<f64>,
-    start_date: String,
-    end_date: String,
-    min_samples_per_rule_day: Option<usize>,
-    min_listed_trade_days: Option<usize>,
-    backtest_period: Option<usize>,
-    parallel_batch_size: Option<usize>,
-    board: Option<String>,
-    exclude_st_board: Option<bool>,
-    total_mv_min: Option<f64>,
-    total_mv_max: Option<f64>,
-) -> Result<RuleLayerBacktestData, String> {
-    validate_backtest_strategy_expressions(&source_path)?;
-    let source_db = source_db_path(&source_path);
-    let source_db_str = source_db
-        .to_str()
-        .ok_or_else(|| "åŽŸå§‹åº“è·¯å¾„ä¸æ˜¯æœ‰æ•ˆUTF-8".to_string())?;
-    let source_conn =
-        Connection::open(source_db_str).map_err(|e| format!("æ‰“å¼€åŽŸå§‹åº“å¤±è´¥: {e}"))?;
-    let (resolved_board, exclude_st_board, total_mv_min, total_mv_max, allowed_ts_codes) =
-        build_backtest_stock_filter(
-            &source_path,
-            board,
-            exclude_st_board,
-            total_mv_min,
-            total_mv_max,
-        )?;
-
-    let params = RuleLayerBacktestRunParams {
-        stock_adj_type: stock_adj_type
-            .unwrap_or_else(|| "qfq".to_string())
-            .trim()
-            .to_string(),
-        index_ts_code: index_ts_code.trim().to_string(),
-        index_beta: index_beta.unwrap_or(0.5),
-        concept_beta: concept_beta.unwrap_or(0.2),
-        industry_beta: industry_beta.unwrap_or(0.0),
-        start_date: start_date.trim().to_string(),
-        end_date: end_date.trim().to_string(),
-        min_samples_per_day: min_samples_per_rule_day.unwrap_or(5),
-        min_listed_trade_days: min_listed_trade_days
-            .unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
-        backtest_period: backtest_period.unwrap_or(1),
-        parallel_batch_size: parallel_batch_size
-            .unwrap_or(DEFAULT_RULE_WITH_SAMPLES_PARALLEL_BATCH_SIZE)
-            .max(1),
-        resolved_board,
-        exclude_st_board,
-        total_mv_min,
-        total_mv_max,
-        allowed_ts_codes,
-    };
-    let layer_config = RuleLayerConfig {
-        min_samples_per_day: params.min_samples_per_day,
-        backtest_period: params.backtest_period,
-        min_listed_trade_days: params.min_listed_trade_days,
-    };
-    let (score_batch, _) = scoring_all_to_memory_with_mode(
-        &source_path,
-        None,
-        &params.stock_adj_type,
-        &params.start_date,
-        &params.end_date,
-        ScoringMemoryMode::SummaryAndDetails,
-    )?;
-    let summary_rows = filter_score_summary_rows_by_ts_codes(
-        score_batch.summary_rows,
-        params.allowed_ts_codes.as_ref(),
-    );
-    let detail_rows = (|rows: Vec<ScoreDetails>,
-                        allowed_ts_codes: Option<&HashSet<String>>|
-     -> Vec<ScoreDetails> {
-        if allowed_ts_codes.is_none() {
-            return rows;
-        }
-        rows.into_iter()
-            .filter(|row| ts_code_allowed_by_filter(allowed_ts_codes, &row.ts_code))
-            .collect()
-    })(score_batch.detail_rows, params.allowed_ts_codes.as_ref());
-    let (rule_options, rule_meta_map) = load_rule_meta(&source_path)?;
-    let explain_map = rule_meta_map
-        .iter()
-        .map(|(rule_name, meta)| (rule_name.clone(), meta.explain.clone()))
-        .collect::<HashMap<_, _>>();
-    let has_rule_meta_match = rule_options
-        .iter()
-        .any(|rule_name| rule_meta_map.contains_key(rule_name));
-    let stock_meta_map = if has_rule_meta_match {
-        load_validation_sample_stock_meta_map(&source_path)?
-    } else {
-        HashMap::new()
-    };
-    let similarity_cache = if has_rule_meta_match {
-        load_validation_similarity_cache_optional(
-            &source_path,
-            &params.start_date,
-            &params.end_date,
-        )?
-    } else {
-        empty_validation_similarity_cache()
-    };
-    let contribution_averages = build_rule_contribution_averages_from_rows(
-        &summary_rows,
-        &detail_rows,
-        &params.start_date,
-        &params.end_date,
-    );
-    let summary_detail_items = calc_all_rule_layer_metrics_with_validation_from_rows_map(
-        &source_conn,
-        &source_path,
-        &rule_options,
-        &summary_rows,
-        &detail_rows,
-        &params.stock_adj_type,
-        &params.index_ts_code,
-        params.index_beta,
-        params.concept_beta,
-        params.industry_beta,
-        &params.start_date,
-        &params.end_date,
-        &layer_config,
-        params.parallel_batch_size,
-        |one_rule_name, validation| {
-            Ok(build_one_rule_backtest_summary_and_detail(
-                one_rule_name,
-                validation,
-                &rule_meta_map,
-                &contribution_averages,
-                &explain_map,
-                &params,
-                &similarity_cache,
-                &stock_meta_map,
-            ))
-        },
-    );
-    let (all_rule_summaries, rule_validation_details) =
-        split_and_sort_rule_backtest_summaries_and_details(summary_detail_items?);
-    let decay_validations = build_all_rule_decay_validations(&all_rule_summaries);
-
-    let (
-        avg_residual_mean,
-        avg_excess_residual_mean,
-        avg_er_change,
-        profit_loss_ratio,
-        _spread_mean,
-        ic_mean,
-        ic_std,
-        icir,
-        ic_t_value,
-    ) = aggregate_all_rule_summary_metrics(&all_rule_summaries);
-    Ok(RuleLayerBacktestData {
-        rule_name: String::new(),
-        stock_adj_type: params.stock_adj_type,
-        index_ts_code: params.index_ts_code,
-        index_beta: params.index_beta,
-        concept_beta: params.concept_beta,
-        industry_beta: params.industry_beta,
-        start_date: params.start_date,
-        end_date: params.end_date,
-        resolved_board: params.resolved_board,
-        exclude_st_board: params.exclude_st_board,
-        total_mv_min: params.total_mv_min,
-        total_mv_max: params.total_mv_max,
-        min_samples_per_rule_day: params.min_samples_per_day,
-        min_listed_trade_days: params.min_listed_trade_days,
-        backtest_period: params.backtest_period,
-        points: Vec::new(),
-        avg_residual_mean,
-        avg_excess_residual_mean,
-        decay_validations,
-        avg_er_change,
-        profit_loss_ratio,
-        spread_mean: None,
-        avg_contribution_score: weighted_rule_summary_metric(&all_rule_summaries, |item| {
-            item.avg_contribution_score
-        }),
-        avg_contribution_per_trigger: weighted_rule_summary_metric(&all_rule_summaries, |item| {
-            item.avg_contribution_per_trigger
-        }),
-        ic_mean,
-        ic_std,
-        icir,
-        ic_t_value,
-        layer_count: None,
-        layer_method: None,
-        layer_method_label: None,
-        layer_summaries: Vec::new(),
-        is_all_rules: true,
-        all_rule_summaries,
-        rule_validation_details,
-    })
-}
-
-pub fn run_transient_rank_layer_backtest(
-    source_path: String,
-    stock_adj_type: Option<String>,
-    index_ts_code: String,
-    index_beta: Option<f64>,
-    concept_beta: Option<f64>,
-    industry_beta: Option<f64>,
-    start_date: String,
-    end_date: String,
-    min_samples_per_rank_day: Option<usize>,
-    min_listed_trade_days: Option<usize>,
-    backtest_period: Option<usize>,
-    layer_count: Option<usize>,
-    layer_method: Option<String>,
-    board: Option<String>,
-    exclude_st_board: Option<bool>,
-) -> Result<RankLayerBacktestData, String> {
-    validate_backtest_strategy_expressions(&source_path)?;
-    let source_db = source_db_path(&source_path);
-    let source_db_str = source_db
-        .to_str()
-        .ok_or_else(|| "åŽŸå§‹åº“è·¯å¾„ä¸æ˜¯æœ‰æ•ˆUTF-8".to_string())?;
-    let source_conn =
-        Connection::open(source_db_str).map_err(|e| format!("æ‰“å¼€åŽŸå§‹åº“å¤±è´¥: {e}"))?;
-    let (resolved_board, exclude_st_board, _total_mv_min, _total_mv_max, allowed_ts_codes) =
-        build_backtest_stock_filter(&source_path, board, exclude_st_board, None, None)?;
-
-    let params = RankLayerBacktestRunParams {
-        stock_adj_type: stock_adj_type
-            .unwrap_or_else(|| "qfq".to_string())
-            .trim()
-            .to_string(),
-        index_ts_code: index_ts_code.trim().to_string(),
-        index_beta: index_beta.unwrap_or(0.5),
-        concept_beta: concept_beta.unwrap_or(0.2),
-        industry_beta: industry_beta.unwrap_or(0.0),
-        start_date: start_date.trim().to_string(),
-        end_date: end_date.trim().to_string(),
-        min_samples_per_day: min_samples_per_rank_day.unwrap_or(5),
-        min_listed_trade_days: min_listed_trade_days
-            .unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
-        backtest_period: backtest_period.unwrap_or(1),
-        layer_count: layer_count.unwrap_or_else(RankLayerConfig::default_layer_count),
-        layer_method: match layer_method {
-            Some(value) => RankLayerMethod::from_str(&value)?,
-            None => RankLayerMethod::SampleCount,
-        },
-        resolved_board,
-        exclude_st_board,
-        allowed_ts_codes,
-    };
-    let layer_config = RankLayerConfig {
-        min_samples_per_day: params.min_samples_per_day,
-        backtest_period: params.backtest_period,
-        min_listed_trade_days: params.min_listed_trade_days,
-        layer_count: params.layer_count,
-        layer_method: params.layer_method,
-    };
-    let input = RankLayerFromDbInput {
-        stock_adj_type: params.stock_adj_type,
-        index_ts_code: params.index_ts_code,
-        index_beta: params.index_beta,
-        concept_beta: params.concept_beta,
-        industry_beta: params.industry_beta,
-        start_date: params.start_date,
-        end_date: params.end_date,
-        layer_config,
-    };
-    let (score_batch, _) = scoring_all_to_memory_with_mode(
-        &source_path,
-        None,
-        &input.stock_adj_type,
-        &input.start_date,
-        &input.end_date,
-        ScoringMemoryMode::SummaryOnly,
-    )?;
-    let summary_rows = filter_score_summary_rows_by_ts_codes(
-        score_batch.summary_rows,
-        params.allowed_ts_codes.as_ref(),
-    );
-    let metrics =
-        calc_rank_layer_metrics_from_score_rows(&source_conn, &source_path, &input, &summary_rows)?;
-    let market_value_summaries = build_rank_market_value_summaries(
-        &source_path,
-        &input,
-        &summary_rows,
-        &metrics.layer_samples,
-    )?;
-    let stock_meta_map = load_validation_sample_stock_meta_map(&source_path)?;
-    let layer_sample_groups = build_rank_layer_sample_groups(
-        &metrics.layer_samples,
-        input.layer_config.layer_count,
-        &stock_meta_map,
-    );
-    Ok(RankLayerBacktestData {
-        stock_adj_type: input.stock_adj_type,
-        index_ts_code: input.index_ts_code,
-        index_beta: input.index_beta,
-        concept_beta: input.concept_beta,
-        industry_beta: input.industry_beta,
-        start_date: input.start_date,
-        end_date: input.end_date,
-        resolved_board: params.resolved_board,
-        exclude_st_board: params.exclude_st_board,
-        market_value_grouping: true,
-        min_samples_per_rank_day: input.layer_config.effective_min_samples_per_day(),
-        min_listed_trade_days: input.layer_config.min_listed_trade_days,
-        backtest_period: input.layer_config.backtest_period,
-        layer_count: input.layer_config.layer_count,
-        layer_method: input.layer_config.layer_method.as_str().to_string(),
-        layer_method_label: rank_layer_method_label(input.layer_config.layer_method).to_string(),
-        point_count: metrics.point_count,
-        sample_count: metrics.sample_count,
-        avg_er_change: metrics.avg_er_change,
-        spread_mean: metrics.spread_mean,
-        ic_mean: metrics.ic_mean,
-        ic_std: metrics.ic_std,
-        icir: metrics.icir,
-        ic_t_value: metrics.ic_t_value,
-        top_k_summaries: rank_top_k_summary_data(metrics.top_k_summaries),
-        top_k_period_summaries: rank_top_k_period_summary_data(metrics.top_k_period_summaries),
-        layer_summaries: metrics
-            .layers
-            .into_iter()
-            .map(|item| RankLayerBucketSummary {
-                layer_index: item.layer_index,
-                layer_label: rank_layer_label(item.layer_index, input.layer_config.layer_count),
-                point_count: item.point_count,
-                sample_count: item.sample_count,
-                avg_score: item.avg_score,
-                avg_residual_return: item.avg_residual_return,
-                avg_er_change: item.avg_er_change,
-            })
-            .collect(),
-        layer_sample_groups,
-        market_value_summaries,
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{
-        collections::HashMap,
-        fs::{create_dir_all, write},
-        path::PathBuf,
-        time::{SystemTime, UNIX_EPOCH},
-    };
-
-    use duckdb::{Connection, params};
-
-    use crate::{
-        data::{DataReader, RuleTag, result_db_path, source_db_path},
-        scoring::tools::load_st_list,
-        scoring_model::{ScoreDetails, ScoreSummary},
-        simulate::rank::RankLayerSamplePoint,
-        simulate::rule::{
-            RuleLayerDailyScoreGroup, RuleLayerDailyScoreLayers, RuleLayerPoint,
-            RuleLayerSamplePoint,
-        },
-    };
-
-    use super::{
-        PreparedValidationCombo, VALIDATION_EPS, ValidationSampleRawRow, ValidationSampleStockMeta,
-        ValidationSeedRule, ValidationSimilarityCache, ValidationVariant,
-        build_industry_maps_from_rows, build_rank_layer_sample_groups,
-        build_recent_decay_dist_points, build_rule_basket_decay_from_daily_groups,
-        build_rule_contribution_averages, build_rule_contribution_averages_from_rows,
-        build_rule_decay_validations, build_validation_cached_rule,
-        build_validation_calibration_specs, build_validation_return_distribution,
-        build_validation_return_distribution_from_counts, build_validation_sample_groups,
-        build_validation_score_layer_details,
-        build_validation_score_layer_details_from_daily_layers, build_validation_similarity_rows,
-        build_validation_triggered_scores, build_validation_triggered_scores_for_combos,
-        calibration_stability_factor, collect_rule_validation_runtime_keys,
-        collect_validation_assigned_names, derive_validation_volatility_group,
-        estimate_net_money_flow_yuan, money_flow_rank_items, money_outflow_rank_items,
-        resolve_validation_sample_board_label, resolve_validation_trigger_count,
-        scope_way_config_label, trailing_period_gain,
-    };
-    use crate::data::ScopeWay;
-
-    #[test]
-    fn market_analysis_industry_map_uses_industry_instead_of_market_board() {
-        let rows = vec![
-            vec![
-                "000001.SZ",
-                "000001",
-                "å¹³å®‰é“¶è¡Œ",
-                "æ·±åœ³",
-                "é“¶è¡Œ",
-                "",
-                "",
-                "",
-                "",
-                "",
-                "",
-                "",
-                "",
-                "",
-                "ä¸»æ¿",
-            ],
-            vec![
-                "300001.SZ",
-                "300001",
-                "ç‰¹é”å¾·",
-                "é’å²›",
-                "ä¸“ç”¨è®¾å¤‡",
-                "",
-                "",
-                "",
-                "",
-                "",
-                "",
-                "",
-                "",
-                "",
-                "åˆ›ä¸šæ¿",
-            ],
-        ]
-        .into_iter()
-        .map(|row| row.into_iter().map(str::to_string).collect())
-        .collect();
-
-        let (industry_map, industry_counts) = build_industry_maps_from_rows(rows);
-
-        assert_eq!(
-            industry_map.get("000001.SZ"),
-            Some(&vec!["é“¶è¡Œ".to_string()])
-        );
-        assert_eq!(
-            industry_map.get("300001.SZ"),
-            Some(&vec!["ä¸“ç”¨è®¾å¤‡".to_string()])
-        );
-        assert!(!industry_counts.contains_key("ä¸»æ¿"));
-        assert!(!industry_counts.contains_key("åˆ›ä¸šæ¿"));
-    }
-
-    #[test]
-    fn market_analysis_money_flow_converts_volume_to_yuan() {
-        assert_eq!(
-            estimate_net_money_flow_yuan(100.0, 1_000.0, 5_000.0),
-            Some(500_000.0)
-        );
-        assert_eq!(estimate_net_money_flow_yuan(100.0, 0.0, 5_000.0), None);
-        assert_eq!(
-            estimate_net_money_flow_yuan(f64::NAN, 1_000.0, 5_000.0),
-            None
-        );
-    }
-
-    #[test]
-    fn market_analysis_money_flow_only_ranks_positive_eligible_boards() {
-        let acc = HashMap::from([
-            ("ç®—åŠ›".to_string(), 200_000_000.0),
-            ("æœºå™¨äºº".to_string(), 80_000_000.0),
-            ("é“¶è¡Œ".to_string(), -50_000_000.0),
-        ]);
-        let counts = HashMap::from([
-            ("ç®—åŠ›".to_string(), 12),
-            ("æœºå™¨äºº".to_string(), 1),
-            ("é“¶è¡Œ".to_string(), 20),
-        ]);
-
-        let items = money_flow_rank_items(acc, &counts, 2);
-
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].name, "ç®—åŠ›");
-        assert_eq!(items[0].value, 200_000_000.0);
-    }
-
-    #[test]
-    fn market_analysis_money_outflow_ranks_largest_outflow_first() {
-        let acc = HashMap::from([
-            ("ç®—åŠ›".to_string(), 20_000_000.0),
-            ("æœºå™¨äºº".to_string(), -80_000_000.0),
-            ("é“¶è¡Œ".to_string(), -150_000_000.0),
-        ]);
-        let counts = HashMap::from([
-            ("ç®—åŠ›".to_string(), 12),
-            ("æœºå™¨äºº".to_string(), 8),
-            ("é“¶è¡Œ".to_string(), 20),
-        ]);
-
-        let items = money_outflow_rank_items(acc, &counts, 2);
-
-        assert_eq!(items.len(), 2);
-        assert_eq!(items[0].name, "é“¶è¡Œ");
-        assert_eq!(items[0].value, -150_000_000.0);
-        assert_eq!(items[1].name, "æœºå™¨äºº");
-    }
-
-    #[test]
-    fn market_analysis_trailing_gain_uses_requested_trade_day_window() {
-        let rows = vec![
-            ("20240102".to_string(), 10.0),
-            ("20240103".to_string(), 11.0),
-            ("20240104".to_string(), 12.0),
-            ("20240105".to_string(), 15.0),
-            ("20240108".to_string(), 20.0),
-            ("20240109".to_string(), 24.0),
-        ];
-
-        let three_day = trailing_period_gain(&rows, 3).expect("three day gain");
-        let five_day = trailing_period_gain(&rows, 5).expect("five day gain");
-
-        assert!((three_day - 100.0).abs() < 1e-9);
-        assert!((five_day - 140.0).abs() < 1e-9);
-        assert_eq!(trailing_period_gain(&rows[..5], 5), None);
-    }
-
-    fn temp_source_dir() -> PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        std::env::temp_dir().join(format!("lianghua_validation_trigger_scores_{unique}"))
-    }
-
-    fn prepare_validation_source_files(source_dir: &str) {
-        create_dir_all(source_dir).expect("create source dir");
-
-        write(
-            PathBuf::from(source_dir).join("trade_calendar.csv"),
-            "cal_date\n20240102\n20240103\n20240104\n",
-        )
-        .expect("write trade_calendar.csv");
-
-        write(
-            PathBuf::from(source_dir).join("stock_list.csv"),
-            "ts_code,unused,name\n000001.SZ,,æ ·æœ¬è‚¡\n",
-        )
-        .expect("write stock_list.csv");
-
-        let source_conn = Connection::open(source_db_path(source_dir)).expect("open source db");
-        source_conn
-            .execute(
-                r#"
-                CREATE TABLE stock_data (
-                    ts_code VARCHAR,
-                    trade_date VARCHAR,
-                    adj_type VARCHAR,
-                    open DOUBLE,
-                    high DOUBLE,
-                    low DOUBLE,
-                    close DOUBLE,
-                    vol DOUBLE,
-                    amount DOUBLE,
-                    pre_close DOUBLE,
-                    change DOUBLE,
-                    pct_chg DOUBLE
-                )
-                "#,
-                [],
-            )
-            .expect("create stock_data");
-
-        let mut app = source_conn
-            .appender("stock_data")
-            .expect("stock_data appender");
-        app.append_row(params![
-            "000001.SZ",
-            "20240102",
-            "qfq",
-            10.0_f64,
-            10.5_f64,
-            9.8_f64,
-            10.2_f64,
-            1000.0_f64,
-            10000.0_f64,
-            10.0_f64,
-            0.2_f64,
-            2.0_f64,
-        ])
-        .expect("insert stock row1");
-        app.append_row(params![
-            "000001.SZ",
-            "20240103",
-            "qfq",
-            10.2_f64,
-            11.0_f64,
-            10.1_f64,
-            10.8_f64,
-            1100.0_f64,
-            11000.0_f64,
-            10.2_f64,
-            0.6_f64,
-            5.88_f64,
-        ])
-        .expect("insert stock row2");
-        app.append_row(params![
-            "000001.SZ",
-            "20240104",
-            "qfq",
-            10.8_f64,
-            11.3_f64,
-            10.7_f64,
-            11.1_f64,
-            1200.0_f64,
-            12000.0_f64,
-            10.8_f64,
-            0.3_f64,
-            2.78_f64,
-        ])
-        .expect("insert stock row3");
-        app.flush().expect("flush stock_data");
-    }
-
-    #[test]
-    fn rule_expression_validation_reports_bad_expression_before_stock_filter() {
-        let source_dir = temp_source_dir();
-        let source_dir_str = source_dir.to_str().expect("utf8 source dir");
-        create_dir_all(source_dir_str).expect("create source dir");
-        write(
-            PathBuf::from(source_dir_str).join("score_rule.toml"),
-            r#"
-version = 1
-
-[[scene]]
-name = "è¶‹åŠ¿å¯åŠ¨"
-direction = "long"
-observe_threshold = 1.0
-trigger_threshold = 2.0
-confirm_threshold = 3.0
-fail_threshold = 1.0
-
-[[rule]]
-name = "æœ‰æ•ˆç­–ç•¥"
-scene = "è¶‹åŠ¿å¯åŠ¨"
-stage = "base"
-scope_windows = 1
-scope_way = "LAST"
-when = "C > O"
-points = 1.0
-explain = "test"
-"#,
-        )
-        .expect("write score_rule.toml");
-
-        let error = super::run_rule_expression_validation(
-            source_dir_str.to_string(),
-            String::new(),
-            Some("MA(C,".to_string()),
-            Some("LAST".to_string()),
-            Some(1),
-            Some("qfq".to_string()),
-            "000001.SH".to_string(),
-            Some(0.5),
-            Some(0.2),
-            Some(0.0),
-            "20240102".to_string(),
-            "20240104".to_string(),
-            Some(1),
-            Some(0),
-            Some(1),
-            None,
-            None,
-            Some(1),
-            Some("ä¸»æ¿".to_string()),
-            Some(false),
-            None,
-            None,
-        )
-        .expect_err("bad expression should fail before stock filtering");
-
-        assert!(error.contains("è¡¨è¾¾å¼è§£æžé”™è¯¯"), "{error}");
-        assert!(!error.contains("stock_list.csv"), "{error}");
-    }
-
-    #[test]
-    fn transient_rule_contribution_averages_match_rank_weight_formula() {
-        let summary_rows = vec![
-            ScoreSummary {
-                ts_code: "000001.SZ".to_string(),
-                trade_date: "20240102".to_string(),
-                total_score: 10.0,
-                rank: Some(1),
-            },
-            ScoreSummary {
-                ts_code: "000002.SZ".to_string(),
-                trade_date: "20240102".to_string(),
-                total_score: 5.0,
-                rank: Some(2),
-            },
-            ScoreSummary {
-                ts_code: "000001.SZ".to_string(),
-                trade_date: "20240103".to_string(),
-                total_score: 3.0,
-                rank: Some(2),
-            },
-            ScoreSummary {
-                ts_code: "000002.SZ".to_string(),
-                trade_date: "20240103".to_string(),
-                total_score: 9.0,
-                rank: Some(1),
-            },
-        ];
-        let detail_rows = vec![
-            ScoreDetails {
-                ts_code: "000001.SZ".to_string(),
-                trade_date: "20240102".to_string(),
-                rule_name: "è§„åˆ™A".to_string(),
-                rule_score: 2.0,
-            },
-            ScoreDetails {
-                ts_code: "000002.SZ".to_string(),
-                trade_date: "20240102".to_string(),
-                rule_name: "è§„åˆ™A".to_string(),
-                rule_score: 1.0,
-            },
-            ScoreDetails {
-                ts_code: "000001.SZ".to_string(),
-                trade_date: "20240103".to_string(),
-                rule_name: "è§„åˆ™A".to_string(),
-                rule_score: -2.0,
-            },
-            ScoreDetails {
-                ts_code: "000002.SZ".to_string(),
-                trade_date: "20240103".to_string(),
-                rule_name: "è§„åˆ™B".to_string(),
-                rule_score: 3.0,
-            },
-        ];
-
-        let averages = build_rule_contribution_averages_from_rows(
-            &summary_rows,
-            &detail_rows,
-            "20240102",
-            "20240103",
-        );
-
-        let rule_a = averages.get("è§„åˆ™A").expect("rule A averages");
-        assert_eq!(rule_a.avg_contribution_score, Some(0.75));
-        assert_eq!(rule_a.avg_contribution_per_trigger, Some(0.5));
-
-        let rule_b = averages.get("è§„åˆ™B").expect("rule B averages");
-        assert_eq!(rule_b.avg_contribution_score, Some(3.0));
-        assert_eq!(rule_b.avg_contribution_per_trigger, Some(3.0));
-    }
-
-    #[test]
-    fn persisted_rule_contribution_sql_matches_row_formula() {
-        let source_dir = temp_source_dir();
-        let source_dir_str = source_dir.to_str().expect("utf8 source dir");
-        create_dir_all(source_dir_str).expect("create source dir");
-        let result_conn = Connection::open(result_db_path(source_dir_str)).expect("open result db");
-        result_conn
-            .execute_batch(
-                r#"
-                CREATE TABLE score_summary (
-                    ts_code VARCHAR,
-                    trade_date VARCHAR,
-                    total_score DOUBLE,
-                    rank BIGINT
-                );
-                INSERT INTO score_summary VALUES
-                    ('000001.SZ', '20240102', 10.0, 1),
-                    ('000002.SZ', '20240102', 5.0, 2),
-                    ('000001.SZ', '20240103', 3.0, 2),
-                    ('000002.SZ', '20240103', 9.0, 1);
-
-                CREATE TABLE rule_details (
-                    ts_code VARCHAR,
-                    trade_date VARCHAR,
-                    rule_name VARCHAR,
-                    rule_score DOUBLE
-                );
-                INSERT INTO rule_details VALUES
-                    ('000001.SZ', '20240102', 'è§„åˆ™A', 2.0),
-                    ('000002.SZ', '20240102', 'è§„åˆ™A', 1.0),
-                    ('000001.SZ', '20240103', 'è§„åˆ™A', -2.0),
-                    ('000002.SZ', '20240103', 'è§„åˆ™B', 3.0),
-                    ('000001.SZ', '20240103', 'æœªè¯·æ±‚è§„åˆ™', 100.0);
-                "#,
-            )
-            .expect("prepare contribution rows");
-        drop(result_conn);
-
-        let averages = build_rule_contribution_averages(
-            source_dir_str,
-            &["è§„åˆ™A".to_string(), "è§„åˆ™B".to_string()],
-            "20240102",
-            "20240103",
-        )
-        .expect("query contribution averages");
-
-        let rule_a = averages.get("è§„åˆ™A").expect("rule A averages");
-        assert_eq!(rule_a.avg_contribution_score, Some(0.75));
-        assert_eq!(rule_a.avg_contribution_per_trigger, Some(0.5));
-
-        let rule_b = averages.get("è§„åˆ™B").expect("rule B averages");
-        assert_eq!(rule_b.avg_contribution_score, Some(3.0));
-        assert_eq!(rule_b.avg_contribution_per_trigger, Some(3.0));
-        assert!(!averages.contains_key("æœªè¯·æ±‚è§„åˆ™"));
-    }
-
-    #[test]
-    fn validation_return_distribution_uses_symmetric_percent_buckets() {
-        let samples = [-12.0, -10.0, -7.0, -3.0, -2.0, 0.0, 2.0, 3.0, 8.0, 11.0]
-            .into_iter()
-            .map(|residual_return| RuleLayerSamplePoint {
-                ts_code: "000001.SZ".to_string(),
-                trade_date: "20240102".to_string(),
-                rule_score: 1.0,
-                residual_return,
-                er_change: f64::INFINITY,
-            })
-            .collect::<Vec<_>>();
-
-        let buckets = build_validation_return_distribution(&samples);
-
-        assert_eq!(buckets.len(), 7);
-        assert_eq!(
-            buckets
-                .iter()
-                .map(|bucket| bucket.sample_count)
-                .collect::<Vec<_>>(),
-            vec![2, 1, 2, 2, 1, 1, 1]
-        );
-        assert_eq!(buckets[0].sample_ratio, Some(0.2));
-
-        let compressed = build_validation_return_distribution_from_counts([2, 1, 2, 2, 1, 1, 1]);
-        assert_eq!(
-            compressed
-                .iter()
-                .map(|bucket| (bucket.sample_count, bucket.sample_ratio))
-                .collect::<Vec<_>>(),
-            buckets
-                .iter()
-                .map(|bucket| (bucket.sample_count, bucket.sample_ratio))
-                .collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn compressed_validation_score_layers_match_full_samples() {
-        let samples = vec![
-            RuleLayerSamplePoint {
-                ts_code: "000001.SZ".to_string(),
-                trade_date: "20240102".to_string(),
-                rule_score: 0.0,
-                residual_return: 1.0,
-                er_change: 0.0,
-            },
-            RuleLayerSamplePoint {
-                ts_code: "000002.SZ".to_string(),
-                trade_date: "20240102".to_string(),
-                rule_score: 2.0,
-                residual_return: 3.0,
-                er_change: 0.0,
-            },
-            RuleLayerSamplePoint {
-                ts_code: "000001.SZ".to_string(),
-                trade_date: "20240103".to_string(),
-                rule_score: 0.0,
-                residual_return: 2.0,
-                er_change: 0.0,
-            },
-            RuleLayerSamplePoint {
-                ts_code: "000002.SZ".to_string(),
-                trade_date: "20240103".to_string(),
-                rule_score: 0.0,
-                residual_return: 4.0,
-                er_change: 0.0,
-            },
-        ];
-        let full = build_validation_score_layer_details(&samples, 1);
-        let compressed = build_validation_score_layer_details_from_daily_layers(vec![
-            RuleLayerDailyScoreLayers {
-                trade_date: "20240103".to_string(),
-                groups: vec![RuleLayerDailyScoreGroup {
-                    score: 0.0,
-                    sample_count: 2,
-                    avg_residual_return: 3.0,
-                }],
-            },
-            RuleLayerDailyScoreLayers {
-                trade_date: "20240102".to_string(),
-                groups: vec![
-                    RuleLayerDailyScoreGroup {
-                        score: 0.0,
-                        sample_count: 1,
-                        avg_residual_return: 1.0,
-                    },
-                    RuleLayerDailyScoreGroup {
-                        score: 2.0,
-                        sample_count: 1,
-                        avg_residual_return: 3.0,
-                    },
-                ],
-            },
-        ]);
-
-        assert_eq!(compressed.spread_mean, full.spread_mean);
-        assert_eq!(compressed.layer_summaries.len(), full.layer_summaries.len());
-        for (compressed, full) in compressed.layer_summaries.iter().zip(&full.layer_summaries) {
-            assert_eq!(compressed.layer_index, full.layer_index);
-            assert_eq!(compressed.layer_label, full.layer_label);
-            assert_eq!(compressed.point_count, full.point_count);
-            assert_eq!(compressed.sample_count, full.sample_count);
-            assert_eq!(compressed.avg_score, full.avg_score);
-            assert_eq!(compressed.avg_residual_return, full.avg_residual_return);
-        }
-    }
-
-    #[test]
-    fn validation_triggered_scores_cover_full_analysis_window() {
-        let source_dir = temp_source_dir();
-        let source_dir_str = source_dir.to_str().expect("utf8 source dir");
-        prepare_validation_source_files(source_dir_str);
-
-        let cached_rule = build_validation_cached_rule(
-            "validation_test_rule".to_string(),
-            ScopeWay::Any,
-            1,
-            1.0,
-            None,
-            RuleTag::Normal,
-            "C > 0",
-        )
-        .expect("build cached rule");
-
-        let triggered_score_map = build_validation_triggered_scores(
-            source_dir_str,
-            "qfq",
-            "20240102",
-            "20240104",
-            &cached_rule,
-        )
-        .expect("build triggered scores");
-
-        let date_score_map = triggered_score_map
-            .get("000001.SZ")
-            .expect("ts_code should have triggered scores");
-
-        assert_eq!(date_score_map.len(), 3);
-        assert!(date_score_map.contains_key("20240102"));
-        assert!(date_score_map.contains_key("20240103"));
-        assert!(date_score_map.contains_key("20240104"));
-        assert_eq!(
-            triggered_score_map
-                .values()
-                .map(|item| item.len())
-                .sum::<usize>(),
-            3
-        );
-    }
-
-    #[test]
-    fn validation_triggered_scores_inject_uppercase_rank() {
-        let source_dir = temp_source_dir();
-        let source_dir_str = source_dir.to_str().expect("utf8 source dir");
-        prepare_validation_source_files(source_dir_str);
-        (|source_dir: &str| {
-            let result_conn = Connection::open(result_db_path(source_dir)).expect("open result db");
-            result_conn
-                .execute(
-                    r#"
-                CREATE TABLE score_summary (
-                    ts_code VARCHAR,
-                    trade_date VARCHAR,
-                    total_score DOUBLE,
-                    rank BIGINT
-                )
-                "#,
-                    [],
-                )
-                .expect("create score_summary");
-            result_conn
-                .execute(
-                    "INSERT INTO score_summary VALUES (?, ?, ?, ?), (?, ?, ?, ?), (?, ?, ?, ?)",
-                    params![
-                        "000001.SZ",
-                        "20240102",
-                        80.0_f64,
-                        3_i64,
-                        "000001.SZ",
-                        "20240103",
-                        90.0_f64,
-                        2_i64,
-                        "000001.SZ",
-                        "20240104",
-                        100.0_f64,
-                        1_i64,
-                    ],
-                )
-                .expect("insert rank rows");
-        })(source_dir_str);
-
-        let cached_rule = build_validation_cached_rule(
-            "validation_rank_rule".to_string(),
-            ScopeWay::Any,
-            1,
-            1.0,
-            None,
-            RuleTag::Normal,
-            "RANK <= 2",
-        )
-        .expect("build cached rule");
-
-        let triggered_score_map = build_validation_triggered_scores(
-            source_dir_str,
-            "qfq",
-            "20240102",
-            "20240104",
-            &cached_rule,
-        )
-        .expect("build triggered scores");
-
-        let date_score_map = triggered_score_map
-            .get("000001.SZ")
-            .expect("ts_code should have rank-triggered scores");
-
-        assert_eq!(date_score_map.len(), 2);
-        assert!(!date_score_map.contains_key("20240102"));
-        assert!(date_score_map.contains_key("20240103"));
-        assert!(date_score_map.contains_key("20240104"));
-    }
-
-    #[test]
-    fn validation_sample_board_prefers_market_label_and_derives_group() {
-        assert_eq!(
-            resolve_validation_sample_board_label("688001.SH", Some("æ ·æœ¬è‚¡"), Some("ç§‘åˆ›æ¿")),
-            "ç§‘åˆ›æ¿"
-        );
-        assert_eq!(derive_validation_volatility_group("ç§‘åˆ›æ¿"), "é«˜æ³¢åŠ¨");
-    }
-
-    #[test]
-    fn validation_sample_board_keeps_st_override() {
-        assert_eq!(
-            resolve_validation_sample_board_label("000001.SZ", Some("*STæ ·æœ¬"), Some("ä¸»æ¿")),
-            "ST"
-        );
-        assert_eq!(derive_validation_volatility_group("ST"), "å…¶ä»–æ³¢åŠ¨");
-    }
-
-    #[test]
-    fn validation_trigger_count_uses_each_score_multiple() {
-        assert_eq!(resolve_validation_trigger_count(3.0, true, 1.0, false), 3);
-        assert_eq!(resolve_validation_trigger_count(-4.0, true, -1.0, false), 4);
-        assert_eq!(resolve_validation_trigger_count(6.0, true, 2.0, false), 3);
-        assert_eq!(resolve_validation_trigger_count(3.0, false, 1.0, false), 1);
-        assert_eq!(resolve_validation_trigger_count(3.0, true, 1.0, true), 1);
-    }
-
-    #[test]
-    fn validation_sample_limit_applies_per_board_and_direction() {
-        let samples = vec![
-            ValidationSampleRawRow {
-                ts_code: "BJ0001.BJ".to_string(),
-                trade_date: "20240102".to_string(),
-                trigger_count: 1,
-                rule_score: 1.0,
-                residual_return: 9.0,
-            },
-            ValidationSampleRawRow {
-                ts_code: "BJ0001.BJ".to_string(),
-                trade_date: "20240103".to_string(),
-                trigger_count: 1,
-                rule_score: 1.0,
-                residual_return: 8.0,
-            },
-            ValidationSampleRawRow {
-                ts_code: "MB0001.SZ".to_string(),
-                trade_date: "20240102".to_string(),
-                trigger_count: 1,
-                rule_score: 1.0,
-                residual_return: 7.0,
-            },
-            ValidationSampleRawRow {
-                ts_code: "MB0001.SZ".to_string(),
-                trade_date: "20240103".to_string(),
-                trigger_count: 1,
-                rule_score: 1.0,
-                residual_return: 6.0,
-            },
-            ValidationSampleRawRow {
-                ts_code: "BJ0001.BJ".to_string(),
-                trade_date: "20240104".to_string(),
-                trigger_count: 1,
-                rule_score: 1.0,
-                residual_return: -7.0,
-            },
-            ValidationSampleRawRow {
-                ts_code: "BJ0001.BJ".to_string(),
-                trade_date: "20240105".to_string(),
-                trigger_count: 1,
-                rule_score: 1.0,
-                residual_return: -8.0,
-            },
-            ValidationSampleRawRow {
-                ts_code: "MB0001.SZ".to_string(),
-                trade_date: "20240104".to_string(),
-                trigger_count: 1,
-                rule_score: 1.0,
-                residual_return: -5.0,
-            },
-            ValidationSampleRawRow {
-                ts_code: "MB0001.SZ".to_string(),
-                trade_date: "20240105".to_string(),
-                trigger_count: 1,
-                rule_score: 1.0,
-                residual_return: -6.0,
-            },
-        ];
-        let stock_meta_map = HashMap::from([
-            (
-                "BJ0001.BJ".to_string(),
-                ValidationSampleStockMeta {
-                    name: Some("åŒ—äº¤æ ·æœ¬".to_string()),
-                    board: "åŒ—äº¤æ‰€".to_string(),
-                    volatility_group: "é«˜æ³¢åŠ¨".to_string(),
-                },
-            ),
-            (
-                "MB0001.SZ".to_string(),
-                ValidationSampleStockMeta {
-                    name: Some("ä¸»æ¿æ ·æœ¬".to_string()),
-                    board: "ä¸»æ¿".to_string(),
-                    volatility_group: "å¸¸è§„æ³¢åŠ¨".to_string(),
-                },
-            ),
-        ]);
-
-        let (stats, groups) = build_validation_sample_groups(&samples, 1, &stock_meta_map);
-
-        assert_eq!(stats.positive_count, 4);
-        assert_eq!(stats.negative_count, 4);
-        assert_eq!(stats.random_count, 8);
-        assert_eq!(stats.total_samples, 8);
-
-        let count_boards = |rows: &[super::RuleValidationSampleRow]| {
-            rows.iter()
-                .fold(HashMap::<String, usize>::new(), |mut acc, row| {
-                    *acc.entry(row.board.clone()).or_insert(0) += 1;
-                    acc
-                })
-        };
-
-        let positive_boards = count_boards(&groups.positive);
-        let negative_boards = count_boards(&groups.negative);
-        let random_boards = count_boards(&groups.random);
-
-        assert_eq!(groups.positive.len(), 2);
-        assert_eq!(positive_boards.get("åŒ—äº¤æ‰€"), Some(&1));
-        assert_eq!(positive_boards.get("ä¸»æ¿"), Some(&1));
-
-        assert_eq!(groups.negative.len(), 2);
-        assert_eq!(negative_boards.get("åŒ—äº¤æ‰€"), Some(&1));
-        assert_eq!(negative_boards.get("ä¸»æ¿"), Some(&1));
-
-        assert_eq!(groups.random.len(), 2);
-        assert_eq!(random_boards.get("åŒ—äº¤æ‰€"), Some(&1));
-        assert_eq!(random_boards.get("ä¸»æ¿"), Some(&1));
-    }
-
-    #[test]
-    fn rank_layer_samples_keep_full_observation_counts_and_per_board_limit() {
-        let mut samples = Vec::new();
-        let mut stock_meta_map = HashMap::new();
-        for (board_prefix, board) in [("MB", "ä¸»æ¿"), ("CY", "åˆ›ä¸šæ¿")] {
-            for index in 0..6 {
-                let ts_code = format!("{board_prefix}{index:04}.SZ");
-                stock_meta_map.insert(
-                    ts_code.clone(),
-                    ValidationSampleStockMeta {
-                        name: None,
-                        board: board.to_string(),
-                        volatility_group: "å¸¸è§„æ³¢åŠ¨".to_string(),
-                    },
-                );
-                samples.push(RankLayerSamplePoint {
-                    layer_index: 1,
-                    ts_code: ts_code.clone(),
-                    trade_date: "20240102".to_string(),
-                    score: 10.0,
-                    residual_return: index as f64 + 1.0,
-                    er_change: f64::INFINITY,
-                });
-                samples.push(RankLayerSamplePoint {
-                    layer_index: 1,
-                    ts_code,
-                    trade_date: "20240103".to_string(),
-                    score: 10.0,
-                    residual_return: index as f64 + 11.0,
-                    er_change: f64::INFINITY,
-                });
-            }
-        }
-
-        let groups = build_rank_layer_sample_groups(&samples, 1, &stock_meta_map);
-        let group = &groups[0];
-
-        assert_eq!(group.total_samples, 24);
-        assert_eq!(group.triggered_days, 2);
-        assert_eq!(group.positive_count, 24);
-        assert_eq!(group.positive.len(), 10);
-        assert_eq!(group.positive[0].residual_return, 16.0);
-        assert!(
-            group
-                .positive
-                .iter()
-                .all(|row| row.trade_date == "20240103")
-        );
-    }
-
-    #[test]
-    fn validation_batch_scores_restore_overwritten_base_series() {
-        let source_dir = temp_source_dir();
-        let source_dir_str = source_dir.to_str().expect("utf8 source dir");
-        prepare_validation_source_files(source_dir_str);
-
-        let first_rule = build_validation_cached_rule(
-            "validation_combo_001".to_string(),
-            ScopeWay::Any,
-            1,
-            1.0,
-            None,
-            RuleTag::Normal,
-            "C := REF(C, 1); C > 0",
-        )
-        .expect("build first cached rule");
-        let second_rule = build_validation_cached_rule(
-            "validation_combo_002".to_string(),
-            ScopeWay::Any,
-            1,
-            1.0,
-            None,
-            RuleTag::Normal,
-            "C := REF(C, 2); C > 0",
-        )
-        .expect("build second cached rule");
-
-        let expected_first = build_validation_triggered_scores(
-            source_dir_str,
-            "qfq",
-            "20240102",
-            "20240104",
-            &first_rule,
-        )
-        .expect("build first triggered scores");
-        let expected_second = build_validation_triggered_scores(
-            source_dir_str,
-            "qfq",
-            "20240102",
-            "20240104",
-            &second_rule,
-        )
-        .expect("build second triggered scores");
-
-        let reader = DataReader::new(source_dir_str).expect("build reader");
-        let ts_codes = reader
-            .list_ts_code("qfq", "20240102", "20240104")
-            .expect("list ts codes");
-        let st_list = load_st_list(source_dir_str).expect("load st list");
-        let combos = vec![
-            PreparedValidationCombo {
-                variant: ValidationVariant {
-                    combo_key: first_rule.name.clone(),
-                    combo_label: first_rule.name.clone(),
-                    formula: first_rule.when_src.clone(),
-                    unknown_values: Vec::new(),
-                },
-                cached_rule: first_rule.clone(),
-                assigned_names: collect_validation_assigned_names(&first_rule.when_ast),
-            },
-            PreparedValidationCombo {
-                variant: ValidationVariant {
-                    combo_key: second_rule.name.clone(),
-                    combo_label: second_rule.name.clone(),
-                    formula: second_rule.when_src.clone(),
-                    unknown_values: Vec::new(),
-                },
-                cached_rule: second_rule.clone(),
-                assigned_names: collect_validation_assigned_names(&second_rule.when_ast),
-            },
-        ];
-
-        let batch_results = build_validation_triggered_scores_for_combos(
-            source_dir_str,
-            "qfq",
-            "20240102",
-            "20240102",
-            "20240104",
-            3,
-            &ts_codes,
-            &st_list,
-            &combos,
-        )
-        .expect("build batch triggered scores");
-
-        assert_eq!(batch_results.len(), 2);
-        assert_eq!(batch_results[0], expected_first);
-        assert_eq!(batch_results[1], expected_second);
-    }
-
-    #[test]
-    fn rule_validation_runtime_key_collection_skips_injected_fields() {
-        let rule = build_validation_cached_rule(
-            "validation_runtime_keys".to_string(),
-            ScopeWay::Any,
-            1,
-            1.0,
-            None,
-            RuleTag::Normal,
-            "M := MA(C, 5); M > MY_VALIDATION_IND AND RANK <= 100 AND SCORE > 0 AND ZHANG > 0 AND TOTAL_MV_YI <= 300 AND S_RANK <= 100 AND CYQ_TPR > 0.6",
-        )
-        .expect("build cached rule");
-        let combo = PreparedValidationCombo {
-            variant: ValidationVariant {
-                combo_key: rule.name.clone(),
-                combo_label: rule.name.clone(),
-                formula: rule.when_src.clone(),
-                unknown_values: Vec::new(),
-            },
-            cached_rule: rule.clone(),
-            assigned_names: collect_validation_assigned_names(&rule.when_ast),
-        };
-
-        let keys = collect_rule_validation_runtime_keys(&[combo]);
-
-        for required_key in ["C", "MY_VALIDATION_IND"] {
-            assert!(keys.contains(required_key), "missing {required_key}");
-        }
-        assert!(!keys.contains("TOTAL_MV"));
-        for injected_key in ["RANK", "SCORE", "ZHANG", "TOTAL_MV_YI", "S_RANK", "CYQ_TPR"] {
-            assert!(!keys.contains(injected_key), "unexpected {injected_key}");
-        }
-        assert!(!keys.contains("O"));
-    }
-
-    #[test]
-    fn validation_similarity_rows_use_pair_index_cache() {
-        let similarity_cache = ValidationSimilarityCache {
-            total_samples: 12.0,
-            rule_names: vec!["è§„åˆ™A".to_string(), "è§„åˆ™B".to_string()],
-            rule_hit_counts: vec![3, 1],
-            pair_to_rule_indices: HashMap::from([
-                (
-                    "000001.SZ".to_string(),
-                    HashMap::from([("20240102".to_string(), vec![0, 1])]),
-                ),
-                (
-                    "000002.SZ".to_string(),
-                    HashMap::from([("20240103".to_string(), vec![0])]),
-                ),
-            ]),
-        };
-        let triggered_samples = vec![
-            RuleLayerSamplePoint {
-                ts_code: "000001.SZ".to_string(),
-                trade_date: "20240102".to_string(),
-                rule_score: 1.0,
-                residual_return: 0.5,
-                er_change: f64::INFINITY,
-            },
-            RuleLayerSamplePoint {
-                ts_code: "000002.SZ".to_string(),
-                trade_date: "20240103".to_string(),
-                rule_score: 1.0,
-                residual_return: 0.3,
-                er_change: f64::INFINITY,
-            },
-        ];
-        let explain_map = HashMap::from([("è§„åˆ™A".to_string(), "è¯´æ˜ŽA".to_string())]);
-
-        let rows = build_validation_similarity_rows(
-            &similarity_cache,
-            &triggered_samples,
-            None,
-            &explain_map,
-        );
-
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].rule_name, "è§„åˆ™A");
-        assert_eq!(rows[0].overlap_samples, 2);
-        assert_eq!(rows[0].overlap_rate_vs_validation, Some(1.0));
-        assert_eq!(rows[0].overlap_rate_vs_existing, Some(2.0 / 3.0));
-        assert_eq!(rows[0].overlap_lift, Some(4.0));
-        assert_eq!(rows[0].explain.as_deref(), Some("è¯´æ˜ŽA"));
-
-        assert_eq!(rows[1].rule_name, "è§„åˆ™B");
-        assert_eq!(rows[1].overlap_samples, 1);
-        assert_eq!(rows[1].overlap_rate_vs_validation, Some(0.5));
-        assert_eq!(rows[1].overlap_rate_vs_existing, Some(1.0));
-        assert_eq!(rows[1].overlap_lift, Some(6.0));
-        assert!(rows[1].explain.is_none());
-    }
-
-    #[test]
-    fn validation_calibration_candidates_cover_trigger_modes_without_plain_duplicate() {
-        let seed_rule = ValidationSeedRule {
-            rule_name: "æµ‹è¯•ç­–ç•¥".to_string(),
-            rule_explain: String::new(),
-            scope_way: ScopeWay::Last,
-            scope_windows: 1,
-            formula: "C > O".to_string(),
-            points: 1.0,
-            dist_points: None,
-            tag: RuleTag::Normal,
-            exclude_rule_name: None,
-        };
-
-        let specs = build_validation_calibration_specs(&seed_rule);
-
-        assert_eq!(
-            specs
-                .iter()
-                .filter(|item| {
-                    scope_way_config_label(item.scope_way) == "LAST" && item.scope_windows == 1
-                })
-                .count(),
-            1
-        );
-        for scope_label in ["ANY", "EACH", "CONSEC>=2", "CONSEC>=3", "RECENT"] {
-            assert!(
-                specs
-                    .iter()
-                    .any(|item| scope_way_config_label(item.scope_way) == scope_label),
-                "missing {scope_label}"
-            );
-        }
-    }
-
-    #[test]
-    fn validation_recent_decay_weights_keep_direction_and_decay() {
-        let positive = build_recent_decay_dist_points(3, 1.0);
-        let negative = build_recent_decay_dist_points(3, -1.0);
-
-        assert_eq!(positive.len(), 3);
-        assert!((positive[0].points - 1.0).abs() < VALIDATION_EPS);
-        assert!((positive[1].points - 0.5).abs() < VALIDATION_EPS);
-        assert!((positive[2].points - 0.25).abs() < VALIDATION_EPS);
-        assert!((negative[0].points + 1.0).abs() < VALIDATION_EPS);
-        assert!((negative[1].points + 0.5).abs() < VALIDATION_EPS);
-        assert!((negative[2].points + 0.25).abs() < VALIDATION_EPS);
-    }
-
-    #[test]
-    fn validation_calibration_stability_requires_both_time_halves() {
-        assert_eq!(calibration_stability_factor(1.0, Some(0.3), Some(0.1)), 1.0);
-        assert_eq!(
-            calibration_stability_factor(-1.0, Some(-0.3), Some(-0.1)),
-            1.0
-        );
-        assert_eq!(
-            calibration_stability_factor(1.0, Some(0.3), Some(-0.1)),
-            0.5
-        );
-        assert_eq!(
-            calibration_stability_factor(-1.0, Some(0.3), Some(-0.1)),
-            0.5
-        );
-        assert_eq!(
-            calibration_stability_factor(1.0, Some(-0.3), Some(-0.1)),
-            0.0
-        );
-    }
-
-    fn decay_test_point(index: usize, score: f64, excess: f64) -> RuleLayerPoint {
-        RuleLayerPoint {
-            trade_date: format!("{index:08}"),
-            sample_count: 10,
-            avg_rule_score: Some(score),
-            avg_residual_return: Some(excess),
-            avg_excess_residual_return: Some(excess),
-            top_bottom_spread: None,
-            ic: None,
-        }
-    }
-
-    #[test]
-    fn rule_decay_validation_detects_recent_positive_rule_decay() {
-        let points = (0..80)
-            .map(|index| {
-                let excess = if index < 60 {
-                    0.20 + (index % 2) as f64 * 0.02
-                } else {
-                    -0.50 + (index % 2) as f64 * 0.02
-                };
-                decay_test_point(index, 1.0, excess)
-            })
-            .collect::<Vec<_>>();
-
-        let validations = build_rule_decay_validations(&points);
-        let recent_20 = validations
-            .iter()
-            .find(|item| item.window_days == 20)
-            .expect("20-day validation");
-
-        assert_eq!(recent_20.status, "significant_decay");
-        assert_eq!(recent_20.recent_day_count, 20);
-        assert_eq!(recent_20.prior_day_count, 60);
-        assert!(
-            recent_20
-                .recent_directional_excess_mean
-                .is_some_and(|value| value < 0.0)
-        );
-        assert!(recent_20.decay_change.is_some_and(|value| value < -0.6));
-        assert!(recent_20.decay_t_value.is_some_and(|value| value < -2.0));
-    }
-
-    #[test]
-    fn rule_decay_validation_normalizes_negative_rule_direction() {
-        let points = (0..80)
-            .map(|index| {
-                let excess = if index < 60 {
-                    -0.30 - (index % 2) as f64 * 0.02
-                } else {
-                    0.20 - (index % 2) as f64 * 0.02
-                };
-                decay_test_point(index, -1.0, excess)
-            })
-            .collect::<Vec<_>>();
-
-        let validations = build_rule_decay_validations(&points);
-        let recent_20 = validations
-            .iter()
-            .find(|item| item.window_days == 20)
-            .expect("20-day validation");
-
-        assert_eq!(recent_20.status, "significant_decay");
-        assert!(
-            recent_20
-                .prior_directional_excess_mean
-                .is_some_and(|value| value > 0.0)
-        );
-        assert!(
-            recent_20
-                .recent_directional_excess_mean
-                .is_some_and(|value| value < 0.0)
-        );
-        assert!(recent_20.decay_change.is_some_and(|value| value < 0.0));
-    }
-
-    #[test]
-    fn rule_decay_validation_marks_short_history_as_insufficient() {
-        let points = (0..25)
-            .map(|index| decay_test_point(index, 1.0, 0.10))
-            .collect::<Vec<_>>();
-
-        let validations = build_rule_decay_validations(&points);
-
-        assert_eq!(validations.len(), 3);
-        assert!(validations.iter().all(|item| item.status == "insufficient"));
-        let recent_20 = validations
-            .iter()
-            .find(|item| item.window_days == 20)
-            .expect("20-day validation");
-        assert_eq!(recent_20.recent_day_count, 20);
-        assert_eq!(recent_20.prior_day_count, 5);
-        assert_eq!(recent_20.decay_change, None);
-    }
-
-    #[test]
-    fn all_rule_basket_decay_averages_directional_strategy_days() {
-        let first = (0..80)
-            .map(|index| {
-                let value = if index < 60 {
-                    0.20 + (index % 2) as f64 * 0.02
-                } else {
-                    -0.30 + (index % 2) as f64 * 0.02
-                };
-                (format!("{index:08}"), value)
-            })
-            .collect::<Vec<_>>();
-        let second = (0..80)
-            .map(|index| {
-                let value = if index < 60 {
-                    0.40 + (index % 2) as f64 * 0.02
-                } else {
-                    -0.10 + (index % 2) as f64 * 0.02
-                };
-                (format!("{index:08}"), value)
-            })
-            .collect::<Vec<_>>();
-
-        let validations =
-            build_rule_basket_decay_from_daily_groups([first.as_slice(), second.as_slice()]);
-        let recent_20 = validations
-            .iter()
-            .find(|item| item.window_days == 20)
-            .expect("20-day basket validation");
-
-        assert_eq!(recent_20.status, "significant_decay");
-        assert_eq!(recent_20.recent_day_count, 20);
-        assert_eq!(recent_20.prior_day_count, 60);
-        assert!(
-            recent_20
-                .recent_directional_excess_mean
-                .is_some_and(|value| value < -0.18)
-        );
-        assert!(recent_20.decay_change.is_some_and(|value| value < -0.49));
-    }
-}
+YªçŠx-®éÜj×¢ëiºÚ+Š§j[h‘éÜ¢éí×]ùëÄèµ©hºÚn¶X§zÍ]\ÙHÝŽžÂˆÛ\Ž“Ü™\š[™ËˆÛÛXÝ[ÛœÎŽžÒ\ÚX\\ÚÙ]KˆÞ[˜ÎŽžÐ\˜Ë]]^Û˜ÙSØÚßKˆ[YNŽžÑ\˜][Û‹[œÝ[KŸNÂ‚\ÙHXÚÙŽŽžÐÛÛ›™XÝ[Û‹\˜[\Ë\˜[\×Ùœ›ÛWÚ]\ŸNÂ\ÙH˜[™Žœ˜[™ÛNÂˆÖØÙ™Ê\Ý
+WB\ÙH˜[™ŽžÔ›™ËÙYYX›T›™Ë›™ÜÎŽ”Ý›™ßNÂ\ÙH˜^[ÛŽŽœ™[YNŽŠŽÂ\ÙHÙ\™NŽžÑ\Ù\šX[^™KÙ\šX[^™_NÂ‚\ÙHÜ˜]NŽžÂˆ]NŽžÂˆ]T™XY\‹[RÚ[™[TÝYÙK[UYË[[YRÙ^PÛÛXÝÜ[ÛœËØÛÜUØ^KØÛÜ™T[KˆØÛÜ™TØÙ[™KÛÛXÝØ\ÜÚYÛ™YÛ˜[Y\×Ùœ›ÛWÙ^—Ü›ÙÜ˜[KˆÛÛXÝÜ[[YWÚÙ^\×Ùœ›ÛWÙ^—Ü›ÙÜ˜[\ËÛÛ˜Ù\Ü\™›Ü›X[˜ÙWÙ—Ü]ˆ^—Ü›ÙÜ˜[WÝ\Ù\×Ü[[YWÚÙ^KØYÜÝØÚ×Û\ÝØYÝ×ØÛÛ˜Ù\×Û\Ý™\Ý[Ù—Ü]ˆ[[YNŽœ›Ý×Ú[×ÜÛÝ\˜ÙWÙ—Ü]ˆKˆ^ŽŽžÂˆ]˜[ŽžÔ[[YK˜[Y_Kˆ^\ŽŽ•ÚÙ[’Ú[™ˆ\œÙ\ŽŽžÔÝ]Ý]Ë^Ø[Kˆ˜[Y][ÛŽŽžÂˆ\Ý[X]WÙ^™\ÜÚ[Û—ÝØ\›]\\œÙWÙ^™\ÜÚ[Û—Ü›ÙÜ˜[K˜[Y]WÙ^™\ÜÚ[Û—Ù[˜Ý[ÛœËˆKˆKˆØÛÜš[™ÎŽœ[WØØXÚNŽ˜ØXÚWÜ[WØZ[\ÈZ[ÜØÛÜš[™×Ü[WØØXÚKˆØÛÜš[™ÎŽœ[›™\ŽŽžÔØÛÜš[™ÓY[[ÜžS[ÙKØÛÜš[™×Ø[Ý×ÛY[[ÜžWÝÚ]Û[Ù_KˆØÛÜš[™ÎŽÛÛÎŽžÂˆÞ\PÚ[‘šY[[š™XÝÜ‹Ú[Z[\š]T˜[šÑšY[[š™XÝÜ‹Ø[×Ü]Y\žWÛ™YYÜ›ÝÜËˆØ[×Ü]Y\žWÜÝ\Ù]KÛÛXÝÝ\ÙYØÞ\WØÚ[—Ü[[YWÚÙ^\ËÞ\WØÚ[—Ü[[YWÚÙ^WÛ˜[Y\Ëˆ[š™XÝÜÝØÚ×Ù^˜WÙšY[ËØYÜÝÛ\ÝØYÝÝ[ÜÚ\™WÛX\ˆKˆØÛÜš[™ÎŽžÐØXÚY[K]˜[X]WØØXÚYÜ[WÜØÛÜ™\ßKˆØÛÜš[™×Û[Ù[ŽžÔØÙ[™P˜XÚÝ\Ý›ÝËØÛÜ™Q]Z[ËØÛÜ™TÝ[[X\ž_KˆÚ[][]NŽžÂˆQUSÐPÒÕTÕÓRS—ÓTÕQÕQWÑVTËZ[Ø˜XÚÝ\ÝÜØ[\WÙ[YÚXš[]Kˆ˜[šÎŽžÂˆ˜[šÓ^Y\ÛÛ™šYË˜[šÓ^Y\‘œ›ÛQ’[œ]˜[šÓ^Y\“Y]ÙˆØ[×Ü˜[š×Û^Y\—ÛY]šXÜ×Ùœ›ÛWÜ˜[š×ÜØ[\\ËØ[×Ü˜[š×Û^Y\—ÛY]šXÜ×Ùœ›ÛWÜØÛÜ™WÜ›ÝÜËˆKˆ[NŽžÂˆQUSÔ•SWÕÒUÔÐSTT×ÔTSSÐUÒÔÒV‘K[S^Y\ÛÛ™šYËˆ[S^Y\‘Z[TØÛÜ™S^Y\œË[S^Y\‘œ›ÛQ’[œ][S^Y\“Y]šXÜÕÚ]˜[Y][Û‹ˆ[S^Y\”[[YPØXÚK[S^Y\”Ø[\TÚ[™Y‹ˆZ[Ü[WÛ^Y\—Ü[[YWØØXÚWÙœ›ÛWÜÝØÚ×Ù]WÝÚ]Ý×Ùš[\‹ˆØ[×Ø[Ü[WÛ^Y\—ÛY]šXÜ×ÝÚ]Ý˜[Y][Û—Ùœ›ÛWÙ—ÛX\ÝÚ]Ý×Ùš[\‹ˆØ[×Ø[Ü[WÛ^Y\—ÛY]šXÜ×ÝÚ]Ý˜[Y][Û—Ùœ›ÛWÛÝÛ™YÜ›ÝÜ×ÛX\ˆØ[×Ü[WÛ^Y\—ÛY]šXÜ×Ùœ›ÛWØØXÚKØ[×Ü[WÛ^Y\—ÛY]šXÜ×Ùœ›ÛWÙ—ÝÚ]Ý×Ùš[\‹ˆØ[×Ü[WÛ^Y\—ÛY]šXÜ×ÝÚ]ÜØ[\\×Ùœ›ÛWØØXÚKˆš\Ú]ÝšYÙÙ\™YÜ[WÜØ[\\×Ùœ›ÛWØØXÚKˆKˆØÙ[™NŽžÂˆØÙ[™S^Y\ÛÛ™šYËØÙ[™S^Y\‘œ›ÛQ’[œ]ˆØ[×Ø[ÜØÙ[™WÛ^Y\—ÛY]šXÜ×Ùœ›ÛWÙ—ÝÚ]Ý×Ùš[\‹ˆØ[×Ø[ÜØÙ[™WÛ^Y\—ÛY]šXÜ×Ùœ›ÛWÜ›ÝÜËˆØ[×ÜØÙ[™WÛ^Y\—ÛY]šXÜ×Ùœ›ÛWÙ—ÝÚ]Ý×Ùš[\‹ˆKˆKˆ][ÎŽ][ÎŽ˜›Ø\™ØØ]YÛÜžKŸNÂ\ÙHX[™ÚXWØ\ÜÚ\™YŽžØZ[ØÛÛ˜Ù\×ÛX\Z[Û˜[YWÛX\Z[ÝÝ[Û]—ÛX\š[\—Û]ŸNÂ‚ˆÖÙ\š]™JXYËÛÛ™JWBœÝXÝ[SY]HÂˆÚ[ŽˆÝš[™Ëˆ^Z[ŽˆÝš[™ËˆšYÙÙ\—Û[ÙNˆÝš[™Ëˆ\×ÙXXÚˆ›ÛÛˆÚ[ÎˆŸB‚ˆÖÙ\š]™JXYËÛÛ™KY˜][
+WBœÝXÝ[Q^PYÙÈÂˆšYÙÙ\—ØÛÝ[ˆMˆÛÛšX][Û—ÜØÛÜ™NˆˆÜLÝšYÙÙ\—ØÛÝ[ˆMˆ™\ÝÜ˜[šÎˆÜ[ÛM‹ŸB‚ˆÖÙ\š]™JXYËÙ\šX[^™JWBœXˆÝXÝÝ˜]YÞRX]X\Ù[ÂˆXˆ˜YWÙ]NˆÝš[™ËˆXˆ^WÛ]™[ˆÜ[Û‹ˆXˆ]™×Û]™[ˆÜ[Û‹ˆXˆ[WÛ]™[ˆÜ[Û‹ˆXˆX›Ý™WØ]™ÎˆÜ[Û›ÛÛ‹ŸB‚ˆÖÙ\š]™JXYËÙ\šX[^™JWBœXˆÝXÝÝ˜]YÞSÝ™\šY]Ô^[ØYÂˆXˆ][\ÎˆÜ[Û™XÏÝ˜]YÞRX]X\Ù[‹ˆXˆ]\ÝÝ˜YWÙ]NˆÜ[ÛÝš[™Ï‹ˆXˆ]™\˜YÙWÛ]™[ˆÜ[Û‹ŸB‚ˆÖÙ\š]™JXYËÛÛ™KÙ\šX[^™JWBœXˆÝXÝÝ˜]YÞQZ[T›ÝÈÂˆXˆ˜YWÙ]NˆÝš[™ËˆXˆ[WÛ˜[YNˆÝš[™ËˆXˆšYÙÙ\—Û[ÙNˆÜ[ÛÝš[™Ï‹ˆXˆØ[\WØÛÝ[ˆÜ[ÛM‹ˆXˆšYÙÙ\—ØÛÝ[ˆÜ[ÛM‹ˆXˆÛÝ™\˜YÙNˆÜ[Û‹ˆXˆÛÛšX][Û—ÜØÛÜ™NˆÜ[Û‹ˆXˆÛÛšX][Û—Ü\—ÝšYÙÙ\ŽˆÜ[Û‹ˆXˆYYX[—ÝšYÙÙ\—ØÛÝ[ˆÜ[Û‹ˆXˆÜLÝšYÙÙ\—ØÛÝ[ˆÜ[ÛM‹ˆXˆ™\ÝÜ˜[šÎˆÜ[ÛM‹ŸB‚ˆÖÙ\š]™JXYËÙ\šX[^™JWBœXˆÝXÝÝ˜]YÞPÚ\Ú[ÂˆXˆ˜YWÙ]NˆÝš[™ËˆXˆšYÙÙ\—ØÛÝ[ˆÜ[ÛM‹ˆXˆÜLÝšYÙÙ\—ØÛÝ[ˆÜ[ÛM‹ˆXˆÛÝ™\˜YÙNˆÜ[Û‹ŸB‚ˆÖÙ\š]™JXYËÙ\šX[^™JWBœXˆÝXÝÝ˜]YÞPÚ\^[ØYÂˆXˆ][\ÎˆÜ[Û™XÏÝ˜]YÞPÚ\Ú[‹ŸB‚ˆÖÙ\š]™JXYËÙ\šX[^™JWBœXˆÝXÝšYÙÙ\™YÝØÚÔ›ÝÈÂˆXˆ˜[šÎˆÜ[ÛM‹ˆXˆ×ØÛÙNˆÝš[™ËˆXˆ˜[YNˆÜ[ÛÝš[™Ï‹ˆXˆÝ[ÜØÛÜ™NˆÜ[Û‹ˆXˆ[WÜØÛÜ™NˆÜ[Û‹ˆXˆÛÛ˜Ù\ˆÜ[ÛÝš[™Ï‹ŸB‚ˆÖÙ\š]™JXYËÙ\šX[^™JWBœXˆÝXÝÝ˜]YÞTÝ]\ÝXÜÔYÙQ]HÂˆXˆÝ™\šY]ÎˆÜ[ÛÝ˜]YÞSÝ™\šY]Ô^[ØY‹ˆXˆ]Z[Ü›ÝÜÎˆÜ[Û™XÏÝ˜]YÞQZ[T›ÝÏ‹ˆXˆÝ˜]YÞWÛÜ[ÛœÎˆÜ[Û™XÏÝš[™Ï‹ˆXˆ™\ÛÛ™YÜÝ˜]YÞWÛ˜[YNˆÜ[ÛÝš[™Ï‹ˆXˆ[˜[\Ú\×Ý˜YWÙ]WÛÜ[ÛœÎˆÜ[Û™XÏÝš[™Ï‹ˆXˆ™\ÛÛ™YØ[˜[\Ú\×Ý˜YWÙ]NˆÜ[ÛÝš[™Ï‹ˆXˆÚ\ˆÜ[ÛÝ˜]YÞPÚ\^[ØY‹ˆXˆšYÙÙ\™YÜÝØÚÜÎˆÜ[Û™XÏšYÙÙ\™YÝØÚÔ›ÝÏ‹ŸB‚ˆÖÙ\š]™JXYËÙ\šX[^™JWBœXˆÝXÝÝ˜]YÞTÝ]\ÝXÜÑ]Z[]HÂˆXˆÝ˜]YÞWÛ˜[YNˆÝš[™ËˆXˆ[˜[\Ú\×Ý˜YWÙ]WÛÜ[ÛœÎˆ™XÏÝš[™Ï‹ˆXˆ™\ÛÛ™YØ[˜[\Ú\×Ý˜YWÙ]NˆÜ[ÛÝš[™Ï‹ˆXˆÙ[XÝYÙZ[WÜ›ÝÎˆÜ[ÛÝ˜]YÞQZ[T›ÝÏ‹ˆXˆÚ\ˆÜ[ÛÝ˜]YÞPÚ\^[ØY‹ˆXˆšYÙÙ\™YÜÝØÚÜÎˆ™XÏšYÙÙ\™YÝØÚÔ›ÝÏ‹ŸB‚ˆÖÙ\š]™JXYËÙ\šX[^™JWBœXˆÝXÝØÙ[™TÝYÙT›ÝÈÂˆXˆÝYÙNˆÝš[™ËˆXˆØ[\WØÛÝ[ˆMˆXˆÝYÙWÜ˜][×Ú[—ÜØÙ[™NˆÜ[Û‹ŸB‚ˆÖÙ\š]™JXYËÙ\šX[^™JWBœXˆÝXÝØÙ[™PÛÛšX][Û”Ý[[X\žHÂˆXˆØÙ[™WØÛÝ™\™YØÛÝ[ˆMˆXˆØÙ[™WÝÝ[ÜØ[\WØÛÝ[ˆMˆXˆØÙ[™WØÛÝ™\˜YÙWÜ˜][ÎˆÜ[Û‹ˆXˆØÙ[™WÜ[WØÛÛšX][Û—ÜØÛÜ™NˆÜ[Û‹ˆXˆ[Ü[WØÛÛšX][Û—ÜØÛÜ™NˆÜ[Û‹ˆXˆØÙ[™WÜ[WØÛÛšX][Û—Ü˜][ÎˆÜ[Û‹ŸB‚ˆÖÙ\š]™JXYËÙ\šX[^™JWBœXˆÝXÝØÙ[™TÝ]\ÝXÜÔYÙQ]HÂˆXˆØÙ[™WÛÜ[ÛœÎˆÜ[Û™XÏÝš[™Ï‹ˆXˆ™\ÛÛ™YÜØÙ[™WÛ˜[YNˆÜ[ÛÝš[™Ï‹ˆXˆ[˜[\Ú\×Ý˜YWÙ]WÛÜ[ÛœÎˆÜ[Û™XÏÝš[™Ï‹ˆXˆ™\ÛÛ™YØ[˜[\Ú\×Ý˜YWÙ]NˆÜ[ÛÝš[™Ï‹ˆXˆÝYÙWÜ›ÝÜÎˆÜ[Û™XÏØÙ[™TÝYÙT›ÝÏ‹ˆXˆÝ[[X\žNˆÜ[ÛØÙ[™PÛÛšX][Û”Ý[[X\žO‹ŸB‚ˆÖÙ\š]™JXYËÙ\šX[^™JWBœXˆÝXÝØÙ[™S^Y\”Ý]P]™Ô™\ÚYX[™]\›ˆÂˆXˆØÙ[™WÜÝ]NˆÝš[™ËˆXˆ]™×Ü™\ÚYX[Ü™]\›ŽˆÜ[Û‹ŸB‚ˆÖÙ\š]™JXYËÙ\šX[^™JWBœXˆÝXÝØÙ[™S^Y\”Ú[^[ØYÂˆXˆ˜YWÙ]NˆÝš[™ËˆXˆÝ]WØ]™×Ü™\ÚYX[Ü™]\›œÎˆ™XÏØÙ[™S^Y\”Ý]P]™Ô™\ÚYX[™]\›‹ˆXˆÜØ›ÝÛWÜÜ™XYˆÜ[Û‹ˆXˆXÎˆÜ[Û‹ŸB‚ˆÖÙ\š]™JXYËÙ\šX[^™JWBœXˆÝXÝØÙ[™S^Y\”ØÙ[™TÝ[[X\žHÂˆXˆØÙ[™WÛ˜[YNˆÝš[™ËˆXˆÚ[ØÛÝ[ˆ\Ú^™KˆXˆÜ™XYÛYX[ŽˆÜ[Û‹ˆXˆX×ÛYX[ŽˆÜ[Û‹ˆXˆX×ÜÝˆÜ[Û‹ˆXˆXÚ\ŽˆÜ[Û‹ˆXˆX×ÝÝ˜[YNˆÜ[Û‹ŸB‚ˆÖÙ\š]™JXYËÙ\šX[^™JWBœXˆÝXÝØÙ[™S^Y\˜XÚÝ\Ý]HÂˆXˆØÙ[™WÛ˜[YNˆÝš[™ËˆXˆÝØÚ×ØY—Ý\NˆÝš[™ËˆXˆ[™^Ý×ØÛÙNˆÝš[™ËˆXˆ[™^Ø™]NˆˆXˆÛÛ˜Ù\Ø™]NˆˆXˆ[™\ÝžWØ™]NˆˆXˆÝ\Ù]NˆÝš[™ËˆXˆ[™Ù]NˆÝš[™ËˆXˆ™\ÛÛ™YØ›Ø\™ˆÜ[ÛÝš[™Ï‹ˆXˆ^ÛYWÜÝØ›Ø\™ˆ›ÛÛˆXˆÝ[Û]—ÛZ[ŽˆÜ[Û‹ˆXˆÝ[Û]—ÛX^ˆÜ[Û‹ˆXˆZ[—ÜØ[\\×Ü\—ÜØÙ[™WÙ^Nˆ\Ú^™KˆXˆZ[—Û\ÝYÝ˜YWÙ^\Îˆ\Ú^™KˆXˆ˜XÚÝ\ÝÜ\š[Ùˆ\Ú^™KˆXˆÚ[Îˆ™XÏØÙ[™S^Y\”Ú[^[ØY‹ˆXˆÜ™XYÛYX[ŽˆÜ[Û‹ˆXˆX×ÛYX[ŽˆÜ[Û‹ˆXˆX×ÜÝˆÜ[Û‹ˆXˆXÚ\ŽˆÜ[Û‹ˆXˆX×ÝÝ˜[YNˆÜ[Û‹ˆXˆ\×Ø[ÜØÙ[™\Îˆ›ÛÛˆXˆ[ÜØÙ[™WÜÝ[[X\šY\Îˆ™XÏØÙ[™S^Y\”ØÙ[™TÝ[[X\žO‹ŸB‚ˆÖÙ\š]™JXYËÙ\šX[^™JWBœXˆÝXÝØÙ[™S^Y\˜XÚÝ\ÝY˜][Ñ]HÂˆXˆØÙ[™WÛÜ[ÛœÎˆ™XÏÝš[™Ï‹ˆXˆ™\ÛÛ™YÜØÙ[™WÛ˜[YNˆÜ[ÛÝš[™Ï‹ˆXˆÝ\Ù]NˆÜ[ÛÝš[™Ï‹ˆXˆ[™Ù]NˆÜ[ÛÝš[™Ï‹ŸB‚ˆÖÙ\š]™JXYËÙ\šX[^™JWBœXˆÝXÝ[S^Y\”Ú[^[ØYÂˆXˆ˜YWÙ]NˆÝš[™ËˆXˆØ[\WØÛÝ[ˆ\Ú^™KˆXˆ]™×Ü[WÜØÛÜ™NˆÜ[Û‹ˆXˆ]™×Ü™\ÚYX[Ü™]\›ŽˆÜ[Û‹ˆXˆ]™×Ù^Ù\Ü×Ü™\ÚYX[Ü™]\›ŽˆÜ[Û‹ˆXˆÜØ›ÝÛWÜÜ™XYˆÜ[Û‹ˆXˆXÎˆÜ[Û‹ŸB‚ˆÖÙ\š]™JXYËÛÛ™KÙ\šX[^™JWBœXˆÝXÝ[QXØ^U˜[Y][ÛˆÂˆXˆÚ[™Ý×Ù^\Îˆ\Ú^™KˆXˆ™XÙ[ÜÝ\Ù]NˆÜ[ÛÝš[™Ï‹ˆXˆ™XÙ[Ù[™Ù]NˆÜ[ÛÝš[™Ï‹ˆXˆ™XÙ[Ù^WØÛÝ[ˆ\Ú^™KˆXˆš[Ü—Ù^WØÛÝ[ˆ\Ú^™KˆXˆ™XÙ[Ù\™XÝ[Û˜[Ù^Ù\Ü×ÛYX[ŽˆÜ[Û‹ˆXˆš[Ü—Ù\™XÝ[Û˜[Ù^Ù\Ü×ÛYX[ŽˆÜ[Û‹ˆXˆXØ^WØÚ[™ÙNˆÜ[Û‹ˆXˆXØ^WÝÝ˜[YNˆÜ[Û‹ˆXˆÝ]\ÎˆÝš[™ËˆXˆÝ]\×ÛX™[ˆÝš[™ËŸB‚ˆÖÙ\š]™JXYËÙ\šX[^™JWBœXˆÝXÝ[S^Y\”[TÝ[[X\žHÂˆXˆ[WÛ˜[YNˆÝš[™ËˆXˆÚ[ØÛÝ[ˆ\Ú^™KˆXˆ]™×Ü™\ÚYX[ÛYX[ŽˆÜ[Û‹ˆXˆ]™×Ù^Ù\Ü×Ü™\ÚYX[ÛYX[ŽˆÜ[Û‹ˆXˆ]™×Ù\—ØÚ[™ÙNˆÜ[Û‹ˆÖÜÙ\™JÚÚ\
+WBˆXˆ\—ØÚ[™ÙWÜØ[\WØÛÝ[ˆ\Ú^™KˆXˆ›Ùš]ÛÜÜ×Ü˜][ÎˆÜ[Û‹ˆXˆÜ™XYÛYX[ŽˆÜ[Û‹ˆXˆ]™×ØÛÛšX][Û—ÜØÛÜ™NˆÜ[Û‹ˆXˆ]™×ØÛÛšX][Û—Ü\—ÝšYÙÙ\ŽˆÜ[Û‹ˆXˆX×ÛYX[ŽˆÜ[Û‹ˆXˆX×ÜÝˆÜ[Û‹ˆXˆXÚ\ŽˆÜ[Û‹ˆXˆX×ÝÝ˜[YNˆÜ[Û‹ˆXˆXØ^WÝ˜[Y][ÛœÎˆ™XÏ[QXØ^U˜[Y][Û‹ˆÖÜÙ\™JÚÚ\
+WBˆXˆXØ^WÙZ[WÝ˜[Y\Îˆ™XÏ
+Ýš[™Ë
+O‹ŸB‚ˆÖÙ\š]™JXYËÙ\šX[^™JWBœXˆÝXÝ[S^Y\˜XÚÝ\Ý]HÂˆXˆ[WÛ˜[YNˆÝš[™ËˆXˆÝØÚ×ØY—Ý\NˆÝš[™ËˆXˆ[™^Ý×ØÛÙNˆÝš[™ËˆXˆ[™^Ø™]NˆˆXˆÛÛ˜Ù\Ø™]NˆˆXˆ[™\ÝžWØ™]NˆˆXˆÝ\Ù]NˆÝš[™ËˆXˆ[™Ù]NˆÝš[™ËˆXˆ™\ÛÛ™YØ›Ø\™ˆÜ[ÛÝš[™Ï‹ˆXˆ^ÛYWÜÝØ›Ø\™ˆ›ÛÛˆXˆÝ[Û]—ÛZ[ŽˆÜ[Û‹ˆXˆÝ[Û]—ÛX^ˆÜ[Û‹ˆXˆZ[—ÜØ[\\×Ü\—Ü[WÙ^Nˆ\Ú^™KˆXˆZ[—Û\ÝYÝ˜YWÙ^\Îˆ\Ú^™KˆXˆ˜XÚÝ\ÝÜ\š[Ùˆ\Ú^™KˆXˆÚ[Îˆ™XÏ[S^Y\”Ú[^[ØY‹ˆXˆ]™×Ü™\ÚYX[ÛYX[ŽˆÜ[Û‹ˆXˆ]™×Ù^Ù\Ü×Ü™\ÚYX[ÛYX[ŽˆÜ[Û‹ˆXˆXØ^WÝ˜[Y][ÛœÎˆ™XÏ[QXØ^U˜[Y][Û‹ˆXˆ]™×Ù\—ØÚ[™ÙNˆÜ[Û‹ˆXˆ›Ùš]ÛÜÜ×Ü˜][ÎˆÜ[Û‹ˆXˆÜ™XYÛYX[ŽˆÜ[Û‹ˆXˆ]™×ØÛÛšX][Û—ÜØÛÜ™NˆÜ[Û‹ˆXˆ]™×ØÛÛšX][Û—Ü\—ÝšYÙÙ\ŽˆÜ[Û‹ˆXˆX×ÛYX[ŽˆÜ[Û‹ˆXˆX×ÜÝˆÜ[Û‹ˆXˆXÚ\ŽˆÜ[Û‹ˆXˆX×ÝÝ˜[YNˆÜ[Û‹ˆXˆ^Y\—ØÛÝ[ˆÜ[Û\Ú^™O‹ˆXˆ^Y\—ÛY]ÙˆÜ[ÛÝš[™Ï‹ˆXˆ^Y\—ÛY]ÙÛX™[ˆÜ[ÛÝš[™Ï‹ˆXˆ^Y\—ÜÝ[[X\šY\Îˆ™XÏ˜[šÓ^Y\XÚÙ]Ý[[X\žO‹ˆXˆ\×Ø[Ü[\Îˆ›ÛÛˆXˆ[Ü[WÜÝ[[X\šY\Îˆ™XÏ[S^Y\”[TÝ[[X\žO‹ˆXˆ[WÝ˜[Y][Û—Ù]Z[Îˆ™XÏ[U˜[Y][ÛÛÛX›Ô™\Ý[‹ŸB‚ˆÖÙ\š]™JXYËÙ\šX[^™JWBœXˆÝXÝ[S^Y\˜XÚÝ\ÝY˜][Ñ]HÂˆXˆ[WÛÜ[ÛœÎˆ™XÏÝš[™Ï‹ˆXˆ™\ÛÛ™YÜ[WÛ˜[YNˆÜ[ÛÝš[™Ï‹ˆXˆÝ\Ù]NˆÜ[ÛÝš[™Ï‹ˆXˆ[™Ù]NˆÜ[ÛÝš[™Ï‹ŸB‚ˆÖÙ\š]™JXYËÙ\šX[^™JWBœXˆÝXÝ˜[šÓ^Y\XÚÙ]Ý[[X\žHÂˆXˆ^Y\—Ú[™^ˆ\Ú^™KˆXˆ^Y\—ÛX™[ˆÝš[™ËˆXˆÚ[ØÛÝ[ˆ\Ú^™KˆXˆØ[\WØÛÝ[ˆ\Ú^™KˆXˆ]™×ÜØÛÜ™NˆÜ[Û‹ˆXˆ]™×Ü™\ÚYX[Ü™]\›ŽˆÜ[Û‹ˆXˆ]™×Ù\—ØÚ[™ÙNˆÜ[Û‹ŸB‚ˆÖÙ\š]™JXYËÙ\šX[^™JWBœXˆÝXÝ˜[šÕÜÔÝ[[X\žQ]HÂˆXˆÜÚÎˆ\Ú^™KˆXˆÚ[ØÛÝ[ˆ\Ú^™KˆXˆØ[\WØÛÝ[ˆ\Ú^™KˆXˆ]™×ÙZ[WÜ™\ÚYX[Ü™]\›ŽˆÜ[Û‹ˆXˆYYX[—ÙZ[WÜ™\ÚYX[Ü™]\›ŽˆÜ[Û‹ˆXˆÜÚ]]™WÙ^WÜ˜][ÎˆÜ[Û‹ˆXˆZ[WÜÝˆÜ[Û‹ˆXˆX×ÝÝ˜[YNˆÜ[Û‹ˆXˆX×ÛYÎˆ\Ú^™KŸB‚ˆÖÙ\š]™JXYËÙ\šX[^™JWBœXˆÝXÝ˜[šÕÜÔ\š[ÙÝ[[X\žQ]HÂˆXˆ\š[ÙÛX™[ˆÝš[™ËˆXˆÝ\Ù]NˆÝš[™ËˆXˆ[™Ù]NˆÝš[™ËˆXˆÜÚÎˆ\Ú^™KˆXˆÚ[ØÛÝ[ˆ\Ú^™KˆXˆØ[\WØÛÝ[ˆ\Ú^™KˆXˆ]™×ÙZ[WÜ™\ÚYX[Ü™]\›ŽˆÜ[Û‹ˆXˆYYX[—ÙZ[WÜ™\ÚYX[Ü™]\›ŽˆÜ[Û‹ˆXˆÜÚ]]™WÙ^WÜ˜][ÎˆÜ[Û‹ˆXˆX×ÝÝ˜[YNˆÜ[Û‹ˆXˆX×ÛYÎˆ\Ú^™KŸB‚ˆÖÙ\š]™JXYËÙ\šX[^™JWBœXˆÝXÝ˜[šÓ^Y\”Ø[\QÜ›Ý\ÂˆXˆ^Y\—Ú[™^ˆ\Ú^™KˆXˆ^Y\—ÛX™[ˆÝš[™ËˆXˆÝ[ÜØ[\\Îˆ\Ú^™KˆXˆšYÙÙ\™YÙ^\Îˆ\Ú^™KˆXˆÜÚ]]™WØÛÝ[ˆ\Ú^™KˆXˆ™YØ]]™WØÛÝ[ˆ\Ú^™KˆXˆ˜[™ÛWØÛÝ[ˆ\Ú^™KˆXˆÜÚ]]™Nˆ™XÏ[U˜[Y][Û”Ø[\T›ÝÏ‹ˆXˆ™YØ]]™Nˆ™XÏ[U˜[Y][Û”Ø[\T›ÝÏ‹ˆXˆ˜[™ÛNˆ™XÏ[U˜[Y][Û”Ø[\T›ÝÏ‹ŸB‚ˆÖÙ\š]™JXYËÙ\šX[^™JWBœXˆÝXÝ˜[šÓ^Y\˜XÚÝ\Ý]HÂˆXˆÝØÚ×ØY—Ý\NˆÝš[™ËˆXˆ[™^Ý×ØÛÙNˆÝš[™ËˆXˆ[™^Ø™]NˆˆXˆÛÛ˜Ù\Ø™]NˆˆXˆ[™\ÝžWØ™]NˆˆXˆÝ\Ù]NˆÝš[™ËˆXˆ[™Ù]NˆÝš[™ËˆXˆ™\ÛÛ™YØ›Ø\™ˆÜ[ÛÝš[™Ï‹ˆXˆ^ÛYWÜÝØ›Ø\™ˆ›ÛÛˆXˆX\šÙ]Ý˜[YWÙÜ›Ý\[™Îˆ›ÛÛˆXˆZ[—ÜØ[\\×Ü\—Ü˜[š×Ù^Nˆ\Ú^™KˆXˆZ[—Û\ÝYÝ˜YWÙ^\Îˆ\Ú^™KˆXˆ˜XÚÝ\ÝÜ\š[Ùˆ\Ú^™KˆXˆ^Y\—ØÛÝ[ˆ\Ú^™KˆXˆ^Y\—ÛY]ÙˆÝš[™ËˆXˆ^Y\—ÛY]ÙÛX™[ˆÝš[™ËˆXˆÚ[ØÛÝ[ˆ\Ú^™KˆXˆØ[\WØÛÝ[ˆ\Ú^™KˆXˆ]™×Ù\—ØÚ[™ÙNˆÜ[Û‹ˆXˆÜ™XYÛYX[ŽˆÜ[Û‹ˆXˆX×ÛYX[ŽˆÜ[Û‹ˆXˆX×ÜÝˆÜ[Û‹ˆXˆXÚ\ŽˆÜ[Û‹ˆXˆX×ÝÝ˜[YNˆÜ[Û‹ˆXˆÜÚ×ÜÝ[[X\šY\Îˆ™XÏ˜[šÕÜÔÝ[[X\žQ]O‹ˆXˆÜÚ×Ü\š[ÙÜÝ[[X\šY\Îˆ™XÏ˜[šÕÜÔ\š[ÙÝ[[X\žQ]O‹ˆXˆ^Y\—ÜÝ[[X\šY\Îˆ™XÏ˜[šÓ^Y\XÚÙ]Ý[[X\žO‹ˆXˆ^Y\—ÜØ[\WÙÜ›Ý\Îˆ™XÏ˜[šÓ^Y\”Ø[\QÜ›Ý\‹ˆXˆX\šÙ]Ý˜[YWÜÝ[[X\šY\Îˆ™XÏ˜[šÓ^Y\“X\šÙ]˜[YTÝ[[X\žO‹ŸB‚ˆÖÙ\š]™JXYËÙ\šX[^™JWBœXˆÝXÝ˜[šÓ^Y\“X\šÙ]˜[YTÝ[[X\žHÂˆXˆÜ›Ý\ÛX™[ˆÝš[™ËˆXˆÝ[Û]—ÛZ[ŽˆÜ[Û‹ˆXˆÝ[Û]—ÛX^ˆÜ[Û‹ˆXˆÚ[ØÛÝ[ˆ\Ú^™KˆXˆØ[\WØÛÝ[ˆ\Ú^™KˆXˆ]™×Ù\—ØÚ[™ÙNˆÜ[Û‹ˆXˆÜ™XYÛYX[ŽˆÜ[Û‹ˆXˆX×ÛYX[ŽˆÜ[Û‹ˆXˆX×ÝÝ˜[YNˆÜ[Û‹ˆXˆXÚ\ŽˆÜ[Û‹ŸB‚˜ÛÛœÝSQUSÓ—ÑTÎˆHYKLLŽÂ˜ÛÛœÝ•SWÐPÒÕTÕÑTÎˆHYKLLŽÂ˜ÛÛœÝSQUSÓ—ÓPVÐÓÓP’SUSÓ”Îˆ\Ú^™HHMŽÂ˜ÛÛœÝSQUSÓ—ÐÓÓ•S•PUSÓ—Õˆ\˜][ÛˆH\˜][ÛŽŽ™œ›ÛWÜÙXÜÊÌ
+ˆŒ
+NÂ˜ÛÛœÝS’×ÐPÒÕTÕÓVQT—ÔÐSTWÓSRUÔT—ÑÔ“ÕTˆ\Ú^™HHNÂ‚ˆÖÙ\š]™JXYËÛÛ™K\Ù\šX[^™JWBœXˆÝXÝ[U˜[Y][Û•[šÛ›ÝÛÛÛ™šYÈÂˆXˆ˜[YNˆÝš[™ËˆXˆÝ\ˆˆXˆ[™ˆˆXˆÝ\ˆŸB‚ˆÖÙ\š]™JXYËÛÛ™KÙ\šX[^™JWBœXˆÝXÝ[U˜[Y][Û•[šÛ›ÝÛ•˜[YHÂˆXˆ˜[YNˆÝš[™ËˆXˆ˜[YNˆŸB‚ˆÖÙ\š]™JXYËÙ\šX[^™JWBœXˆÝXÝ[U˜[Y][Û”Ú[Z[\š]T›ÝÈÂˆXˆ[WÛ˜[YNˆÝš[™ËˆXˆ^Z[ŽˆÜ[ÛÝš[™Ï‹ˆXˆÝ™\›\ÜØ[\\Îˆ\Ú^™KˆXˆÝ™\›\Ü˜]WÝœ×Ý˜[Y][ÛŽˆÜ[Û‹ˆXˆÝ™\›\Ü˜]WÝœ×Ù^\Ý[™ÎˆÜ[Û‹ˆXˆÝ™\›\ÛYˆÜ[Û‹ŸB‚ˆÖÙ\š]™JXYËÙ\šX[^™JWBœXˆÝXÝ[U˜[Y][Û”Ø[\TÝ]ÈÂˆXˆÜÚ]]™WØÛÝ[ˆ\Ú^™KˆXˆ™YØ]]™WØÛÝ[ˆ\Ú^™KˆXˆ˜[™ÛWØÛÝ[ˆ\Ú^™KˆXˆÝ[ÜØ[\\Îˆ\Ú^™KŸB‚ˆÖÙ\š]™JXYËÛÛ™KÙ\šX[^™JWBœXˆÝXÝ[U˜[Y][Û•šYÙÙ\ÛÝ[Ý]ÈÂˆXˆšYÙÙ\—ØÛÝ[ˆ\Ú^™KˆXˆÜÚ]]™WØÛÝ[ˆ\Ú^™KˆXˆ™YØ]]™WØÛÝ[ˆ\Ú^™KˆXˆ˜[™ÛWØÛÝ[ˆ\Ú^™KˆXˆÝ[ÜØ[\\Îˆ\Ú^™KŸB‚ˆÖÙ\š]™JXYËÙ\šX[^™JWBœXˆÝXÝ[U˜[Y][Û”Ø[\T›ÝÈÂˆXˆ×ØÛÙNˆÝš[™ËˆXˆ˜[YNˆÜ[ÛÝš[™Ï‹ˆXˆ›Ø\™ˆÝš[™ËˆXˆ›Û][]WÙÜ›Ý\ˆÝš[™ËˆXˆ˜YWÙ]NˆÝš[™ËˆXˆšYÙÙ\—ØÛÝ[ˆ\Ú^™KˆXˆ[WÜØÛÜ™NˆˆXˆ™\ÚYX[Ü™]\›ŽˆŸB‚ˆÖÙ\š]™JXYËÙ\šX[^™JWBœXˆÝXÝ[U˜[Y][Û”Ø[\QÜ›Ý\ÈÂˆXˆÜÚ]]™Nˆ™XÏ[U˜[Y][Û”Ø[\T›ÝÏ‹ˆXˆ™YØ]]™Nˆ™XÏ[U˜[Y][Û”Ø[\T›ÝÏ‹ˆXˆ˜[™ÛNˆ™XÏ[U˜[Y][Û”Ø[\T›ÝÏ‹ŸB‚ˆÖÙ\š]™JXYËÙ\šX[^™JWBœXˆÝXÝ[U˜[Y][Û”™]\›‘\ÝšX][ÛXÚÙ]ÂˆXˆXÚÙ]ÛX™[ˆÝš[™ËˆXˆØ[\WØÛÝ[ˆ\Ú^™KˆXˆØ[\WÜ˜][ÎˆÜ[Û‹ŸB‚ˆÖÙ\š]™JXYËÙ\šX[^™JWBœXˆÝXÝ[U˜[Y][ÛÛÛX›Ô™\Ý[ÂˆXˆÛÛX›×ÚÙ^NˆÝš[™ËˆXˆÛÛX›×ÛX™[ˆÝš[™ËˆXˆ›Ü›][NˆÝš[™ËˆXˆ[šÛ›ÝÛ—Ý˜[Y\Îˆ™XÏ[U˜[Y][Û•[šÛ›ÝÛ•˜[YO‹ˆXˆšYÙÙ\—ÜØ[\\Îˆ\Ú^™KˆXˆšYÙÙ\™YÙ^\Îˆ\Ú^™KˆXˆ]™×ÙZ[WÝšYÙÙ\ŽˆˆXˆØ[\WÜÝ]Îˆ[U˜[Y][Û”Ø[\TÝ]ËˆXˆšYÙÙ\—ØÛÝ[ÜÝ]Îˆ™XÏ[U˜[Y][Û•šYÙÙ\ÛÝ[Ý]Ï‹ˆXˆØ[\WÙÜ›Ý\Îˆ[U˜[Y][Û”Ø[\QÜ›Ý\ËˆXˆ™]\›—Ù\ÝšX][ÛŽˆ™XÏ[U˜[Y][Û”™]\›‘\ÝšX][ÛXÚÙ]‹ˆXˆ˜XÚÝ\Ýˆ[S^Y\˜XÚÝ\Ý]KˆXˆÚ[Z[\š]WÜ›ÝÜÎˆ™XÏ[U˜[Y][Û”Ú[Z[\š]T›ÝÏ‹ŸB‚ˆÖÙ\š]™JXYËÙ\šX[^™JWBœXˆÝXÝ[Q^™\ÜÚ[Û•˜[Y][Û‘]HÂˆXˆ[\ÜÜ[WÛ˜[YNˆÝš[™ËˆXˆ[\ÜÜ[WÙ^Z[ŽˆÝš[™ËˆXˆØÛÜWÝØ^NˆÝš[™ËˆXˆØÛÜWÝÚ[™ÝÜÎˆ\Ú^™KˆXˆØ[\WÛ[Z]Ü\—ÙÜ›Ý\ˆ\Ú^™KˆXˆÛÛX›×Ü™\Ý[Îˆ™XÏ[U˜[Y][ÛÛÛX›Ô™\Ý[‹ˆXˆ™\ÝØÛÛX›×ÚÙ^NˆÜ[ÛÝš[™Ï‹ˆXˆÛÛ[X][Û—ÚYˆÜ[ÛÝš[™Ï‹ŸB‚ˆÖÙ\š]™JXYËÛÛ™KÙ\šX[^™JWBœXˆÝXÝ[Q^™\ÜÚ[ÛØ[Xœ˜][ÛXÚÙ]ÂˆXˆØÛÜ™WÛ][\Y\ŽˆˆXˆØ[\WØÛÝ[ˆ\Ú^™KˆXˆ]™×Ü™\ÚYX[Ü™]\›ŽˆÜ[Û‹ŸB‚ˆÖÙ\š]™JXYËÛÛ™KÙ\šX[^™JWBœXˆÝXÝ[Q^™\ÜÚ[ÛØ[Xœ˜][Û‘\Ý[˜ÙTÚ[ÂˆXˆZ[Žˆ\Ú^™KˆXˆX^ˆ\Ú^™KˆXˆÚ[ÎˆŸB‚ˆÖÙ\š]™JXYËÛÛ™KÙ\šX[^™JWBœXˆÝXÝ[Q^™\ÜÚ[ÛØ[Xœ˜][ÛØ[™Y]HÂˆXˆØ[™Y]WÚÙ^NˆÝš[™ËˆXˆØÛÜWÝØ^NˆÝš[™ËˆXˆØÛÜWÛX™[ˆÝš[™ËˆXˆØÛÜWÝÚ[™ÝÜÎˆ\Ú^™KˆXˆ\×ØÝ\œ™[ˆ›ÛÛˆXˆšYÙÙ\—ÜØ[\\Îˆ\Ú^™KˆXˆšYÙÙ\™YÙ^\Îˆ\Ú^™KˆXˆ]™×ÙZ[WÝšYÙÙ\ŽˆˆXˆ]™×Ü™\ÚYX[ÛYX[ŽˆÜ[Û‹ˆXˆ]™×Ù^Ù\Ü×Ü™\ÚYX[ÛYX[ŽˆÜ[Û‹ˆXˆZ[WÜÝˆÜ[Û‹ˆXˆÝ[™\™Ù\œ›ÜŽˆÜ[Û‹ˆXˆÛÛœÙ\˜]]™WÙYÙNˆÜ[Û‹ˆXˆX\›WÙ^Ù\Ü×Ü™\ÚYX[ÛYX[ŽˆÜ[Û‹ˆXˆ]WÙ^Ù\Ü×Ü™\ÚYX[ÛYX[ŽˆÜ[Û‹ˆXˆX×ÛYX[ŽˆÜ[Û‹ˆXˆX×ÝÝ˜[YNˆÜ[Û‹ˆXˆØÛÜ™WÛ[Û›ÝÛšXÚ]NˆÜ[Û‹ˆXˆ]™×ÜØÛÜ™WÛ][\Y\ŽˆÜ[Û‹ˆXˆÝYÙÙ\ÝYÜÚ[ÎˆˆXˆÝYÙÙ\ÝYÝÝ[ÜÚ[ÎˆˆXˆØ[Xœ˜][Û—ÜØÛÜ™NˆˆXˆÝ]\ÎˆÝš[™ËˆXˆÝ]\×ÛX™[ˆÝš[™ËˆXˆØÛÜ™WØXÚÙ]Îˆ™XÏ[Q^™\ÜÚ[ÛØ[Xœ˜][ÛXÚÙ]‹ˆXˆÝYÙÙ\ÝYÙ\ÝÜÚ[Îˆ™XÏ[Q^™\ÜÚ[ÛØ[Xœ˜][Û‘\Ý[˜ÙTÚ[‹ŸB‚ˆÖÙ\š]™JXYËÙ\šX[^™JWBœXˆÝXÝ[Q^™\ÜÚ[ÛØ[Xœ˜][Û‘]HÂˆXˆÛÛ[X][Û—ÚYˆÝš[™ËˆXˆÛÛX›×ÚÙ^NˆÝš[™ËˆXˆÛÛX›×ÛX™[ˆÝš[™ËˆXˆ\™XÝ[ÛŽˆÝš[™ËˆXˆØ[™Y]WØÛÝ[ˆ\Ú^™KˆXˆÚ[ÜØØ[WÙ\ØÜš\[ÛŽˆÝš[™ËˆXˆ™XÛÛ[Y[™YØØ[™Y]WÚÙ^NˆÜ[ÛÝš[™Ï‹ˆXˆØ[™Y]\Îˆ™XÏ[Q^™\ÜÚ[ÛØ[Xœ˜][ÛØ[™Y]O‹ŸB‚ˆÖÙ\š]™JXYËÛÛ™K\Ù\šX[^™JWBˆÖÜÙ\™J™[˜[YWØ[H˜Ø[Y[Ø\ÙHŠWBœXˆÝXÝ[Q^™\ÜÚ[Û•˜[Y][Û“X[X[Ý˜]YÞHÂˆXˆ˜[YNˆÜ[ÛÝš[™Ï‹ˆXˆØÙ[™WÛ˜[YNˆÜ[ÛÝš[™Ï‹ˆXˆÝYÙNˆÜ[ÛÝš[™Ï‹ˆXˆØÛÜWÝØ^NˆÜ[ÛÝš[™Ï‹ˆXˆØÛÜWÝÚ[™ÝÜÎˆÜ[Û\Ú^™O‹ˆXˆÚ[ŽˆÜ[ÛÝš[™Ï‹ˆXˆÚ[ÎˆÜ[Û‹ˆXˆ\ÝÜÚ[ÎˆÜ[Û™XÏÜ˜]NŽ™]NŽ‘\ÝÚ[‹ˆXˆ^Z[ŽˆÜ[ÛÝš[™Ï‹ˆXˆYÎˆÜ[ÛÝš[™Ï‹ŸB‚ˆÖÙ\š]™JXYÊWBœÝXÝ˜[Y][Û•˜\šX[ÂˆÛÛX›×ÚÙ^NˆÝš[™ËˆÛÛX›×ÛX™[ˆÝš[™Ëˆ›Ü›][NˆÝš[™Ëˆ[šÛ›ÝÛ—Ý˜[Y\Îˆ™XÏ[U˜[Y][Û•[šÛ›ÝÛ•˜[YO‹ŸB‚\H˜[Y][Û•šYÙÙ\™YØÛÜ™SX\H\ÚX\Ýš[™Ë\ÚX\Ýš[™ËŽÂ‚œÝXÝ™\\™Y˜[Y][ÛÛÛX›ÈÂˆ˜\šX[ˆ˜[Y][Û•˜\šX[ˆØXÚYÜ[NˆØXÚY[Kˆ\ÜÚYÛ™YÛ˜[Y\Îˆ™XÏÝš[™Ï‹ŸB‚œÝXÝ˜[Y][Û‘^XÝ][Û”[ˆÂˆÛÛX›ÜÎˆ™XÏ™\\™Y˜[Y][ÛÛÛX›Ï‹ˆ™YYÜ›ÝÜÎˆ\Ú^™Kˆ]Y\žWÜÝ\Ù]NˆÝš[™ËŸB‚œÝXÝ˜[Y][Û•ÐÛÙQ]˜[X][ÛˆÂˆ×ØÛÙNˆÝš[™ËˆÛÛX›×Ú]Îˆ™XÏ
+\Ú^™K\ÚX\Ýš[™ËŠO‹ŸB‚ˆÖÙ\š]™JXYËÛÛ™JWBœÝXÝ˜[Y][Û”ÙYY[HÂˆ[WÛ˜[YNˆÝš[™Ëˆ[WÙ^Z[ŽˆÝš[™ËˆØÛÜWÝØ^NˆØÛÜUØ^KˆØÛÜWÝÚ[™ÝÜÎˆ\Ú^™Kˆ›Ü›][NˆÝš[™ËˆÚ[Îˆˆ\ÝÜÚ[ÎˆÜ[Û™XÏÜ˜]NŽ™]NŽ‘\ÝÚ[‹ˆYÎˆ[UYËˆ^ÛYWÜ[WÛ˜[YNˆÜ[ÛÝš[™Ï‹ŸB‚ˆÖÙ\š]™JXYËÛÛ™JWBœÝXÝ˜[Y][ÛÛÛ[X][ÛÛÛX›ÈÂˆÛÛX›×ÚÙ^NˆÝš[™ËˆÛÛX›×ÛX™[ˆÝš[™Ëˆ›Ü›][NˆÝš[™ËŸB‚ˆÖÙ\š]™JXYÊWBœÝXÝ˜[Y][ÛÛÛ[X][Û”Ù\ÜÚ[ÛˆÂˆÜ™X]YØ]ˆ[œÝ[ˆÛÝ\˜ÙWÜ]ˆÝš[™Ëˆ\˜[\Îˆ[S^Y\˜XÚÝ\Ý[”\˜[\Ëˆ[[YWØØXÚNˆ\˜Ï[S^Y\”[[YPØXÚO‹ˆÙYYÜ[Nˆ˜[Y][Û”ÙYY[Kˆ˜[Y][Û—Ý×ØÛÙ\Îˆ™XÏÝš[™Ï‹ˆÛÛX›ÜÎˆ\ÚX\Ýš[™Ë˜[Y][ÛÛÛ[X][ÛÛÛX›Ï‹ŸB‚œÝ]XÈSQUSÓ—ÐÓÓ•S•PUSÓ—ÐÐPÒNˆÛ˜ÙSØÚÏˆ]]^\ÚX\Ýš[™Ë\˜Ï˜[Y][ÛÛÛ[X][Û”Ù\ÜÚ[Û‹ˆHÛ˜ÙSØÚÎŽ›™]Ê
+NÂ‚™›ˆ˜[Y][Û—ØÛÛ[X][Û—ØØXÚJ
+B‹Oˆ	‰ÜÝ]XÈ]]^\ÚX\Ýš[™Ë\˜Ï˜[Y][ÛÛÛ[X][Û”Ù\ÜÚ[ÛˆÂˆSQUSÓ—ÐÓÓ•S•PUSÓ—ÐÐPÒK™Ù]ÛÜ—Ú[š]
+]]^Ž›™]Ê\ÚX\Ž›™]Ê
+JJBŸB‚ˆÖÙ\š]™JXYËÙ\šX[^™JWBœXˆÝXÝX\šÙ]˜[šÒ][HÂˆXˆ˜[YNˆÝš[™ËˆXˆ˜[YNˆˆXˆ×ØÛÙNˆÜ[ÛÝš[™Ï‹ˆXˆÝ\Ù]NˆÜ[ÛÝš[™Ï‹ˆXˆ[™Ù]NˆÜ[ÛÝš[™Ï‹ˆXˆÛÛ˜Ù\ÎˆÜ[ÛÝš[™Ï‹ˆXˆ™YWÙ^WÙØZ[ŽˆÜ[Û‹ˆXˆš]™WÙ^WÙØZ[ŽˆÜ[Û‹ŸB‚ˆÖÙ\š]™JXYËÙ\šX[^™JWBœXˆÝXÝX\šÙ][˜[\Ú\ÔÛ˜\ÚÝÂˆXˆ˜YWÙ]NˆÜ[ÛÝš[™Ï‹ˆXˆÛÛ˜Ù\ÝÜˆ™XÏX\šÙ]˜[šÒ][O‹ˆXˆ[™\ÝžWÝÜˆ™XÏX\šÙ]˜[šÒ][O‹ˆXˆÛÛ˜Ù\Û[Û™^WÙ›Ý×ÝÜˆ™XÏX\šÙ]˜[šÒ][O‹ˆXˆ[™\ÝžWÛ[Û™^WÙ›Ý×ÝÜˆ™XÏX\šÙ]˜[šÒ][O‹ˆXˆÛÛ˜Ù\Û[Û™^WÛÝ]›Ý×ÝÜˆ™XÏX\šÙ]˜[šÒ][O‹ˆXˆ[™\ÝžWÛ[Û™^WÛÝ]›Ý×ÝÜˆ™XÏX\šÙ]˜[šÒ][O‹ˆXˆØZ[—ÝÜˆ™XÏX\šÙ]˜[šÒ][O‹ˆXˆÝX—Ú[\˜[ÙØZ[—ÝÜˆ™XÏX\šÙ]˜[šÒ][O‹ŸB‚ˆÖÙ\š]™JXYËÙ\šX[^™JWBœXˆÝXÝX\šÙ][˜[\Ú\Ñ]HÂˆXˆÛÚØ˜XÚ×Ü\š[Ùˆ\Ú^™KˆXˆÝØÚ×Ü˜[š×Û[Z]ˆ\Ú^™KˆXˆÝX—Ú[\˜[Ü\š[Ùˆ\Ú^™KˆXˆZ[—Ø›Ø\™ÜÝØÚ×ØÛÝ[ˆ\Ú^™KˆXˆ]\ÝÝ˜YWÙ]NˆÜ[ÛÝš[™Ï‹ˆXˆ™\ÛÛ™YÜ™Y™\™[˜ÙWÝ˜YWÙ]NˆÜ[ÛÝš[™Ï‹ˆXˆ›Ø\™ÛÜ[ÛœÎˆ™XÏÝš[™Ï‹ˆXˆ™\ÛÛ™YØ›Ø\™ˆÜ[ÛÝš[™Ï‹ˆXˆ[\˜[ˆX\šÙ][˜[\Ú\ÔÛ˜\ÚÝˆXˆZ[NˆX\šÙ][˜[\Ú\ÔÛ˜\ÚÝŸB‚ˆÖÙ\š]™JXYËÙ\šX[^™JWBœXˆÝXÝX\šÙ]ÛÛšX]Ü’][HÂˆXˆ×ØÛÙNˆÝš[™ËˆXˆ˜[YNˆÜ[ÛÝš[™Ï‹ˆXˆ[™\ÝžNˆÜ[ÛÝš[™Ï‹ˆXˆÛÛšX][Û—ÜÝˆŸB‚™›ˆX\šÙ]Ü˜[š×Ú][J˜[YNˆÝš[™Ë˜[YNˆ
+HOˆX\šÙ]˜[šÒ][HÂˆX\šÙ]˜[šÒ][HÂˆ˜[YKˆ˜[YKˆ×ØÛÙNˆ›Û™KˆÝ\Ù]Nˆ›Û™Kˆ[™Ù]Nˆ›Û™KˆÛÛ˜Ù\Îˆ›Û™Kˆ™YWÙ^WÙØZ[Žˆ›Û™Kˆš]™WÙ^WÙØZ[Žˆ›Û™KˆBŸB‚™›ˆX\šÙ]ÜÝØÚ×Ü˜[š×Ú][JˆÝØÚ×Û˜[YWÛX\ˆ	’\ÚX\Ýš[™ËÝš[™Ï‹ˆ×ØÛÙNˆÝš[™Ëˆ˜[YNˆˆÝ\Ù]NˆÜ[ÛÝš[™Ï‹ˆ[™Ù]NˆÜ[ÛÝš[™Ï‹ŠHOˆX\šÙ]˜[šÒ][HÂˆ]˜[YHHÝØÚ×Û˜[YWÛX\ˆ™Ù]
+	×ØÛÙJBˆ˜ÛÛ™Y
+
+Bˆ[Ü˜\ÛÜ—Ù[ÙJ×ØÛÙK˜ÛÛ™J
+JNÂˆX\šÙ]˜[šÒ][HÂˆ˜[YNˆ›Ü›X]JžßH
+ßJH‹˜[YK×ØÛÙJKˆ˜[YKˆ×ØÛÙNˆÛÛYJ×ØÛÙJKˆÝ\Ù]Kˆ[™Ù]KˆÛÛ˜Ù\Îˆ›Û™Kˆ™YWÙ^WÙØZ[Žˆ›Û™Kˆš]™WÙ^WÙØZ[Žˆ›Û™KˆBŸB‚™›ˆ˜Z[[™×Ü\š[ÙÙØZ[Š›ÝÜÎˆ	–ÊÝš[™Ë
+WK\š[Ùˆ\Ú^™JHOˆÜ[ÛˆÂˆYˆ\š[ÙOH›ÝÜË›[Š
+HH\š[ÙÂˆ™]\›ˆ›Û™NÂˆBˆ]Ý\ØÛÜÙHH›ÝÜË™Ù]
+›ÝÜË›[Š
+HH\š[ÙHJOËŒNÂˆ][™ØÛÜÙHH›ÝÜË›\Ý
+
+OËŒNÂˆYˆ\Ý\ØÛÜÙKš\×Ùš[š]J
+HY[™ØÛÜÙKš\×Ùš[š]J
+HÝ\ØÛÜÙHHŽ‘TÒSÓˆÂˆ™]\›ˆ›Û™NÂˆBˆ]˜[YHH
+[™ØÛÜÙHÈÝ\ØÛÜÙHHKŒ
+H
+ˆLŒÂˆ˜[YKš\×Ùš[š]J
+K[—ÜÛÛYJ˜[YJBŸB‚ˆÖÙ\š]™JXYËÙ\šX[^™JWBœXˆÝXÝX\šÙ]ÛÛšX][Û‘]HÂˆXˆØÛÜNˆÝš[™ËˆXˆÚ[™ˆÝš[™ËˆXˆ˜[YNˆÝš[™ËˆXˆ˜YWÙ]NˆÜ[ÛÝš[™Ï‹ˆXˆÝ\Ù]NˆÜ[ÛÝš[™Ï‹ˆXˆ[™Ù]NˆÜ[ÛÝš[™Ï‹ˆXˆÛÚØ˜XÚ×Ü\š[Ùˆ\Ú^™KˆXˆÛÛšX]ÜœÎˆ™XÏX\šÙ]ÛÛšX]Ü’][O‹ŸB‚™›ˆÜ[—Ü™\Ý[ØÛÛ›ŠÛÝ\˜ÙWÜ]ˆ	œÝŠHOˆ™\Ý[ÛÛ›™XÝ[Û‹Ýš[™ÏˆÂˆ]™\Ý[ÙˆH™\Ý[Ù—Ü]
+ÛÝ\˜ÙWÜ]
+NÂˆ]™\Ý[Ù—ÜÝˆH™\Ý[Ù‚ˆ×ÜÝŠ
+Bˆ›Ú×ÛÜ—Ù[ÙJ¹îäù§§9n¤ú-ëùo¡9.#y¦+ù§"y¥bU‹N‹×ÜÝš[™Ê
+JOÎÂˆÛÛ›™XÝ[ÛŽŽ›Ü[Š™\Ý[Ù—ÜÝŠK›X\Ù\œŠ_›Ü›X]J¹¢dùo 9îäù§§9n¤ùi,z-)NˆÙ_HŠJBŸB‚™›ˆØÛÜWÝØ^WÛX™[
+ØÛÜWÝØ^NˆØÛÜUØ^JHOˆÝš[™ÈÂˆX]ÚØÛÜWÝØ^HÂˆØÛÜUØ^NŽ[žHOˆ˜[žH‹×ÜÝš[™Ê
+KˆØÛÜUØ^NŽ“\ÝOˆ›\Ý‹×ÜÝš[™Ê
+KˆØÛÜUØ^NŽ‘XXÚOˆ™XXÚ‹×ÜÝš[™Ê
+KˆØÛÜUØ^NŽ”™XÙ[Oˆœ™XÙ[‹×ÜÝš[™Ê
+KˆØÛÜUØ^NŽÛÛœÙXÊŠHOˆ›Ü›X]J˜ÛÛœÙXÏ^ÛŸHŠKˆBŸB‚™›ˆ\œÙWÜØÛÜWÝØ^WÚ[œ]
+ØÛÜWÝØ^WÜ˜]Îˆ	œÝŠHOˆ™\Ý[ØÛÜUØ^KÝš[™ÏˆÂˆ]›Ü›X[^™YHØÛÜWÝØ^WÜ˜]Ëš[J
+K×Ø\ØÚZWÝ\\˜Ø\ÙJ
+NÂˆX]Ú›Ü›X[^™Y˜\×ÜÝŠ
+HÂˆS–HˆOˆÚÊØÛÜUØ^NŽ[žJKˆ“TÕˆOˆÚÊØÛÜUØ^NŽ“\Ý
+Kˆ‘PPÒˆOˆÚÊØÛÜUØ^NŽ‘XXÚ
+Kˆ”‘PÑS•ˆOˆÚÊØÛÜUØ^NŽ”™XÙ[
+Kˆ˜[YHOˆÂˆ]ÛÛYJ[JHH˜[YKœÝš\Ü™Yš^
+ÓÓ”ÑPÏHŠH[ÙHÂˆ™]\›ˆ\œŠ›Ü›X]JˆœØÛÜWÝØ^H9.#y¥+ù£ NˆÜØÛÜWÝØ^WÜ˜]ß{ï#9.áy¥+ù£ HS–KÓTÕÑPPÒÔ‘PÑS•ÐÓÓ”ÑPÏSˆ‚ˆ
+JNÂˆNÂˆ]™\ÚÛH[Bˆœ\œÙNŽ\Ú^™OŠ
+Bˆ›X\Ù\œŠß›Ü›X]JœØÛÜWÝØ^H:/ç¹îëzf"9`/:gg¹¬åNˆÜØÛÜWÝØ^WÜ˜]ßHŠJOÎÂˆYˆ™\ÚÛOHÂˆ™]\›ˆ\œŠœØÛÜWÝØ^H:/ç¹îëzf"9`/9oázhnÈHH‹×ÜÝš[™Ê
+JNÂˆBˆÚÊØÛÜUØ^NŽÛÛœÙXÊ™\ÚÛ
+JBˆBˆBŸB‚™›ˆ™XYÛ›Û—Ù[\WÛÝÛ™Y
+˜]ÎˆÜ[Û	œÝŠHOˆÜ[ÛÝš[™ÏˆÂˆ˜]Ë›X\
+ÝŽŽš[JBˆ™š[\Š˜[Y_]˜[YKš\×Ù[\J
+JBˆ›X\
+ÝŽŽ×ÜÝš[™ÊBŸB‚™›ˆØYÜ[WÛY]JÛÝ\˜ÙWÜ]ˆ	œÝŠHOˆ™\Ý[
+™XÏÝš[™Ï‹\ÚX\Ýš[™Ë[SY]OŠKÝš[™ÏˆÂˆ][\ÈHØÛÜ™T[NŽ›ØYÜ[\ÊÛÝ\˜ÙWÜ]
+OÎÂˆ]]]Ü™\ˆH™XÎŽÚ]ØØ\XÚ]J[\Ë›[Š
+JNÂˆ]]]Y]WÛX\H\ÚX\ŽÚ]ØØ\XÚ]J[\Ë›[Š
+JNÂ‚ˆ›Üˆ[H[ˆ[\ÈÂˆÜ™\‹œ\Ú
+[K›˜[YK˜ÛÛ™J
+JNÂˆ]Ú[ˆHX]Ú[KšÚ[™Âˆ[RÚ[™Ž”Ú[™ÛHOˆ[KÚ[‹˜ÛÛ™J
+Kˆ[RÚ[™ŽÛÛXš[˜][ÛˆOˆ
+[Nˆ	”ØÛÜ™T[_OˆÝš[™ÈÂˆ]ÛÛ™][ÛœÈH[Bˆ˜ÛÛ™][ÛœÂˆš]\Š
+Bˆ›X\
+ÛÛ™][ÛŸ›Ü›X]JžßNˆßH‹ÛÛ™][Û‹›˜[YKÛÛ™][Û‹Ú[ŠJBˆ˜ÛÛXÝŽ™XÏÏŠ
+Bˆš›Ú[Š»ï&ÈŠNÂˆ]›Û\Ù\ÈH[Bˆ˜ÛÛ™][ÛœÂˆš]\Š
+Bˆ™š[\ŠÛÛ™][ÛŸÛÛ™][Û‹˜›Û\×ÜÚ[ÈOHŒ
+Bˆ›X\
+ÛÛ™][ÛŸ›Ü›X]JžßNˆÎŠßH‹ÛÛ™][Û‹›˜[YKÛÛ™][Û‹˜›Û\×ÜÚ[ÊJBˆ˜ÛÛXÝŽ™XÏÏŠ
+Bˆš›Ú[Š»ï&ÈŠNÂˆ]]]\ÈH™XÈVÂˆ›Ü›X]J¹îá9d"9§hy.í»ï&žØÛÛ™][ÛœßHŠKˆ›Ü›X]Jˆ¹doy.+y¥l9o¥ùb!»ï&žÎßH‹ˆ[KœÚ[×ØžWÚ]Ë˜\×Ù\™YŠ
+K[Ü˜\ÛÜ—ÙY˜][
+
+Bˆ
+KˆNÂˆYˆX›Û\Ù\Ëš\×Ù[\J
+HÂˆ\Ëœ\Ú
+›Ü›X]Jºh§yi%¹b¨9b!»ï&žØ›Û\Ù\ßHŠJNÂˆBˆ\Ëš›Ú[Š»ï&ÈŠBˆJJ	œ[JKˆNÂˆ]Ú[ÈH[Kœ™\™\Ù[]]™WÜÚ[Ê
+NÂˆY]WÛX\š[œÙ\
+ˆ[K›˜[YKˆ[SY]HÂˆÚ[‹ˆ^Z[Žˆ[K™^Z[‹ˆšYÙÙ\—Û[ÙNˆØÛÜWÝØ^WÛX™[
+[KœØÛÜWÝØ^JKˆ\×ÙXXÚˆ[KšÚ[™OH[RÚ[™Ž”Ú[™ÛH	‰ˆX]Ú\ÈJ[KœØÛÜWÝØ^KØÛÜUØ^NŽ‘XXÚ
+KˆÚ[ËˆKˆ
+NÂˆB‚ˆÚÊ
+Ü™\‹Y]WÛX\
+JBŸB‚™›ˆØYÜØÙ[™WÛÜ[ÛœÊÛÝ\˜ÙWÜ]ˆ	œÝŠHOˆ™\Ý[™XÏÝš[™Ï‹Ýš[™ÏˆÂˆ]ØÙ[™\ÈHØÛÜ™TØÙ[™NŽ›ØYÜØÙ[™\ÊÛÝ\˜ÙWÜ]
+OÎÂˆÚÊØÙ[™\Ëš[×Ú]\Š
+K›X\
+ØÙ[™_ØÙ[™K›˜[YJK˜ÛÛXÝ
+
+JBŸB‚™›ˆ]Y\žWÙZ[WÜ›ÝÜÊˆÛÛ›Žˆ	ÛÛ›™XÝ[Û‹ˆ[WÛÜ™\Žˆ	–ÔÝš[™×KˆY]WÛX\ˆ	’\ÚX\Ýš[™Ë[SY]O‹ŠHOˆ™\Ý[™XÏÝ˜]YÞQZ[T›ÝÏ‹Ýš[™ÏˆÂˆ]XXÚÛYYX[œÈH
+ÛÛ›Žˆ	ÛÛ›™XÝ[Û‹ˆY]WÛX\ˆ	’\ÚX\Ýš[™Ë[SY]OŸˆOˆ™\Ý[\ÚX\
+Ýš[™ËÝš[™ÊK‹Ýš[™ÏˆÂˆ]]]Ý]H\ÚX\Ž›™]Ê
+NÂ‚ˆ›Üˆ
+[WÛ˜[YKY]JH[ˆY]WÛX\ÂˆYˆ[Y]Kš\×ÙXXÚY]KœÚ[ÈOHŒÂˆÛÛ[YNÂˆB‚ˆ]]]Ý]HÛÛ›‚ˆœ™\\™JˆˆÈ‚ˆÑSPÕˆ˜YWÙ]KˆUPS•SWÐÓÓ•
+P”Ê[WÜØÛÜ™HÈÊKJHTÈYYX[—ÝšYÙÙ\—ØÛÝ[ˆ”“ÓH[WÙ]Z[ÂˆÒT‘H[WÛ˜[YHHÂˆS‘[WÜØÛÜ™HTÈ“Õ•SˆS‘P”Ê[WÜØÛÜ™JHˆYKLL‚ˆÔ“ÕT–HBˆÔ‘Tˆ–HHTÐÂˆˆËˆ
+Bˆ›X\Ù\œŠ_›Ü›X]Jºh¡9ï%º+äHPPÒ9.+y/cz)é¹cäy«(y¥lÔS9i,z-)NˆÙ_HŠJOÎÂˆ]]]›ÝÜÈHÝ]ˆœ]Y\žJ\˜[\ÈVÛY]KœÚ[Ë[WÛ˜[YWJBˆ›X\Ù\œŠ_›Ü›X]J¹¢iú(cPPÒ9.+y/cz)é¹cäy«(y¥lÔS9i,z-)NˆÙ_HŠJOÎÂ‚ˆÚ[H]ÛÛYJ›ÝÊHH›ÝÜÂˆ›™^
+
+Bˆ›X\Ù\œŠ_›Ü›X]Jº+îùcåˆPPÒ9.+y/cz)é¹cäy«(y¥l9i,z-)NˆÙ_HŠJOÂˆÂˆ]˜YWÙ]NˆÝš[™ÈH›ÝË™Ù]
+
+K›X\Ù\œŠ_›Ü›X]Jº+îùcå¹.©9¦$ù¥éyi,z-)NˆÙ_HŠJOÎÂˆ]YYX[ŽˆÜ[ÛˆH›ÝÂˆ™Ù]
+JBˆ›X\Ù\œŠ_›Ü›X]Jº+îùcå¹.+y/cz)é¹cäy«(y¥l9i,z-)NˆÙ_HŠJOÎÂˆYˆ]ÛÛYJ˜[YJHHYYX[ˆÂˆÝ]š[œÙ\
+
+˜YWÙ]K[WÛ˜[YK˜ÛÛ™J
+JK˜[YJNÂˆBˆBˆB‚ˆÚÊÝ]
+BˆJJÛÛ›‹Y]WÛX\
+OÎÂˆ]]]Ø[\WÜÝ]HÛÛ›‚ˆœ™\\™JˆˆÈ‚ˆÑSPÕˆ˜YWÙ]KˆÓÕS•
+
+ŠHTÈØ[\WØÛÝ[ˆ”“ÓHØÛÜ™WÜÝ[[X\žBˆÔ“ÕT–HBˆÔ‘Tˆ–HHTÐÂˆˆËˆ
+Bˆ›X\Ù\œŠ_›Ü›X]Jºh¡9ï%º+äy¥éyn©¹¨-ù§+9¥lÔS9i,z-)NˆÙ_HŠJOÎÂˆ]]]Ø[\WÜ›ÝÜÈHØ[\WÜÝ]ˆœ]Y\žJ×JBˆ›X\Ù\œŠ_›Ü›X]J¹¢iú(c9¥éyn©¹¨-ù§+9¥lÔS9i,z-)NˆÙ_HŠJOÎÂ‚ˆ]]]Z[WÜØ[\\ÈH™XÎŽ›™]Ê
+NÂˆÚ[H]ÛÛYJ›ÝÊHHØ[\WÜ›ÝÜÂˆ›™^
+
+Bˆ›X\Ù\œŠ_›Ü›X]Jº+îùcå¹¥éyn©¹¨-ù§+9¥l9i,z-)NˆÙ_HŠJOÂˆÂˆ]˜YWÙ]NˆÝš[™ÈH›ÝË™Ù]
+
+K›X\Ù\œŠ_›Ü›X]Jº+îùcå¹.©9¦$ù¥éyi,z-)NˆÙ_HŠJOÎÂˆ]Ø[\WØÛÝ[ˆMH›ÝË™Ù]
+JK›X\Ù\œŠ_›Ü›X]Jº+îùcå¹¨-ù§+9¥l9i,z-)NˆÙ_HŠJOÎÂˆZ[WÜØ[\\Ëœ\Ú
+
+˜YWÙ]KØ[\WØÛÝ[
+JNÂˆB‚ˆ]Ü[HˆÈ‚ˆÒUZ[WÜ˜[š×Ø›Ý[™ÈTÈ
+ˆÑSPÕˆ˜YWÙ]KˆPV
+˜[šÊHTÈX^Ü˜[šÂˆ”“ÓHØÛÜ™WÜÝ[[X\žBˆÔ“ÕT–HBˆ
+KˆšYÙÙ\™YÜ[WÜ›ÝÜÈTÈ
+ˆÑSPÕ
+‚ˆ”“ÓH[WÙ]Z[ÂˆÒT‘H[WÜØÛÜ™HTÈ“Õ•SˆS‘P”Ê[WÜØÛÜ™JHˆYKLL‚ˆ
+BˆÑSPÕˆ˜YWÙ]Kˆœ[WÛ˜[YKˆÓÕS•
+
+ŠHTÈšYÙÙ\—ØÛÝ[ˆÕSJˆÐTÑBˆÒSˆËœ˜[šÈTÈ“Õ•SˆS‘‹›X^Ü˜[šÈTÈ“Õ•SˆS‘‹›X^Ü˜[šÈˆˆSˆœ[WÜØÛÜ™H
+ˆÐTÕ
+
+‹›X^Ü˜[šÈ
+ÈHHËœ˜[šÊHTÈÕP“JHÈÐTÕ
+‹›X^Ü˜[šÈTÈÕP“JBˆSÑHˆS‘ˆ
+HTÈÛÛšX][Û—ÜØÛÜ™KˆÕSJÐTÑHÒSˆËœ˜[šÈHÈSˆHSÑHS‘
+HTÈÜLÝšYÙÙ\—ØÛÝ[ˆRSŠËœ˜[šÊHTÈ™\ÝÜ˜[šÂˆ”“ÓHšYÙÙ\™YÜ[WÜ›ÝÜÈTÈˆQ•“ÒSˆØÛÜ™WÜÝ[[X\žHTÈÂˆÓˆË×ØÛÙHH×ØÛÙBˆS‘Ë˜YWÙ]HH˜YWÙ]BˆQ•“ÒSˆZ[WÜ˜[š×Ø›Ý[™ÈTÈ‚ˆÓˆ‹˜YWÙ]HH˜YWÙ]BˆÔ“ÕT–HK‚ˆÔ‘Tˆ–H˜YWÙ]HTÐËœ[WÛ˜[YHTÐÂˆˆÎÂ‚ˆ]]]Ý]HÛÛ›‚ˆœ™\\™JÜ[
+Bˆ›X\Ù\œŠ_›Ü›X]Jºh¡9ï%º+äy¥éyn©¹ëe¹åiyîçú+¨HÔS9i,z-)NˆÙ_HŠJOÎÂˆ]]]›ÝÜÈHÝ]ˆœ]Y\žJ\˜[\ÈVÊL
+WJBˆ›X\Ù\œŠ_›Ü›X]J¹¢iú(c9¥éyn©¹ëe¹åiyîçú+¨HÔS9i,z-)NˆÙ_HŠJOÎÂ‚ˆ]]]Ý]H™XÎŽ›™]Ê
+NÂˆ]]]Z[WØYÙ×ÛX\ˆ\ÚX\
+Ýš[™ËÝš[™ÊK[Q^PYÙÏˆH\ÚX\Ž›™]Ê
+NÂˆÚ[H]ÛÛYJ›ÝÊHH›ÝÜÂˆ›™^
+
+Bˆ›X\Ù\œŠ_›Ü›X]Jº+îùcå¹¥éyn©¹ëe¹åiyîçú+¨yi,z-)NˆÙ_HŠJOÂˆÂˆ]˜YWÙ]NˆÝš[™ÈH›ÝË™Ù]
+
+K›X\Ù\œŠ_›Ü›X]Jº+îùcå¹.©9¦$ù¥éyi,z-)NˆÙ_HŠJOÎÂˆ][WÛ˜[YNˆÝš[™ÈH›ÝË™Ù]
+JK›X\Ù\œŠ_›Ü›X]Jº+îùcå¹ëe¹åiyd#yi,z-)NˆÙ_HŠJOÎÂˆZ[WØYÙ×ÛX\š[œÙ\
+ˆ
+˜YWÙ]K[WÛ˜[YJKˆ[Q^PYÙÈÂˆšYÙÙ\—ØÛÝ[ˆ›ÝË™Ù]
+ŠK›X\Ù\œŠ_›Ü›X]Jº+îùcåº)é¹cäy«(y¥l9i,z-)NˆÙ_HŠJOËˆÛÛšX][Û—ÜØÛÜ™Nˆ›ÝÂˆ™Ù]Ž\Ú^™KÜ[ÛŠÊBˆ›X\Ù\œŠ_›Ü›X]Jº+îùcå¹ëe¹åiz-(yã+¹n©¹i,z-)NˆÙ_HŠJOÂˆ[Ü˜\ÛÜŠŒ
+KˆÜLÝšYÙÙ\—ØÛÝ[ˆ›ÝÂˆ™Ù]Ž\Ú^™KÜ[ÛMŠ
+Bˆ›X\Ù\œŠ_›Ü›X]Jº+îùcå¹bcLL:)é¹cäy«(y¥l9i,z-)NˆÙ_HŠJOÂˆ[Ü˜\ÛÜŠ
+Kˆ™\ÝÜ˜[šÎˆ›ÝË™Ù]
+JK›X\Ù\œŠ_›Ü›X]Jº+îùcå¹§ 9/&9£¤¹d#yi,z-)NˆÙ_HŠJOËˆKˆ
+NÂˆB‚ˆ›Üˆ
+˜YWÙ]KØ[\WØÛÝ[
+H[ˆZ[WÜØ[\\ÈÂˆ›Üˆ[WÛ˜[YH[ˆ[WÛÜ™\ˆÂˆ]YÙÈHZ[WØYÙ×ÛX\ˆ™Ù]
+	Š˜YWÙ]K˜ÛÛ™J
+K[WÛ˜[YK˜ÛÛ™J
+JJBˆ˜ÛÛ™Y
+
+Bˆ[Ü˜\ÛÜ—ÙY˜][
+
+NÂˆ]Y]HHY]WÛX\™Ù]
+[WÛ˜[YJNÂˆ]ÛÛšX][Û—ÜØÛÜ™HHYˆYÙËšYÙÙ\—ØÛÝ[ˆÂˆÛÛYJYÙË˜ÛÛšX][Û—ÜØÛÜ™JBˆH[ÙHÂˆ›Û™BˆNÂˆ]ÛÛšX][Û—Ü\—ÝšYÙÙ\ˆBˆÛÛšX][Û—ÜØÛÜ™K›X\
+ØÛÜ™_ØÛÜ™HÈYÙËšYÙÙ\—ØÛÝ[\È
+NÂˆ]ÛÝ™\˜YÙHHYˆØ[\WØÛÝ[ˆÂˆÛÛYJYÙËšYÙÙ\—ØÛÝ[\ÈÈØ[\WØÛÝ[\È
+BˆH[ÙHÂˆ›Û™BˆNÂ‚ˆÝ]œ\Ú
+Ý˜]YÞQZ[T›ÝÈÂˆYYX[—ÝšYÙÙ\—ØÛÝ[ˆXXÚÛYYX[œÂˆ™Ù]
+	Š˜YWÙ]K˜ÛÛ™J
+K[WÛ˜[YK˜ÛÛ™J
+JJBˆ˜ÛÜYY
+
+Kˆ˜YWÙ]Nˆ˜YWÙ]K˜ÛÛ™J
+Kˆ[WÛ˜[YNˆ[WÛ˜[YK˜ÛÛ™J
+KˆšYÙÙ\—Û[ÙNˆY]K›X\
+Ÿ‹šYÙÙ\—Û[ÙK˜ÛÛ™J
+JKˆØ[\WØÛÝ[ˆÛÛYJØ[\WØÛÝ[
+KˆšYÙÙ\—ØÛÝ[ˆÛÛYJYÙËšYÙÙ\—ØÛÝ[
+KˆÛÝ™\˜YÙKˆÛÛšX][Û—ÜØÛÜ™KˆÛÛšX][Û—Ü\—ÝšYÙÙ\‹ˆÜLÝšYÙÙ\—ØÛÝ[ˆÛÛYJYÙËÜLÝšYÙÙ\—ØÛÝ[
+Kˆ™\ÝÜ˜[šÎˆYÙË˜™\ÝÜ˜[šËˆJNÂˆBˆB‚ˆÚÊÝ]
+BŸB‚™›ˆ™\ÛÛ™WØ[˜[\Ú\×Ý˜YWÙ]Jˆ™\]Y\ÝYˆÜ[ÛÝš[™Ï‹ˆ˜YWÙ]WÛÜ[ÛœÎˆ	–ÔÝš[™×KŠHOˆÜ[ÛÝš[™ÏˆÂˆ]™\]Y\ÝYH™\]Y\ÝYˆ›X\
+Ÿ‹š[J
+K×ÜÝš[™Ê
+JBˆ™š[\ŠŸ]‹š\×Ù[\J
+JNÂˆYˆ]ÛÛYJ˜YWÙ]JHH™\]Y\ÝYÂˆYˆ˜YWÙ]WÛÜ[ÛœËš]\Š
+K˜[žJ][_][HOH	˜YWÙ]JHÂˆ™]\›ˆÛÛYJ˜YWÙ]JNÂˆBˆBˆ˜YWÙ]WÛÜ[ÛœË™š\œÝ
+
+K˜ÛÛ™Y
+
+BŸB‚™›ˆZ[ØÚ\
+Ý˜]YÞWÜ›ÝÜÎˆ	–ÔÝ˜]YÞQZ[T›Ý×JHOˆÝ˜]YÞPÚ\^[ØYÂˆ]][\ÈHÝ˜]YÞWÜ›ÝÜÂˆš]\Š
+Bˆ›X\
+›ÝßÝ˜]YÞPÚ\Ú[Âˆ˜YWÙ]Nˆ›ÝË˜YWÙ]K˜ÛÛ™J
+KˆšYÙÙ\—ØÛÝ[ˆ›ÝËšYÙÙ\—ØÛÝ[ˆÜLÝšYÙÙ\—ØÛÝ[ˆ›ÝËÜLÝšYÙÙ\—ØÛÝ[ˆÛÝ™\˜YÙNˆ›ÝË˜ÛÝ™\˜YÙKˆJBˆ˜ÛÛXÝ
+
+NÂ‚ˆÝ˜]YÞPÚ\^[ØYÈ][\ÎˆÛÛYJ][\ÊHBŸB‚™›ˆ]Y\žWÝšYÙÙ\™YÜÝØÚÜÊˆÛÛ›Žˆ	ÛÛ›™XÝ[Û‹ˆÛÝ\˜ÙWÜ]ˆ	œÝ‹ˆ[WÛ˜[YNˆ	œÝ‹ˆ˜YWÙ]Nˆ	œÝ‹ŠHOˆ™\Ý[™XÏšYÙÙ\™YÝØÚÔ›ÝÏ‹Ýš[™ÏˆÂˆ]˜[YWÛX\HZ[Û˜[YWÛX\
+ÛÝ\˜ÙWÜ]
+K[Ü˜\ÛÜ—ÙY˜][
+
+NÂˆ]ÛÛ˜Ù\ÛX\HZ[ØÛÛ˜Ù\×ÛX\
+ÛÝ\˜ÙWÜ]
+K[Ü˜\ÛÜ—ÙY˜][
+
+NÂˆ]]]Ý]HÛÛ›‚ˆœ™\\™JˆˆÈ‚ˆÑSPÕˆËœ˜[šËˆ×ØÛÙKˆËÝ[ÜØÛÜ™Kˆœ[WÜØÛÜ™Bˆ”“ÓH[WÙ]Z[ÈTÈˆQ•“ÒSˆØÛÜ™WÜÝ[[X\žHTÈÂˆÓˆË×ØÛÙHH×ØÛÙBˆS‘Ë˜YWÙ]HH˜YWÙ]BˆÒT‘H˜YWÙ]HHÂˆS‘œ[WÛ˜[YHHÂˆS‘œ[WÜØÛÜ™HTÈ“Õ•SˆS‘P”Êœ[WÜØÛÜ™JHˆYKLL‚ˆÔ‘Tˆ–HËœ˜[šÈTÐÈ•SÈTÕ×ØÛÙHTÐÂˆˆËˆ
+Bˆ›X\Ù\œŠ_›Ü›X]Jºh¡9ï%º+äz)é¹cäz ¨yéjÔS9i,z-)NˆÙ_HŠJOÎÂˆ]]]›ÝÜÈHÝ]ˆœ]Y\žJ\˜[\ÈVÝ˜YWÙ]K[WÛ˜[YWJBˆ›X\Ù\œŠ_›Ü›X]J¹¢iú(c:)é¹cäz ¨yéjÔS9i,z-)NˆÙ_HŠJOÎÂ‚ˆ]]]Ý]H™XÎŽ›™]Ê
+NÂˆÚ[H]ÛÛYJ›ÝÊHH›ÝÜË›™^
+
+K›X\Ù\œŠ_›Ü›X]Jº+îùcåº)é¹cäz ¨yéj9i,z-)NˆÙ_HŠJOÈÂˆ]×ØÛÙNˆÝš[™ÈH›ÝË™Ù]
+JK›X\Ù\œŠ_›Ü›X]Jº+îùcåº ¨yéj9.èùè yi,z-)NˆÙ_HŠJOÎÂˆÝ]œ\Ú
+šYÙÙ\™YÝØÚÔ›ÝÈÂˆ˜[šÎˆ›ÝË™Ù]
+
+K›X\Ù\œŠ_›Ü›X]Jº+îùcå¹£¤¹d#yi,z-)NˆÙ_HŠJOËˆÝ[ÜØÛÜ™Nˆ›ÝË™Ù]
+ŠK›X\Ù\œŠ_›Ü›X]Jº+îùcå¹ .ùb!¹i,z-)NˆÙ_HŠJOËˆ[WÜØÛÜ™Nˆ›ÝË™Ù]
+ÊK›X\Ù\œŠ_›Ü›X]Jº+îùcå¹ëe¹åiyo¥ùb!¹i,z-)NˆÙ_HŠJOËˆ˜[YNˆ˜[YWÛX\™Ù]
+	×ØÛÙJK˜ÛÛ™Y
+
+KˆÛÛ˜Ù\ˆÛÛ˜Ù\ÛX\™Ù]
+	×ØÛÙJK˜ÛÛ™Y
+
+Kˆ×ØÛÙKˆJNÂˆB‚ˆÚÊÝ]
+BŸB‚œXˆ›ˆÙ]ÜÝ˜]YÞWÝšYÙÙ\™YÜÝØÚÜÊˆÛÝ\˜ÙWÜ]ˆÝš[™ËˆÝ˜]YÞWÛ˜[YNˆÝš[™Ëˆ[˜[\Ú\×Ý˜YWÙ]NˆÝš[™ËŠHOˆ™\Ý[™XÏšYÙÙ\™YÝØÚÔ›ÝÏ‹Ýš[™ÏˆÂˆ]Ý˜]YÞWÛ˜[YHHÝ˜]YÞWÛ˜[YKš[J
+NÂˆ][˜[\Ú\×Ý˜YWÙ]HH[˜[\Ú\×Ý˜YWÙ]Kš[J
+NÂˆYˆÝ˜]YÞWÛ˜[YKš\×Ù[\J
+H[˜[\Ú\×Ý˜YWÙ]Kš\×Ù[\J
+HÂˆ™]\›ˆÚÊ™XÎŽ›™]Ê
+JNÂˆB‚ˆ]ÛÛ›ˆHÜ[—Ü™\Ý[ØÛÛ›Š	œÛÝ\˜ÙWÜ]
+OÎÂˆ]Y\žWÝšYÙÙ\™YÜÝØÚÜÊ	˜ÛÛ›‹	œÛÝ\˜ÙWÜ]Ý˜]YÞWÛ˜[YK[˜[\Ú\×Ý˜YWÙ]JBŸB‚œXˆ›ˆÙ]ÜÝ˜]YÞWÜÝ]\ÝXÜ×Ù]Z[
+ˆÛÝ\˜ÙWÜ]ˆÝš[™ËˆÝ˜]YÞWÛ˜[YNˆÝš[™Ëˆ[˜[\Ú\×Ý˜YWÙ]NˆÜ[ÛÝš[™Ï‹ŠHOˆ™\Ý[Ý˜]YÞTÝ]\ÝXÜÑ]Z[]KÝš[™ÏˆÂˆ]Ý˜]YÞWÛ˜[YHHÝ˜]YÞWÛ˜[YKš[J
+K×ÜÝš[™Ê
+NÂˆYˆÝ˜]YÞWÛ˜[YKš\×Ù[\J
+HÂˆ™]\›ˆ\œŠ¹ëe¹åiyd#y.#z ïy..¹ênˆ‹×ÜÝš[™Ê
+JNÂˆB‚ˆ]ÛÛ›ˆHÜ[—Ü™\Ý[ØÛÛ›Š	œÛÝ\˜ÙWÜ]
+OÎÂˆ]
+[WÛÜ™\‹Y]WÛX\
+HHØYÜ[WÛY]J	œÛÝ\˜ÙWÜ]
+OÎÂˆ]]Z[Ü›ÝÜ×Ø[H]Y\žWÙZ[WÜ›ÝÜÊ	˜ÛÛ›‹	œ[WÛÜ™\‹	›Y]WÛX\
+OÎÂˆ]Ý˜]YÞWÜ›ÝÜÈH]Z[Ü›ÝÜ×Ø[ˆš]\Š
+Bˆ™š[\Š›Ýß›ÝËœ[WÛ˜[YHOHÝ˜]YÞWÛ˜[YJBˆ˜ÛÛ™Y
+
+Bˆ˜ÛÛXÝŽ™XÏÏŠ
+NÂ‚ˆ]]][˜[\Ú\×Ý˜YWÙ]WÛÜ[ÛœÈHÝ˜]YÞWÜ›ÝÜÂˆš]\Š
+Bˆ™š[\Š›Ýß›ÝËšYÙÙ\—ØÛÝ[[Ü˜\ÛÜŠ
+Hˆ
+Bˆ›X\
+›Ýß›ÝË˜YWÙ]K˜ÛÛ™J
+JBˆ˜ÛÛXÝŽ™XÏÏŠ
+NÂˆ[˜[\Ú\×Ý˜YWÙ]WÛÜ[ÛœËœÛÜ
+
+NÂˆ[˜[\Ú\×Ý˜YWÙ]WÛÜ[ÛœË™Y\
+
+NÂˆ[˜[\Ú\×Ý˜YWÙ]WÛÜ[ÛœËœ™]™\œÙJ
+NÂˆYˆ[˜[\Ú\×Ý˜YWÙ]WÛÜ[ÛœËš\×Ù[\J
+HÂˆ[˜[\Ú\×Ý˜YWÙ]WÛÜ[ÛœÈHÝ˜]YÞWÜ›ÝÜÂˆš]\Š
+Bˆ›X\
+›Ýß›ÝË˜YWÙ]K˜ÛÛ™J
+JBˆ˜ÛÛXÝŽ™XÏÏŠ
+NÂˆ[˜[\Ú\×Ý˜YWÙ]WÛÜ[ÛœËœÛÜ
+
+NÂˆ[˜[\Ú\×Ý˜YWÙ]WÛÜ[ÛœË™Y\
+
+NÂˆ[˜[\Ú\×Ý˜YWÙ]WÛÜ[ÛœËœ™]™\œÙJ
+NÂˆBˆ]™\ÛÛ™YØ[˜[\Ú\×Ý˜YWÙ]HBˆ™\ÛÛ™WØ[˜[\Ú\×Ý˜YWÙ]J[˜[\Ú\×Ý˜YWÙ]K	˜[˜[\Ú\×Ý˜YWÙ]WÛÜ[ÛœÊNÂˆ]Ù[XÝYÙZ[WÜ›ÝÈH™\ÛÛ™YØ[˜[\Ú\×Ý˜YWÙ]Bˆ˜\×Ü™YŠ
+Bˆ˜[™Ý[Š˜YWÙ]_ÂˆÝ˜]YÞWÜ›ÝÜÂˆš]\Š
+Bˆ™š[™
+›Ýß›ÝË˜YWÙ]HOH
+˜YWÙ]JBˆ˜ÛÛ™Y
+
+BˆJNÂˆ]šYÙÙ\™YÜÝØÚÜÈHYˆ]ÛÛYJ˜YWÙ]JHH™\ÛÛ™YØ[˜[\Ú\×Ý˜YWÙ]K˜\×Ù\™YŠ
+HÂˆ]Y\žWÝšYÙÙ\™YÜÝØÚÜÊ	˜ÛÛ›‹	œÛÝ\˜ÙWÜ]	œÝ˜]YÞWÛ˜[YK˜YWÙ]JOÂˆH[ÙHÂˆ™XÎŽ›™]Ê
+BˆNÂ‚ˆÚÊÝ˜]YÞTÝ]\ÝXÜÑ]Z[]HÂˆÝ˜]YÞWÛ˜[YKˆ[˜[\Ú\×Ý˜YWÙ]WÛÜ[ÛœËˆ™\ÛÛ™YØ[˜[\Ú\×Ý˜YWÙ]KˆÙ[XÝYÙZ[WÜ›ÝËˆÚ\ˆÛÛYJZ[ØÚ\
+	œÝ˜]YÞWÜ›ÝÜÊJKˆšYÙÙ\™YÜÝØÚÜËˆJBŸB‚œXˆ›ˆÙ]ÜÝ˜]YÞWÜÝ]\ÝXÜ×ÜYÙJˆÛÝ\˜ÙWÜ]ˆÝš[™ËˆÝ˜]YÞWÛ˜[YNˆÜ[ÛÝš[™Ï‹ˆ[˜[\Ú\×Ý˜YWÙ]NˆÜ[ÛÝš[™Ï‹ŠHOˆ™\Ý[Ý˜]YÞTÝ]\ÝXÜÔYÙQ]KÝš[™ÏˆÂˆ]ÛÛ›ˆHÜ[—Ü™\Ý[ØÛÛ›Š	œÛÝ\˜ÙWÜ]
+OÎÂˆ]Ý™\šY]ÈH
+ÛÛ›Žˆ	ÛÛ›™XÝ[ÛŸOˆ™\Ý[Ý˜]YÞSÝ™\šY]Ô^[ØYÝš[™ÏˆÂˆ]Ü[HˆÈ‚ˆÒU\—ÜÝØÚ×Ù^HTÈ
+ˆÑSPÕˆ˜YWÙ]Kˆ×ØÛÙKˆÓÕS•
+
+ŠHTÈ]Ü[WØÛÝ[ˆ”“ÓH[WÙ]Z[ÂˆÒT‘H[WÜØÛÜ™HTÈ“Õ•SˆS‘P”Ê[WÜØÛÜ™JHˆYKLL‚ˆÔ“ÕT–HK‚ˆ
+KˆZ[WÛ]™[TÈ
+ˆÑSPÕˆ˜YWÙ]KˆU‘Ê]Ü[WØÛÝ[
+HTÈ^WÛ]™[ˆ”“ÓH\—ÜÝØÚ×Ù^BˆÔ“ÕT–HBˆ
+KˆÝ™\˜[Û]™[TÈ
+ˆÑSPÕU‘Ê]Ü[WØÛÝ[
+HTÈ]™×Û]™[ˆ”“ÓH\—ÜÝØÚ×Ù^Bˆ
+BˆÑSPÕˆ˜YWÙ]Kˆ™^WÛ]™[ˆË˜]™×Û]™[ˆ™^WÛ]™[HË˜]™×Û]™[TÈ[WÛ]™[ˆÐTÑBˆÒSˆ™^WÛ]™[TÈ•SÔˆË˜]™×Û]™[TÈ•SSˆ•SˆSÑH™^WÛ]™[ˆË˜]™×Û]™[ˆS‘TÈX›Ý™WØ]™Âˆ”“ÓHZ[WÛ]™[TÈˆÔ“ÔÔÈ“ÒSˆÝ™\˜[Û]™[TÈÂˆÔ‘Tˆ–H˜YWÙ]HTÐÂˆˆÎÂ‚ˆ]]]Ý]HÛÛ›‚ˆœ™\\™JÜ[
+Bˆ›X\Ù\œŠ_›Ü›X]Jºh¡9ï%º+äy .ù/dùîçú+¨HÔS9i,z-)NˆÙ_HŠJOÎÂˆ]]]›ÝÜÈHÝ]ˆœ]Y\žJ×JBˆ›X\Ù\œŠ_›Ü›X]J¹¢iú(c9 .ù/dùîçú+¨HÔS9i,z-)NˆÙ_HŠJOÎÂ‚ˆ]]]][\ÈH™XÎŽ›™]Ê
+NÂˆ]]]]\ÝÝ˜YWÙ]HH›Û™NÂˆ]]]]™\˜YÙWÛ]™[H›Û™NÂ‚ˆÚ[H]ÛÛYJ›ÝÊHH›ÝÜË›™^
+
+K›X\Ù\œŠ_›Ü›X]Jº+îùcå¹ .ù/dùîçú+¨yi,z-)NˆÙ_HŠJOÈÂˆ]˜YWÙ]NˆÝš[™ÈH›ÝË™Ù]
+
+K›X\Ù\œŠ_›Ü›X]Jº+îùcå¹.©9¦$ù¥éyi,z-)NˆÙ_HŠJOÎÂˆ]]™×Û]™[ˆÜ[ÛˆBˆ›ÝË™Ù]
+ŠK›X\Ù\œŠ_›Ü›X]Jº+îùcå¹nlùgaù¬-9nlùi,z-)NˆÙ_HŠJOÎÂ‚ˆ]\ÝÝ˜YWÙ]HHÛÛYJ˜YWÙ]K˜ÛÛ™J
+JNÂˆ]™\˜YÙWÛ]™[H]™×Û]™[Âˆ][\Ëœ\Ú
+Ý˜]YÞRX]X\Ù[Âˆ˜YWÙ]Kˆ^WÛ]™[ˆ›ÝË™Ù]
+JK›X\Ù\œŠ_›Ü›X]Jº+îùcå¹odù¥éy¬-9nlùi,z-)NˆÙ_HŠJOËˆ]™×Û]™[ˆ[WÛ]™[ˆ›ÝË™Ù]
+ÊK›X\Ù\œŠ_›Ü›X]Jº+îùcå¹më¹`/9i,z-)NˆÙ_HŠJOËˆX›Ý™WØ]™Îˆ›ÝË™Ù]
+
+K›X\Ù\œŠ_›Ü›X]Jº+îùcå¹o.¹o,y¨!ú+¬9i,z-)NˆÙ_HŠJOËˆJNÂˆB‚ˆÚÊÝ˜]YÞSÝ™\šY]Ô^[ØYÂˆ][\ÎˆÛÛYJ][\ÊKˆ]\ÝÝ˜YWÙ]Kˆ]™\˜YÙWÛ]™[ˆJBˆJJ	˜ÛÛ›ŠOÎÂˆ]
+Ý˜]YÞWÛÜ[ÛœËY]WÛX\
+HHØYÜ[WÛY]J	œÛÝ\˜ÙWÜ]
+OÎÂˆ]]Z[Ü›ÝÜ×Ø[H]Y\žWÙZ[WÜ›ÝÜÊ	˜ÛÛ›‹	œÝ˜]YÞWÛÜ[ÛœË	›Y]WÛX\
+OÎÂ‚ˆ]™\ÛÛ™YÜÝ˜]YÞWÛ˜[YHBˆ
+™\]Y\ÝYˆÜ[ÛÝš[™Ï‹Ý˜]YÞWÛÜ[ÛœÎˆ	–ÔÝš[™×_OˆÜ[ÛÝš[™ÏˆÂˆ]™\]Y\ÝYH™\]Y\ÝYˆ›X\
+Ÿ‹š[J
+K×ÜÝš[™Ê
+JBˆ™š[\ŠŸ]‹š\×Ù[\J
+JNÂˆYˆ]ÛÛYJ˜[YJHH™\]Y\ÝYÂˆYˆÝ˜]YÞWÛÜ[ÛœËš]\Š
+K˜[žJ][_][HOH	›˜[YJHÂˆ™]\›ˆÛÛYJ˜[YJNÂˆBˆBˆ›Û™BˆJJÝ˜]YÞWÛ˜[YK	œÝ˜]YÞWÛÜ[ÛœÊNÂ‚ˆ]Ý˜]YÞWÜ›ÝÜÎˆ™XÏÝ˜]YÞQZ[T›ÝÏˆBˆYˆ]ÛÛYJÙ[XÝYÛ˜[YJHH™\ÛÛ™YÜÝ˜]YÞWÛ˜[YK˜\×Ü™YŠ
+HÂˆ]Z[Ü›ÝÜ×Ø[ˆš]\Š
+Bˆ™š[\Š›Ýß›ÝËœ[WÛ˜[YHOH
+œÙ[XÝYÛ˜[YJBˆ˜ÛÛ™Y
+
+Bˆ˜ÛÛXÝ
+
+BˆH[ÙHÂˆ™XÎŽ›™]Ê
+BˆNÂ‚ˆ]]][˜[\Ú\×Ý˜YWÙ]WÛÜ[ÛœÎˆ™XÏÝš[™ÏˆH]Z[Ü›ÝÜ×Ø[ˆš]\Š
+Bˆ™š[\Š›Ýß›ÝËšYÙÙ\—ØÛÝ[[Ü˜\ÛÜŠ
+Hˆ
+Bˆ›X\
+›Ýß›ÝË˜YWÙ]K˜ÛÛ™J
+JBˆ˜ÛÛXÝ
+
+NÂˆ[˜[\Ú\×Ý˜YWÙ]WÛÜ[ÛœËœÛÜ
+
+NÂˆ[˜[\Ú\×Ý˜YWÙ]WÛÜ[ÛœË™Y\
+
+NÂˆ[˜[\Ú\×Ý˜YWÙ]WÛÜ[ÛœËœ™]™\œÙJ
+NÂ‚ˆYˆ[˜[\Ú\×Ý˜YWÙ]WÛÜ[ÛœËš\×Ù[\J
+HÂˆ[˜[\Ú\×Ý˜YWÙ]WÛÜ[ÛœÈH]Z[Ü›ÝÜ×Ø[ˆš]\Š
+Bˆ›X\
+›Ýß›ÝË˜YWÙ]K˜ÛÛ™J
+JBˆ˜ÛÛXÝ
+
+NÂˆ[˜[\Ú\×Ý˜YWÙ]WÛÜ[ÛœËœÛÜ
+
+NÂˆ[˜[\Ú\×Ý˜YWÙ]WÛÜ[ÛœË™Y\
+
+NÂˆ[˜[\Ú\×Ý˜YWÙ]WÛÜ[ÛœËœ™]™\œÙJ
+NÂˆB‚ˆ]™\ÛÛ™YØ[˜[\Ú\×Ý˜YWÙ]HBˆ™\ÛÛ™WØ[˜[\Ú\×Ý˜YWÙ]J[˜[\Ú\×Ý˜YWÙ]K	˜[˜[\Ú\×Ý˜YWÙ]WÛÜ[ÛœÊNÂ‚ˆ]šYÙÙ\™YÜÝØÚÜÈHYˆ]
+ÛÛYJ[WÛ˜[YJKÛÛYJ˜YWÙ]JJHH
+ˆ™\ÛÛ™YÜÝ˜]YÞWÛ˜[YK˜\×Ù\™YŠ
+Kˆ™\ÛÛ™YØ[˜[\Ú\×Ý˜YWÙ]K˜\×Ù\™YŠ
+Kˆ
+HÂˆ]Y\žWÝšYÙÙ\™YÜÝØÚÜÊ	˜ÛÛ›‹	œÛÝ\˜ÙWÜ][WÛ˜[YK˜YWÙ]JOÂˆH[ÙHÂˆ™XÎŽ›™]Ê
+BˆNÂ‚ˆ]]]]Z[Ü›ÝÜÈH]Z[Ü›ÝÜ×Ø[Âˆ]Z[Ü›ÝÜËœÛÜØžJKŸÂˆ‹˜YWÙ]Bˆ˜Û\
+	˜K˜YWÙ]JBˆ[—ÝÚ]
+Âˆ‹šYÙÙ\—ØÛÝ[ˆ[Ü˜\ÛÜŠ
+Bˆ˜Û\
+	˜KšYÙÙ\—ØÛÝ[[Ü˜\ÛÜŠ
+JBˆJBˆ[—ÝÚ]
+Kœ[WÛ˜[YK˜Û\
+	˜‹œ[WÛ˜[YJJBˆJNÂ‚ˆÚÊÝ˜]YÞTÝ]\ÝXÜÔYÙQ]HÂˆÝ™\šY]ÎˆÛÛYJÝ™\šY]ÊKˆ]Z[Ü›ÝÜÎˆÛÛYJ]Z[Ü›ÝÜÊKˆÝ˜]YÞWÛÜ[ÛœÎˆÛÛYJÝ˜]YÞWÛÜ[ÛœÊKˆ™\ÛÛ™YÜÝ˜]YÞWÛ˜[YKˆ[˜[\Ú\×Ý˜YWÙ]WÛÜ[ÛœÎˆÛÛYJ[˜[\Ú\×Ý˜YWÙ]WÛÜ[ÛœÊKˆ™\ÛÛ™YØ[˜[\Ú\×Ý˜YWÙ]KˆÚ\ˆÛÛYJZ[ØÚ\
+	œÝ˜]YÞWÜ›ÝÜÊJKˆšYÙÙ\™YÜÝØÚÜÎˆÛÛYJšYÙÙ\™YÜÝØÚÜÊKˆJBŸB‚œXˆ›ˆÙ]ÜØÙ[™WÜÝ]\ÝXÜ×ÜYÙJˆÛÝ\˜ÙWÜ]ˆÝš[™ËˆØÙ[™WÛ˜[YNˆÜ[ÛÝš[™Ï‹ˆ[˜[\Ú\×Ý˜YWÙ]NˆÜ[ÛÝš[™Ï‹ŠHOˆ™\Ý[ØÙ[™TÝ]\ÝXÜÔYÙQ]KÝš[™ÏˆÂˆ]ÛÛ›ˆHÜ[—Ü™\Ý[ØÛÛ›Š	œÛÝ\˜ÙWÜ]
+OÎÂˆ]ØÙ[™WÛÜ[ÛœÈHØYÜØÙ[™WÛÜ[ÛœÊ	œÛÝ\˜ÙWÜ]
+OÎÂˆ]™\ÛÛ™YÜØÙ[™WÛ˜[YHBˆ
+™\]Y\ÝYˆÜ[ÛÝš[™Ï‹ØÙ[™WÛÜ[ÛœÎˆ	–ÔÝš[™×_OˆÜ[ÛÝš[™ÏˆÂˆ]™\]Y\ÝYH™\]Y\ÝYˆ›X\
+˜[Y_˜[YKš[J
+K×ÜÝš[™Ê
+JBˆ™š[\Š˜[Y_]˜[YKš\×Ù[\J
+JNÂˆYˆ]ÛÛYJØÙ[™WÛ˜[YJHH™\]Y\ÝYÂˆYˆØÙ[™WÛÜ[ÛœËš]\Š
+K˜[žJ][_][HOH	œØÙ[™WÛ˜[YJHÂˆ™]\›ˆÛÛYJØÙ[™WÛ˜[YJNÂˆBˆBˆØÙ[™WÛÜ[ÛœË™š\œÝ
+
+K˜ÛÛ™Y
+
+BˆJJØÙ[™WÛ˜[YK	œØÙ[™WÛÜ[ÛœÊNÂˆ][˜[\Ú\×Ý˜YWÙ]WÛÜ[ÛœÈH
+ÛÛ›Žˆ	ÛÛ›™XÝ[ÛŸOˆ™\Ý[™XÏÝš[™Ï‹Ýš[™ÏˆÂˆ]]]Ý]HÛÛ›‚ˆœ™\\™JˆˆÈ‚ˆÑSPÕTÕSÕ˜YWÙ]Bˆ”“ÓHØÙ[™WÙ]Z[ÂˆÔ‘Tˆ–H˜YWÙ]HTÐÂˆˆËˆ
+Bˆ›X\Ù\œŠ_›Ü›X]Jºh¡9ï%º+äHØÙ[™H9.©9¦$ù¥éHÔS9i,z-)NˆÙ_HŠJOÎÂˆ]]]›ÝÜÈHÝ]ˆœ]Y\žJ×JBˆ›X\Ù\œŠ_›Ü›X]J¹¢iú(cØÙ[™H9.©9¦$ù¥éHÔS9i,z-)NˆÙ_HŠJOÎÂ‚ˆ]]]Ý]H™XÎŽ›™]Ê
+NÂˆÚ[H]ÛÛYJ›ÝÊHH›ÝÜÂˆ›™^
+
+Bˆ›X\Ù\œŠ_›Ü›X]Jº+îùcåˆØÙ[™H9.©9¦$ù¥éyi,z-)NˆÙ_HŠJOÂˆÂˆ]˜YWÙ]NˆÝš[™ÈH›ÝË™Ù]
+
+K›X\Ù\œŠ_›Ü›X]Jº+îùcå¹.©9¦$ù¥éykeù«­yi,z-)NˆÙ_HŠJOÎÂˆYˆ]˜YWÙ]Kš[J
+Kš\×Ù[\J
+HÂˆÝ]œ\Ú
+˜YWÙ]JNÂˆBˆB‚ˆÚÊÝ]
+BˆJJ	˜ÛÛ›ŠOÎÂˆ]™\ÛÛ™YØ[˜[\Ú\×Ý˜YWÙ]HBˆ™\ÛÛ™WØ[˜[\Ú\×Ý˜YWÙ]J[˜[\Ú\×Ý˜YWÙ]K	˜[˜[\Ú\×Ý˜YWÙ]WÛÜ[ÛœÊNÂ‚ˆ]]]ÝYÙWÜ›ÝÜÈH™XÎŽ›™]Ê
+NÂˆ]]]Ý[[X\žHH›Û™NÂ‚ˆYˆ]
+ÛÛYJÙ[XÝYÜØÙ[™WÛ˜[YJKÛÛYJÙ[XÝYÝ˜YWÙ]JJHH
+ˆ™\ÛÛ™YÜØÙ[™WÛ˜[YK˜\×Ù\™YŠ
+Kˆ™\ÛÛ™YØ[˜[\Ú\×Ý˜YWÙ]K˜\×Ù\™YŠ
+Kˆ
+HÂˆ]
+™^ÜÝYÙWÜ›ÝÜËÝ[ÜØ[\WØÛÝ[ÛÝ™\™YØÛÝ[
+HBˆ
+ÛÛ›Žˆ	ÛÛ›™XÝ[Û‹ˆØÙ[™WÛ˜[YNˆ	œÝ‹ˆ˜YWÙ]Nˆ	œÝŸˆOˆ™\Ý[
+™XÏØÙ[™TÝYÙT›ÝÏ‹MM
+KÝš[™ÏˆÂˆ]]]Ý]HÛÛ›‚ˆœ™\\™JˆˆÈ‚ˆÑSPÕˆÓÐSTÐÑJ•SQŠÝYÙK	ÉÊK	Û›Û™IÊHTÈÝYÙKˆÓÕS•
+
+ŠHTÈØ[\WØÛÝ[ˆ”“ÓHØÙ[™WÙ]Z[ÂˆÒT‘H˜YWÙ]HHÂˆS‘ØÙ[™WÛ˜[YHHÂˆÔ“ÕT–HBˆˆËˆ
+Bˆ›X\Ù\œŠ_›Ü›X]Jºh¡9ï%º+äHØÙ[™H:f-¹«­yîçú+¨HÔS9i,z-)NˆÙ_HŠJOÎÂˆ]]]›ÝÜÈHÝ]ˆœ]Y\žJ\˜[\ÈVÝ˜YWÙ]KØÙ[™WÛ˜[YWJBˆ›X\Ù\œŠ_›Ü›X]J¹¢iú(cØÙ[™H:f-¹«­yîçú+¨HÔS9i,z-)NˆÙ_HŠJOÎÂ‚ˆ]]]ÝYÙWØÛÝ[ÛX\ˆ\ÚX\Ýš[™ËMˆH\ÚX\Ž›™]Ê
+NÂˆÚ[H]ÛÛYJ›ÝÊHH›ÝÜÂˆ›™^
+
+Bˆ›X\Ù\œŠ_›Ü›X]Jº+îùcåˆØÙ[™H:f-¹«­yîçú+¨yi,z-)NˆÙ_HŠJOÂˆÂˆ]ÝYÙNˆÝš[™ÈH›ÝË™Ù]
+
+K›X\Ù\œŠ_›Ü›X]Jº+îùcåºf-¹«­ykeù«­yi,z-)NˆÙ_HŠJOÎÂˆ]Ø[\WØÛÝ[ˆMBˆ›ÝË™Ù]
+JK›X\Ù\œŠ_›Ü›X]Jº+îùcåºf-¹«­y¥l:aãùi,z-)NˆÙ_HŠJOÎÂˆ]›Ü›X[^™YÜÝYÙHHÝYÙKš[J
+K×Ø\ØÚZWÛÝÙ\˜Ø\ÙJ
+NÂˆÝYÙWØÛÝ[ÛX\š[œÙ\
+›Ü›X[^™YÜÝYÙKØ[\WØÛÝ[
+NÂˆB‚ˆ]Ý[ÜØ[\WØÛÝ[ˆMHÝYÙWØÛÝ[ÛX\˜[Y\Ê
+KœÝ[J
+NÂˆ]›Û™WØÛÝ[HÝYÙWØÛÝ[ÛX\™Ù]
+››Û™HŠK˜ÛÜYY
+
+K[Ü˜\ÛÜŠ
+NÂˆ]ÛÝ™\™YØÛÝ[H
+Ý[ÜØ[\WØÛÝ[H›Û™WØÛÝ[
+K›X^
+
+NÂ‚ˆ]]]›ÝÜ×ÛÝ]H™XÎŽ›™]Ê
+NÂˆ]ÝYÙWÛÜ™\ˆHÈšYÙÙ\ˆ‹˜ÛÛ™š\›H‹›ØœÙ\™H‹™˜Z[‹››Û™H—NÂ‚ˆ›ÜˆÝYÙH[ˆÝYÙWÛÜ™\ˆÂˆ]Ø[\WØÛÝ[HÝYÙWØÛÝ[ÛX\œ™[[Ý™JÝYÙJK[Ü˜\ÛÜŠ
+NÂˆ›ÝÜ×ÛÝ]œ\Ú
+ØÙ[™TÝYÙT›ÝÈÂˆÝYÙNˆÝYÙK×ÜÝš[™Ê
+KˆØ[\WØÛÝ[ˆÝYÙWÜ˜][×Ú[—ÜØÙ[™NˆYˆÝ[ÜØ[\WØÛÝ[ˆÂˆÛÛYJØ[\WØÛÝ[\ÈÈÝ[ÜØ[\WØÛÝ[\È
+BˆH[ÙHÂˆ›Û™BˆKˆJNÂˆB‚ˆ]]]™[XZ[—ÜÝYÙ\ÈHÝYÙWØÛÝ[ÛX\š[×Ú]\Š
+K˜ÛÛXÝŽ™XÏÏŠ
+NÂˆ™[XZ[—ÜÝYÙ\ËœÛÜØžJKŸKŒ˜Û\
+	˜‹Œ
+JNÂˆ›Üˆ
+ÝYÙKØ[\WØÛÝ[
+H[ˆ™[XZ[—ÜÝYÙ\ÈÂˆ›ÝÜ×ÛÝ]œ\Ú
+ØÙ[™TÝYÙT›ÝÈÂˆÝYÙKˆØ[\WØÛÝ[ˆÝYÙWÜ˜][×Ú[—ÜØÙ[™NˆYˆÝ[ÜØ[\WØÛÝ[ˆÂˆÛÛYJØ[\WØÛÝ[\ÈÈÝ[ÜØ[\WØÛÝ[\È
+BˆH[ÙHÂˆ›Û™BˆKˆJNÂˆB‚ˆÚÊ
+›ÝÜ×ÛÝ]Ý[ÜØ[\WØÛÝ[ÛÝ™\™YØÛÝ[
+JBˆJJ	˜ÛÛ›‹Ù[XÝYÜØÙ[™WÛ˜[YKÙ[XÝYÝ˜YWÙ]JOÎÂˆÝYÙWÜ›ÝÜÈH™^ÜÝYÙWÜ›ÝÜÎÂ‚ˆ]ØÙ[™WÜ[WÛ˜[YWÜÙ]ÈBˆ
+ÛÝ\˜ÙWÜ]ˆ	œÝŸOˆ™\Ý[\ÚX\Ýš[™Ë\ÚÙ]Ýš[™Ï‹Ýš[™ÏˆÂˆ][\ÈHØÛÜ™T[NŽ›ØYÜ[\ÊÛÝ\˜ÙWÜ]
+OÎÂˆ]]]Ý]ˆ\ÚX\Ýš[™Ë\ÚÙ]Ýš[™ÏˆH\ÚX\Ž›™]Ê
+NÂ‚ˆ›Üˆ[H[ˆ[\ÈÂˆÝ]™[žJ[KœØÙ[™WÛ˜[YJK›Ü—ÙY˜][
+
+Kš[œÙ\
+[K›˜[YJNÂˆB‚ˆÚÊÝ]
+BˆJJ	œÛÝ\˜ÙWÜ]
+OÎÂˆ]ÛÛšX][Û—ØžWÜ[HH
+ÛÛ›Žˆ	ÛÛ›™XÝ[Û‹ˆ˜YWÙ]Nˆ	œÝŸˆOˆ™\Ý[\ÚX\Ýš[™Ë‹Ýš[™ÏˆÂˆ]Ü[HˆÈ‚ˆÒUZ[WÜ˜[š×Ø›Ý[™ÈTÈ
+ˆÑSPÕˆ˜YWÙ]KˆPV
+˜[šÊHTÈX^Ü˜[šÂˆ”“ÓHØÛÜ™WÜÝ[[X\žBˆÒT‘H˜YWÙ]HHÂˆÔ“ÕT–HBˆ
+KˆšYÙÙ\™YÜ[WÜ›ÝÜÈTÈ
+ˆÑSPÕ
+‚ˆ”“ÓH[WÙ]Z[ÂˆÒT‘H˜YWÙ]HHÂˆS‘[WÜØÛÜ™HTÈ“Õ•SˆS‘P”Ê[WÜØÛÜ™JHˆYKLL‚ˆ
+BˆÑSPÕˆœ[WÛ˜[YKˆÕSJˆÐTÑBˆÒSˆËœ˜[šÈTÈ“Õ•SˆS‘‹›X^Ü˜[šÈTÈ“Õ•SˆS‘‹›X^Ü˜[šÈˆˆSˆœ[WÜØÛÜ™H
+ˆÐTÕ
+
+‹›X^Ü˜[šÈ
+ÈHHËœ˜[šÊHTÈÕP“JHÈÐTÕ
+‹›X^Ü˜[šÈTÈÕP“JBˆSÑHˆS‘ˆ
+HTÈÛÛšX][Û—ÜØÛÜ™Bˆ”“ÓHšYÙÙ\™YÜ[WÜ›ÝÜÈTÈˆQ•“ÒSˆØÛÜ™WÜÝ[[X\žHTÈÂˆÓˆË×ØÛÙHH×ØÛÙBˆS‘Ë˜YWÙ]HH˜YWÙ]BˆQ•“ÒSˆZ[WÜ˜[š×Ø›Ý[™ÈTÈ‚ˆÓˆ‹˜YWÙ]HH˜YWÙ]BˆÔ“ÕT–HBˆˆÎÂ‚ˆ]]]Ý]HÛÛ›‚ˆœ™\\™JÜ[
+Bˆ›X\Ù\œŠ_›Ü›X]Jºh¡9ï%º+äHØÙ[™H:)á9b&z-(yã+¹n©ˆÔS9i,z-)NˆÙ_HŠJOÎÂˆ]]]›ÝÜÈHÝ]ˆœ]Y\žJ\˜[\ÈVÝ˜YWÙ]K˜YWÙ]WJBˆ›X\Ù\œŠ_›Ü›X]J¹¢iú(cØÙ[™H:)á9b&z-(yã+¹n©ˆÔS9i,z-)NˆÙ_HŠJOÎÂ‚ˆ]]]Ý]H\ÚX\Ž›™]Ê
+NÂˆÚ[H]ÛÛYJ›ÝÊHH›ÝÜÂˆ›™^
+
+Bˆ›X\Ù\œŠ_›Ü›X]Jº+îùcåˆØÙ[™H:)á9b&z-(yã+¹n©¹i,z-)NˆÙ_HŠJOÂˆÂˆ][WÛ˜[YNˆÝš[™ÈH›ÝË™Ù]
+
+K›X\Ù\œŠ_›Ü›X]Jº+îùcåº)á9b&yd#yi,z-)NˆÙ_HŠJOÎÂˆ]ÛÛšX][Û—ÜØÛÜ™HH›ÝÂˆ™Ù]Ž\Ú^™KÜ[ÛŠJBˆ›X\Ù\œŠ_›Ü›X]Jº+îùcåº)á9b&z-(yã+¹n©¹i,z-)NˆÙ_HŠJOÂˆ[Ü˜\ÛÜŠŒ
+NÂˆÝ]š[œÙ\
+[WÛ˜[YKÛÛšX][Û—ÜØÛÜ™JNÂˆB‚ˆÚÊÝ]
+BˆJJ	˜ÛÛ›‹Ù[XÝYÝ˜YWÙ]JOÎÂˆÝ[[X\žHHÛÛYJ
+ØÙ[™WÝÝ[ÜØ[\WØÛÝ[ˆMˆØÙ[™WØÛÝ™\™YØÛÝ[ˆMˆØÙ[™WÜ[WÛ˜[Y\ÎˆÜ[Û	’\ÚÙ]Ýš[™Ï‹ˆÛÛšX][Û—ØžWÜ[Nˆ	’\ÚX\Ýš[™ËŸˆOˆØÙ[™PÛÛšX][Û”Ý[[X\žHÂˆ]ØÙ[™WÜ[WØÛÛšX][Û—ÜØÛÜ™HHØÙ[™WÜ[WÛ˜[Y\Ë›X\
+[WÛ˜[Y\ßÂˆÛÛšX][Û—ØžWÜ[Bˆš]\Š
+Bˆ™š[\Š
+[WÛ˜[YKÊ_[WÛ˜[Y\Ë˜ÛÛZ[œÊ
+œ[WÛ˜[YJJBˆ›X\
+
+ËØÛÜ™J_
+œØÛÜ™JBˆœÝ[NŽŠ
+BˆJNÂˆ][Ü[WØÛÛšX][Û—ÜØÛÜ™HHYˆÛÛšX][Û—ØžWÜ[Kš\×Ù[\J
+HÂˆ›Û™BˆH[ÙHÂˆÛÛYJÛÛšX][Û—ØžWÜ[K˜[Y\Ê
+KœÝ[NŽŠ
+JBˆNÂˆ]ØÙ[™WÜ[WØÛÛšX][Û—Ü˜][ÈBˆX]Ú
+ØÙ[™WÜ[WØÛÛšX][Û—ÜØÛÜ™K[Ü[WØÛÛšX][Û—ÜØÛÜ™JHÂˆ
+ÛÛYJØÙ[™WÜØÛÜ™JKÛÛYJ[ÜØÛÜ™JJHYˆ[ÜØÛÜ™K˜XœÊ
+HˆYKLLˆOˆÂˆÛÛYJØÙ[™WÜØÛÜ™HÈ[ÜØÛÜ™JBˆBˆÈOˆ›Û™KˆNÂ‚ˆØÙ[™PÛÛšX][Û”Ý[[X\žHÂˆØÙ[™WØÛÝ™\™YØÛÝ[ˆØÙ[™WÝÝ[ÜØ[\WØÛÝ[ˆØÙ[™WØÛÝ™\˜YÙWÜ˜][ÎˆYˆØÙ[™WÝÝ[ÜØ[\WØÛÝ[ˆÂˆÛÛYJØÙ[™WØÛÝ™\™YØÛÝ[\ÈÈØÙ[™WÝÝ[ÜØ[\WØÛÝ[\È
+BˆH[ÙHÂˆ›Û™BˆKˆØÙ[™WÜ[WØÛÛšX][Û—ÜØÛÜ™Kˆ[Ü[WØÛÛšX][Û—ÜØÛÜ™KˆØÙ[™WÜ[WØÛÛšX][Û—Ü˜][ËˆBˆJJˆÝ[ÜØ[\WØÛÝ[ˆÛÝ™\™YØÛÝ[ˆØÙ[™WÜ[WÛ˜[YWÜÙ]Ë™Ù]
+Ù[XÝYÜØÙ[™WÛ˜[YJKˆ	˜ÛÛšX][Û—ØžWÜ[Kˆ
+JNÂˆB‚ˆÚÊØÙ[™TÝ]\ÝXÜÔYÙQ]HÂˆØÙ[™WÛÜ[ÛœÎˆÛÛYJØÙ[™WÛÜ[ÛœÊKˆ™\ÛÛ™YÜØÙ[™WÛ˜[YKˆ[˜[\Ú\×Ý˜YWÙ]WÛÜ[ÛœÎˆÛÛYJ[˜[\Ú\×Ý˜YWÙ]WÛÜ[ÛœÊKˆ™\ÛÛ™YØ[˜[\Ú\×Ý˜YWÙ]KˆÝYÙWÜ›ÝÜÎˆÛÛYJÝYÙWÜ›ÝÜÊKˆÝ[[X\žKˆJBŸB‚™›ˆ›Ü›X]Ý˜[Y][Û—Û[X™\Š˜[YNˆ
+HOˆÝš[™ÈÂˆ]›Ý[™YH˜[YKœ›Ý[™
+
+NÂˆYˆ
+˜[YHH›Ý[™Y
+K˜XœÊ
+HYKNHÂˆ›Ü›X]JžÜ›Ý[™Y‹ŒHŠBˆH[ÙHÂˆ]]]^H›Ü›X]JžÝ˜[YN‹ŸHŠNÂˆÚ[H^˜ÛÛZ[œÊ	Ë‰ÊH	‰ˆ^™[™×ÝÚ]
+	Ì	ÊHÂˆ^œÜ
+
+NÂˆBˆYˆ^™[™×ÝÚ]
+	Ë‰ÊHÂˆ^œÜ
+
+NÂˆBˆ^ˆBŸB‚™›ˆ\Ý[X]WÜ[WÝØ\›]\
+ˆÝ]Îˆ	”Ý]ËˆØÛÜWÝØ^NˆØÛÜUØ^KˆØÛÜWÝÚ[™ÝÜÎˆ\Ú^™KŠHOˆ™\Ý[\Ú^™KÝš[™ÏˆÂˆ]^™\ÜÚ[Û—Û™YYH\Ý[X]WÙ^™\ÜÚ[Û—ÝØ\›]\
+Ý]ÊOÎÂ‚ˆ]ØÛÜWÙ^˜HHX]ÚØÛÜWÝØ^HÂˆØÛÜUØ^NŽ“\ÝOˆˆØÛÜUØ^NŽ[žHØÛÜUØ^NŽ‘XXÚØÛÜUØ^NŽ”™XÙ[OˆØÛÜWÝÚ[™ÝÜËœØ]\˜][™×ÜÝXŠJKˆØÛÜUØ^NŽÛÛœÙXÊ™\ÚÛ
+HOˆØÛÜWÝÚ[™ÝÜÂˆœØ]\˜][™×ÜÝXŠJBˆ›X^
+™\ÚÛœØ]\˜][™×ÜÝXŠJJKˆNÂ‚ˆÚÊ^™\ÜÚ[Û—Û™YY
+ÈØÛÜWÙ^˜JBŸB‚™›ˆZ[Ý˜[Y][Û—ØØXÚYÜ[Jˆ[WÛ˜[YNˆÝš[™ËˆØÛÜWÝØ^NˆØÛÜUØ^KˆØÛÜWÝÚ[™ÝÜÎˆ\Ú^™KˆÚ[Îˆˆ\ÝÜÚ[ÎˆÜ[Û™XÏÜ˜]NŽ™]NŽ‘\ÝÚ[‹ˆYÎˆÜ˜]NŽ™]NŽ”[UYËˆ›Ü›][Nˆ	œÝ‹ŠHOˆ™\Ý[ØXÚY[KÝš[™ÏˆÂˆ]Ý]ÈH\œÙWÙ^™\ÜÚ[Û—Ü›ÙÜ˜[J›Ü›][JBˆ›X\Ù\œŠ_›Ü›X]Jº(j:/¯¹o#ú)èù§¤:e&z+ëùg*ßNžßH‹KšYK›\ÙÊJOÎÂˆ˜[Y]WÙ^™\ÜÚ[Û—Ù[˜Ý[ÛœÊ	œÝ]ÊOÎÂˆ]\ÜÚYÛ™YÛ˜[Y\ÈHÛÛXÝØ\ÜÚYÛ™YÛ˜[Y\×Ùœ›ÛWÙ^—Ü›ÙÜ˜[J	œÝ]ÊNÂ‚ˆÚÊØXÚY[HÂˆ˜[YNˆ[WÛ˜[YKˆØÛÜWÝÚ[™ÝÜËˆØÛÜWÝØ^KˆÚ[Ëˆ\ÝÜÚ[ËˆX^ÜÚ[Îˆ›Û™KˆYËˆÚ[—ÜÜ˜Îˆ›Ü›][K×ÜÝš[™Ê
+KˆÚ[—Ø\ÝˆÝ]Ëˆ\ÜÚYÛ™YÛ˜[Y\ËˆÛÛXš[˜][ÛŽˆ›Û™KˆJBŸB‚™›ˆÛÛXÝÝ˜[Y][Û—Ø\ÜÚYÛ™YÛ˜[Y\ÊÝ]Îˆ	”Ý]ÊHOˆ™XÏÝš[™ÏˆÂˆ]]]\ÜÚYÛ™YH\ÚÙ]Ž›™]Ê
+NÂˆ›ÜˆÝ][ˆ	œÝ]Ëš][HÂˆYˆ]Ý]Ž\ÜÚYÛˆÈ˜[YK‹ˆHHÝ]Âˆ\ÜÚYÛ™Yš[œÙ\
+˜[YK˜ÛÛ™J
+JNÂˆBˆB‚ˆ]]]Ý]H\ÜÚYÛ™Yš[×Ú]\Š
+K˜ÛÛXÝŽ™XÏÏŠ
+NÂˆÝ]œÛÜ
+
+NÂˆÝ]ŸB‚™›ˆÛÛXÝÜ[WÝ˜[Y][Û—Ü[[YWÚÙ^\ÊÛÛX›ÜÎˆ	–Ô™\\™Y˜[Y][ÛÛÛX›×JHOˆ\ÚÙ]Ýš[™ÏˆÂˆ]›ÙÜ˜[\ÈHÛÛX›ÜÂˆš]\Š
+Bˆ›X\
+ÛÛX›ß	˜ÛÛX›Ë˜ØXÚYÜ[KÚ[—Ø\Ý
+Bˆ˜ÛÛXÝŽ™XÏÏŠ
+NÂˆ]Þ\WØÚ[—ÚÙ^\ÈHÞ\WØÚ[—Ü[[YWÚÙ^WÛ˜[Y\Ê
+NÂˆ][š™XÝYÚÙ^\ÈH
+È”S’È‹”ÐÓÔ‘H‹”×ÔS’È‹–’S‘È‹•ÕSÓU—ÖRH—JBˆš]\Š
+Bˆ˜ÛÜYY
+
+Bˆ˜ÚZ[ŠÞ\WØÚ[—ÚÙ^\ÊBˆ˜ÛÛXÝŽ™XÏÏŠ
+NÂ‚ˆÛÛXÝÜ[[YWÚÙ^\×Ùœ›ÛWÙ^—Ü›ÙÜ˜[\Êˆ	œ›ÙÜ˜[\Ëˆ[[YRÙ^PÛÛXÝÜ[ÛœÈÂˆ[Ø^\×ÚÙ^\Îˆ	–×Kˆ[š™XÝYÚÙ^\Îˆ	š[š™XÝYÚÙ^\Ëˆ[X\Ù\Îˆ	Š×JKˆKˆ
+BŸB‚™›ˆÛ˜\ÚÝÜ[[YWÝ˜[Y\Ê[[YNˆ	”[[YK˜[Y\Îˆ	–ÔÝš[™×JHOˆ™XÏ
+Ýš[™Ë˜[YJOˆÂˆ˜[Y\Âˆš]\Š
+Bˆ™š[\—ÛX\
+˜[Y_Âˆ[[YBˆ˜\œÂˆ™Ù]
+˜[YJBˆ˜ÛÛ™Y
+
+Bˆ›X\
+˜[Y_
+˜[YK˜ÛÛ™J
+K˜[YJJBˆJBˆ˜ÛÛXÝ
+
+BŸB‚™›ˆ™\ÝÜ™WÜ[[YWÝ˜[Y\Ê[[YNˆ	›]][[YK˜[Y\Îˆ	–ÊÝš[™Ë˜[YJWJHÂˆ›Üˆ
+˜[YK˜[YJH[ˆ˜[Y\ÈÂˆ[[YK˜\œËš[œÙ\
+˜[YK˜ÛÛ™J
+K˜[YK˜ÛÛ™J
+JNÂˆBŸB‚ˆÖÙ\š]™JXYËÛÛ™KÛÜKY˜][
+WBœÝXÝ˜[Y][Û”˜[šÔØÛÜ™R[™›ÈÂˆ˜[šÎˆÜ[Û‹ˆØÛÜ™NˆÜ[Û‹ŸB‚™›ˆZ[Ý˜[Y][Û—ÝšYÙÙ\™YÜØÛÜ™\×Ù›Ü—ØÛÛX›ÜÊˆÛÝ\˜ÙWÜ]ˆ	œÝ‹ˆÝØÚ×ØY—Ý\Nˆ	œÝ‹ˆ]Y\žWÜÝ\Ù]Nˆ	œÝ‹ˆÝ\Ù]Nˆ	œÝ‹ˆ[™Ù]Nˆ	œÝ‹ˆ™YYÜ›ÝÜÎˆ\Ú^™Kˆ×ØÛÙ\Îˆ	–ÔÝš[™×KˆÝÛ\Ýˆ	’\ÚÙ]Ýš[™Ï‹ˆÛÛX›ÜÎˆ	–Ô™\\™Y˜[Y][ÛÛÛX›×KŠHOˆ™\Ý[™XÏ˜[Y][Û•šYÙÙ\™YØÛÜ™SX\‹Ýš[™ÏˆÂˆYˆÛÛX›ÜËš\×Ù[\J
+HÂˆ™]\›ˆÚÊ™XÎŽ›™]Ê
+JNÂˆB‚ˆ]™\]Z\™YÜ[[YWÚÙ^\ÈHÛÛXÝÜ[WÝ˜[Y][Û—Ü[[YWÚÙ^\ÊÛÛX›ÜÊNÂˆ]\ÙYØÞ\WØÚ[—ÚÙ^\ÈH
+ÛÛX›ÜÎˆ	–Ô™\\™Y˜[Y][ÛÛÛX›×_Oˆ\ÚÙ]Ýš[™ÏˆÂˆ]›ÙÜ˜[\ÈHÛÛX›ÜÂˆš]\Š
+Bˆ›X\
+ÛÛX›ß	˜ÛÛX›Ë˜ØXÚYÜ[KÚ[—Ø\Ý
+Bˆ˜ÛÛXÝŽ™XÏÏŠ
+NÂˆÛÛXÝÝ\ÙYØÞ\WØÚ[—Ü[[YWÚÙ^\Ê	œ›ÙÜ˜[\ÊBˆJJÛÛX›ÜÊNÂˆ]Ý[ÜÚ\™WÛX\HØYÝÝ[ÜÚ\™WÛX\
+ÛÝ\˜ÙWÜ]
+K[Ü˜\ÛÜ—ÙY˜][
+
+NÂˆ]™YY×Ü˜[š×ÜØÛÜ™HH
+ÛÛX›ÜÎˆ	–Ô™\\™Y˜[Y][ÛÛÛX›×_Oˆ›ÛÛÂˆÛÛX›ÜËš]\Š
+K˜[žJÛÛX›ßÂˆ^—Ü›ÙÜ˜[WÝ\Ù\×Ü[[YWÚÙ^J	˜ÛÛX›Ë˜ØXÚYÜ[KÚ[—Ø\Ý”S’ÈŠBˆ^—Ü›ÙÜ˜[WÝ\Ù\×Ü[[YWÚÙ^J	˜ÛÛX›Ë˜ØXÚYÜ[KÚ[—Ø\Ý”ÐÓÔ‘HŠBˆJBˆJJÛÛX›ÜÊNÂˆ]™YY×ÜÚ[Z[\š]WÜ˜[šÈHÛÛX›ÜÂˆš]\Š
+Bˆ˜[žJÛÛX›ß^—Ü›ÙÜ˜[WÝ\Ù\×Ü[[YWÚÙ^J	˜ÛÛX›Ë˜ØXÚYÜ[KÚ[—Ø\Ý”×ÔS’ÈŠJNÂˆ]˜[š×ÜØÛÜ™WÜÙ\šY\×ÛX\HYˆ™YY×Ü˜[š×ÜØÛÜ™HÂˆ
+ÛÝ\˜ÙWÜ]ˆ	œÝ‹ˆÝ\Ù]Nˆ	œÝ‹ˆ[™Ù]Nˆ	œÝŸˆOˆ\ÚX\Ýš[™Ë\ÚX\Ýš[™Ë˜[Y][Û”˜[šÔØÛÜ™R[™›ÏˆÂˆ]™\Ý[ÙˆH™\Ý[Ù—Ü]
+ÛÝ\˜ÙWÜ]
+NÂˆYˆ\™\Ý[Ù‹™^\ÝÊ
+HÂˆ™]\›ˆ\ÚX\Ž›™]Ê
+NÂˆB‚ˆ]ÛÛYJ™\Ý[Ù—ÜÝŠHH™\Ý[Ù‹×ÜÝŠ
+H[ÙHÂˆ™]\›ˆ\ÚX\Ž›™]Ê
+NÂˆNÂˆ]ÚÊÛÛ›ŠHHÛÛ›™XÝ[ÛŽŽ›Ü[Š™\Ý[Ù—ÜÝŠH[ÙHÂˆ™]\›ˆ\ÚX\Ž›™]Ê
+NÂˆNÂˆ]ÚÊ]]Ý]
+HHÛÛ›‹œ™\\™JˆˆÈ‚ˆÑSPÕ×ØÛÙK˜YWÙ]K˜[šËÝ[ÜØÛÜ™Bˆ”“ÓHØÛÜ™WÜÝ[[X\žBˆÒT‘H˜YWÙ]HHÈS‘˜YWÙ]HHÂˆˆËˆ
+H[ÙHÂˆ™]\›ˆ\ÚX\Ž›™]Ê
+NÂˆNÂˆ]ÚÊ]]›ÝÜÊHHÝ]œ]Y\žJ\˜[\ÈVÜÝ\Ù]K[™Ù]WJH[ÙHÂˆ™]\›ˆ\ÚX\Ž›™]Ê
+NÂˆNÂ‚ˆ]]]Ý]ˆ\ÚX\Ýš[™Ë\ÚX\Ýš[™Ë˜[Y][Û”˜[šÔØÛÜ™R[™›ÏˆH\ÚX\Ž›™]Ê
+NÂˆÚ[H]ÚÊÛÛYJ›ÝÊJHH›ÝÜË›™^
+
+HÂˆ]ÚÊ×ØÛÙJHH›ÝË™Ù]ŽËÝš[™ÏŠ
+H[ÙHÂˆÛÛ[YNÂˆNÂˆ]ÚÊ˜YWÙ]JHH›ÝË™Ù]ŽËÝš[™ÏŠJH[ÙHÂˆÛÛ[YNÂˆNÂˆ]˜[šÈH›ÝÂˆ™Ù]ŽËÜ[ÛMŠŠBˆ›ÚÊ
+Bˆ™›][Š
+Bˆ›X\
+˜[Y_˜[YH\È
+NÂˆ]ØÛÜ™HH›ÝË™Ù]ŽËÜ[ÛŠÊK›ÚÊ
+K™›][Š
+NÂˆÝ]™[žJ×ØÛÙJBˆ›Ü—ÙY˜][
+
+Bˆš[œÙ\
+˜YWÙ]K˜[Y][Û”˜[šÔØÛÜ™R[™›ÈÈ˜[šËØÛÜ™HJNÂˆB‚ˆÝ]ˆJJÛÝ\˜ÙWÜ]]Y\žWÜÝ\Ù]K[™Ù]JBˆH[ÙHÂˆ\ÚX\Ž›™]Ê
+BˆNÂˆ]ÛÛX›×ÝšYÙÙ\™YÛX\ÈH]]^Ž›™]ÊˆÝŽš]\ŽŽœ™\X]ÝÚ]
+\ÚX\Ž›™]ÊBˆZÙJÛÛX›ÜË›[Š
+JBˆ˜ÛÛXÝŽ™XÏ˜[Y][Û•šYÙÙ\™YØÛÜ™SX\Š
+Kˆ
+NÂˆ]™\Ý[ÈH×ØÛÙ\Âˆœ\—Ú]\Š
+Bˆ›X\Ú[š]
+ˆÂˆ]T™XY\ŽŽ›™]×ÝÚ]Ü[[YWÚÙ^\ÊÛÝ\˜ÙWÜ]	œ™\]Z\™YÜ[[YWÚÙ^\ÊK›X\
+ˆ™XY\ŸÂˆ
+ˆ™XY\‹ˆÞ\PÚ[‘šY[[š™XÝÜŽŽ›™]ÊÛÝ\˜ÙWÜ]	\ÙYØÞ\WØÚ[—ÚÙ^\ÊKˆÚ[Z[\š]T˜[šÑšY[[š™XÝÜŽŽ›™]ÊÛÝ\˜ÙWÜ]™YY×ÜÚ[Z[\š]WÜ˜[šÊKˆ
+BˆKˆ
+BˆKˆÛÜšÙ\—Ü™\Ë×ØÛÙ_Âˆ]
+™XY\‹Þ\WØÚ[—Ú[š™XÝÜ‹Ú[Z[\š]WÜ˜[š×Ú[š™XÝÜŠHBˆÛÜšÙ\—Ü™\Ë˜\×Û]]
+
+K›X\Ù\œŠ\œŸ\œ‹˜ÛÛ™J
+JOÎÂˆ]˜[Y][Û•ÐÛÙQ]˜[X][ÛˆÂˆ×ØÛÙKˆÛÛX›×Ú]ËˆHH
+™XY\Žˆ	›]]]T™XY\‹ˆÞ\WØÚ[—Ú[š™XÝÜŽˆ	Þ\PÚ[‘šY[[š™XÝÜ‹ˆÚ[Z[\š]WÜ˜[š×Ú[š™XÝÜŽˆ	”Ú[Z[\š]T˜[šÑšY[[š™XÝÜ‹ˆ×ØÛÙNˆ	œÝ‹ˆÝØÚ×ØY—Ý\Nˆ	œÝ‹ˆÝ\Ù]Nˆ	œÝ‹ˆ[™Ù]Nˆ	œÝ‹ˆ™YYÜ›ÝÜÎˆ\Ú^™KˆÝÛ\Ýˆ	’\ÚÙ]Ýš[™Ï‹ˆÝ[ÜÚ\™WÛX\ˆ	’\ÚX\Ýš[™Ë‹ˆ˜[š×ÜØÛÜ™WÜÙ\šY\×ÛX\ˆ	’\ÚX\ˆÝš[™Ëˆ\ÚX\Ýš[™Ë˜[Y][Û”˜[šÔØÛÜ™R[™›Ï‹ˆ‹ˆ™YY×Ü˜[š×ÜØÛÜ™Nˆ›ÛÛˆ™YY×ÜÚ[Z[\š]WÜ˜[šÎˆ›ÛÛˆÛÛX›ÜÎˆ	–Ô™\\™Y˜[Y][ÛÛÛX›×_ˆOˆ™\Ý[˜[Y][Û•ÐÛÙQ]˜[X][Û‹Ýš[™ÏˆÂˆ]]]›Ý×Ù]HBˆ™XY\‹›ØYÛÛ™WÝZ[Ü›ÝÜÊ×ØÛÙKÝØÚ×ØY—Ý\K[™Ù]K™YYÜ›ÝÜÊOÎÂˆ]ÈHÞ\WØÚ[—Ú[š™XÝÜ‹š[š™XÝ
+	›]]›Ý×Ù]K×ØÛÙJNÂˆYˆ™YY×ÜÚ[Z[\š]WÜ˜[šÈÂˆÚ[Z[\š]WÜ˜[š×Ú[š™XÝÜ‹š[š™XÝ
+	›]]›Ý×Ù]K×ØÛÙJOÎÂˆBˆ[š™XÝÜÝØÚ×Ù^˜WÙšY[Êˆ	›]]›Ý×Ù]Kˆ×ØÛÙKˆÝÛ\Ý˜ÛÛZ[œÊ×ØÛÙJKˆÝ[ÜÚ\™WÛX\™Ù]
+×ØÛÙJK˜ÛÜYY
+
+Kˆ
+OÎÂˆYˆ™YY×Ü˜[š×ÜØÛÜ™HÂˆ
+›Ý×Ù]Nˆ	›]]Ü˜]NŽ™]NŽ”›ÝÑ]Kˆ×ØÛÙNˆ	œÝ‹ˆ˜[š×ÜØÛÜ™WÜÙ\šY\×ÛX\ˆ	’\ÚX\ˆÝš[™Ëˆ\ÚX\Ýš[™Ë˜[Y][Û”˜[šÔØÛÜ™R[™›Ï‹ˆŸˆOˆ™\Ý[
+
+KÝš[™ÏˆÂˆ][ˆH›Ý×Ù]K˜YWÙ]\Ë›[Š
+NÂˆ]]]˜[š×ÜÙ\šY\ÈH™XÈVÓ›Û™NÈ[—NÂˆ]]]ØÛÜ™WÜÙ\šY\ÈH™XÈVÓ›Û™NÈ[—NÂ‚ˆYˆ]ÛÛYJ]WÝ×Ý˜[Y\ÊHH˜[š×ÜØÛÜ™WÜÙ\šY\×ÛX\™Ù]
+×ØÛÙJHÂˆ›Üˆ
+[™^˜YWÙ]JH[ˆ›Ý×Ù]K˜YWÙ]\Ëš]\Š
+K™[[Y\˜]J
+HÂˆYˆ]ÛÛYJ˜[Y\ÊHH]WÝ×Ý˜[Y\Ë™Ù]
+˜YWÙ]JK˜ÛÜYY
+
+HÂˆ˜[š×ÜÙ\šY\ÖÚ[™^HH˜[Y\Ëœ˜[šÎÂˆØÛÜ™WÜÙ\šY\ÖÚ[™^HH˜[Y\ËœØÛÜ™NÂˆBˆBˆB‚ˆ›Ý×Ù]K˜ÛÛËš[œÙ\
+”S’È‹×ÜÝš[™Ê
+K˜[š×ÜÙ\šY\ÊNÂˆ›Ý×Ù]K˜ÛÛËš[œÙ\
+”ÐÓÔ‘H‹×ÜÝš[™Ê
+KØÛÜ™WÜÙ\šY\ÊNÂˆ›Ý×Ù]K˜[Y]J
+BˆJJ	›]]›Ý×Ù]K×ØÛÙK˜[š×ÜØÛÜ™WÜÙ\šY\×ÛX\
+OÎÂˆB‚ˆ]˜YWÙ]\ÈH›Ý×Ù]K˜YWÙ]\Ë˜ÛÛ™J
+NÂˆYˆ˜YWÙ]\Ëš\×Ù[\J
+HÂˆ™]\›ˆÚÊ˜[Y][Û•ÐÛÙQ]˜[X][ÛˆÂˆ×ØÛÙNˆ×ØÛÙK×ÜÝš[™Ê
+KˆÛÛX›×Ú]Îˆ™XÎŽ›™]Ê
+KˆJNÂˆB‚ˆ]ÙY\Ùœ›ÛHH˜YWÙ]\Âˆ˜š[˜\žWÜÙX\˜ÚØžJ]_]K˜\×ÜÝŠ
+K˜Û\
+Ý\Ù]JJBˆ[Ü˜\ÛÜ—Ù[ÙJ[™^[™^
+NÂˆ]]][[YHH›Ý×Ú[×Ü
+›Ý×Ù]JOÎÂˆ]™\ÝÜ™WÝ˜[Y\ÈHÛÛX›ÜÂˆš]\Š
+Bˆ›X\
+ÛÛX›ßÛ˜\ÚÝÜ[[YWÝ˜[Y\Ê	œ[[YK	˜ÛÛX›Ë˜\ÜÚYÛ™YÛ˜[Y\ÊJBˆ˜ÛÛXÝŽ™XÏÏŠ
+NÂˆ]]]ÛÛX›×Ú]ÈH™XÎŽ›™]Ê
+NÂ‚ˆËÈ[ÛÛX›ÜÈÜšYÚ[˜]Hœ›ÛHHØ[YH›Ü›][H[\]HÚ]Y™™\™[ÛÛœÝ[ËˆËÈÛÈÛ™H[[YHØYØ[ˆ™H™]\ÙY\ÈÛ™È\È[žHÝ™\Üš][ˆ˜\ÙHÛÛ[[œÈ\™H™\ÝÜ™Y‚ˆ›Üˆ
+ÛÛX›×Ú[™^ÛÛX›ÊH[ˆÛÛX›ÜËš]\Š
+K™[[Y\˜]J
+HÂˆYˆ\™\ÝÜ™WÝ˜[Y\ÖØÛÛX›×Ú[™^Kš\×Ù[\J
+HÂˆ™\ÝÜ™WÜ[[YWÝ˜[Y\Ê	›]][[YK	œ™\ÝÜ™WÝ˜[Y\ÖØÛÛX›×Ú[™^JNÂˆB‚ˆ]
+ØÛÜ™\ËšYÙÙ\™YÙ›YÜÊHBˆ]˜[X]WØØXÚYÜ[WÜØÛÜ™\Ê	˜ÛÛX›Ë˜ØXÚYÜ[K	›]][[YJOÎÂˆ]ÛÛYJ]WÜØÛÜ™WÛX\
+HBˆ
+˜YWÙ]\Îˆ	–ÔÝš[™×KˆÙY\Ùœ›ÛNˆ\Ú^™KˆØÛÜ™\Îˆ	–ÙKˆšYÙÙ\™YÙ›YÜÎˆ	–Ø›ÛÛKˆ[WÜÚ[ÎˆˆOˆÜ[Û\ÚX\Ýš[™ËˆÂˆ]Z[—Û[ˆH\Ú^™NŽ›Z[Šˆ˜YWÙ]\Ë›[Š
+Kˆ\Ú^™NŽ›Z[ŠØÛÜ™\Ë›[Š
+KšYÙÙ\™YÙ›YÜË›[Š
+JKˆ
+NÂˆYˆÙY\Ùœ›ÛHHZ[—Û[ˆÂˆ™]\›ˆ›Û™NÂˆB‚ˆ]]]]WÜØÛÜ™WÛX\H\ÚX\Ž›™]Ê
+NÂˆ›Üˆ[™^[ˆÙY\Ùœ›ÛK‹›Z[—Û[ˆÂˆ]ÛÛYJØÛÜ™JHBˆ
+ØÛÜ™NˆˆšYÙÙ\™Yˆ›ÛÛˆ[WÜÚ[ÎˆˆOˆÜ[ÛˆÂˆYˆ\ØÛÜ™Kš\×Ùš[š]J
+HÂˆ™]\›ˆ›Û™NÂˆBˆYˆØÛÜ™K˜XœÊ
+HˆSQUSÓ—ÑTÈÂˆ™]\›ˆÛÛYJØÛÜ™JNÂˆBˆYˆ]šYÙÙ\™YÂˆ™]\›ˆ›Û™NÂˆB‚ˆYˆ[WÜÚ[Ëš\×Ùš[š]J
+Bˆ	‰ˆ[WÜÚ[Ë˜XœÊ
+HˆSQUSÓ—ÑTÂˆÂˆ™]\›ˆÛÛYJ[WÜÚ[ËœÚYÛ[J
+JNÂˆBˆÛÛYJKŒ
+BˆJJˆØÛÜ™\ÖÚ[™^KšYÙÙ\™YÙ›YÜÖÚ[™^K[WÜÚ[Âˆ
+Bˆ[ÙHÂˆÛÛ[YNÂˆNÂˆ]WÜØÛÜ™WÛX\š[œÙ\
+˜YWÙ]\ÖÚ[™^K˜ÛÛ™J
+KØÛÜ™JNÂˆB‚ˆYˆ]WÜØÛÜ™WÛX\š\×Ù[\J
+HÂˆ›Û™BˆH[ÙHÂˆÛÛYJ]WÜØÛÜ™WÛX\
+BˆBˆJJˆ	˜YWÙ]\ËˆÙY\Ùœ›ÛKˆ	œØÛÜ™\Ëˆ	šYÙÙ\™YÙ›YÜËˆÛÛX›Ë˜ØXÚYÜ[KœÚ[Ëˆ
+Bˆ[ÙHÂˆÛÛ[YNÂˆNÂˆÛÛX›×Ú]Ëœ\Ú
+
+ÛÛX›×Ú[™^]WÜØÛÜ™WÛX\
+JNÂˆB‚ˆÚÊ˜[Y][Û•ÐÛÙQ]˜[X][ÛˆÂˆ×ØÛÙNˆ×ØÛÙK×ÜÝš[™Ê
+KˆÛÛX›×Ú]ËˆJBˆJJˆ™XY\‹ˆÞ\WØÚ[—Ú[š™XÝÜ‹ˆÚ[Z[\š]WÜ˜[š×Ú[š™XÝÜ‹ˆ×ØÛÙKˆÝØÚ×ØY—Ý\KˆÝ\Ù]Kˆ[™Ù]Kˆ™YYÜ›ÝÜËˆÝÛ\Ýˆ	Ý[ÜÚ\™WÛX\ˆ	œ˜[š×ÜØÛÜ™WÜÙ\šY\×ÛX\ˆ™YY×Ü˜[š×ÜØÛÜ™Kˆ™YY×ÜÚ[Z[\š]WÜ˜[šËˆÛÛX›ÜËˆ
+OÎÂ‚ˆYˆXÛÛX›×Ú]Ëš\×Ù[\J
+HÂˆ]]]X\ÈHÛÛX›×ÝšYÙÙ\™YÛX\Âˆ›ØÚÊ
+Bˆ›X\Ù\œŠß¹a¦yaizj£:+àz)é¹cäyîäù§§9i,z-)Nºe ymì¹£gùgcÈ‹×ÜÝš[™Ê
+JOÎÂˆ›Üˆ
+ÛÛX›×Ú[™^]WÜØÛÜ™WÛX\
+H[ˆÛÛX›×Ú]ÈÂˆX\ÖØÛÛX›×Ú[™^Kš[œÙ\
+×ØÛÙK˜ÛÛ™J
+K]WÜØÛÜ™WÛX\
+NÂˆBˆB‚ˆÚÎŽ
+
+KÝš[™ÏŠ
+
+JBˆKˆ
+Bˆ˜ÛÛXÝŽ™XÏÏŠ
+NÂ‚ˆ›Üˆ™\Ý[[ˆ™\Ý[ÈÂˆ™\Ý[ÎÂˆB‚ˆÛÛX›×ÝšYÙÙ\™YÛX\Âˆš[×Ú[›™\Š
+Bˆ›X\Ù\œŠßº+îùcåºj£:+àz)é¹cäyîäù§§9i,z-)Nºe ymì¹£gùgcÈ‹×ÜÝš[™Ê
+JBŸB‚ˆÖØÙ™Ê\Ý
+WB™›ˆZ[Ý˜[Y][Û—ÝšYÙÙ\™YÜØÛÜ™\ÊˆÛÝ\˜ÙWÜ]ˆ	œÝ‹ˆÝØÚ×ØY—Ý\Nˆ	œÝ‹ˆÝ\Ù]Nˆ	œÝ‹ˆ[™Ù]Nˆ	œÝ‹ˆØXÚYÜ[Nˆ	ØXÚY[KŠHOˆ™\Ý[\ÚX\Ýš[™Ë\ÚX\Ýš[™Ë‹Ýš[™ÏˆÂˆ]ÛÛX›ÈH™\\™Y˜[Y][ÛÛÛX›ÈÂˆ˜\šX[ˆ˜[Y][Û•˜\šX[ÂˆÛÛX›×ÚÙ^NˆØXÚYÜ[K›˜[YK˜ÛÛ™J
+KˆÛÛX›×ÛX™[ˆØXÚYÜ[K›˜[YK˜ÛÛ™J
+Kˆ›Ü›][NˆØXÚYÜ[KÚ[—ÜÜ˜Ë˜ÛÛ™J
+Kˆ[šÛ›ÝÛ—Ý˜[Y\Îˆ™XÎŽ›™]Ê
+KˆKˆØXÚYÜ[NˆØXÚYÜ[K˜ÛÛ™J
+Kˆ\ÜÚYÛ™YÛ˜[Y\ÎˆÛÛXÝÝ˜[Y][Û—Ø\ÜÚYÛ™YÛ˜[Y\Ê	˜ØXÚYÜ[KÚ[—Ø\Ý
+KˆNÂˆ]™\]Z\™YÜ[[YWÚÙ^\ÈHÛÛXÝÜ[WÝ˜[Y][Û—Ü[[YWÚÙ^\ÊÝŽœÛXÙNŽ™œ›ÛWÜ™YŠ	˜ÛÛX›ÊJNÂˆ]™XY\ˆH]T™XY\ŽŽ›™]×ÝÚ]Ü[[YWÚÙ^\ÊÛÝ\˜ÙWÜ]	œ™\]Z\™YÜ[[YWÚÙ^\ÊOÎÂˆ]×ØÛÙ\ÈH™XY\‹›\ÝÝ×ØÛÙJÝØÚ×ØY—Ý\KÝ\Ù]K[™Ù]JOÎÂˆ]ÝÛ\ÝHØYÜÝÛ\Ý
+ÛÝ\˜ÙWÜ]
+OÎÂˆ]Ø\›]\Û™YYH\Ý[X]WÜ[WÝØ\›]\
+ˆ	˜ØXÚYÜ[KÚ[—Ø\ÝˆØXÚYÜ[KœØÛÜWÝØ^KˆØXÚYÜ[KœØÛÜWÝÚ[™ÝÜËˆ
+OÎÂˆ]™YYÜ›ÝÜÈHØ[×Ü]Y\žWÛ™YYÜ›ÝÜÊÛÝ\˜ÙWÜ]Ø\›]\Û™YYÝ\Ù]K[™Ù]JOÎÂˆ]]]šYÙÙ\™YÛX\ÈHZ[Ý˜[Y][Û—ÝšYÙÙ\™YÜØÛÜ™\×Ù›Ü—ØÛÛX›ÜÊˆÛÝ\˜ÙWÜ]ˆÝØÚ×ØY—Ý\Kˆ	˜Ø[×Ü]Y\žWÜÝ\Ù]JÛÝ\˜ÙWÜ]Ø\›]\Û™YYÝ\Ù]JOËˆÝ\Ù]Kˆ[™Ù]Kˆ™YYÜ›ÝÜËˆ	×ØÛÙ\Ëˆ	œÝÛ\Ýˆ	–ØÛÛX›×Kˆ
+OÎÂˆÚÊšYÙÙ\™YÛX\ËœÜ
+
+K[Ü˜\ÛÜ—ÙY˜][
+
+JBŸB‚œÝXÝ˜[Y][Û”ØÛÜ™S^Y\YÙÈÂˆØÛÜ™NˆˆÚ[ØÛÝ[ˆ\Ú^™KˆØ[\WØÛÝ[ˆ\Ú^™Kˆ™\ÚYX[ÜÝ[NˆŸB‚œÝXÝ˜[Y][Û”ØÛÜ™S^Y\‘]Z[ÈÂˆÜ™XYÛYX[ŽˆÜ[Û‹ˆ^Y\—ÜÝ[[X\šY\Îˆ™XÏ˜[šÓ^Y\XÚÙ]Ý[[X\žO‹ŸB‚™›ˆYX[—Ù
+˜[Y\Îˆ	–ÙJHOˆÜ[ÛˆÂˆYˆ˜[Y\Ëš\×Ù[\J
+HÂˆ™]\›ˆ›Û™NÂˆBˆÛÛYJ˜[Y\Ëš]\Š
+KœÝ[NŽŠ
+HÈ˜[Y\Ë›[Š
+H\È
+BŸB‚™›ˆZ[Ý˜[Y][Û—ÜØÛÜ™WÛ^Y\—Ù]Z[ÊˆØ[\\Îˆ	–ØÜ˜]NŽœÚ[][zßž¼¶‰žËkºwµçYˆ\×Ü[WÛY]WÛX]ÚÂˆØYÝ˜[Y][Û—ÜÚ[Z[\š]WØØXÚWÛÜ[Û˜[
+ˆÛÝ\˜ÙWÜ]ˆ	œ\˜[\ËœÝ\Ù]Kˆ	œ\˜[\Ë™[™Ù]Kˆ
+OÂˆH[ÙHÂˆ[\WÝ˜[Y][Û—ÜÚ[Z[\š]WØØXÚJ
+BˆNÂˆ]ÛÛšX][Û—Ø]™\˜YÙ\ÈHYˆ\˜[\Ë˜[ÝÙYÝ×ØÛÙ\Ëš\×ÜÛÛYJ
+HÂˆËÈ: ¨yéj:# ùfí:/áù®é:g :) z`$:(c:+¨yë¥ú-(yã+¹n©»ï&ù¢¢¹c§ùiâú(c:fd9b-¹g*:/æy.*¹/g9å*9gçùa¡{ï#9èk¹/çyg*ˆËÈ:/æùaiyëe¹åiynm¹cäybczaâ¹¥/»ï#:`oùacy.#º/ä:(c9¥í¹ï$ùkf9câ¹«ãùëe¹åiy¨(zj£9¥l9£k¹d#9¥í¹n.:jnøà ‚ˆ]
+Ý[[X\žWÜ›ÝÜË]Z[Ü›ÝÜÊHBˆ
+ÛÝ\˜ÙWÜ]ˆ	œÝ‹ˆÝ\Ù]Nˆ	œÝ‹ˆ[™Ù]Nˆ	œÝ‹ˆ[ÝÙYÝ×ØÛÙ\ÎˆÜ[Û	’\ÚÙ]Ýš[™ÏŸˆOˆ™\Ý[
+™XÏØÛÜ™TÝ[[X\žO‹™XÏØÛÜ™Q]Z[ÏŠKÝš[™ÏˆÂˆ]™\Ý[ØÛÛ›ˆHÜ[—Ü™\Ý[ØÛÛ›ŠÛÝ\˜ÙWÜ]
+OÎÂˆ]Ý[[X\šY\ÈHØYÜØÛÜ™WÜÝ[[X\žWÜ›ÝÜ×Ùœ›ÛWÙŠˆÛÝ\˜ÙWÜ]ˆÝ\Ù]Kˆ[™Ù]Kˆ[ÝÙYÝ×ØÛÙ\Ëˆ
+OÎÂ‚ˆ]]]]Z[ÜÝ]H™\Ý[ØÛÛ›‚ˆœ™\\™JˆˆÈ‚ˆÑSPÕ×ØÛÙK˜YWÙ]K[WÛ˜[YK–WÐÐTÕ
+[WÜØÛÜ™HTÈÕP“JBˆ”“ÓH[WÙ]Z[ÂˆÒT‘H˜YWÙ]HHÂˆS‘˜YWÙ]HHÂˆS‘–WÐÐTÕ
+[WÜØÛÜ™HTÈÕP“JHTÈ“Õ•SˆÔ‘Tˆ–H˜YWÙ]HTÐË[WÛ˜[YHTÐË×ØÛÙHTÐÂˆˆËˆ
+Bˆ›X\Ù\œŠ_›Ü›X]Jºh¡9ï%º+äyëe¹åiyfç¹­bú)á9b&yc§ùiâú(c9i,z-)NˆÙ_HŠJOÎÂˆ]]]]Z[Ü›ÝÜÈH]Z[ÜÝ]ˆœ]Y\žJ\˜[\ÈVÜÝ\Ù]K[™Ù]WJBˆ›X\Ù\œŠ_›Ü›X]J¹§éz+è¹ëe¹åiyfç¹­bú)á9b&yc§ùiâú(c9i,z-)NˆÙ_HŠJOÎÂˆ]]]]Z[ÈH™XÎŽ›™]Ê
+NÂˆÚ[H]ÛÛYJ›ÝÊHH]Z[Ü›ÝÜÂˆ›™^
+
+Bˆ›X\Ù\œŠ_›Ü›X]Jº+îùcå¹ëe¹åiyfç¹­bú)á9b&yc§ùiâú(c9i,z-)NˆÙ_HŠJOÂˆÂˆ][WÜØÛÜ™NˆBˆ›ÝË™Ù]
+ÊK›X\Ù\œŠ_›Ü›X]Jº+îùcåº)á9b&yb!¹¥l9i,z-)NˆÙ_HŠJOÎÂˆ]][HHØÛÜ™Q]Z[ÈÂˆ×ØÛÙNˆ›ÝË™Ù]
+
+K›X\Ù\œŠ_›Ü›X]Jº+îùcåº)á9b&y.èùè yi,z-)NˆÙ_HŠJOËˆ˜YWÙ]Nˆ›ÝË™Ù]
+JK›X\Ù\œŠ_›Ü›X]Jº+îùcåº)á9b&y¥éy§'ùi,z-)NˆÙ_HŠJOËˆ[WÛ˜[YNˆ›ÝË™Ù]
+ŠK›X\Ù\œŠ_›Ü›X]Jº+îùcåº)á9b&yd#yéì9i,z-)NˆÙ_HŠJOËˆ[WÜØÛÜ™KˆNÂˆYˆ[WÜØÛÜ™Kš\×Ùš[š]J
+Bˆ	‰ˆ×ØÛÙWØ[ÝÙYØžWÙš[\Š[ÝÙYÝ×ØÛÙ\Ë	š][K×ØÛÙJBˆÂˆ]Z[Ëœ\Ú
+][JNÂˆBˆB‚ˆÚÊ
+Ý[[X\šY\Ë]Z[ÊJBˆJJˆÛÝ\˜ÙWÜ]ˆ	œ\˜[\ËœÝ\Ù]Kˆ	œ\˜[\Ë™[™Ù]Kˆ\˜[\Ë˜[ÝÙYÝ×ØÛÙ\Ë˜\×Ü™YŠ
+Kˆ
+OÎÂˆZ[Ü[WØÛÛšX][Û—Ø]™\˜YÙ\×Ùœ›ÛWÜ›ÝÜÊˆ	œÝ[[X\žWÜ›ÝÜËˆ	™]Z[Ü›ÝÜËˆ	œ\˜[\ËœÝ\Ù]Kˆ	œ\˜[\Ë™[™Ù]Kˆ
+BˆH[ÙHÂˆZ[Ü[WØÛÛšX][Û—Ø]™\˜YÙ\ÊˆÛÝ\˜ÙWÜ]ˆ	œ[WÛÜ[ÛœËˆ	œ\˜[\ËœÝ\Ù]Kˆ	œ\˜[\Ë™[™Ù]Kˆ
+OÂˆNÂˆ]Ý[[X\žWÙ]Z[Ú][\ÈBˆØ[×Ø[Ü[WÛ^Y\—ÛY]šXÜ×ÝÚ]Ý˜[Y][Û—Ùœ›ÛWÙ—ÛX\ÝÚ]Ý×Ùš[\ŠˆÛÝ\˜ÙWØÛÛ›‹ˆÛÝ\˜ÙWÜ]ˆ	œ[WÛÜ[ÛœËˆ	œ\˜[\ËœÝØÚ×ØY—Ý\Kˆ	œ\˜[\Ëš[™^Ý×ØÛÙKˆ\˜[\Ëš[™^Ø™]Kˆ\˜[\Ë˜ÛÛ˜Ù\Ø™]Kˆ\˜[\Ëš[™\ÝžWØ™]Kˆ	œ\˜[\ËœÝ\Ù]Kˆ	œ\˜[\Ë™[™Ù]Kˆ	›^Y\—ØÛÛ™šYËˆ\˜[\Ë˜[ÝÙYÝ×ØÛÙ\Ë˜\×Ü™YŠ
+Kˆ\˜[\Ëœ\˜[[Ø˜]ÚÜÚ^™KˆÛ™WÜ[WÛ˜[YK˜[Y][ÛŸÂˆÚÊZ[ÛÛ™WÜ[WØ˜XÚÝ\ÝÜÝ[[X\žWØ[™Ù]Z[
+ˆÛ™WÜ[WÛ˜[YKˆ˜[Y][Û‹ˆ	œ[WÛY]WÛX\ˆ	˜ÛÛšX][Û—Ø]™\˜YÙ\Ëˆ	™^Z[—ÛX\ˆ\˜[\Ëˆ	œÚ[Z[\š]WØØXÚKˆ	œÝØÚ×ÛY]WÛX\ˆ
+JBˆKˆ
+NÂˆ]
+[Ü[WÜÝ[[X\šY\Ë[WÝ˜[Y][Û—Ù]Z[ÊHBˆÜ]Ø[™ÜÛÜÜ[WØ˜XÚÝ\ÝÜÝ[[X\šY\×Ø[™Ù]Z[ÊÝ[[X\žWÙ]Z[Ú][\ÏÊNÂˆ]XØ^WÝ˜[Y][ÛœÈHZ[Ø[Ü[WÙXØ^WÝ˜[Y][ÛœÊ	˜[Ü[WÜÝ[[X\šY\ÊNÂ‚ˆ]
+ˆ]™×Ü™\ÚYX[ÛYX[‹ˆ]™×Ù^Ù\Ü×Ü™\ÚYX[ÛYX[‹ˆ]™×Ù\—ØÚ[™ÙKˆ›Ùš]ÛÜÜ×Ü˜][ËˆÜÜ™XYÛYX[‹ˆX×ÛYX[‹ˆX×ÜÝˆXÚ\‹ˆX×ÝÝ˜[YKˆ
+HHYÙÜ™YØ]WØ[Ü[WÜÝ[[X\žWÛY]šXÜÊ	˜[Ü[WÜÝ[[X\šY\ÊNÂˆÚÊ[S^Y\˜XÚÝ\Ý]HÂˆ[WÛ˜[YNˆÝš[™ÎŽ›™]Ê
+KˆÝØÚ×ØY—Ý\Nˆ\˜[\ËœÝØÚ×ØY—Ý\K˜ÛÛ™J
+Kˆ[™^Ý×ØÛÙNˆ\˜[\Ëš[™^Ý×ØÛÙK˜ÛÛ™J
+Kˆ[™^Ø™]Nˆ\˜[\Ëš[™^Ø™]KˆÛÛ˜Ù\Ø™]Nˆ\˜[\Ë˜ÛÛ˜Ù\Ø™]Kˆ[™\ÝžWØ™]Nˆ\˜[\Ëš[™\ÝžWØ™]KˆÝ\Ù]Nˆ\˜[\ËœÝ\Ù]K˜ÛÛ™J
+Kˆ[™Ù]Nˆ\˜[\Ë™[™Ù]K˜ÛÛ™J
+Kˆ™\ÛÛ™YØ›Ø\™ˆ\˜[\Ëœ™\ÛÛ™YØ›Ø\™˜ÛÛ™J
+Kˆ^ÛYWÜÝØ›Ø\™ˆ\˜[\Ë™^ÛYWÜÝØ›Ø\™ˆÝ[Û]—ÛZ[Žˆ\˜[\ËÝ[Û]—ÛZ[‹ˆÝ[Û]—ÛX^ˆ\˜[\ËÝ[Û]—ÛX^ˆZ[—ÜØ[\\×Ü\—Ü[WÙ^Nˆ\˜[\Ë›Z[—ÜØ[\\×Ü\—Ù^KˆZ[—Û\ÝYÝ˜YWÙ^\Îˆ\˜[\Ë›Z[—Û\ÝYÝ˜YWÙ^\Ëˆ˜XÚÝ\ÝÜ\š[Ùˆ\˜[\Ë˜˜XÚÝ\ÝÜ\š[ÙˆÚ[Îˆ™XÎŽ›™]Ê
+Kˆ]™×Ü™\ÚYX[ÛYX[‹ˆ]™×Ù^Ù\Ü×Ü™\ÚYX[ÛYX[‹ˆXØ^WÝ˜[Y][ÛœËˆ]™×Ù\—ØÚ[™ÙKˆ›Ùš]ÛÜÜ×Ü˜][ËˆÜ™XYÛYX[Žˆ›Û™Kˆ]™×ØÛÛšX][Û—ÜØÛÜ™NˆÙZYÚYÜ[WÜÝ[[X\žWÛY]šXÊ	˜[Ü[WÜÝ[[X\šY\Ë][_Âˆ][K˜]™×ØÛÛšX][Û—ÜØÛÜ™BˆJKˆ]™×ØÛÛšX][Û—Ü\—ÝšYÙÙ\ŽˆÙZYÚYÜ[WÜÝ[[X\žWÛY]šXÊˆ	˜[Ü[WÜÝ[[X\šY\Ëˆ][_][K˜]™×ØÛÛšX][Û—Ü\—ÝšYÙÙ\‹ˆ
+KˆX×ÛYX[‹ˆX×ÜÝˆXÚ\‹ˆX×ÝÝ˜[YKˆ^Y\—ØÛÝ[ˆ›Û™Kˆ^Y\—ÛY]Ùˆ›Û™Kˆ^Y\—ÛY]ÙÛX™[ˆ›Û™Kˆ^Y\—ÜÝ[[X\šY\Îˆ™XÎŽ›™]Ê
+Kˆ\×Ø[Ü[\ÎˆYKˆ[Ü[WÜÝ[[X\šY\Ëˆ[WÝ˜[Y][Û—Ù]Z[ËˆJBˆJJ	œÛÝ\˜ÙWØÛÛ›‹	œÛÝ\˜ÙWÜ]›Û™K	œ\˜[\ÊBŸB‚œXˆ›ˆ[—Ü˜[š×Û^Y\—Ø˜XÚÝ\Ý
+ˆÛÝ\˜ÙWÜ]ˆÝš[™ËˆÝØÚ×ØY—Ý\NˆÜ[ÛÝš[™Ï‹ˆ[™^Ý×ØÛÙNˆÝš[™Ëˆ[™^Ø™]NˆÜ[Û‹ˆÛÛ˜Ù\Ø™]NˆÜ[Û‹ˆ[™\ÝžWØ™]NˆÜ[Û‹ˆÝ\Ù]NˆÝš[™Ëˆ[™Ù]NˆÝš[™ËˆZ[—ÜØ[\\×Ü\—Ü˜[š×Ù^NˆÜ[Û\Ú^™O‹ˆZ[—Û\ÝYÝ˜YWÙ^\ÎˆÜ[Û\Ú^™O‹ˆ˜XÚÝ\ÝÜ\š[ÙˆÜ[Û\Ú^™O‹ˆ^Y\—ØÛÝ[ˆÜ[Û\Ú^™O‹ˆ^Y\—ÛY]ÙˆÜ[ÛÝš[™Ï‹ˆ›Ø\™ˆÜ[ÛÝš[™Ï‹ˆ^ÛYWÜÝØ›Ø\™ˆÜ[Û›ÛÛ‹ŠHOˆ™\Ý[˜[šÓ^Y\˜XÚÝ\Ý]KÝš[™ÏˆÂˆ˜[Y]WØ˜XÚÝ\ÝÜÝ˜]YÞWÙ^™\ÜÚ[ÛœÊ	œÛÝ\˜ÙWÜ]
+OÎÂˆ]ÛÝ\˜ÙWÙˆHÛÝ\˜ÙWÙ—Ü]
+	œÛÝ\˜ÙWÜ]
+NÂˆ]ÛÝ\˜ÙWÙ—ÜÝˆHÛÝ\˜ÙWÙ‚ˆ×ÜÝŠ
+Bˆ›Ú×ÛÜ—Ù[ÙJ¹c§ùiâùn¤ú-ëùo¡9.#y¦+ù§"y¥bU‹N‹×ÜÝš[™Ê
+JOÎÂˆ]ÛÝ\˜ÙWØÛÛ›ˆBˆÛÛ›™XÝ[ÛŽŽ›Ü[ŠÛÝ\˜ÙWÙ—ÜÝŠK›X\Ù\œŠ_›Ü›X]J¹¢dùo 9c§ùiâùn¤ùi,z-)NˆÙ_HŠJOÎÂˆ]
+™\ÛÛ™YØ›Ø\™^ÛYWÜÝØ›Ø\™ÝÝ[Û]—ÛZ[‹ÝÝ[Û]—ÛX^[ÝÙYÝ×ØÛÙ\ÊHBˆZ[Ø˜XÚÝ\ÝÜÝØÚ×Ùš[\Š	œÛÝ\˜ÙWÜ]›Ø\™^ÛYWÜÝØ›Ø\™›Û™K›Û™JOÎÂ‚ˆ]\˜[\ÈH˜[šÓ^Y\˜XÚÝ\Ý[”\˜[\ÈÂˆÝØÚ×ØY—Ý\NˆÝØÚ×ØY—Ý\Bˆ[Ü˜\ÛÜ—Ù[ÙJœYœH‹×ÜÝš[™Ê
+JBˆš[J
+Bˆ×ÜÝš[™Ê
+Kˆ[™^Ý×ØÛÙNˆ[™^Ý×ØÛÙKš[J
+K×ÜÝš[™Ê
+Kˆ[™^Ø™]Nˆ[™^Ø™]K[Ü˜\ÛÜŠJKˆÛÛ˜Ù\Ø™]NˆÛÛ˜Ù\Ø™]K[Ü˜\ÛÜŠŒŠKˆ[™\ÝžWØ™]Nˆ[™\ÝžWØ™]K[Ü˜\ÛÜŠŒ
+KˆÝ\Ù]NˆÝ\Ù]Kš[J
+K×ÜÝš[™Ê
+Kˆ[™Ù]Nˆ[™Ù]Kš[J
+K×ÜÝš[™Ê
+KˆZ[—ÜØ[\\×Ü\—Ù^NˆZ[—ÜØ[\\×Ü\—Ü˜[š×Ù^K[Ü˜\ÛÜŠJKˆZ[—Û\ÝYÝ˜YWÙ^\ÎˆZ[—Û\ÝYÝ˜YWÙ^\Âˆ[Ü˜\ÛÜŠQUSÐPÒÕTÕÓRS—ÓTÕQÕQWÑVTÊKˆ˜XÚÝ\ÝÜ\š[Ùˆ˜XÚÝ\ÝÜ\š[Ù[Ü˜\ÛÜŠJKˆ^Y\—ØÛÝ[ˆ^Y\—ØÛÝ[[Ü˜\ÛÜ—Ù[ÙJ˜[šÓ^Y\ÛÛ™šYÎŽ™Y˜][Û^Y\—ØÛÝ[
+Kˆ^Y\—ÛY]ÙˆX]Ú^Y\—ÛY]ÙÂˆÛÛYJ˜[YJHOˆ˜[šÓ^Y\“Y]ÙŽ™œ›ÛWÜÝŠ	˜[YJOËˆ›Û™HOˆ˜[šÓ^Y\“Y]ÙŽ”Ø[\PÛÝ[ˆKˆ™\ÛÛ™YØ›Ø\™ˆ^ÛYWÜÝØ›Ø\™ˆ[ÝÙYÝ×ØÛÙ\ËˆNÂ‚ˆ
+ÛÝ\˜ÙWØÛÛ›Žˆ	ÛÛ›™XÝ[Û‹ˆÛÝ\˜ÙWÜ]ˆ	œÝ‹ˆ\˜[\Îˆ	”˜[šÓ^Y\˜XÚÝ\Ý[”\˜[\ßˆOˆ™\Ý[˜[šÓ^Y\˜XÚÝ\Ý]KÝš[™ÏˆÂˆ]^Y\—ØÛÛ™šYÈH˜[šÓ^Y\ÛÛ™šYÈÂˆZ[—ÜØ[\\×Ü\—Ù^Nˆ\˜[\Ë›Z[—ÜØ[\\×Ü\—Ù^Kˆ˜XÚÝ\ÝÜ\š[Ùˆ\˜[\Ë˜˜XÚÝ\ÝÜ\š[ÙˆZ[—Û\ÝYÝ˜YWÙ^\Îˆ\˜[\Ë›Z[—Û\ÝYÝ˜YWÙ^\Ëˆ^Y\—ØÛÝ[ˆ\˜[\Ë›^Y\—ØÛÝ[ˆ^Y\—ÛY]Ùˆ\˜[\Ë›^Y\—ÛY]ÙˆNÂˆ][œ]H˜[šÓ^Y\‘œ›ÛQ’[œ]ÂˆÝØÚ×ØY—Ý\Nˆ\˜[\ËœÝØÚ×ØY—Ý\K˜ÛÛ™J
+Kˆ[™^Ý×ØÛÙNˆ\˜[\Ëš[™^Ý×ØÛÙK˜ÛÛ™J
+Kˆ[™^Ø™]Nˆ\˜[\Ëš[™^Ø™]KˆÛÛ˜Ù\Ø™]Nˆ\˜[\Ë˜ÛÛ˜Ù\Ø™]Kˆ[™\ÝžWØ™]Nˆ\˜[\Ëš[™\ÝžWØ™]KˆÝ\Ù]Nˆ\˜[\ËœÝ\Ù]K˜ÛÛ™J
+Kˆ[™Ù]Nˆ\˜[\Ë™[™Ù]K˜ÛÛ™J
+Kˆ^Y\—ØÛÛ™šYËˆNÂˆ]Ý[[X\žWÜ›ÝÜÈHØYÜØÛÜ™WÜÝ[[X\žWÜ›ÝÜ×Ùœ›ÛWÙŠˆÛÝ\˜ÙWÜ]ˆ	œ\˜[\ËœÝ\Ù]Kˆ	œ\˜[\Ë™[™Ù]Kˆ\˜[\Ë˜[ÝÙYÝ×ØÛÙ\Ë˜\×Ü™YŠ
+Kˆ
+OÎÂˆ]Y]šXÜÈHØ[×Ü˜[š×Û^Y\—ÛY]šXÜ×Ùœ›ÛWÜØÛÜ™WÜ›ÝÜÊˆÛÝ\˜ÙWØÛÛ›‹ˆÛÝ\˜ÙWÜ]ˆ	š[œ]ˆ	œÝ[[X\žWÜ›ÝÜËˆ
+OÎÂˆ]X\šÙ]Ý˜[YWÜÝ[[X\šY\ÈHZ[Ü˜[š×ÛX\šÙ]Ý˜[YWÜÝ[[X\šY\ÊˆÛÝ\˜ÙWÜ]ˆ	š[œ]ˆ	œÝ[[X\žWÜ›ÝÜËˆ	›Y]šXÜË›^Y\—ÜØ[\\Ëˆ
+OÎÂˆ]ÝØÚ×ÛY]WÛX\HØYÝ˜[Y][Û—ÜØ[\WÜÝØÚ×ÛY]WÛX\
+ÛÝ\˜ÙWÜ]
+OÎÂˆ]^Y\—ÜØ[\WÙÜ›Ý\ÈHZ[Ü˜[š×Û^Y\—ÜØ[\WÙÜ›Ý\Êˆ	›Y]šXÜË›^Y\—ÜØ[\\Ëˆ[œ]›^Y\—ØÛÛ™šYË›^Y\—ØÛÝ[ˆ	œÝØÚ×ÛY]WÛX\ˆ
+NÂˆÚÊ˜[šÓ^Y\˜XÚÝ\Ý]HÂˆÝØÚ×ØY—Ý\Nˆ[œ]œÝØÚ×ØY—Ý\Kˆ[™^Ý×ØÛÙNˆ[œ]š[™^Ý×ØÛÙKˆ[™^Ø™]Nˆ[œ]š[™^Ø™]KˆÛÛ˜Ù\Ø™]Nˆ[œ]˜ÛÛ˜Ù\Ø™]Kˆ[™\ÝžWØ™]Nˆ[œ]š[™\ÝžWØ™]KˆÝ\Ù]Nˆ[œ]œÝ\Ù]Kˆ[™Ù]Nˆ[œ]™[™Ù]Kˆ™\ÛÛ™YØ›Ø\™ˆ\˜[\Ëœ™\ÛÛ™YØ›Ø\™˜ÛÛ™J
+Kˆ^ÛYWÜÝØ›Ø\™ˆ\˜[\Ë™^ÛYWÜÝØ›Ø\™ˆX\šÙ]Ý˜[YWÙÜ›Ý\[™ÎˆYKˆZ[—ÜØ[\\×Ü\—Ü˜[š×Ù^Nˆ[œ]›^Y\—ØÛÛ™šYË™Y™™XÝ]™WÛZ[—ÜØ[\\×Ü\—Ù^J
+KˆZ[—Û\ÝYÝ˜YWÙ^\Îˆ[œ]›^Y\—ØÛÛ™šYË›Z[—Û\ÝYÝ˜YWÙ^\Ëˆ˜XÚÝ\ÝÜ\š[Ùˆ[œ]›^Y\—ØÛÛ™šYË˜˜XÚÝ\ÝÜ\š[Ùˆ^Y\—ØÛÝ[ˆ[œ]›^Y\—ØÛÛ™šYË›^Y\—ØÛÝ[ˆ^Y\—ÛY]Ùˆ[œ]›^Y\—ØÛÛ™šYË›^Y\—ÛY]Ù˜\×ÜÝŠ
+K×ÜÝš[™Ê
+Kˆ^Y\—ÛY]ÙÛX™[ˆ˜[š×Û^Y\—ÛY]ÙÛX™[
+[œ]›^Y\—ØÛÛ™šYË›^Y\—ÛY]Ù
+Bˆ×ÜÝš[™Ê
+KˆÚ[ØÛÝ[ˆY]šXÜËœÚ[ØÛÝ[ˆØ[\WØÛÝ[ˆY]šXÜËœØ[\WØÛÝ[ˆ]™×Ù\—ØÚ[™ÙNˆY]šXÜË˜]™×Ù\—ØÚ[™ÙKˆÜ™XYÛYX[ŽˆY]šXÜËœÜ™XYÛYX[‹ˆX×ÛYX[ŽˆY]šXÜËšX×ÛYX[‹ˆX×ÜÝˆY]šXÜËšX×ÜÝˆXÚ\ŽˆY]šXÜËšXÚ\‹ˆX×ÝÝ˜[YNˆY]šXÜËšX×ÝÝ˜[YKˆÜÚ×ÜÝ[[X\šY\Îˆ˜[š×ÝÜÚ×ÜÝ[[X\žWÙ]JY]šXÜËÜÚ×ÜÝ[[X\šY\ÊKˆÜÚ×Ü\š[ÙÜÝ[[X\šY\Îˆ˜[š×ÝÜÚ×Ü\š[ÙÜÝ[[X\žWÙ]JY]šXÜËÜÚ×Ü\š[ÙÜÝ[[X\šY\ÊKˆ^Y\—ÜÝ[[X\šY\ÎˆY]šXÜÂˆ›^Y\œÂˆš[×Ú]\Š
+Bˆ›X\
+][_˜[šÓ^Y\XÚÙ]Ý[[X\žHÂˆ^Y\—Ú[™^ˆ][K›^Y\—Ú[™^ˆ^Y\—ÛX™[ˆ˜[š×Û^Y\—ÛX™[
+][K›^Y\—Ú[™^[œ]›^Y\—ØÛÛ™šYË›^Y\—ØÛÝ[
+KˆÚ[ØÛÝ[ˆ][KœÚ[ØÛÝ[ˆØ[\WØÛÝ[ˆ][KœØ[\WØÛÝ[ˆ]™×ÜØÛÜ™Nˆ][K˜]™×ÜØÛÜ™Kˆ]™×Ü™\ÚYX[Ü™]\›Žˆ][K˜]™×Ü™\ÚYX[Ü™]\›‹ˆ]™×Ù\—ØÚ[™ÙNˆ][K˜]™×Ù\—ØÚ[™ÙKˆJBˆ˜ÛÛXÝ
+
+Kˆ^Y\—ÜØ[\WÙÜ›Ý\ËˆX\šÙ]Ý˜[YWÜÝ[[X\šY\ËˆJBˆJJ	œÛÝ\˜ÙWØÛÛ›‹	œÛÝ\˜ÙWÜ]	œ\˜[\ÊBŸB‚œXˆ›ˆ[—Ý˜[œÚY[ÜØÙ[™WÛ^Y\—Ø˜XÚÝ\Ý
+ˆÛÝ\˜ÙWÜ]ˆÝš[™ËˆÝØÚ×ØY—Ý\NˆÜ[ÛÝš[™Ï‹ˆ[™^Ý×ØÛÙNˆÝš[™Ëˆ[™^Ø™]NˆÜ[Û‹ˆÛÛ˜Ù\Ø™]NˆÜ[Û‹ˆ[™\ÝžWØ™]NˆÜ[Û‹ˆÝ\Ù]NˆÝš[™Ëˆ[™Ù]NˆÝš[™ËˆZ[—ÜØ[\\×Ü\—ÜØÙ[™WÙ^NˆÜ[Û\Ú^™O‹ˆZ[—Û\ÝYÝ˜YWÙ^\ÎˆÜ[Û\Ú^™O‹ˆ˜XÚÝ\ÝÜ\š[ÙˆÜ[Û\Ú^™O‹ˆ›Ø\™ˆÜ[ÛÝš[™Ï‹ˆ^ÛYWÜÝØ›Ø\™ˆÜ[Û›ÛÛ‹ˆÝ[Û]—ÛZ[ŽˆÜ[Û‹ˆÝ[Û]—ÛX^ˆÜ[Û‹ŠHOˆ™\Ý[ØÙ[™S^Y\˜XÚÝ\Ý]KÝš[™ÏˆÂˆ˜[Y]WØ˜XÚÝ\ÝÜÝ˜]YÞWÙ^™\ÜÚ[ÛœÊ	œÛÝ\˜ÙWÜ]
+OÎÂˆ]ÛÝ\˜ÙWÙˆHÛÝ\˜ÙWÙ—Ü]
+	œÛÝ\˜ÙWÜ]
+NÂˆ]ÛÝ\˜ÙWÙ—ÜÝˆHÛÝ\˜ÙWÙ‚ˆ×ÜÝŠ
+Bˆ›Ú×ÛÜ—Ù[ÙJ¹c§ùiâùn¤ú-ëùo¡9.#y¦+ù§"y¥bU‹N‹×ÜÝš[™Ê
+JOÎÂˆ]ÛÝ\˜ÙWØÛÛ›ˆBˆÛÛ›™XÝ[ÛŽŽ›Ü[ŠÛÝ\˜ÙWÙ—ÜÝŠK›X\Ù\œŠ_›Ü›X]J¹¢dùo 9c§ùiâùn¤ùi,z-)NˆÙ_HŠJOÎÂˆ]
+™\ÛÛ™YØ›Ø\™^ÛYWÜÝØ›Ø\™Ý[Û]—ÛZ[‹Ý[Û]—ÛX^[ÝÙYÝ×ØÛÙ\ÊHBˆZ[Ø˜XÚÝ\ÝÜÝØÚ×Ùš[\Šˆ	œÛÝ\˜ÙWÜ]ˆ›Ø\™ˆ^ÛYWÜÝØ›Ø\™ˆÝ[Û]—ÛZ[‹ˆÝ[Û]—ÛX^ˆ
+OÎÂ‚ˆ]\˜[\ÈHØÙ[™S^Y\˜XÚÝ\Ý[”\˜[\ÈÂˆÝØÚ×ØY—Ý\NˆÝØÚ×ØY—Ý\Bˆ[Ü˜\ÛÜ—Ù[ÙJœYœH‹×ÜÝš[™Ê
+JBˆš[J
+Bˆ×ÜÝš[™Ê
+Kˆ[™^Ý×ØÛÙNˆ[™^Ý×ØÛÙKš[J
+K×ÜÝš[™Ê
+Kˆ[™^Ø™]Nˆ[™^Ø™]K[Ü˜\ÛÜŠJKˆÛÛ˜Ù\Ø™]NˆÛÛ˜Ù\Ø™]K[Ü˜\ÛÜŠŒŠKˆ[™\ÝžWØ™]Nˆ[™\ÝžWØ™]K[Ü˜\ÛÜŠŒ
+KˆÝ\Ù]NˆÝ\Ù]Kš[J
+K×ÜÝš[™Ê
+Kˆ[™Ù]Nˆ[™Ù]Kš[J
+K×ÜÝš[™Ê
+KˆZ[—ÜØ[\\×Ü\—Ù^NˆZ[—ÜØ[\\×Ü\—ÜØÙ[™WÙ^K[Ü˜\ÛÜŠJKˆZ[—Û\ÝYÝ˜YWÙ^\ÎˆZ[—Û\ÝYÝ˜YWÙ^\Âˆ[Ü˜\ÛÜŠQUSÐPÒÕTÕÓRS—ÓTÕQÕQWÑVTÊKˆ˜XÚÝ\ÝÜ\š[Ùˆ˜XÚÝ\ÝÜ\š[Ù[Ü˜\ÛÜŠJKˆ™\ÛÛ™YØ›Ø\™ˆ^ÛYWÜÝØ›Ø\™ˆÝ[Û]—ÛZ[‹ˆÝ[Û]—ÛX^ˆ[ÝÙYÝ×ØÛÙ\ËˆNÂˆ]^Y\—ØÛÛ™šYÈHØÙ[™S^Y\ÛÛ™šYÈÂˆZ[—ÜØ[\\×Ü\—Ù^Nˆ\˜[\Ë›Z[—ÜØ[\\×Ü\—Ù^Kˆ˜XÚÝ\ÝÜ\š[Ùˆ\˜[\Ë˜˜XÚÝ\ÝÜ\š[ÙˆZ[—Û\ÝYÝ˜YWÙ^\Îˆ\˜[\Ë›Z[—Û\ÝYÝ˜YWÙ^\ËˆNÂˆ]
+ØÛÜ™WØ˜]ÚÊHHØÛÜš[™×Ø[Ý×ÛY[[ÜžWÝÚ]Û[ÙJˆ	œÛÝ\˜ÙWÜ]ˆ›Û™Kˆ	œ\˜[\ËœÝØÚ×ØY—Ý\Kˆ	œ\˜[\ËœÝ\Ù]Kˆ	œ\˜[\Ë™[™Ù]KˆØÛÜš[™ÓY[[ÜžS[ÙNŽ”ØÙ[™SÛ›Kˆ
+OÎÂˆ]ØÙ[™WÜ›ÝÜÈH
+›ÝÜÎˆ™XÏØÙ[™P˜XÚÝ\Ý›ÝÏ‹ˆ[ÝÙYÝ×ØÛÙ\ÎˆÜ[Û	’\ÚÙ]Ýš[™ÏŸˆOˆ™XÏØÙ[™P˜XÚÝ\Ý›ÝÏˆÂˆYˆ[ÝÙYÝ×ØÛÙ\Ëš\×Û›Û™J
+HÂˆ™]\›ˆ›ÝÜÎÂˆBˆ›ÝÜËš[×Ú]\Š
+Bˆ™š[\Š›Ýß×ØÛÙWØ[ÝÙYØžWÙš[\Š[ÝÙYÝ×ØÛÙ\Ë	œ›ÝË×ØÛÙJJBˆ˜ÛÛXÝ
+
+BˆJJˆØÛÜ™WØ˜]ÚœØÙ[™WØ˜XÚÝ\ÝÜ›ÝÜËˆ\˜[\Ë˜[ÝÙYÝ×ØÛÙ\Ë˜\×Ü™YŠ
+Kˆ
+NÂˆ]ØÙ[™WÛÜ[ÛœÈHØYÜØÙ[™WÛÜ[ÛœÊ	œÛÝ\˜ÙWÜ]
+OÎÂˆ][ÛY]šXÜÈHØ[×Ø[ÜØÙ[™WÛ^Y\—ÛY]šXÜ×Ùœ›ÛWÜ›ÝÜÊˆ	œÛÝ\˜ÙWØÛÛ›‹ˆ	œÛÝ\˜ÙWÜ]ˆ	œØÙ[™WÛÜ[ÛœËˆØÙ[™WÜ›ÝÜËˆ	œ\˜[\ËœÝØÚ×ØY—Ý\Kˆ	œ\˜[\Ëš[™^Ý×ØÛÙKˆ\˜[\Ëš[™^Ø™]Kˆ\˜[\Ë˜ÛÛ˜Ù\Ø™]Kˆ\˜[\Ëš[™\ÝžWØ™]Kˆ	œ\˜[\ËœÝ\Ù]Kˆ	œ\˜[\Ë™[™Ù]Kˆ	›^Y\—ØÛÛ™šYËˆ
+OÎÂˆ]]][ÜØÙ[™WÜÝ[[X\šY\ÈH™XÎŽÚ]ØØ\XÚ]J[ÛY]šXÜË›[Š
+JNÂˆ›Üˆ
+Û™WÜØÙ[™WÛ˜[YKY]šXÜÊH[ˆ[ÛY]šXÜÈÂˆ[ÜØÙ[™WÜÝ[[X\šY\Ëœ\Ú
+ØÙ[™S^Y\”ØÙ[™TÝ[[X\žHÂˆØÙ[™WÛ˜[YNˆÛ™WÜØÙ[™WÛ˜[YKˆÚ[ØÛÝ[ˆY]šXÜËœÚ[Ë›[Š
+KˆÜ™XYÛYX[ŽˆY]šXÜËœÜ™XYÛYX[‹ˆX×ÛYX[ŽˆY]šXÜËšX×ÛYX[‹ˆX×ÜÝˆY]šXÜËšX×ÜÝˆXÚ\ŽˆY]šXÜËšXÚ\‹ˆX×ÝÝ˜[YNˆY]šXÜËšX×ÝÝ˜[YKˆJNÂˆBˆ[ÜØÙ[™WÜÝ[[X\šY\ËœÛÜØžJKŸÂˆ‹œÜ™XYÛYX[‚ˆ[Ü˜\ÛÜŠŽ“‘Q×ÒS‘’S’UJBˆœ\X[ØÛ\
+	˜KœÜ™XYÛYX[‹[Ü˜\ÛÜŠŽ“‘Q×ÒS‘’S’UJJBˆ[Ü˜\ÛÜŠÝŽ˜Û\Ž“Ü™\š[™ÎŽ‘\]X[
+Bˆ[—ÝÚ]
+‹œÚ[ØÛÝ[˜Û\
+	˜KœÚ[ØÛÝ[
+JBˆ[—ÝÚ]
+KœØÙ[™WÛ˜[YK˜Û\
+	˜‹œØÙ[™WÛ˜[YJJBˆJNÂ‚ˆÚÊØÙ[™S^Y\˜XÚÝ\Ý]HÂˆØÙ[™WÛ˜[YNˆÝš[™ÎŽ›™]Ê
+KˆÝØÚ×ØY—Ý\Nˆ\˜[\ËœÝØÚ×ØY—Ý\Kˆ[™^Ý×ØÛÙNˆ\˜[\Ëš[™^Ý×ØÛÙKˆ[™^Ø™]Nˆ\˜[\Ëš[™^Ø™]KˆÛÛ˜Ù\Ø™]Nˆ\˜[\Ë˜ÛÛ˜Ù\Ø™]Kˆ[™\ÝžWØ™]Nˆ\˜[\Ëš[™\ÝžWØ™]KˆÝ\Ù]Nˆ\˜[\ËœÝ\Ù]Kˆ[™Ù]Nˆ\˜[\Ë™[™Ù]Kˆ™\ÛÛ™YØ›Ø\™ˆ\˜[\Ëœ™\ÛÛ™YØ›Ø\™ˆ^ÛYWÜÝØ›Ø\™ˆ\˜[\Ë™^ÛYWÜÝØ›Ø\™ˆÝ[Û]—ÛZ[Žˆ\˜[\ËÝ[Û]—ÛZ[‹ˆÝ[Û]—ÛX^ˆ\˜[\ËÝ[Û]—ÛX^ˆZ[—ÜØ[\\×Ü\—ÜØÙ[™WÙ^Nˆ\˜[\Ë›Z[—ÜØ[\\×Ü\—Ù^KˆZ[—Û\ÝYÝ˜YWÙ^\Îˆ\˜[\Ë›Z[—Û\ÝYÝ˜YWÙ^\Ëˆ˜XÚÝ\ÝÜ\š[Ùˆ\˜[\Ë˜˜XÚÝ\ÝÜ\š[ÙˆÚ[Îˆ™XÎŽ›™]Ê
+KˆÜ™XYÛYX[Žˆ›Û™KˆX×ÛYX[Žˆ›Û™KˆX×ÜÝˆ›Û™KˆXÚ\Žˆ›Û™KˆX×ÝÝ˜[YNˆ›Û™Kˆ\×Ø[ÜØÙ[™\ÎˆYKˆ[ÜØÙ[™WÜÝ[[X\šY\ËˆJBŸB‚œXˆ›ˆ[—Ý˜[œÚY[Ü[WÛ^Y\—Ø˜XÚÝ\Ý
+ˆÛÝ\˜ÙWÜ]ˆÝš[™ËˆÝØÚ×ØY—Ý\NˆÜ[ÛÝš[™Ï‹ˆ[™^Ý×ØÛÙNˆÝš[™Ëˆ[™^Ø™]NˆÜ[Û‹ˆÛÛ˜Ù\Ø™]NˆÜ[Û‹ˆ[™\ÝžWØ™]NˆÜ[Û‹ˆÝ\Ù]NˆÝš[™Ëˆ[™Ù]NˆÝš[™ËˆZ[—ÜØ[\\×Ü\—Ü[WÙ^NˆÜ[Û\Ú^™O‹ˆZ[—Û\ÝYÝ˜YWÙ^\ÎˆÜ[Û\Ú^™O‹ˆ˜XÚÝ\ÝÜ\š[ÙˆÜ[Û\Ú^™O‹ˆ\˜[[Ø˜]ÚÜÚ^™NˆÜ[Û\Ú^™O‹ˆ›Ø\™ˆÜ[ÛÝš[™Ï‹ˆ^ÛYWÜÝØ›Ø\™ˆÜ[Û›ÛÛ‹ˆÝ[Û]—ÛZ[ŽˆÜ[Û‹ˆÝ[Û]—ÛX^ˆÜ[Û‹ŠHOˆ™\Ý[[S^Y\˜XÚÝ\Ý]KÝš[™ÏˆÂˆ˜[Y]WØ˜XÚÝ\ÝÜÝ˜]YÞWÙ^™\ÜÚ[ÛœÊ	œÛÝ\˜ÙWÜ]
+OÎÂˆ]ÛÝ\˜ÙWÙˆHÛÝ\˜ÙWÙ—Ü]
+	œÛÝ\˜ÙWÜ]
+NÂˆ]ÛÝ\˜ÙWÙ—ÜÝˆHÛÝ\˜ÙWÙ‚ˆ×ÜÝŠ
+Bˆ›Ú×ÛÜ—Ù[ÙJ¹c§ùiâùn¤ú-ëùo¡9.#y¦+ù§"y¥bU‹N‹×ÜÝš[™Ê
+JOÎÂˆ]ÛÝ\˜ÙWØÛÛ›ˆBˆÛÛ›™XÝ[ÛŽŽ›Ü[ŠÛÝ\˜ÙWÙ—ÜÝŠK›X\Ù\œŠ_›Ü›X]J¹¢dùo 9c§ùiâùn¤ùi,z-)NˆÙ_HŠJOÎÂˆ]
+™\ÛÛ™YØ›Ø\™^ÛYWÜÝØ›Ø\™Ý[Û]—ÛZ[‹Ý[Û]—ÛX^[ÝÙYÝ×ØÛÙ\ÊHBˆZ[Ø˜XÚÝ\ÝÜÝØÚ×Ùš[\Šˆ	œÛÝ\˜ÙWÜ]ˆ›Ø\™ˆ^ÛYWÜÝØ›Ø\™ˆÝ[Û]—ÛZ[‹ˆÝ[Û]—ÛX^ˆ
+OÎÂ‚ˆ]\˜[\ÈH[S^Y\˜XÚÝ\Ý[”\˜[\ÈÂˆÝØÚ×ØY—Ý\NˆÝØÚ×ØY—Ý\Bˆ[Ü˜\ÛÜ—Ù[ÙJœYœH‹×ÜÝš[™Ê
+JBˆš[J
+Bˆ×ÜÝš[™Ê
+Kˆ[™^Ý×ØÛÙNˆ[™^Ý×ØÛÙKš[J
+K×ÜÝš[™Ê
+Kˆ[™^Ø™]Nˆ[™^Ø™]K[Ü˜\ÛÜŠJKˆÛÛ˜Ù\Ø™]NˆÛÛ˜Ù\Ø™]K[Ü˜\ÛÜŠŒŠKˆ[™\ÝžWØ™]Nˆ[™\ÝžWØ™]K[Ü˜\ÛÜŠŒ
+KˆÝ\Ù]NˆÝ\Ù]Kš[J
+K×ÜÝš[™Ê
+Kˆ[™Ù]Nˆ[™Ù]Kš[J
+K×ÜÝš[™Ê
+KˆZ[—ÜØ[\\×Ü\—Ù^NˆZ[—ÜØ[\\×Ü\—Ü[WÙ^K[Ü˜\ÛÜŠJKˆZ[—Û\ÝYÝ˜YWÙ^\ÎˆZ[—Û\ÝYÝ˜YWÙ^\Âˆ[Ü˜\ÛÜŠQUSÐPÒÕTÕÓRS—ÓTÕQÕQWÑVTÊKˆ˜XÚÝ\ÝÜ\š[Ùˆ˜XÚÝ\ÝÜ\š[Ù[Ü˜\ÛÜŠJKˆ\˜[[Ø˜]ÚÜÚ^™Nˆ\˜[[Ø˜]ÚÜÚ^™Bˆ[Ü˜\ÛÜŠQUSÔ•SWÕÒUÔÐSTT×ÔTSSÐUÒÔÒV‘JBˆ›X^
+JKˆ™\ÛÛ™YØ›Ø\™ˆ^ÛYWÜÝØ›Ø\™ˆÝ[Û]—ÛZ[‹ˆÝ[Û]—ÛX^ˆ[ÝÙYÝ×ØÛÙ\ËˆNÂˆ]^Y\—ØÛÛ™šYÈH[S^Y\ÛÛ™šYÈÂˆZ[—ÜØ[\\×Ü\—Ù^Nˆ\˜[\Ë›Z[—ÜØ[\\×Ü\—Ù^Kˆ˜XÚÝ\ÝÜ\š[Ùˆ\˜[\Ë˜˜XÚÝ\ÝÜ\š[ÙˆZ[—Û\ÝYÝ˜YWÙ^\Îˆ\˜[\Ë›Z[—Û\ÝYÝ˜YWÙ^\ËˆNÂˆ]
+ØÛÜ™WØ˜]ÚÊHHØÛÜš[™×Ø[Ý×ÛY[[ÜžWÝÚ]Û[ÙJˆ	œÛÝ\˜ÙWÜ]ˆ›Û™Kˆ	œ\˜[\ËœÝØÚ×ØY—Ý\Kˆ	œ\˜[\ËœÝ\Ù]Kˆ	œ\˜[\Ë™[™Ù]KˆØÛÜš[™ÓY[[ÜžS[ÙNŽ”Ý[[X\žP[™]Z[Ëˆ
+OÎÂˆ]Ý[[X\žWÜ›ÝÜÈHš[\—ÜØÛÜ™WÜÝ[[X\žWÜ›ÝÜ×ØžWÝ×ØÛÙ\ÊˆØÛÜ™WØ˜]ÚœÝ[[X\žWÜ›ÝÜËˆ\˜[\Ë˜[ÝÙYÝ×ØÛÙ\Ë˜\×Ü™YŠ
+Kˆ
+NÂˆ]]]]Z[Ü›ÝÜÈHØÛÜ™WØ˜]Ú™]Z[Ü›ÝÜÎÂˆYˆ\˜[\Ë˜[ÝÙYÝ×ØÛÙ\Ëš\×ÜÛÛYJ
+HÂˆ]Z[Ü›ÝÜËœ™]Z[Š›ÝßÂˆ×ØÛÙWØ[ÝÙYØžWÙš[\Š\˜[\Ë˜[ÝÙYÝ×ØÛÙ\Ë˜\×Ü™YŠ
+K	œ›ÝË×ØÛÙJBˆJNÂˆBˆ]
+[WÛÜ[ÛœË[WÛY]WÛX\
+HHØYÜ[WÛY]J	œÛÝ\˜ÙWÜ]
+OÎÂˆ]^Z[—ÛX\H[WÛY]WÛX\ˆš]\Š
+Bˆ›X\
+
+[WÛ˜[YKY]J_
+[WÛ˜[YK˜ÛÛ™J
+KY]K™^Z[‹˜ÛÛ™J
+JJBˆ˜ÛÛXÝŽ\ÚX\ËÏŠ
+NÂˆ]\×Ü[WÛY]WÛX]ÚH[WÛÜ[ÛœÂˆš]\Š
+Bˆ˜[žJ[WÛ˜[Y_[WÛY]WÛX\˜ÛÛZ[œ×ÚÙ^J[WÛ˜[YJJNÂˆ]ÝØÚ×ÛY]WÛX\HYˆ\×Ü[WÛY]WÛX]ÚÂˆØYÝ˜[Y][Û—ÜØ[\WÜÝØÚ×ÛY]WÛX\
+	œÛÝ\˜ÙWÜ]
+OÂˆH[ÙHÂˆ\ÚX\Ž›™]Ê
+BˆNÂˆ]Ú[Z[\š]WØØXÚHHYˆ\×Ü[WÛY]WÛX]ÚÂˆØYÝ˜[Y][Û—ÜÚ[Z[\š]WØØXÚWÛÜ[Û˜[
+ˆ	œÛÝ\˜ÙWÜ]ˆ	œ\˜[\ËœÝ\Ù]Kˆ	œ\˜[\Ë™[™Ù]Kˆ
+OÂˆH[ÙHÂˆ[\WÝ˜[Y][Û—ÜÚ[Z[\š]WØØXÚJ
+BˆNÂˆ]ÛÛšX][Û—Ø]™\˜YÙ\ÈHZ[Ü[WØÛÛšX][Û—Ø]™\˜YÙ\×Ùœ›ÛWÜ›ÝÜÊˆ	œÝ[[X\žWÜ›ÝÜËˆ	™]Z[Ü›ÝÜËˆ	œ\˜[\ËœÝ\Ù]Kˆ	œ\˜[\Ë™[™Ù]Kˆ
+NÂˆ]Ý[[X\žWÙ]Z[Ú][\ÈHØ[×Ø[Ü[WÛ^Y\—ÛY]šXÜ×ÝÚ]Ý˜[Y][Û—Ùœ›ÛWÛÝÛ™YÜ›ÝÜ×ÛX\
+ˆ	œÛÝ\˜ÙWØÛÛ›‹ˆ	œÛÝ\˜ÙWÜ]ˆ	œ[WÛÜ[ÛœËˆ	œÝ[[X\žWÜ›ÝÜËˆ]Z[Ü›ÝÜËˆ	œ\˜[\ËœÝØÚ×ØY—Ý\Kˆ	œ\˜[\Ëš[™^Ý×ØÛÙKˆ\˜[\Ëš[™^Ø™]Kˆ\˜[\Ë˜ÛÛ˜Ù\Ø™]Kˆ\˜[\Ëš[™\ÝžWØ™]Kˆ	œ\˜[\ËœÝ\Ù]Kˆ	œ\˜[\Ë™[™Ù]Kˆ	›^Y\—ØÛÛ™šYËˆ\˜[\Ëœ\˜[[Ø˜]ÚÜÚ^™KˆÛ™WÜ[WÛ˜[YK˜[Y][ÛŸÂˆÚÊZ[ÛÛ™WÜ[WØ˜XÚÝ\ÝÜÝ[[X\žWØ[™Ù]Z[
+ˆÛ™WÜ[WÛ˜[YKˆ˜[Y][Û‹ˆ	œ[WÛY]WÛX\ˆ	˜ÛÛšX][Û—Ø]™\˜YÙ\Ëˆ	™^Z[—ÛX\ˆ	œ\˜[\Ëˆ	œÚ[Z[\š]WØØXÚKˆ	œÝØÚ×ÛY]WÛX\ˆ
+JBˆKˆ
+NÂˆ]
+[Ü[WÜÝ[[X\šY\Ë[WÝ˜[Y][Û—Ù]Z[ÊHBˆÜ]Ø[™ÜÛÜÜ[WØ˜XÚÝ\ÝÜÝ[[X\šY\×Ø[™Ù]Z[ÊÝ[[X\žWÙ]Z[Ú][\ÏÊNÂˆ]XØ^WÝ˜[Y][ÛœÈHZ[Ø[Ü[WÙXØ^WÝ˜[Y][ÛœÊ	˜[Ü[WÜÝ[[X\šY\ÊNÂ‚ˆ]
+ˆ]™×Ü™\ÚYX[ÛYX[‹ˆ]™×Ù^Ù\Ü×Ü™\ÚYX[ÛYX[‹ˆ]™×Ù\—ØÚ[™ÙKˆ›Ùš]ÛÜÜ×Ü˜][ËˆÜÜ™XYÛYX[‹ˆX×ÛYX[‹ˆX×ÜÝˆXÚ\‹ˆX×ÝÝ˜[YKˆ
+HHYÙÜ™YØ]WØ[Ü[WÜÝ[[X\žWÛY]šXÜÊ	˜[Ü[WÜÝ[[X\šY\ÊNÂˆÚÊ[S^Y\˜XÚÝ\Ý]HÂˆ[WÛ˜[YNˆÝš[™ÎŽ›™]Ê
+KˆÝØÚ×ØY—Ý\Nˆ\˜[\ËœÝØÚ×ØY—Ý\Kˆ[™^Ý×ØÛÙNˆ\˜[\Ëš[™^Ý×ØÛÙKˆ[™^Ø™]Nˆ\˜[\Ëš[™^Ø™]KˆÛÛ˜Ù\Ø™]Nˆ\˜[\Ë˜ÛÛ˜Ù\Ø™]Kˆ[™\ÝžWØ™]Nˆ\˜[\Ëš[™\ÝžWØ™]KˆÝ\Ù]Nˆ\˜[\ËœÝ\Ù]Kˆ[™Ù]Nˆ\˜[\Ë™[™Ù]Kˆ™\ÛÛ™YØ›Ø\™ˆ\˜[\Ëœ™\ÛÛ™YØ›Ø\™ˆ^ÛYWÜÝØ›Ø\™ˆ\˜[\Ë™^ÛYWÜÝØ›Ø\™ˆÝ[Û]—ÛZ[Žˆ\˜[\ËÝ[Û]—ÛZ[‹ˆÝ[Û]—ÛX^ˆ\˜[\ËÝ[Û]—ÛX^ˆZ[—ÜØ[\\×Ü\—Ü[WÙ^Nˆ\˜[\Ë›Z[—ÜØ[\\×Ü\—Ù^KˆZ[—Û\ÝYÝ˜YWÙ^\Îˆ\˜[\Ë›Z[—Û\ÝYÝ˜YWÙ^\Ëˆ˜XÚÝ\ÝÜ\š[Ùˆ\˜[\Ë˜˜XÚÝ\ÝÜ\š[ÙˆÚ[Îˆ™XÎŽ›™]Ê
+Kˆ]™×Ü™\ÚYX[ÛYX[‹ˆ]™×Ù^Ù\Ü×Ü™\ÚYX[ÛYX[‹ˆXØ^WÝ˜[Y][ÛœËˆ]™×Ù\—ØÚ[™ÙKˆ›Ùš]ÛÜÜ×Ü˜][ËˆÜ™XYÛYX[Žˆ›Û™Kˆ]™×ØÛÛšX][Û—ÜØÛÜ™NˆÙZYÚYÜ[WÜÝ[[X\žWÛY]šXÊ	˜[Ü[WÜÝ[[X\šY\Ë][_Âˆ][K˜]™×ØÛÛšX][Û—ÜØÛÜ™BˆJKˆ]™×ØÛÛšX][Û—Ü\—ÝšYÙÙ\ŽˆÙZYÚYÜ[WÜÝ[[X\žWÛY]šXÊ	˜[Ü[WÜÝ[[X\šY\Ë][_Âˆ][K˜]™×ØÛÛšX][Û—Ü\—ÝšYÙÙ\‚ˆJKˆX×ÛYX[‹ˆX×ÜÝˆXÚ\‹ˆX×ÝÝ˜[YKˆ^Y\—ØÛÝ[ˆ›Û™Kˆ^Y\—ÛY]Ùˆ›Û™Kˆ^Y\—ÛY]ÙÛX™[ˆ›Û™Kˆ^Y\—ÜÝ[[X\šY\Îˆ™XÎŽ›™]Ê
+Kˆ\×Ø[Ü[\ÎˆYKˆ[Ü[WÜÝ[[X\šY\Ëˆ[WÝ˜[Y][Û—Ù]Z[ËˆJBŸB‚œXˆ›ˆ[—Ý˜[œÚY[Ü˜[š×Û^Y\—Ø˜XÚÝ\Ý
+ˆÛÝ\˜ÙWÜ]ˆÝš[™ËˆÝØÚ×ØY—Ý\NˆÜ[ÛÝš[™Ï‹ˆ[™^Ý×ØÛÙNˆÝš[™Ëˆ[™^Ø™]NˆÜ[Û‹ˆÛÛ˜Ù\Ø™]NˆÜ[Û‹ˆ[™\ÝžWØ™]NˆÜ[Û‹ˆÝ\Ù]NˆÝš[™Ëˆ[™Ù]NˆÝš[™ËˆZ[—ÜØ[\\×Ü\—Ü˜[š×Ù^NˆÜ[Û\Ú^™O‹ˆZ[—Û\ÝYÝ˜YWÙ^\ÎˆÜ[Û\Ú^™O‹ˆ˜XÚÝ\ÝÜ\š[ÙˆÜ[Û\Ú^™O‹ˆ^Y\—ØÛÝ[ˆÜ[Û\Ú^™O‹ˆ^Y\—ÛY]ÙˆÜ[ÛÝš[™Ï‹ˆ›Ø\™ˆÜ[ÛÝš[™Ï‹ˆ^ÛYWÜÝØ›Ø\™ˆÜ[Û›ÛÛ‹ŠHOˆ™\Ý[˜[šÓ^Y\˜XÚÝ\Ý]KÝš[™ÏˆÂˆ˜[Y]WØ˜XÚÝ\ÝÜÝ˜]YÞWÙ^™\ÜÚ[ÛœÊ	œÛÝ\˜ÙWÜ]
+OÎÂˆ]ÛÝ\˜ÙWÙˆHÛÝ\˜ÙWÙ—Ü]
+	œÛÝ\˜ÙWÜ]
+NÂˆ]ÛÝ\˜ÙWÙ—ÜÝˆHÛÝ\˜ÙWÙ‚ˆ×ÜÝŠ
+Bˆ›Ú×ÛÜ—Ù[ÙJ¹c§ùiâùn¤ú-ëùo¡9.#y¦+ù§"y¥bU‹N‹×ÜÝš[™Ê
+JOÎÂˆ]ÛÝ\˜ÙWØÛÛ›ˆBˆÛÛ›™XÝ[ÛŽŽ›Ü[ŠÛÝ\˜ÙWÙ—ÜÝŠK›X\Ù\œŠ_›Ü›X]J¹¢dùo 9c§ùiâùn¤ùi,z-)NˆÙ_HŠJOÎÂˆ]
+™\ÛÛ™YØ›Ø\™^ÛYWÜÝØ›Ø\™ÝÝ[Û]—ÛZ[‹ÝÝ[Û]—ÛX^[ÝÙYÝ×ØÛÙ\ÊHBˆZ[Ø˜XÚÝ\ÝÜÝØÚ×Ùš[\Š	œÛÝ\˜ÙWÜ]›Ø\™^ÛYWÜÝØ›Ø\™›Û™K›Û™JOÎÂ‚ˆ]\˜[\ÈH˜[šÓ^Y\˜XÚÝ\Ý[”\˜[\ÈÂˆÝØÚ×ØY—Ý\NˆÝØÚ×ØY—Ý\Bˆ[Ü˜\ÛÜ—Ù[ÙJœYœH‹×ÜÝš[™Ê
+JBˆš[J
+Bˆ×ÜÝš[™Ê
+Kˆ[™^Ý×ØÛÙNˆ[™^Ý×ØÛÙKš[J
+K×ÜÝš[™Ê
+Kˆ[™^Ø™]Nˆ[™^Ø™]K[Ü˜\ÛÜŠJKˆÛÛ˜Ù\Ø™]NˆÛÛ˜Ù\Ø™]K[Ü˜\ÛÜŠŒŠKˆ[™\ÝžWØ™]Nˆ[™\ÝžWØ™]K[Ü˜\ÛÜŠŒ
+KˆÝ\Ù]NˆÝ\Ù]Kš[J
+K×ÜÝš[™Ê
+Kˆ[™Ù]Nˆ[™Ù]Kš[J
+K×ÜÝš[™Ê
+KˆZ[—ÜØ[\\×Ü\—Ù^NˆZ[—ÜØ[\\×Ü\—Ü˜[š×Ù^K[Ü˜\ÛÜŠJKˆZ[—Û\ÝYÝ˜YWÙ^\ÎˆZ[—Û\ÝYÝ˜YWÙ^\Âˆ[Ü˜\ÛÜŠQUSÐPÒÕTÕÓRS—ÓTÕQÕQWÑVTÊKˆ˜XÚÝ\ÝÜ\š[Ùˆ˜XÚÝ\ÝÜ\š[Ù[Ü˜\ÛÜŠJKˆ^Y\—ØÛÝ[ˆ^Y\—ØÛÝ[[Ü˜\ÛÜ—Ù[ÙJ˜[šÓ^Y\ÛÛ™šYÎŽ™Y˜][Û^Y\—ØÛÝ[
+Kˆ^Y\—ÛY]ÙˆX]Ú^Y\—ÛY]ÙÂˆÛÛYJ˜[YJHOˆ˜[šÓ^Y\“Y]ÙŽ™œ›ÛWÜÝŠ	˜[YJOËˆ›Û™HOˆ˜[šÓ^Y\“Y]ÙŽ”Ø[\PÛÝ[ˆKˆ™\ÛÛ™YØ›Ø\™ˆ^ÛYWÜÝØ›Ø\™ˆ[ÝÙYÝ×ØÛÙ\ËˆNÂˆ]^Y\—ØÛÛ™šYÈH˜[šÓ^Y\ÛÛ™šYÈÂˆZ[—ÜØ[\\×Ü\—Ù^Nˆ\˜[\Ë›Z[—ÜØ[\\×Ü\—Ù^Kˆ˜XÚÝ\ÝÜ\š[Ùˆ\˜[\Ë˜˜XÚÝ\ÝÜ\š[ÙˆZ[—Û\ÝYÝ˜YWÙ^\Îˆ\˜[\Ë›Z[—Û\ÝYÝ˜YWÙ^\Ëˆ^Y\—ØÛÝ[ˆ\˜[\Ë›^Y\—ØÛÝ[ˆ^Y\—ÛY]Ùˆ\˜[\Ë›^Y\—ÛY]ÙˆNÂˆ][œ]H˜[šÓ^Y\‘œ›ÛQ’[œ]ÂˆÝØÚ×ØY—Ý\Nˆ\˜[\ËœÝØÚ×ØY—Ý\Kˆ[™^Ý×ØÛÙNˆ\˜[\Ëš[™^Ý×ØÛÙKˆ[™^Ø™]Nˆ\˜[\Ëš[™^Ø™]KˆÛÛ˜Ù\Ø™]Nˆ\˜[\Ë˜ÛÛ˜Ù\Ø™]Kˆ[™\ÝžWØ™]Nˆ\˜[\Ëš[™\ÝžWØ™]KˆÝ\Ù]Nˆ\˜[\ËœÝ\Ù]Kˆ[™Ù]Nˆ\˜[\Ë™[™Ù]Kˆ^Y\—ØÛÛ™šYËˆNÂˆ]
+ØÛÜ™WØ˜]ÚÊHHØÛÜš[™×Ø[Ý×ÛY[[ÜžWÝÚ]Û[ÙJˆ	œÛÝ\˜ÙWÜ]ˆ›Û™Kˆ	š[œ]œÝØÚ×ØY—Ý\Kˆ	š[œ]œÝ\Ù]Kˆ	š[œ]™[™Ù]KˆØÛÜš[™ÓY[[ÜžS[ÙNŽ”Ý[[X\žSÛ›Kˆ
+OÎÂˆ]Ý[[X\žWÜ›ÝÜÈHš[\—ÜØÛÜ™WÜÝ[[X\žWÜ›ÝÜ×ØžWÝ×ØÛÙ\ÊˆØÛÜ™WØ˜]ÚœÝ[[X\žWÜ›ÝÜËˆ\˜[\Ë˜[ÝÙYÝ×ØÛÙ\Ë˜\×Ü™YŠ
+Kˆ
+NÂˆ]Y]šXÜÈBˆØ[×Ü˜[š×Û^Y\—ÛY]šXÜ×Ùœ›ÛWÜØÛÜ™WÜ›ÝÜÊ	œÛÝ\˜ÙWØÛÛ›‹	œÛÝ\˜ÙWÜ]	š[œ]	œÝ[[X\žWÜ›ÝÜÊOÎÂˆ]X\šÙ]Ý˜[YWÜÝ[[X\šY\ÈHZ[Ü˜[š×ÛX\šÙ]Ý˜[YWÜÝ[[X\šY\Êˆ	œÛÝ\˜ÙWÜ]ˆ	š[œ]ˆ	œÝ[[X\žWÜ›ÝÜËˆ	›Y]šXÜË›^Y\—ÜØ[\\Ëˆ
+OÎÂˆ]ÝØÚ×ÛY]WÛX\HØYÝ˜[Y][Û—ÜØ[\WÜÝØÚ×ÛY]WÛX\
+	œÛÝ\˜ÙWÜ]
+OÎÂˆ]^Y\—ÜØ[\WÙÜ›Ý\ÈHZ[Ü˜[š×Û^Y\—ÜØ[\WÙÜ›Ý\Êˆ	›Y]šXÜË›^Y\—ÜØ[\\Ëˆ[œ]›^Y\—ØÛÛ™šYË›^Y\—ØÛÝ[ˆ	œÝØÚ×ÛY]WÛX\ˆ
+NÂˆÚÊ˜[šÓ^Y\˜XÚÝ\Ý]HÂˆÝØÚ×ØY—Ý\Nˆ[œ]œÝØÚ×ØY—Ý\Kˆ[™^Ý×ØÛÙNˆ[œ]š[™^Ý×ØÛÙKˆ[™^Ø™]Nˆ[œ]š[™^Ø™]KˆÛÛ˜Ù\Ø™]Nˆ[œ]˜ÛÛ˜Ù\Ø™]Kˆ[™\ÝžWØ™]Nˆ[œ]š[™\ÝžWØ™]KˆÝ\Ù]Nˆ[œ]œÝ\Ù]Kˆ[™Ù]Nˆ[œ]™[™Ù]Kˆ™\ÛÛ™YØ›Ø\™ˆ\˜[\Ëœ™\ÛÛ™YØ›Ø\™ˆ^ÛYWÜÝØ›Ø\™ˆ\˜[\Ë™^ÛYWÜÝØ›Ø\™ˆX\šÙ]Ý˜[YWÙÜ›Ý\[™ÎˆYKˆZ[—ÜØ[\\×Ü\—Ü˜[š×Ù^Nˆ[œ]›^Y\—ØÛÛ™šYË™Y™™XÝ]™WÛZ[—ÜØ[\\×Ü\—Ù^J
+KˆZ[—Û\ÝYÝ˜YWÙ^\Îˆ[œ]›^Y\—ØÛÛ™šYË›Z[—Û\ÝYÝ˜YWÙ^\Ëˆ˜XÚÝ\ÝÜ\š[Ùˆ[œ]›^Y\—ØÛÛ™šYË˜˜XÚÝ\ÝÜ\š[Ùˆ^Y\—ØÛÝ[ˆ[œ]›^Y\—ØÛÛ™šYË›^Y\—ØÛÝ[ˆ^Y\—ÛY]Ùˆ[œ]›^Y\—ØÛÛ™šYË›^Y\—ÛY]Ù˜\×ÜÝŠ
+K×ÜÝš[™Ê
+Kˆ^Y\—ÛY]ÙÛX™[ˆ˜[š×Û^Y\—ÛY]ÙÛX™[
+[œ]›^Y\—ØÛÛ™šYË›^Y\—ÛY]Ù
+K×ÜÝš[™Ê
+KˆÚ[ØÛÝ[ˆY]šXÜËœÚ[ØÛÝ[ˆØ[\WØÛÝ[ˆY]šXÜËœØ[\WØÛÝ[ˆ]™×Ù\—ØÚ[™ÙNˆY]šXÜË˜]™×Ù\—ØÚ[™ÙKˆÜ™XYÛYX[ŽˆY]šXÜËœÜ™XYÛYX[‹ˆX×ÛYX[ŽˆY]šXÜËšX×ÛYX[‹ˆX×ÜÝˆY]šXÜËšX×ÜÝˆXÚ\ŽˆY]šXÜËšXÚ\‹ˆX×ÝÝ˜[YNˆY]šXÜËšX×ÝÝ˜[YKˆÜÚ×ÜÝ[[X\šY\Îˆ˜[š×ÝÜÚ×ÜÝ[[X\žWÙ]JY]šXÜËÜÚ×ÜÝ[[X\šY\ÊKˆÜÚ×Ü\š[ÙÜÝ[[X\šY\Îˆ˜[š×ÝÜÚ×Ü\š[ÙÜÝ[[X\žWÙ]JY]šXÜËÜÚ×Ü\š[ÙÜÝ[[X\šY\ÊKˆ^Y\—ÜÝ[[X\šY\ÎˆY]šXÜÂˆ›^Y\œÂˆš[×Ú]\Š
+Bˆ›X\
+][_˜[šÓ^Y\XÚÙ]Ý[[X\žHÂˆ^Y\—Ú[™^ˆ][K›^Y\—Ú[™^ˆ^Y\—ÛX™[ˆ˜[š×Û^Y\—ÛX™[
+][K›^Y\—Ú[™^[œ]›^Y\—ØÛÛ™šYË›^Y\—ØÛÝ[
+KˆÚ[ØÛÝ[ˆ][KœÚ[ØÛÝ[ˆØ[\WØÛÝ[ˆ][KœØ[\WØÛÝ[ˆ]™×ÜØÛÜ™Nˆ][K˜]™×ÜØÛÜ™Kˆ]™×Ü™\ÚYX[Ü™]\›Žˆ][K˜]™×Ü™\ÚYX[Ü™]\›‹ˆ]™×Ù\—ØÚ[™ÙNˆ][K˜]™×Ù\—ØÚ[™ÙKˆJBˆ˜ÛÛXÝ
+
+Kˆ^Y\—ÜØ[\WÙÜ›Ý\ËˆX\šÙ]Ý˜[YWÜÝ[[X\šY\ËˆJBŸB‚ˆÖØÙ™Ê\Ý
+WB›[Ù\ÝÈÂˆ\ÙHÝŽžÂˆÛÛXÝ[ÛœÎŽ’\ÚX\ˆœÎŽžØÜ™X]WÙ\—Ø[Üš]_Kˆ]Ž”]Y‹ˆ[YNŽžÔÞ\Ý[U[YKS’VÑTÐÒKˆNÂ‚ˆ\ÙHXÚÙŽŽžÐÛÛ›™XÝ[Û‹\˜[\ßNÂ‚ˆ\ÙHÜ˜]NŽžÂˆ]NŽžÑ]T™XY\‹[UYË™\Ý[Ù—Ü]ÛÝ\˜ÙWÙ—Ü]KˆØÛÜš[™ÎŽÛÛÎŽ›ØYÜÝÛ\ÝˆØÛÜš[™×Û[Ù[ŽžÔØÛÜ™Q]Z[ËØÛÜ™TÝ[[X\ž_KˆÚ[][]NŽœ˜[šÎŽ”˜[šÓ^Y\”Ø[\TÚ[ˆÚ[][]NŽœ[NŽžÂˆ[S^Y\‘Z[TØÛÜ™QÜ›Ý\[S^Y\‘Z[TØÛÜ™S^Y\œË[S^Y\”Ú[ˆ[S^Y\”Ø[\TÚ[ˆKˆNÂ‚ˆ\ÙHÝ\\ŽŽžÂˆ™\\™Y˜[Y][ÛÛÛX›ËSQUSÓ—ÑTË˜[Y][Û”Ø[\T˜]Ô›ÝË˜[Y][Û”Ø[\TÝØÚÓY]Kˆ˜[Y][Û”ÙYY[K˜[Y][Û”Ú[Z[\š]PØXÚK˜[Y][Û•˜\šX[ˆZ[Ú[™\ÝžWÛX\×Ùœ›ÛWÜ›ÝÜËZ[Ü˜[š×Û^Y\—ÜØ[\WÙÜ›Ý\ËˆZ[Ü™XÙ[ÙXØ^WÙ\ÝÜÚ[ËZ[Ü[WØ˜\ÚÙ]ÙXØ^WÙœ›ÛWÙZ[WÙÜ›Ý\ËˆZ[Ü[WØÛÛšX][Û—Ø]™\˜YÙ\ËZ[Ü[WØÛÛšX][Û—Ø]™\˜YÙ\×Ùœ›ÛWÜ›ÝÜËˆZ[Ü[WÙXØ^WÝ˜[Y][ÛœËZ[Ý˜[Y][Û—ØØXÚYÜ[KˆZ[Ý˜[Y][Û—ØØ[Xœ˜][Û—ÜÜXÜËZ[Ý˜[Y][Û—Ü™]\›—Ù\ÝšX][Û‹ˆZ[Ý˜[Y][Û—Ü™]\›—Ù\ÝšX][Û—Ùœ›ÛWØÛÝ[ËZ[Ý˜[Y][Û—ÜØ[\WÙÜ›Ý\ËˆZ[Ý˜[Y][Û—ÜØÛÜ™WÛ^Y\—Ù]Z[ËˆZ[Ý˜[Y][Û—ÜØÛÜ™WÛ^Y\—Ù]Z[×Ùœ›ÛWÙZ[WÛ^Y\œËZ[Ý˜[Y][Û—ÜÚ[Z[\š]WÜ›ÝÜËˆZ[Ý˜[Y][Û—ÝšYÙÙ\™YÜØÛÜ™\ËZ[Ý˜[Y][Û—ÝšYÙÙ\™YÜØÛÜ™\×Ù›Ü—ØÛÛX›ÜËˆØ[Xœ˜][Û—ÜÝXš[]WÙ˜XÝÜ‹ÛÛXÝÜ[WÝ˜[Y][Û—Ü[[YWÚÙ^\ËˆÛÛXÝÝ˜[Y][Û—Ø\ÜÚYÛ™YÛ˜[Y\Ë\š]™WÝ˜[Y][Û—Ý›Û][]WÙÜ›Ý\ˆ\Ý[X]WÛ™]Û[Û™^WÙ›Ý×Þ]X[‹[Û™^WÙ›Ý×Ü˜[š×Ú][\Ë[Û™^WÛÝ]›Ý×Ü˜[š×Ú][\Ëˆ™\ÛÛ™WÝ˜[Y][Û—ÜØ[\WØ›Ø\™ÛX™[™\ÛÛ™WÝ˜[Y][Û—ÝšYÙÙ\—ØÛÝ[ˆØÛÜWÝØ^WØÛÛ™šY×ÛX™[˜Z[[™×Ü\š[ÙÙØZ[‹ˆNÂˆ\ÙHÜ˜]NŽ™]NŽ”ØÛÜUØ^NÂ‚ˆÖÝ\ÝBˆ›ˆX\šÙ]Ø[˜[\Ú\×Ú[™\ÝžWÛX\Ý\Ù\×Ú[™\ÝžWÚ[œÝXYÛÙ—ÛX\šÙ]Ø›Ø\™
+
+HÂˆ]›ÝÜÈH™XÈVÂˆ™XÈVÂˆŒK”Öˆ‹ˆŒH‹ˆ¹nlùk¢zdíº(c‹ˆ¹­ìyg,È‹ˆºdíº(c‹ˆˆ‹ˆˆ‹ˆˆ‹ˆˆ‹ˆˆ‹ˆˆ‹ˆˆ‹ˆˆ‹ˆˆ‹ˆ¹..ù§oÈ‹ˆKˆ™XÈVÂˆŒÌK”Öˆ‹ˆŒÌH‹ˆ¹ânze$9o­È‹ˆºgd¹l¦È‹ˆ¹.$ùå*:+¯¹i!È‹ˆˆ‹ˆˆ‹ˆˆ‹ˆˆ‹ˆˆ‹ˆˆ‹ˆˆ‹ˆˆ‹ˆˆ‹ˆ¹b&ù.&¹§oÈ‹ˆKˆBˆš[×Ú]\Š
+Bˆ›X\
+›Ýß›ÝËš[×Ú]\Š
+K›X\
+ÝŽŽ×ÜÝš[™ÊK˜ÛÛXÝ
+
+JBˆ˜ÛÛXÝ
+
+NÂ‚ˆ]
+[™\ÝžWÛX\[™\ÝžWØÛÝ[ÊHHZ[Ú[™\ÝžWÛX\×Ùœ›ÛWÜ›ÝÜÊ›ÝÜÊNÂ‚ˆ\ÜÙ\Ù\HJˆ[™\ÝžWÛX\™Ù]
+ŒK”ÖˆŠKˆÛÛYJ	™XÈVÈºdíº(c‹×ÜÝš[™Ê
+WJBˆ
+NÂˆ\ÜÙ\Ù\HJˆ[™\ÝžWÛX\™Ù]
+ŒÌK”ÖˆŠKˆÛÛYJ	™XÈVÈ¹.$ùå*:+¯¹i!È‹×ÜÝš[™Ê
+WJBˆ
+NÂˆ\ÜÙ\JZ[™\ÝžWØÛÝ[Ë˜ÛÛZ[œ×ÚÙ^J¹..ù§oÈŠJNÂˆ\ÜÙ\JZ[™\ÝžWØÛÝ[Ë˜ÛÛZ[œ×ÚÙ^J¹b&ù.&¹§oÈŠJNÂˆB‚ˆÖÝ\ÝBˆ›ˆX\šÙ]Ø[˜[\Ú\×Û[Û™^WÙ›Ý×ØÛÛ™\×Ý›Û[YWÝ×Þ]X[Š
+HÂˆ\ÜÙ\Ù\HJˆ\Ý[X]WÛ™]Û[Û™^WÙ›Ý×Þ]X[ŠLŒWÌŒWÌŒ
+KˆÛÛYJLÌŒ
+Bˆ
+NÂˆ\ÜÙ\Ù\HJ\Ý[X]WÛ™]Û[Û™^WÙ›Ý×Þ]X[ŠLŒŒWÌŒ
+K›Û™JNÂˆ\ÜÙ\Ù\HJˆ\Ý[X]WÛ™]Û[Û™^WÙ›Ý×Þ]X[ŠŽ“S‹WÌŒWÌŒ
+Kˆ›Û™Bˆ
+NÂˆB‚ˆÖÝ\ÝBˆ›ˆX\šÙ]Ø[˜[\Ú\×Û[Û™^WÙ›Ý×ÛÛ›WÜ˜[šÜ×ÜÜÚ]]™WÙ[YÚX›WØ›Ø\™Ê
+HÂˆ]XØÈH\ÚX\Ž™œ›ÛJÂˆ
+¹ë¥ùb¦È‹×ÜÝš[™Ê
+KŒÌÌŒ
+Kˆ
+¹§.¹fj9.®ˆ‹×ÜÝš[™Ê
+KÌÌŒ
+Kˆ
+ºdíº(c‹×ÜÝš[™Ê
+KMLÌÌŒ
+KˆJNÂˆ]ÛÝ[ÈH\ÚX\Ž™œ›ÛJÂˆ
+¹ë¥ùb¦È‹×ÜÝš[™Ê
+KLŠKˆ
+¹§.¹fj9.®ˆ‹×ÜÝš[™Ê
+KJKˆ
+ºdíº(c‹×ÜÝš[™Ê
+KŒ
+KˆJNÂ‚ˆ]][\ÈH[Û™^WÙ›Ý×Ü˜[š×Ú][\ÊXØË	˜ÛÝ[ËŠNÂ‚ˆ\ÜÙ\Ù\HJ][\Ë›[Š
+KJNÂˆ\ÜÙ\Ù\HJ][\ÖÌK›˜[YK¹ë¥ùb¦ÈŠNÂˆ\ÜÙ\Ù\HJ][\ÖÌK˜[YKŒÌÌŒ
+NÂˆB‚ˆÖÝ\ÝBˆ›ˆX\šÙ]Ø[˜[\Ú\×Û[Û™^WÛÝ]›Ý×Ü˜[šÜ×Û\™Ù\ÝÛÝ]›Ý×Ùš\œÝ
+
+HÂˆ]XØÈH\ÚX\Ž™œ›ÛJÂˆ
+¹ë¥ùb¦È‹×ÜÝš[™Ê
+KŒÌÌŒ
+Kˆ
+¹§.¹fj9.®ˆ‹×ÜÝš[™Ê
+KNÌÌŒ
+Kˆ
+ºdíº(c‹×ÜÝš[™Ê
+KLMLÌÌŒ
+KˆJNÂˆ]ÛÝ[ÈH\ÚX\Ž™œ›ÛJÂˆ
+¹ë¥ùb¦È‹×ÜÝš[™Ê
+KLŠKˆ
+¹§.¹fj9.®ˆ‹×ÜÝš[™Ê
+K
+Kˆ
+ºdíº(c‹×ÜÝš[™Ê
+KŒ
+KˆJNÂ‚ˆ]][\ÈH[Û™^WÛÝ]›Ý×Ü˜[š×Ú][\ÊXØË	˜ÛÝ[ËŠNÂ‚ˆ\ÜÙ\Ù\HJ][\Ë›[Š
+KŠNÂˆ\ÜÙ\Ù\HJ][\ÖÌK›˜[YKºdíº(cŠNÂˆ\ÜÙ\Ù\HJ][\ÖÌK˜[YKLMLÌÌŒ
+NÂˆ\ÜÙ\Ù\HJ][\ÖÌWK›˜[YK¹§.¹fj9.®ˆŠNÂˆB‚ˆÖÝ\ÝBˆ›ˆX\šÙ]Ø[˜[\Ú\×Ý˜Z[[™×ÙØZ[—Ý\Ù\×Ü™\]Y\ÝYÝ˜YWÙ^WÝÚ[™ÝÊ
+HÂˆ]›ÝÜÈH™XÈVÂˆ
+ŒŒLˆ‹×ÜÝš[™Ê
+KLŒ
+Kˆ
+ŒŒLÈ‹×ÜÝš[™Ê
+KLKŒ
+Kˆ
+ŒŒL‹×ÜÝš[™Ê
+KL‹Œ
+Kˆ
+ŒŒLH‹×ÜÝš[™Ê
+KMKŒ
+Kˆ
+ŒŒL‹×ÜÝš[™Ê
+KŒŒ
+Kˆ
+ŒŒLH‹×ÜÝš[™Ê
+KŒ
+KˆNÂ‚ˆ]™YWÙ^HH˜Z[[™×Ü\š[ÙÙØZ[Š	œ›ÝÜËÊK™^XÝ
+™YH^HØZ[ˆŠNÂˆ]š]™WÙ^HH˜Z[[™×Ü\š[ÙÙØZ[Š	œ›ÝÜËJK™^XÝ
+™š]™H^HØZ[ˆŠNÂ‚ˆ\ÜÙ\J
+™YWÙ^HHLŒ
+K˜XœÊ
+HYKNJNÂˆ\ÜÙ\J
+š]™WÙ^HHMŒ
+K˜XœÊ
+HYKNJNÂˆ\ÜÙ\Ù\HJ˜Z[[™×Ü\š[ÙÙØZ[Š	œ›ÝÜÖË‹WKJK›Û™JNÂˆB‚ˆ›ˆ[\ÜÛÝ\˜ÙWÙ\Š
+HOˆ]YˆÂˆ][š\]YHHÞ\Ý[U[YNŽ››ÝÊ
+Bˆ™\˜][Û—ÜÚ[˜ÙJS’VÑTÐÒ
+Bˆ™^XÝ
+˜ÛØÚÈŠBˆ˜\×Û˜[›ÜÊ
+NÂˆÝŽ™[ŽŽ[\Ù\Š
+Kš›Ú[Š›Ü›X]J›X[™ÚXWÝ˜[Y][Û—ÝšYÙÙ\—ÜØÛÜ™\×ÞÝ[š\]Y_HŠJBˆB‚ˆ›ˆ™\\™WÝ˜[Y][Û—ÜÛÝ\˜ÙWÙš[\ÊÛÝ\˜ÙWÙ\Žˆ	œÝŠHÂˆÜ™X]WÙ\—Ø[
+ÛÝ\˜ÙWÙ\ŠK™^XÝ
+˜Ü™X]HÛÝ\˜ÙH\ˆŠNÂ‚ˆÜš]Jˆ]YŽŽ™œ›ÛJÛÝ\˜ÙWÙ\ŠKš›Ú[Š˜YWØØ[[™\‹˜ÜÝˆŠKˆ˜Ø[Ù]WŒŒL—ŒŒL×ŒŒLˆ‹ˆ
+Bˆ™^XÝ
+Üš]H˜YWØØ[[™\‹˜ÜÝˆŠNÂ‚ˆÜš]Jˆ]YŽŽ™œ›ÛJÛÝ\˜ÙWÙ\ŠKš›Ú[ŠœÝØÚ×Û\Ý˜ÜÝˆŠKˆ×ØÛÙK[\ÙY˜[YWŒK”Ö‹9¨-ù§+: ¨Wˆ‹ˆ
+Bˆ™^XÝ
+Üš]HÝØÚ×Û\Ý˜ÜÝˆŠNÂ‚ˆ]ÛÝ\˜ÙWØÛÛ›ˆHÛÛ›™XÝ[ÛŽŽ›Ü[ŠÛÝ\˜ÙWÙ—Ü]
+ÛÝ\˜ÙWÙ\ŠJK™^XÝ
+›Ü[ˆÛÝ\˜ÙHˆŠNÂˆÛÝ\˜ÙWØÛÛ›‚ˆ™^XÝ]JˆˆÈ‚ˆÔ‘PUHP“HÝØÚ×Ù]H
+ˆ×ØÛÙHTÒT‹ˆ˜YWÙ]HTÒT‹ˆY—Ý\HTÒT‹ˆÜ[ˆÕP“KˆYÚÕP“KˆÝÈÕP“KˆÛÜÙHÕP“Kˆ›ÛÕP“Kˆ[[Ý[ÕP“Kˆ™WØÛÜÙHÕP“KˆÚ[™ÙHÕP“KˆÝØÚÈÕP“Bˆ
+BˆˆËˆ×Kˆ
+Bˆ™^XÝ
+˜Ü™X]HÝØÚ×Ù]HŠNÂ‚ˆ]]]\HÛÝ\˜ÙWØÛÛ›‚ˆ˜\[™\ŠœÝØÚ×Ù]HŠBˆ™^XÝ
+œÝØÚ×Ù]H\[™\ˆŠNÂˆ\˜\[™Ü›ÝÊ\˜[\ÈVÂˆŒK”Öˆ‹ˆŒŒLˆ‹ˆœYœH‹ˆLŒÙˆLWÙˆKŽÙˆLŒ—ÙˆLŒÙˆLŒÙˆLŒÙˆŒ—Ùˆ‹ŒÙˆJBˆ™^XÝ
+š[œÙ\ÝØÚÈ›ÝÌHŠNÂˆ\˜\[™Ü›ÝÊ\˜[\ÈVÂˆŒK”Öˆ‹ˆŒŒLÈ‹ˆœYœH‹ˆLŒ—ÙˆLKŒÙˆLŒWÙˆLŽÙˆLLŒÙˆLLŒÙˆLŒ—Ùˆ—ÙˆKŽÙˆJBˆ™^XÝ
+š[œÙ\ÝØÚÈ›ÝÌˆŠNÂˆ\˜\[™Ü›ÝÊ\˜[\ÈVÂˆŒK”Öˆ‹ˆŒŒL‹ˆœYœH‹ˆLŽÙˆLKŒ×ÙˆL×ÙˆLKŒWÙˆLŒŒÙˆLŒŒÙˆLŽÙˆŒ×Ùˆ‹ÎÙˆJBˆ™^XÝ
+š[œÙ\ÝØÚÈ›ÝÌÈŠNÂˆ\™›\Ú
+
+K™^XÝ
+™›\ÚÝØÚ×Ù]HŠNÂˆB‚ˆÖÝ\ÝBˆ›ˆ[WÙ^™\ÜÚ[Û—Ý˜[Y][Û—Ü™\Ü×Ø˜YÙ^™\ÜÚ[Û—Ø™Y›Ü™WÜÝØÚ×Ùš[\Š
+HÂˆ]ÛÝ\˜ÙWÙ\ˆH[\ÜÛÝ\˜ÙWÙ\Š
+NÂˆ]ÛÝ\˜ÙWÙ\—ÜÝˆHÛÝ\˜ÙWÙ\‹×ÜÝŠ
+K™^XÝ
+]ŽÛÝ\˜ÙH\ˆŠNÂˆÜ™X]WÙ\—Ø[
+ÛÝ\˜ÙWÙ\—ÜÝŠK™^XÝ
+˜Ü™X]HÛÝ\˜ÙH\ˆŠNÂˆÜš]Jˆ]YŽŽ™œ›ÛJÛÝ\˜ÙWÙ\—ÜÝŠKš›Ú[ŠœØÛÜ™WÜ[KÛ[ŠKˆˆÈ‚™\œÚ[ÛˆHB‚–ÖÜØÙ[™WWB›˜[YHHº-¢ùb¯ùd+ùbª‚™\™XÝ[ÛˆH›Û™È‚›ØœÙ\™WÝ™\ÚÛHKŒšYÙÙ\—Ý™\ÚÛH‹Œ˜ÛÛ™š\›WÝ™\ÚÛHËŒ™˜Z[Ý™\ÚÛHKŒ‚–ÖÜ[WWB›˜[YHH¹§"y¥b9ëe¹åiH‚œØÙ[™HHº-¢ùb¯ùd+ùbª‚œÝYÙHH˜˜\ÙH‚œØÛÜWÝÚ[™ÝÜÈHBœØÛÜWÝØ^HH“TÕ‚Ú[ˆHÈˆÈ‚œÚ[ÈHKŒ™^Z[ˆH\Ý‚ˆˆËˆ
+Bˆ™^XÝ
+Üš]HØÛÜ™WÜ[KÛ[ŠNÂ‚ˆ]\œ›ÜˆHÝ\\ŽŽœ[—Ü[WÙ^™\ÜÚ[Û—Ý˜[Y][ÛŠˆÛÝ\˜ÙWÙ\—ÜÝ‹×ÜÝš[™Ê
+KˆÝš[™ÎŽ›™]Ê
+KˆÛÛYJ“PJË‹×ÜÝš[™Ê
+JKˆÛÛYJ“TÕ‹×ÜÝš[™Ê
+JKˆÛÛYJJKˆÛÛYJœYœH‹×ÜÝš[™Ê
+JKˆŒK”Ò‹×ÜÝš[™Ê
+KˆÛÛYJJKˆÛÛYJŒŠKˆÛÛYJŒ
+KˆŒŒLˆ‹×ÜÝš[™Ê
+KˆŒŒL‹×ÜÝš[™Ê
+KˆÛÛYJJKˆÛÛYJ
+KˆÛÛYJJKˆ›Û™Kˆ›Û™KˆÛÛYJJKˆÛÛYJ¹..ù§oÈ‹×ÜÝš[™Ê
+JKˆÛÛYJ˜[ÙJKˆ›Û™Kˆ›Û™Kˆ
+Bˆ™^XÝÙ\œŠ˜˜Y^™\ÜÚ[ÛˆÚÝ[˜Z[™Y›Ü™HÝØÚÈš[\š[™ÈŠNÂ‚ˆ\ÜÙ\J\œ›Ü‹˜ÛÛZ[œÊº(j:/¯¹o#ú)èù§¤:e&z+ëÈŠKžÙ\œ›ÜŸHŠNÂˆ\ÜÙ\JY\œ›Ü‹˜ÛÛZ[œÊœÝØÚ×Û\Ý˜ÜÝˆŠKžÙ\œ›ÜŸHŠNÂˆB‚ˆÖÝ\ÝBˆ›ˆ˜[œÚY[Ü[WØÛÛšX][Û—Ø]™\˜YÙ\×ÛX]ÚÜ˜[š×ÝÙZYÚÙ›Ü›][J
+HÂˆ]Ý[[X\žWÜ›ÝÜÈH™XÈVÂˆØÛÜ™TÝ[[X\žHÂˆ×ØÛÙNˆŒK”Öˆ‹×ÜÝš[™Ê
+Kˆ˜YWÙ]NˆŒŒLˆ‹×ÜÝš[™Ê
+KˆÝ[ÜØÛÜ™NˆLŒˆ˜[šÎˆÛÛYJJKˆKˆØÛÜ™TÝ[[X\žHÂˆ×ØÛÙNˆŒ‹”Öˆ‹×ÜÝš[™Ê
+Kˆ˜YWÙ]NˆŒŒLˆ‹×ÜÝš[™Ê
+KˆÝ[ÜØÛÜ™NˆKŒˆ˜[šÎˆÛÛYJŠKˆKˆØÛÜ™TÝ[[X\žHÂˆ×ØÛÙNˆŒK”Öˆ‹×ÜÝš[™Ê
+Kˆ˜YWÙ]NˆŒŒLÈ‹×ÜÝš[™Ê
+KˆÝ[ÜØÛÜ™NˆËŒˆ˜[šÎˆÛÛYJŠKˆKˆØÛÜ™TÝ[[X\žHÂˆ×ØÛÙNˆŒ‹”Öˆ‹×ÜÝš[™Ê
+Kˆ˜YWÙ]NˆŒŒLÈ‹×ÜÝš[™Ê
+KˆÝ[ÜØÛÜ™NˆKŒˆ˜[šÎˆÛÛYJJKˆKˆNÂˆ]]Z[Ü›ÝÜÈH™XÈVÂˆØÛÜ™Q]Z[ÈÂˆ×ØÛÙNˆŒK”Öˆ‹×ÜÝš[™Ê
+Kˆ˜YWÙ]NˆŒŒLˆ‹×ÜÝš[™Ê
+Kˆ[WÛ˜[YNˆº)á9b&PH‹×ÜÝš[™Ê
+Kˆ[WÜØÛÜ™Nˆ‹ŒˆKˆØÛÜ™Q]Z[ÈÂˆ×ØÛÙNˆŒ‹”Öˆ‹×ÜÝš[™Ê
+Kˆ˜YWÙ]NˆŒŒLˆ‹×ÜÝš[™Ê
+Kˆ[WÛ˜[YNˆº)á9b&PH‹×ÜÝš[™Ê
+Kˆ[WÜØÛÜ™NˆKŒˆKˆØÛÜ™Q]Z[ÈÂˆ×ØÛÙNˆŒK”Öˆ‹×ÜÝš[™Ê
+Kˆ˜YWÙ]NˆŒŒLÈ‹×ÜÝš[™Ê
+Kˆ[WÛ˜[YNˆº)á9b&PH‹×ÜÝš[™Ê
+Kˆ[WÜØÛÜ™NˆL‹ŒˆKˆØÛÜ™Q]Z[ÈÂˆ×ØÛÙNˆŒ‹”Öˆ‹×ÜÝš[™Ê
+Kˆ˜YWÙ]NˆŒŒLÈ‹×ÜÝš[™Ê
+Kˆ[WÛ˜[YNˆº)á9b&Pˆ‹×ÜÝš[™Ê
+Kˆ[WÜØÛÜ™NˆËŒˆKˆNÂ‚ˆ]]™\˜YÙ\ÈHZ[Ü[WØÛÛšX][Û—Ø]™\˜YÙ\×Ùœ›ÛWÜ›ÝÜÊˆ	œÝ[[X\žWÜ›ÝÜËˆ	™]Z[Ü›ÝÜËˆŒŒLˆ‹ˆŒŒLÈ‹ˆ
+NÂ‚ˆ][WØHH]™\˜YÙ\Ë™Ù]
+º)á9b&PHŠK™^XÝ
+œ[HH]™\˜YÙ\ÈŠNÂˆ\ÜÙ\Ù\HJ[WØK˜]™×ØÛÛšX][Û—ÜØÛÜ™KÛÛYJÍJJNÂˆ\ÜÙ\Ù\HJ[WØK˜]™×ØÛÛšX][Û—Ü\—ÝšYÙÙ\‹ÛÛYJJJNÂ‚ˆ][WØˆH]™\˜YÙ\Ë™Ù]
+º)á9b&PˆŠK™^XÝ
+œ[Hˆ]™\˜YÙ\ÈŠNÂˆ\ÜÙ\Ù\HJ[WØ‹˜]™×ØÛÛšX][Û—ÜØÛÜ™KÛÛYJËŒ
+JNÂˆ\ÜÙ\Ù\HJ[WØ‹˜]™×ØÛÛšX][Û—Ü\—ÝšYÙÙ\‹ÛÛYJËŒ
+JNÂˆB‚ˆÖÝ\ÝBˆ›ˆ\œÚ\ÝYÜ[WØÛÛšX][Û—ÜÜ[ÛX]Ú\×Ü›Ý×Ù›Ü›][J
+HÂˆ]ÛÝ\˜ÙWÙ\ˆH[\ÜÛÝ\˜ÙWÙ\Š
+NÂˆ]ÛÝ\˜ÙWÙ\—ÜÝˆHÛÝ\˜ÙWÙ\‹×ÜÝŠ
+K™^XÝ
+]ŽÛÝ\˜ÙH\ˆŠNÂˆÜ™X]WÙ\—Ø[
+ÛÝ\˜ÙWÙ\—ÜÝŠK™^XÝ
+˜Ü™X]HÛÝ\˜ÙH\ˆŠNÂˆ]™\Ý[ØÛÛ›ˆHÛÛ›™XÝ[ÛŽŽ›Ü[Š™\Ý[Ù—Ü]
+ÛÝ\˜ÙWÙ\—ÜÝŠJK™^XÝ
+›Ü[ˆ™\Ý[ˆŠNÂˆ™\Ý[ØÛÛ›‚ˆ™^XÝ]WØ˜]Ú
+ˆˆÈ‚ˆÔ‘PUHP“HØÛÜ™WÜÝ[[X\žH
+ˆ×ØÛÙHTÒT‹ˆ˜YWÙ]HTÒT‹ˆÝ[ÜØÛÜ™HÕP“Kˆ˜[šÈ’QÒS•ˆ
+NÂˆS”ÑT•S•ÈØÛÜ™WÜÝ[[X\žHSQTÂˆ
+	ÌK”Ö‰Ë	ÌŒL‰ËLŒJKˆ
+	Ì‹”Ö‰Ë	ÌŒL‰ËKŒŠKˆ
+	ÌK”Ö‰Ë	ÌŒLÉËËŒŠKˆ
+	Ì‹”Ö‰Ë	ÌŒLÉËKŒJNÂ‚ˆÔ‘PUHP“H[WÙ]Z[È
+ˆ×ØÛÙHTÒT‹ˆ˜YWÙ]HTÒT‹ˆ[WÛ˜[YHTÒT‹ˆ[WÜØÛÜ™HÕP“Bˆ
+NÂˆS”ÑT•S•È[WÙ]Z[ÈSQTÂˆ
+	ÌK”Ö‰Ë	ÌŒL‰Ë	ú)á9b&PIË‹Œ
+Kˆ
+	Ì‹”Ö‰Ë	ÌŒL‰Ë	ú)á9b&PIËKŒ
+Kˆ
+	ÌK”Ö‰Ë	ÌŒLÉË	ú)á9b&PIËL‹Œ
+Kˆ
+	Ì‹”Ö‰Ë	ÌŒLÉË	ú)á9b&P‰ËËŒ
+Kˆ
+	ÌK”Ö‰Ë	ÌŒLÉË	ù§*º+íù¬`º)á9b&IËLŒ
+NÂˆˆËˆ
+Bˆ™^XÝ
+œ™\\™HÛÛšX][Ûˆ›ÝÜÈŠNÂˆ›Ü
+™\Ý[ØÛÛ›ŠNÂ‚ˆ]]™\˜YÙ\ÈHZ[Ü[WØÛÛšX][Û—Ø]™\˜YÙ\ÊˆÛÝ\˜ÙWÙ\—ÜÝ‹ˆ	–Èº)á9b&PH‹×ÜÝš[™Ê
+Kº)á9b&Pˆ‹×ÜÝš[™Ê
+WKˆŒŒLˆ‹ˆŒŒLÈ‹ˆ
+Bˆ™^XÝ
+œ]Y\žHÛÛšX][Ûˆ]™\˜YÙ\ÈŠNÂ‚ˆ][WØHH]™\˜YÙ\Ë™Ù]
+º)á9b&PHŠK™^XÝ
+œ[HH]™\˜YÙ\ÈŠNÂˆ\ÜÙ\Ù\HJ[WØK˜]™×ØÛÛšX][Û—ÜØÛÜ™KÛÛYJÍJJNÂˆ\ÜÙ\Ù\HJ[WØK˜]™×ØÛÛšX][Û—Ü\—ÝšYÙÙ\‹ÛÛYJJJNÂ‚ˆ][WØˆH]™\˜YÙ\Ë™Ù]
+º)á9b&PˆŠK™^XÝ
+œ[Hˆ]™\˜YÙ\ÈŠNÂˆ\ÜÙ\Ù\HJ[WØ‹˜]™×ØÛÛšX][Û—ÜØÛÜ™KÛÛYJËŒ
+JNÂˆ\ÜÙ\Ù\HJ[WØ‹˜]™×ØÛÛšX][Û—Ü\—ÝšYÙÙ\‹ÛÛYJËŒ
+JNÂˆ\ÜÙ\JX]™\˜YÙ\Ë˜ÛÛZ[œ×ÚÙ^J¹§*º+íù¬`º)á9b&HŠJNÂˆB‚ˆÖÝ\ÝBˆ›ˆ˜[Y][Û—Ü™]\›—Ù\ÝšX][Û—Ý\Ù\×ÜÞ[[Y]šX×Ü\˜Ù[ØXÚÙ]Ê
+HÂˆ]Ø[\\ÈHËLL‹ŒLLŒMËŒLËŒL‹ŒŒ‹ŒËŒŒLKŒBˆš[×Ú]\Š
+Bˆ›X\
+™\ÚYX[Ü™]\›Ÿ[S^Y\”Ø[\TÚ[Âˆ×ØÛÙNˆŒK”Öˆ‹×ÜÝš[™Ê
+Kˆ˜YWÙ]NˆŒŒLˆ‹×ÜÝš[™Ê
+Kˆ[WÜØÛÜ™NˆKŒˆ™\ÚYX[Ü™]\›‹ˆ\—ØÚ[™ÙNˆŽ’S‘’S’UKˆJBˆ˜ÛÛXÝŽ™XÏÏŠ
+NÂ‚ˆ]XÚÙ]ÈHZ[Ý˜[Y][Û—Ü™]\›—Ù\ÝšX][ÛŠ	œØ[\\ÊNÂ‚ˆ\ÜÙ\Ù\HJXÚÙ]Ë›[Š
+KÊNÂˆ\ÜÙ\Ù\HJˆXÚÙ]Âˆš]\Š
+Bˆ›X\
+XÚÙ]XÚÙ]œØ[\WØÛÝ[
+Bˆ˜ÛÛXÝŽ™XÏÏŠ
+Kˆ™XÈVÌ‹K‹‹KKWBˆ
+NÂˆ\ÜÙ\Ù\HJXÚÙ]ÖÌKœØ[\WÜ˜][ËÛÛYJŒŠJNÂ‚ˆ]ÛÛ\™\ÜÙYHZ[Ý˜[Y][Û—Ü™]\›—Ù\ÝšX][Û—Ùœ›ÛWØÛÝ[ÊÌ‹K‹‹KKWJNÂˆ\ÜÙ\Ù\HJˆÛÛ\™\ÜÙYˆš]\Š
+Bˆ›X\
+XÚÙ]
+XÚÙ]œØ[\WØÛÝ[XÚÙ]œØ[\WÜ˜][ÊJBˆ˜ÛÛXÝŽ™XÏÏŠ
+KˆXÚÙ]Âˆš]\Š
+Bˆ›X\
+XÚÙ]
+XÚÙ]œØ[\WØÛÝ[XÚÙ]œØ[\WÜ˜][ÊJBˆ˜ÛÛXÝŽ™XÏÏŠ
+Bˆ
+NÂˆB‚ˆÖÝ\ÝBˆ›ˆÛÛ\™\ÜÙYÝ˜[Y][Û—ÜØÛÜ™WÛ^Y\œ×ÛX]ÚÙ[ÜØ[\\Ê
+HÂˆ]Ø[\\ÈH™XÈVÂˆ[S^Y\”Ø[\TÚ[Âˆ×ØÛÙNˆŒK”Öˆ‹×ÜÝš[™Ê
+Kˆ˜YWÙ]NˆŒŒLˆ‹×ÜÝš[™Ê
+Kˆ[WÜØÛÜ™NˆŒˆ™\ÚYX[Ü™]\›ŽˆKŒˆ\—ØÚ[™ÙNˆŒˆKˆ[S^Y\”Ø[\TÚ[Âˆ×ØÛÙNˆŒ‹”Öˆ‹×ÜÝš[™Ê
+Kˆ˜YWÙ]NˆŒŒLˆ‹×ÜÝš[™Ê
+Kˆ[WÜØÛÜ™Nˆ‹Œˆ™\ÚYX[Ü™]\›ŽˆËŒˆ\—ØÚ[™ÙNˆŒˆKˆ[S^Y\”Ø[\TÚ[Âˆ×ØÛÙNˆŒK”Öˆ‹×ÜÝš[™Ê
+Kˆ˜YWÙ]NˆŒŒLÈ‹×ÜÝš[™Ê
+Kˆ[WÜØÛÜ™NˆŒˆ™\ÚYX[Ü™]\›Žˆ‹Œˆ\—ØÚ[™ÙNˆŒˆKˆ[S^Y\”Ø[\TÚ[Âˆ×ØÛÙNˆŒ‹”Öˆ‹×ÜÝš[™Ê
+Kˆ˜YWÙ]NˆŒŒLÈ‹×ÜÝš[™Ê
+Kˆ[WÜØÛÜ™NˆŒˆ™\ÚYX[Ü™]\›ŽˆŒˆ\—ØÚ[™ÙNˆŒˆKˆNÂˆ][HZ[Ý˜[Y][Û—ÜØÛÜ™WÛ^Y\—Ù]Z[Ê	œØ[\\ËJNÂˆ]ÛÛ\™\ÜÙYHZ[Ý˜[Y][Û—ÜØÛÜ™WÛ^Y\—Ù]Z[×Ùœ›ÛWÙZ[WÛ^Y\œÊ™XÈVÂˆ[S^Y\‘Z[TØÛÜ™S^Y\œÈÂˆ˜YWÙ]NˆŒŒLÈ‹×ÜÝš[™Ê
+KˆÜ›Ý\Îˆ™XÈVÔ[S^Y\‘Z[TØÛÜ™QÜ›Ý\ÂˆØÛÜ™NˆŒˆØ[\WØÛÝ[ˆ‹ˆ]™×Ü™\ÚYX[Ü™]\›ŽˆËŒˆWKˆKˆ[S^Y\‘Z[TØÛÜ™S^Y\œÈÂˆ˜YWÙ]NˆŒŒLˆ‹×ÜÝš[™Ê
+KˆÜ›Ý\Îˆ™XÈVÂˆ[S^Y\‘Z[TØÛÜ™QÜ›Ý\ÂˆØÛÜ™NˆŒˆØ[\WØÛÝ[ˆKˆ]™×Ü™\ÚYX[Ü™]\›ŽˆKŒˆKˆ[S^Y\‘Z[TØÛÜ™QÜ›Ý\ÂˆØÛÜ™Nˆ‹ŒˆØ[\WØÛÝ[ˆKˆ]™×Ü™\ÚYX[Ü™]\›ŽˆËŒˆKˆKˆKˆJNÂ‚ˆ\ÜÙ\Ù\HJÛÛ\™\ÜÙYœÜ™XYÛYX[‹[œÜ™XYÛYX[ŠNÂˆ\ÜÙ\Ù\HJÛÛ\™\ÜÙY›^Y\—ÜÝ[[X\šY\Ë›[Š
+K[›^Y\—ÜÝ[[X\šY\Ë›[Š
+JNÂˆ›Üˆ
+ÛÛ\™\ÜÙY[
+H[ˆÛÛ\™\ÜÙY›^Y\—ÜÝ[[X\šY\Ëš]\Š
+Kžš\
+	™[›^Y\—ÜÝ[[X\šY\ÊHÂˆ\ÜÙ\Ù\HJÛÛ\™\ÜÙY›^Y\—Ú[™^[›^Y\—Ú[™^
+NÂˆ\ÜÙ\Ù\HJÛÛ\™\ÜÙY›^Y\—ÛX™[[›^Y\—ÛX™[
+NÂˆ\ÜÙ\Ù\HJÛÛ\™\ÜÙYœÚ[ØÛÝ[[œÚ[ØÛÝ[
+NÂˆ\ÜÙ\Ù\HJÛÛ\™\ÜÙYœØ[\WØÛÝ[[œØ[\WØÛÝ[
+NÂˆ\ÜÙ\Ù\HJÛÛ\™\ÜÙY˜]™×ÜØÛÜ™K[˜]™×ÜØÛÜ™JNÂˆ\ÜÙ\Ù\HJÛÛ\™\ÜÙY˜]™×Ü™\ÚYX[Ü™]\›‹[˜]™×Ü™\ÚYX[Ü™]\›ŠNÂˆBˆB‚ˆÖÝ\ÝBˆ›ˆ˜[Y][Û—ÝšYÙÙ\™YÜØÛÜ™\×ØÛÝ™\—Ù[Ø[˜[\Ú\×ÝÚ[™ÝÊ
+HÂˆ]ÛÝ\˜ÙWÙ\ˆH[\ÜÛÝ\˜ÙWÙ\Š
+NÂˆ]ÛÝ\˜ÙWÙ\—ÜÝˆHÛÝ\˜ÙWÙ\‹×ÜÝŠ
+K™^XÝ
+]ŽÛÝ\˜ÙH\ˆŠNÂˆ™\\™WÝ˜[Y][Û—ÜÛÝ\˜ÙWÙš[\ÊÛÝ\˜ÙWÙ\—ÜÝŠNÂ‚ˆ]ØXÚYÜ[HHZ[Ý˜[Y][Û—ØØXÚYÜ[Jˆ˜[Y][Û—Ý\ÝÜ[H‹×ÜÝš[™Ê
+KˆØÛÜUØ^NŽ[žKˆKˆKŒˆ›Û™Kˆ[UYÎŽ“›Ü›X[ˆÈˆ‹ˆ
+Bˆ™^XÝ
+˜Z[ØXÚY[HŠNÂ‚ˆ]šYÙÙ\™YÜØÛÜ™WÛX\HZ[Ý˜[Y][Û—ÝšYÙÙ\™YÜØÛÜ™\ÊˆÛÝ\˜ÙWÙ\—ÜÝ‹ˆœYœH‹ˆŒŒLˆ‹ˆŒŒL‹ˆ	˜ØXÚYÜ[Kˆ
+Bˆ™^XÝ
+˜Z[šYÙÙ\™YØÛÜ™\ÈŠNÂ‚ˆ]]WÜØÛÜ™WÛX\HšYÙÙ\™YÜØÛÜ™WÛX\ˆ™Ù]
+ŒK”ÖˆŠBˆ™^XÝ
+×ØÛÙHÚÝ[]™HšYÙÙ\™YØÛÜ™\ÈŠNÂ‚ˆ\ÜÙ\Ù\HJ]WÜØÛÜ™WÛX\›[Š
+KÊNÂˆ\ÜÙ\J]WÜØÛÜ™WÛX\˜ÛÛZ[œ×ÚÙ^JŒŒLˆŠJNÂˆ\ÜÙ\J]WÜØÛÜ™WÛX\˜ÛÛZ[œ×ÚÙ^JŒŒLÈŠJNÂˆ\ÜÙ\J]WÜØÛÜ™WÛX\˜ÛÛZ[œ×ÚÙ^JŒŒLŠJNÂˆ\ÜÙ\Ù\HJˆšYÙÙ\™YÜØÛÜ™WÛX\ˆ˜[Y\Ê
+Bˆ›X\
+][_][K›[Š
+JBˆœÝ[NŽ\Ú^™OŠ
+KˆÂˆ
+NÂˆB‚ˆÖÝ\ÝBˆ›ˆ˜[Y][Û—ÝšYÙÙ\™YÜØÛÜ™\×Ú[š™XÝÝ\\˜Ø\ÙWÜ˜[šÊ
+HÂˆ]ÛÝ\˜ÙWÙ\ˆH[\ÜÛÝ\˜ÙWÙ\Š
+NÂˆ]ÛÝ\˜ÙWÙ\—ÜÝˆHÛÝ\˜ÙWÙ\‹×ÜÝŠ
+K™^XÝ
+]ŽÛÝ\˜ÙH\ˆŠNÂˆ™\\™WÝ˜[Y][Û—ÜÛÝ\˜ÙWÙš[\ÊÛÝ\˜ÙWÙ\—ÜÝŠNÂˆ
+ÛÝ\˜ÙWÙ\Žˆ	œÝŸÂˆ]™\Ý[ØÛÛ›ˆHÛÛ›™XÝ[ÛŽŽ›Ü[Š™\Ý[Ù—Ü]
+ÛÝ\˜ÙWÙ\ŠJK™^XÝ
+›Ü[ˆ™\Ý[ˆŠNÂˆ™\Ý[ØÛÛ›‚ˆ™^XÝ]JˆˆÈ‚ˆÔ‘PUHP“HØÛÜ™WÜÝ[[X\žH
+ˆ×ØÛÙHTÒT‹ˆ˜YWÙ]HTÒT‹ˆÝ[ÜØÛÜ™HÕP“Kˆ˜[šÈ’QÒS•ˆ
+BˆˆËˆ×Kˆ
+Bˆ™^XÝ
+˜Ü™X]HØÛÜ™WÜÝ[[X\žHŠNÂˆ™\Ý[ØÛÛ›‚ˆ™^XÝ]Jˆ’S”ÑT•S•ÈØÛÜ™WÜÝ[[X\žHSQTÈ
+ËËËÊK
+ËËËÊK
+ËËËÊH‹ˆ\˜[\ÈVÂˆŒK”Öˆ‹ˆŒŒLˆ‹ˆŒÙˆ×ÚMˆŒK”Öˆ‹ˆŒŒLÈ‹ˆLŒÙˆ—ÚMˆŒK”Öˆ‹ˆŒŒL‹ˆLŒÙˆWÚMˆKˆ
+Bˆ™^XÝ
+š[œÙ\˜[šÈ›ÝÜÈŠNÂˆJJÛÝ\˜ÙWÙ\—ÜÝŠNÂ‚ˆ]ØXÚYÜ[HHZ[Ý˜[Y][Û—ØØXÚYÜ[Jˆ˜[Y][Û—Ü˜[š×Ü[H‹×ÜÝš[™Ê
+KˆØÛÜUØ^NŽ[žKˆKˆKŒˆ›Û™Kˆ[UYÎŽ“›Ü›X[ˆ”S’ÈHˆ‹ˆ
+Bˆ™^XÝ
+˜Z[ØXÚY[HŠNÂ‚ˆ]šYÙÙ\™YÜØÛÜ™WÛX\HZ[Ý˜[Y][Û—ÝšYÙÙ\™YÜØÛÜ™\ÊˆÛÝ\˜ÙWÙ\—ÜÝ‹ˆœYœH‹ˆŒŒLˆ‹ˆŒŒL‹ˆ	˜ØXÚYÜ[Kˆ
+Bˆ™^XÝ
+˜Z[šYÙÙ\™YØÛÜ™\ÈŠNÂ‚ˆ]]WÜØÛÜ™WÛX\HšYÙÙ\™YÜØÛÜ™WÛX\ˆ™Ù]
+ŒK”ÖˆŠBˆ™^XÝ
+×ØÛÙHÚÝ[]™H˜[šË]šYÙÙ\™YØÛÜ™\ÈŠNÂ‚ˆ\ÜÙ\Ù\HJ]WÜØÛÜ™WÛX\›[Š
+KŠNÂˆ\ÜÙ\JY]WÜØÛÜ™WÛX\˜ÛÛZ[œ×ÚÙ^JŒŒLˆŠJNÂˆ\ÜÙ\J]WÜØÛÜ™WÛX\˜ÛÛZ[œ×ÚÙ^JŒŒLÈŠJNÂˆ\ÜÙ\J]WÜØÛÜ™WÛX\˜ÛÛZ[œ×ÚÙ^JŒŒLŠJNÂˆB‚ˆÖÝ\ÝBˆ›ˆ˜[Y][Û—ÜØ[\WØ›Ø\™Ü™Y™\œ×ÛX\šÙ]ÛX™[Ø[™Ù\š]™\×ÙÜ›Ý\
+
+HÂˆ\ÜÙ\Ù\HJˆ™\ÛÛ™WÝ˜[Y][Û—ÜØ[\WØ›Ø\™ÛX™[
+ŽK”Ò‹ÛÛYJ¹¨-ù§+: ¨HŠKÛÛYJ¹éäyb&ù§oÈŠJKˆ¹éäyb&ù§oÈ‚ˆ
+NÂˆ\ÜÙ\Ù\HJ\š]™WÝ˜[Y][Û—Ý›Û][]WÙÜ›Ý\
+¹éäyb&ù§oÈŠKºjæ9¬è¹bªŠNÂˆB‚ˆÖÝ\ÝBˆ›ˆ˜[Y][Û—ÜØ[\WØ›Ø\™ÚÙY\×ÜÝÛÝ™\œšYJ
+HÂˆ\ÜÙ\Ù\HJˆ™\ÛÛ™WÝ˜[Y][Û—ÜØ[\WØ›Ø\™ÛX™[
+ŒK”Öˆ‹ÛÛYJŠ”Õ9¨-ù§+ŠKÛÛYJ¹..ù§oÈŠJKˆ”Õ‚ˆ
+NÂˆ\ÜÙ\Ù\HJ\š]™WÝ˜[Y][Û—Ý›Û][]WÙÜ›Ý\
+”ÕŠK¹am¹.å¹¬è¹bªŠNÂˆB‚ˆÖÝ\ÝBˆ›ˆ˜[Y][Û—ÝšYÙÙ\—ØÛÝ[Ý\Ù\×ÙXXÚÜØÛÜ™WÛ][\J
+HÂˆ\ÜÙ\Ù\HJ™\ÛÛ™WÝ˜[Y][Û—ÝšYÙÙ\—ØÛÝ[
+ËŒYKKŒ˜[ÙJKÊNÂˆ\ÜÙ\Ù\HJ™\ÛÛ™WÝ˜[Y][Û—ÝšYÙÙ\—ØÛÝ[
+MŒYKLKŒ˜[ÙJK
+NÂˆ\ÜÙ\Ù\HJ™\ÛÛ™WÝ˜[Y][Û—ÝšYÙÙ\—ØÛÝ[
+‹ŒYK‹Œ˜[ÙJKÊNÂˆ\ÜÙ\Ù\HJ™\ÛÛ™WÝ˜[Y][Û—ÝšYÙÙ\—ØÛÝ[
+ËŒ˜[ÙKKŒ˜[ÙJKJNÂˆ\ÜÙ\Ù\HJ™\ÛÛ™WÝ˜[Y][Û—ÝšYÙÙ\—ØÛÝ[
+ËŒYKKŒYJKJNÂˆB‚ˆÖÝ\ÝBˆ›ˆ˜[Y][Û—ÜØ[\WÛ[Z]Ø\Y\×Ü\—Ø›Ø\™Ø[™Ù\™XÝ[ÛŠ
+HÂˆ]Ø[\\ÈH™XÈVÂˆ˜[Y][Û”Ø[\T˜]Ô›ÝÈÂˆ×ØÛÙNˆ’ŒK’ˆ‹×ÜÝš[™Ê
+Kˆ˜YWÙ]NˆŒŒLˆ‹×ÜÝš[™Ê
+KˆšYÙÙ\—ØÛÝ[ˆKˆ[WÜØÛÜ™NˆKŒˆ™\ÚYX[Ü™]\›ŽˆKŒˆKˆ˜[Y][Û”Ø[\T˜]Ô›ÝÈÂˆ×ØÛÙNˆ’ŒK’ˆ‹×ÜÝš[™Ê
+Kˆ˜YWÙ]NˆŒŒLÈ‹×ÜÝš[™Ê
+KˆšYÙÙ\—ØÛÝ[ˆKˆ[WÜØÛÜ™NˆKŒˆ™\ÚYX[Ü™]\›ŽˆŒˆKˆ˜[Y][Û”Ø[\T˜]Ô›ÝÈÂˆ×ØÛÙNˆ“PŒK”Öˆ‹×ÜÝš[™Ê
+Kˆ˜YWÙ]NˆŒŒLˆ‹×ÜÝš[™Ê
+KˆšYÙÙ\—ØÛÝ[ˆKˆ[WÜØÛÜ™NˆKŒˆ™\ÚYX[Ü™]\›ŽˆËŒˆKˆ˜[Y][Û”Ø[\T˜]Ô›ÝÈÂˆ×ØÛÙNˆ“PŒK”Öˆ‹×ÜÝš[™Ê
+Kˆ˜YWÙ]NˆŒŒLÈ‹×ÜÝš[™Ê
+KˆšYÙÙ\—ØÛÝ[ˆKˆ[WÜØÛÜ™NˆKŒˆ™\ÚYX[Ü™]\›Žˆ‹ŒˆKˆ˜[Y][Û”Ø[\T˜]Ô›ÝÈÂˆ×ØÛÙNˆ’ŒK’ˆ‹×ÜÝš[™Ê
+Kˆ˜YWÙ]NˆŒŒL‹×ÜÝš[™Ê
+KˆšYÙÙ\—ØÛÝ[ˆKˆ[WÜØÛÜ™NˆKŒˆ™\ÚYX[Ü™]\›ŽˆMËŒˆKˆ˜[Y][Û”Ø[\T˜]Ô›ÝÈÂˆ×ØÛÙNˆ’ŒK’ˆ‹×ÜÝš[™Ê
+Kˆ˜YWÙ]NˆŒŒLH‹×ÜÝš[™Ê
+KˆšYÙÙ\—ØÛÝ[ˆKˆ[WÜØÛÜ™NˆKŒˆ™\ÚYX[Ü™]\›ŽˆNŒˆKˆ˜[Y][Û”Ø[\T˜]Ô›ÝÈÂˆ×ØÛÙNˆ“PŒK”Öˆ‹×ÜÝš[™Ê
+Kˆ˜YWÙ]NˆŒŒL‹×ÜÝš[™Ê
+KˆšYÙÙ\—ØÛÝ[ˆKˆ[WÜØÛÜ™NˆKŒˆ™\ÚYX[Ü™]\›ŽˆMKŒˆKˆ˜[Y][Û”Ø[\T˜]Ô›ÝÈÂˆ×ØÛÙNˆ“PŒK”Öˆ‹×ÜÝš[™Ê
+Kˆ˜YWÙ]NˆŒŒLH‹×ÜÝš[™Ê
+KˆšYÙÙ\—ØÛÝ[ˆKˆ[WÜØÛÜ™NˆKŒˆ™\ÚYX[Ü™]\›ŽˆM‹ŒˆKˆNÂˆ]ÝØÚ×ÛY]WÛX\H\ÚX\Ž™œ›ÛJÂˆ
+ˆ’ŒK’ˆ‹×ÜÝš[™Ê
+Kˆ˜[Y][Û”Ø[\TÝØÚÓY]HÂˆ˜[YNˆÛÛYJ¹c%ù.©9¨-ù§+‹×ÜÝš[™Ê
+JKˆ›Ø\™ˆ¹c%ù.©9¢`‹×ÜÝš[™Ê
+Kˆ›Û][]WÙÜ›Ý\ˆºjæ9¬è¹bª‹×ÜÝš[™Ê
+KˆKˆ
+Kˆ
+ˆ“PŒK”Öˆ‹×ÜÝš[™Ê
+Kˆ˜[Y][Û”Ø[\TÝØÚÓY]HÂˆ˜[YNˆÛÛYJ¹..ù§où¨-ù§+‹×ÜÝš[™Ê
+JKˆ›Ø\™ˆ¹..ù§oÈ‹×ÜÝš[™Ê
+Kˆ›Û][]WÙÜ›Ý\ˆ¹n.:)á9¬è¹bª‹×ÜÝš[™Ê
+KˆKˆ
+KˆJNÂ‚ˆ]
+Ý]ËÜ›Ý\ÊHHZ[Ý˜[Y][Û—ÜØ[\WÙÜ›Ý\Ê	œØ[\\ËK	œÝØÚ×ÛY]WÛX\
+NÂ‚ˆ\ÜÙ\Ù\HJÝ]ËœÜÚ]]™WØÛÝ[
+NÂˆ\ÜÙ\Ù\HJÝ]Ë›™YØ]]™WØÛÝ[
+NÂˆ\ÜÙ\Ù\HJÝ]Ëœ˜[™ÛWØÛÝ[
+NÂˆ\ÜÙ\Ù\HJÝ]ËÝ[ÜØ[\\Ë
+NÂ‚ˆ]ÛÝ[Ø›Ø\™ÈH›ÝÜÎˆ	–ÜÝ\\ŽŽ”[U˜[Y][Û”Ø[\T›Ý×_Âˆ›ÝÜËš]\Š
+Bˆ™›Û
+\ÚX\ŽÝš[™Ë\Ú^™OŽŽ›™]Ê
+K]]XØË›ÝßÂˆ
+˜XØË™[žJ›ÝË˜›Ø\™˜ÛÛ™J
+JK›Ü—Ú[œÙ\
+
+H
+ÏHNÂˆXØÂˆJBˆNÂ‚ˆ]ÜÚ]]™WØ›Ø\™ÈHÛÝ[Ø›Ø\™Ê	™Ü›Ý\ËœÜÚ]]™JNÂˆ]™YØ]]™WØ›Ø\™ÈHÛÝ[Ø›Ø\™Ê	™Ü›Ý\Ë›™YØ]]™JNÂˆ]˜[™ÛWØ›Ø\™ÈHÛÝ[Ø›Ø\™Ê	™Ü›Ý\Ëœ˜[™ÛJNÂ‚ˆ\ÜÙ\Ù\HJÜ›Ý\ËœÜÚ]]™K›[Š
+KŠNÂˆ\ÜÙ\Ù\HJÜÚ]]™WØ›Ø\™Ë™Ù]
+¹c%ù.©9¢`ŠKÛÛYJ	ŒJJNÂˆ\ÜÙ\Ù\HJÜÚ]]™WØ›Ø\™Ë™Ù]
+¹..ù§oÈŠKÛÛYJ	ŒJJNÂ‚ˆ\ÜÙ\Ù\HJÜ›Ý\Ë›™YØ]]™K›[Š
+KŠNÂˆ\ÜÙ\Ù\HJ™YØ]]™WØ›Ø\™Ë™Ù]
+¹c%ù.©9¢`ŠKÛÛYJ	ŒJJNÂˆ\ÜÙ\Ù\HJ™YØ]]™WØ›Ø\™Ë™Ù]
+¹..ù§oÈŠKÛÛYJ	ŒJJNÂ‚ˆ\ÜÙ\Ù\HJÜ›Ý\Ëœ˜[™ÛK›[Š
+KŠNÂˆ\ÜÙ\Ù\HJ˜[™ÛWØ›Ø\™Ë™Ù]
+¹c%ù.©9¢`ŠKÛÛYJ	ŒJJNÂˆ\ÜÙ\Ù\HJ˜[™ÛWØ›Ø\™Ë™Ù]
+¹..ù§oÈŠKÛÛYJ	ŒJJNÂˆB‚ˆÖÝ\ÝBˆ›ˆ˜[š×Û^Y\—ÜØ[\\×ÚÙY\Ù[ÛØœÙ\˜][Û—ØÛÝ[×Ø[™Ü\—Ø›Ø\™Û[Z]
+
+HÂˆ]]]Ø[\\ÈH™XÎŽ›™]Ê
+NÂˆ]]]ÝØÚ×ÛY]WÛX\H\ÚX\Ž›™]Ê
+NÂˆ›Üˆ
+›Ø\™Ü™Yš^›Ø\™
+H[ˆÊ“Pˆ‹¹..ù§oÈŠK
+ÖH‹¹b&ù.&¹§oÈŠWHÂˆ›Üˆ[™^[ˆ‹ˆÂˆ]×ØÛÙHH›Ü›X]JžØ›Ø\™Ü™Yš^^Ú[™^ŒK”ÖˆŠNÂˆÝØÚ×ÛY]WÛX\š[œÙ\
+ˆ×ØÛÙK˜ÛÛ™J
+Kˆ˜[Y][Û”Ø[\TÝØÚÓY]HÂˆ˜[YNˆ›Û™Kˆ›Ø\™ˆ›Ø\™×ÜÝš[™Ê
+Kˆ›Û][]WÙÜ›Ý\ˆ¹n.:)á9¬è¹bª‹×ÜÝš[™Ê
+KˆKˆ
+NÂˆØ[\\Ëœ\Ú
+˜[šÓ^Y\”Ø[\TÚ[Âˆ^Y\—Ú[™^ˆKˆ×ØÛÙNˆ×ØÛÙK˜ÛÛ™J
+Kˆ˜YWÙ]NˆŒŒLˆ‹×ÜÝš[™Ê
+KˆØÛÜ™NˆLŒˆ™\ÚYX[Ü™]\›Žˆ[™^\È
+ÈKŒˆ\—ØÚ[™ÙNˆŽ’S‘’S’UKˆJNÂˆØ[\\Ëœ\Ú
+˜[šÓ^Y\”Ø[\TÚ[Âˆ^Y\—Ú[™^ˆKˆ×ØÛÙKˆ˜YWÙ]NˆŒŒLÈ‹×ÜÝš[™Ê
+KˆØÛÜ™NˆLŒˆ™\ÚYX[Ü™]\›Žˆ[™^\È
+ÈLKŒˆ\—ØÚ[™ÙNˆŽ’S‘’S’UKˆJNÂˆBˆB‚ˆ]Ü›Ý\ÈHZ[Ü˜[š×Û^Y\—ÜØ[\WÙÜ›Ý\Ê	œØ[\\ËK	œÝØÚ×ÛY]WÛX\
+NÂˆ]Ü›Ý\H	™Ü›Ý\ÖÌNÂ‚ˆ\ÜÙ\Ù\HJÜ›Ý\Ý[ÜØ[\\Ë
+NÂˆ\ÜÙ\Ù\HJÜ›Ý\šYÙÙ\™YÙ^\ËŠNÂˆ\ÜÙ\Ù\HJÜ›Ý\œÜÚ]]™WØÛÝ[
+NÂˆ\ÜÙ\Ù\HJÜ›Ý\œÜÚ]]™K›[Š
+KL
+NÂˆ\ÜÙ\Ù\HJÜ›Ý\œÜÚ]]™VÌKœ™\ÚYX[Ü™]\›‹M‹Œ
+NÂˆ\ÜÙ\JˆÜ›Ý\ˆœÜÚ]]™Bˆš]\Š
+Bˆ˜[
+›Ýß›ÝË˜YWÙ]HOHŒŒLÈŠBˆ
+NÂˆB‚ˆÖÝ\ÝBˆ›ˆ˜[Y][Û—Ø˜]ÚÜØÛÜ™\×Ü™\ÝÜ™WÛÝ™\Üš][—Ø˜\ÙWÜÙ\šY\Ê
+HÂˆ]ÛÝ\˜ÙWÙ\ˆH[\ÜÛÝ\˜ÙWÙ\Š
+NÂˆ]ÛÝ\˜ÙWÙ\—ÜÝˆHÛÝ\˜ÙWÙ\‹×ÜÝŠ
+K™^XÝ
+]ŽÛÝ\˜ÙH\ˆŠNÂˆ™\\™WÝ˜[Y][Û—ÜÛÝ\˜ÙWÙš[\ÊÛÝ\˜ÙWÙ\—ÜÝŠNÂ‚ˆ]š\œÝÜ[HHZ[Ý˜[Y][Û—ØØXÚYÜ[Jˆ˜[Y][Û—ØÛÛX›×ÌH‹×ÜÝš[™Ê
+KˆØÛÜUØ^NŽ[žKˆKˆKŒˆ›Û™Kˆ[UYÎŽ“›Ü›X[ˆÈH‘QŠËJNÈÈˆ‹ˆ
+Bˆ™^XÝ
+˜Z[š\œÝØXÚY[HŠNÂˆ]ÙXÛÛ™Ü[HHZ[Ý˜[Y][Û—ØØXÚYÜ[Jˆ˜[Y][Û—ØÛÛX›×Ìˆ‹×ÜÝš[™Ê
+KˆØÛÜUØ^NŽ[žKˆKˆKŒˆ›Û™Kˆ[UYÎŽ“›Ü›X[ˆÈH‘QŠËŠNÈÈˆ‹ˆ
+Bˆ™^XÝ
+˜Z[ÙXÛÛ™ØXÚY[HŠNÂ‚ˆ]^XÝYÙš\œÝHZ[Ý˜[Y][Û—ÝšYÙÙ\™YÜØÛÜ™\ÊˆÛÝ\˜ÙWÙ\—ÜÝ‹ˆœYœH‹ˆŒŒLˆ‹ˆŒŒL‹ˆ	™š\œÝÜ[Kˆ
+Bˆ™^XÝ
+˜Z[š\œÝšYÙÙ\™YØÛÜ™\ÈŠNÂˆ]^XÝYÜÙXÛÛ™HZ[Ý˜[Y][Û—ÝšYÙÙ\™YÜØÛÜ™\ÊˆÛÝ\˜ÙWÙ\—ÜÝ‹ˆœYœH‹ˆŒŒLˆ‹ˆŒŒL‹ˆ	œÙXÛÛ™Ü[Kˆ
+Bˆ™^XÝ
+˜Z[ÙXÛÛ™šYÙÙ\™YØÛÜ™\ÈŠNÂ‚ˆ]™XY\ˆH]T™XY\ŽŽ›™]ÊÛÝ\˜ÙWÙ\—ÜÝŠK™^XÝ
+˜Z[™XY\ˆŠNÂˆ]×ØÛÙ\ÈH™XY\‚ˆ›\ÝÝ×ØÛÙJœYœH‹ŒŒLˆ‹ŒŒLŠBˆ™^XÝ
+›\ÝÈÛÙ\ÈŠNÂˆ]ÝÛ\ÝHØYÜÝÛ\Ý
+ÛÝ\˜ÙWÙ\—ÜÝŠK™^XÝ
+›ØYÝ\ÝŠNÂˆ]ÛÛX›ÜÈH™XÈVÂˆ™\\™Y˜[Y][ÛÛÛX›ÈÂˆ˜\šX[ˆ˜[Y][Û•˜\šX[ÂˆÛÛX›×ÚÙ^Nˆš\œÝÜ[K›˜[YK˜ÛÛ™J
+KˆÛÛX›×ÛX™[ˆš\œÝÜ[K›˜[YK˜ÛÛ™J
+Kˆ›Ü›][Nˆš\œÝÜ[KÚ[—ÜÜ˜Ë˜ÛÛ™J
+Kˆ[šÛ›ÝÛ—Ý˜[Y\Îˆ™XÎŽ›™]Ê
+KˆKˆØXÚYÜ[Nˆš\œÝÜ[K˜ÛÛ™J
+Kˆ\ÜÚYÛ™YÛ˜[Y\ÎˆÛÛXÝÝ˜[Y][Û—Ø\ÜÚYÛ™YÛ˜[Y\Ê	™š\œÝÜ[KÚ[—Ø\Ý
+KˆKˆ™\\™Y˜[Y][ÛÛÛX›ÈÂˆ˜\šX[ˆ˜[Y][Û•˜\šX[ÂˆÛÛX›×ÚÙ^NˆÙXÛÛ™Ü[K›˜[YK˜ÛÛ™J
+KˆÛÛX›×ÛX™[ˆÙXÛÛ™Ü[K›˜[YK˜ÛÛ™J
+Kˆ›Ü›][NˆÙXÛÛ™Ü[KÚ[—ÜÜ˜Ë˜ÛÛ™J
+Kˆ[šÛ›ÝÛ—Ý˜[Y\Îˆ™XÎŽ›™]Ê
+KˆKˆØXÚYÜ[NˆÙXÛÛ™Ü[K˜ÛÛ™J
+Kˆ\ÜÚYÛ™YÛ˜[Y\ÎˆÛÛXÝÝ˜[Y][Û—Ø\ÜÚYÛ™YÛ˜[Y\Ê	œÙXÛÛ™Ü[KÚ[—Ø\Ý
+KˆKˆNÂ‚ˆ]˜]ÚÜ™\Ý[ÈHZ[Ý˜[Y][Û—ÝšYÙÙ\™YÜØÛÜ™\×Ù›Ü—ØÛÛX›ÜÊˆÛÝ\˜ÙWÙ\—ÜÝ‹ˆœYœH‹ˆŒŒLˆ‹ˆŒŒLˆ‹ˆŒŒL‹ˆËˆ	×ØÛÙ\Ëˆ	œÝÛ\Ýˆ	˜ÛÛX›ÜËˆ
+Bˆ™^XÝ
+˜Z[˜]ÚšYÙÙ\™YØÛÜ™\ÈŠNÂ‚ˆ\ÜÙ\Ù\HJ˜]ÚÜ™\Ý[Ë›[Š
+KŠNÂˆ\ÜÙ\Ù\HJ˜]ÚÜ™\Ý[ÖÌK^XÝYÙš\œÝ
+NÂˆ\ÜÙ\Ù\HJ˜]ÚÜ™\Ý[ÖÌWK^XÝYÜÙXÛÛ™
+NÂˆB‚ˆÖÝ\ÝBˆ›ˆ[WÝ˜[Y][Û—Ü[[YWÚÙ^WØÛÛXÝ[Û—ÜÚÚ\×Ú[š™XÝYÙšY[Ê
+HÂˆ][HHZ[Ý˜[Y][Û—ØØXÚYÜ[Jˆ˜[Y][Û—Ü[[YWÚÙ^\È‹×ÜÝš[™Ê
+KˆØÛÜUØ^NŽ[žKˆKˆKŒˆ›Û™Kˆ[UYÎŽ“›Ü›X[ˆ“HHPJËJNÈHˆVWÕSQUSÓ—ÒS‘S‘S’ÈHLS‘ÐÓÔ‘HˆS‘’S‘ÈˆS‘ÕSÓU—ÖRHHÌS‘×ÔS’ÈHLS‘ÖTWÕˆˆˆ‹ˆ
+Bˆ™^XÝ
+˜Z[ØXÚY[HŠNÂˆ]ÛÛX›ÈH™\\™Y˜[Y][ÛÛÛX›ÈÂˆ˜\šX[ˆ˜[Y][Û•˜\šX[ÂˆÛÛX›×ÚÙ^Nˆ[K›˜[YK˜ÛÛ™J
+KˆÛÛX›×ÛX™[ˆ[K›˜[YK˜ÛÛ™J
+Kˆ›Ü›][Nˆ[KÚ[—ÜÜ˜Ë˜ÛÛ™J
+Kˆ[šÛ›ÝÛ—Ý˜[Y\Îˆ™XÎŽ›™]Ê
+KˆKˆØXÚYÜ[Nˆ[K˜ÛÛ™J
+Kˆ\ÜÚYÛ™YÛ˜[Y\ÎˆÛÛXÝÝ˜[Y][Û—Ø\ÜÚYÛ™YÛ˜[Y\Ê	œ[KÚ[—Ø\Ý
+KˆNÂ‚ˆ]Ù^\ÈHÛÛXÝÜ[WÝ˜[Y][Û—Ü[[YWÚÙ^\Ê	–ØÛÛX›×JNÂ‚ˆ›Üˆ™\]Z\™YÚÙ^H[ˆÈÈ‹“VWÕSQUSÓ—ÒS‘—HÂˆ\ÜÙ\JÙ^\Ë˜ÛÛZ[œÊ™\]Z\™YÚÙ^JK›Z\ÜÚ[™ÈÜ™\]Z\™YÚÙ^_HŠNÂˆBˆ\ÜÙ\JZÙ^\Ë˜ÛÛZ[œÊ•ÕSÓUˆŠJNÂˆ›Üˆ[š™XÝYÚÙ^H[ˆÈ”S’È‹”ÐÓÔ‘H‹–’S‘È‹•ÕSÓU—ÖRH‹”×ÔS’È‹ÖTWÕˆ—HÂˆ\ÜÙ\JZÙ^\Ë˜ÛÛZ[œÊ[š™XÝYÚÙ^JK[™^XÝYÚ[š™XÝYÚÙ^_HŠNÂˆBˆ\ÜÙ\JZÙ^\Ë˜ÛÛZ[œÊ“ÈŠJNÂˆB‚ˆÖÝ\ÝBˆ›ˆ˜[Y][Û—ÜÚ[Z[\š]WÜ›ÝÜ×Ý\ÙWÜZ\—Ú[™^ØØXÚJ
+HÂˆ]Ú[Z[\š]WØØXÚHH˜[Y][Û”Ú[Z[\š]PØXÚHÂˆÝ[ÜØ[\\ÎˆL‹Œˆ[WÛ˜[Y\Îˆ™XÈVÈº)á9b&PH‹×ÜÝš[™Ê
+Kº)á9b&Pˆ‹×ÜÝš[™Ê
+WKˆ[WÚ]ØÛÝ[Îˆ™XÈVÌËWKˆZ\—Ý×Ü[WÚ[™XÙ\Îˆ\ÚX\Ž™œ›ÛJÂˆ
+ˆŒK”Öˆ‹×ÜÝš[™Ê
+Kˆ\ÚX\Ž™œ›ÛJÊŒŒLˆ‹×ÜÝš[™Ê
+K™XÈVÌWJWJKˆ
+Kˆ
+ˆŒ‹”Öˆ‹×ÜÝš[™Ê
+Kˆ\ÚX\Ž™œ›ÛJÊŒŒLÈ‹×ÜÝš[™Ê
+K™XÈVÌJWJKˆ
+KˆJKˆNÂˆ]šYÙÙ\™YÜØ[\\ÈH™XÈVÂˆ[S^Y\”Ø[\TÚ[Âˆ×ØÛÙNˆŒK”Öˆ‹×ÜÝš[™Ê
+Kˆ˜YWÙ]NˆŒŒLˆ‹×ÜÝš[™Ê
+Kˆ[WÜØÛÜ™NˆKŒˆ™\ÚYX[Ü™]\›ŽˆKˆ\—ØÚ[™ÙNˆŽ’S‘’S’UKˆKˆ[S^Y\”Ø[\TÚ[Âˆ×ØÛÙNˆŒ‹”Öˆ‹×ÜÝš[™Ê
+Kˆ˜YWÙ]NˆŒŒLÈ‹×ÜÝš[™Ê
+Kˆ[WÜØÛÜ™NˆKŒˆ™\ÚYX[Ü™]\›ŽˆŒËˆ\—ØÚ[™ÙNˆŽ’S‘’S’UKˆKˆNÂˆ]^Z[—ÛX\H\ÚX\Ž™œ›ÛJÊº)á9b&PH‹×ÜÝš[™Ê
+Kº+í9¦#H‹×ÜÝš[™Ê
+JWJNÂ‚ˆ]›ÝÜÈHZ[Ý˜[Y][Û—ÜÚ[Z[\š]WÜ›ÝÜÊˆ	œÚ[Z[\š]WØØXÚKˆ	šYÙÙ\™YÜØ[\\Ëˆ›Û™Kˆ	™^Z[—ÛX\ˆ
+NÂ‚ˆ\ÜÙ\Ù\HJ›ÝÜË›[Š
+KŠNÂˆ\ÜÙ\Ù\HJ›ÝÜÖÌKœ[WÛ˜[YKº)á9b&PHŠNÂˆ\ÜÙ\Ù\HJ›ÝÜÖÌK›Ý™\›\ÜØ[\\ËŠNÂˆ\ÜÙ\Ù\HJ›ÝÜÖÌK›Ý™\›\Ü˜]WÝœ×Ý˜[Y][Û‹ÛÛYJKŒ
+JNÂˆ\ÜÙ\Ù\HJ›ÝÜÖÌK›Ý™\›\Ü˜]WÝœ×Ù^\Ý[™ËÛÛYJ‹ŒÈËŒ
+JNÂˆ\ÜÙ\Ù\HJ›ÝÜÖÌK›Ý™\›\ÛYÛÛYJŒ
+JNÂˆ\ÜÙ\Ù\HJ›ÝÜÖÌK™^Z[‹˜\×Ù\™YŠ
+KÛÛYJº+í9¦#HŠJNÂ‚ˆ\ÜÙ\Ù\HJ›ÝÜÖÌWKœ[WÛ˜[YKº)á9b&PˆŠNÂˆ\ÜÙ\Ù\HJ›ÝÜÖÌWK›Ý™\›\ÜØ[\\ËJNÂˆ\ÜÙ\Ù\HJ›ÝÜÖÌWK›Ý™\›\Ü˜]WÝœ×Ý˜[Y][Û‹ÛÛYJJJNÂˆ\ÜÙ\Ù\HJ›ÝÜÖÌWK›Ý™\›\Ü˜]WÝœ×Ù^\Ý[™ËÛÛYJKŒ
+JNÂˆ\ÜÙ\Ù\HJ›ÝÜÖÌWK›Ý™\›\ÛYÛÛYJ‹Œ
+JNÂˆ\ÜÙ\J›ÝÜÖÌWK™^Z[‹š\×Û›Û™J
+JNÂˆB‚ˆÖÝ\ÝBˆ›ˆ˜[Y][Û—ØØ[Xœ˜][Û—ØØ[™Y]\×ØÛÝ™\—ÝšYÙÙ\—Û[Ù\×ÝÚ]Ý]ÜZ[—Ù\XØ]J
+HÂˆ]ÙYYÜ[HH˜[Y][Û”ÙYY[HÂˆ[WÛ˜[YNˆ¹­bú+åyëe¹åiH‹×ÜÝš[™Ê
+Kˆ[WÙ^Z[ŽˆÝš[™ÎŽ›™]Ê
+KˆØÛÜWÝØ^NˆØÛÜUØ^NŽ“\ÝˆØÛÜWÝÚ[™ÝÜÎˆKˆ›Ü›][NˆÈˆÈ‹×ÜÝš[™Ê
+KˆÚ[ÎˆKŒˆ\ÝÜÚ[Îˆ›Û™KˆYÎˆ[UYÎŽ“›Ü›X[ˆ^ÛYWÜ[WÛ˜[YNˆ›Û™KˆNÂ‚ˆ]ÜXÜÈHZ[Ý˜[Y][Û—ØØ[Xœ˜][Û—ÜÜXÜÊ	œÙYYÜ[JNÂ‚ˆ\ÜÙ\Ù\HJˆÜXÜÂˆš]\Š
+Bˆ™š[\Š][_ÂˆØÛÜWÝØ^WØÛÛ™šY×ÛX™[
+][KœØÛÜWÝØ^JHOH“TÕˆ	‰ˆ][KœØÛÜWÝÚ[™ÝÜÈOHBˆJBˆ˜ÛÝ[
+
+KˆBˆ
+NÂˆ›ÜˆØÛÜWÛX™[[ˆÈS–H‹‘PPÒ‹ÓÓ”ÑPÏLˆ‹ÓÓ”ÑPÏLÈ‹”‘PÑS•—HÂˆ\ÜÙ\JˆÜXÜÂˆš]\Š
+Bˆ˜[žJ][_ØÛÜWÝØ^WØÛÛ™šY×ÛX™[
+][KœØÛÜWÝØ^JHOHØÛÜWÛX™[
+Kˆ›Z\ÜÚ[™ÈÜØÛÜWÛX™[H‚ˆ
+NÂˆBˆB‚ˆÖÝ\ÝBˆ›ˆ˜[Y][Û—Ü™XÙ[ÙXØ^WÝÙZYÚ×ÚÙY\Ù\™XÝ[Û—Ø[™ÙXØ^J
+HÂˆ]ÜÚ]]™HHZ[Ü™XÙ[ÙXØ^WÙ\ÝÜÚ[ÊËKŒ
+NÂˆ]™YØ]]™HHZ[Ü™XÙ[ÙXØ^WÙ\ÝÜÚ[ÊËLKŒ
+NÂ‚ˆ\ÜÙ\Ù\HJÜÚ]]™K›[Š
+KÊNÂˆ\ÜÙ\J
+ÜÚ]]™VÌKœÚ[ÈHKŒ
+K˜XœÊ
+HSQUSÓ—ÑTÊNÂˆ\ÜÙ\J
+ÜÚ]]™VÌWKœÚ[ÈHJK˜XœÊ
+HSQUSÓ—ÑTÊNÂˆ\ÜÙ\J
+ÜÚ]]™VÌ—KœÚ[ÈHŒJK˜XœÊ
+HSQUSÓ—ÑTÊNÂˆ\ÜÙ\J
+™YØ]]™VÌKœÚ[È
+ÈKŒ
+K˜XœÊ
+HSQUSÓ—ÑTÊNÂˆ\ÜÙ\J
+™YØ]]™VÌWKœÚ[È
+ÈJK˜XœÊ
+HSQUSÓ—ÑTÊNÂˆ\ÜÙ\J
+™YØ]]™VÌ—KœÚ[È
+ÈŒJK˜XœÊ
+HSQUSÓ—ÑTÊNÂˆB‚ˆÖÝ\ÝBˆ›ˆ˜[Y][Û—ØØ[Xœ˜][Û—ÜÝXš[]WÜ™\]Z\™\×Ø›ÝÝ[YWÚ[™\Ê
+HÂˆ\ÜÙ\Ù\HJØ[Xœ˜][Û—ÜÝXš[]WÙ˜XÝÜŠKŒÛÛYJŒÊKÛÛYJŒJJKKŒ
+NÂˆ\ÜÙ\Ù\HJˆØ[Xœ˜][Û—ÜÝXš[]WÙ˜XÝÜŠLKŒÛÛYJLŒÊKÛÛYJLŒJJKˆKŒˆ
+NÂˆ\ÜÙ\Ù\HJˆØ[Xœ˜][Û—ÜÝXš[]WÙ˜XÝÜŠKŒÛÛYJŒÊKÛÛYJLŒJJKˆBˆ
+NÂˆ\ÜÙ\Ù\HJˆØ[Xœ˜][Û—ÜÝXš[]WÙ˜XÝÜŠLKŒÛÛYJŒÊKÛÛYJLŒJJKˆBˆ
+NÂˆ\ÜÙ\Ù\HJˆØ[Xœ˜][Û—ÜÝXš[]WÙ˜XÝÜŠKŒÛÛYJLŒÊKÛÛYJLŒJJKˆŒˆ
+NÂˆB‚ˆ›ˆXØ^WÝ\ÝÜÚ[
+[™^ˆ\Ú^™KØÛÜ™Nˆ^Ù\ÜÎˆ
+HOˆ[S^Y\”Ú[Âˆ[S^Y\”Ú[Âˆ˜YWÙ]Nˆ›Ü›X]JžÚ[™^ŒHŠKˆØ[\WØÛÝ[ˆLˆ]™×Ü[WÜØÛÜ™NˆÛÛYJØÛÜ™JKˆ]™×Ü™\ÚYX[Ü™]\›ŽˆÛÛYJ^Ù\ÜÊKˆ]™×Ù^Ù\Ü×Ü™\ÚYX[Ü™]\›ŽˆÛÛYJ^Ù\ÜÊKˆÜØ›ÝÛWÜÜ™XYˆ›Û™KˆXÎˆ›Û™KˆBˆB‚ˆÖÝ\ÝBˆ›ˆ[WÙXØ^WÝ˜[Y][Û—Ù]XÝ×Ü™XÙ[ÜÜÚ]]™WÜ[WÙXØ^J
+HÂˆ]Ú[ÈH
+‹Ž
+Bˆ›X\
+[™^Âˆ]^Ù\ÜÈHYˆ[™^ŒÂˆŒŒ
+È
+[™^	HŠH\È
+ˆŒ‚ˆH[ÙHÂˆLL
+È
+[™^	HŠH\È
+ˆŒ‚ˆNÂˆXØ^WÝ\ÝÜÚ[
+[™^KŒ^Ù\ÜÊBˆJBˆ˜ÛÛXÝŽ™XÏÏŠ
+NÂ‚ˆ]˜[Y][ÛœÈHZ[Ü[WÙXØ^WÝ˜[Y][ÛœÊ	œÚ[ÊNÂˆ]™XÙ[ÌŒH˜[Y][ÛœÂˆš]\Š
+Bˆ™š[™
+][_][KÚ[™Ý×Ù^\ÈOHŒ
+Bˆ™^XÝ
+ŒŒY^H˜[Y][ÛˆŠNÂ‚ˆ\ÜÙ\Ù\HJ™XÙ[ÌŒœÝ]\ËœÚYÛšYšXØ[ÙXØ^HŠNÂˆ\ÜÙ\Ù\HJ™XÙ[ÌŒœ™XÙ[Ù^WØÛÝ[Œ
+NÂˆ\ÜÙ\Ù\HJ™XÙ[ÌŒœš[Ü—Ù^WØÛÝ[Œ
+NÂˆ\ÜÙ\Jˆ™XÙ[ÌŒˆœ™XÙ[Ù\™XÝ[Û˜[Ù^Ù\Ü×ÛYX[‚ˆš\×ÜÛÛYWØ[™
+˜[Y_˜[YHŒ
+Bˆ
+NÂˆ\ÜÙ\J™XÙ[ÌŒ™XØ^WØÚ[™ÙKš\×ÜÛÛYWØ[™
+˜[Y_˜[YHLŠJNÂˆ\ÜÙ\J™XÙ[ÌŒ™XØ^WÝÝ˜[YKš\×ÜÛÛYWØ[™
+˜[Y_˜[YHL‹Œ
+JNÂˆB‚ˆÖÝ\ÝBˆ›ˆ[WÙXØ^WÝ˜[Y][Û—Û›Ü›X[^™\×Û™YØ]]™WÜ[WÙ\™XÝ[ÛŠ
+HÂˆ]Ú[ÈH
+‹Ž
+Bˆ›X\
+[™^Âˆ]^Ù\ÜÈHYˆ[™^ŒÂˆLŒÌH
+[™^	HŠH\È
+ˆŒ‚ˆH[ÙHÂˆŒŒH
+[™^	HŠH\È
+ˆŒ‚ˆNÂˆXØ^WÝ\ÝÜÚ[
+[™^LKŒ^Ù\ÜÊBˆJBˆ˜ÛÛXÝŽ™XÏÏŠ
+NÂ‚ˆ]˜[Y][ÛœÈHZ[Ü[WÙXØ^WÝ˜[Y][ÛœÊ	œÚ[ÊNÂˆ]™XÙ[ÌŒH˜[Y][ÛœÂˆš]\Š
+Bˆ™š[™
+][_][KÚ[™Ý×Ù^\ÈOHŒ
+Bˆ™^XÝ
+ŒŒY^H˜[Y][ÛˆŠNÂ‚ˆ\ÜÙ\Ù\HJ™XÙ[ÌŒœÝ]\ËœÚYÛšYšXØ[ÙXØ^HŠNÂˆ\ÜÙ\Jˆ™XÙ[ÌŒˆœš[Ü—Ù\™XÝ[Û˜[Ù^Ù\Ü×ÛYX[‚ˆš\×ÜÛÛYWØ[™
+˜[Y_˜[YHˆŒ
+Bˆ
+NÂˆ\ÜÙ\Jˆ™XÙ[ÌŒˆœ™XÙ[Ù\™XÝ[Û˜[Ù^Ù\Ü×ÛYX[‚ˆš\×ÜÛÛYWØ[™
+˜[Y_˜[YHŒ
+Bˆ
+NÂˆ\ÜÙ\J™XÙ[ÌŒ™XØ^WØÚ[™ÙKš\×ÜÛÛYWØ[™
+˜[Y_˜[YHŒ
+JNÂˆB‚ˆÖÝ\ÝBˆ›ˆ[WÙXØ^WÝ˜[Y][Û—ÛX\šÜ×ÜÚÜÚ\ÝÜžWØ\×Ú[œÝY™šXÚY[
+
+HÂˆ]Ú[ÈH
+‹ŒJBˆ›X\
+[™^XØ^WÝ\ÝÜÚ[
+[™^KŒŒL
+JBˆ˜ÛÛXÝŽ™XÏÏŠ
+NÂ‚ˆ]˜[Y][ÛœÈHZ[Ü[WÙXØ^WÝ˜[Y][ÛœÊ	œÚ[ÊNÂ‚ˆ\ÜÙ\Ù\HJ˜[Y][ÛœË›[Š
+KÊNÂˆ\ÜÙ\J˜[Y][ÛœËš]\Š
+K˜[
+][_][KœÝ]\ÈOHš[œÝY™šXÚY[ŠJNÂˆ]™XÙ[ÌŒH˜[Y][ÛœÂˆš]\Š
+Bˆ™š[™
+][_][KÚ[™Ý×Ù^\ÈOHŒ
+Bˆ™^XÝ
+ŒŒY^H˜[Y][ÛˆŠNÂˆ\ÜÙ\Ù\HJ™XÙ[ÌŒœ™XÙ[Ù^WØÛÝ[Œ
+NÂˆ\ÜÙ\Ù\HJ™XÙ[ÌŒœš[Ü—Ù^WØÛÝ[JNÂˆ\ÜÙ\Ù\HJ™XÙ[ÌŒ™XØ^WØÚ[™ÙK›Û™JNÂˆB‚ˆÖÝ\ÝBˆ›ˆ[Ü[WØ˜\ÚÙ]ÙXØ^WØ]™\˜YÙ\×Ù\™XÝ[Û˜[ÜÝ˜]YÞWÙ^\Ê
+HÂˆ]š\œÝH
+‹Ž
+Bˆ›X\
+[™^Âˆ]˜[YHHYˆ[™^ŒÂˆŒŒ
+È
+[™^	HŠH\È
+ˆŒ‚ˆH[ÙHÂˆLŒÌ
+È
+[™^	HŠH\È
+ˆŒ‚ˆNÂˆ
+›Ü›X]JžÚ[™^ŒHŠK˜[YJBˆJBˆ˜ÛÛXÝŽ™XÏÏŠ
+NÂˆ]ÙXÛÛ™H
+‹Ž
+Bˆ›X\
+[™^Âˆ]˜[YHHYˆ[™^ŒÂˆ
+È
+[™^	HŠH\È
+ˆŒ‚ˆH[ÙHÂˆLŒL
+È
+[™^	HŠH\È
+ˆŒ‚ˆNÂˆ
+›Ü›X]JžÚ[™^ŒHŠK˜[YJBˆJBˆ˜ÛÛXÝŽ™XÏÏŠ
+NÂ‚ˆ]˜[Y][ÛœÈBˆZ[Ü[WØ˜\ÚÙ]ÙXØ^WÙœ›ÛWÙZ[WÙÜ›Ý\ÊÙš\œÝ˜\×ÜÛXÙJ
+KÙXÛÛ™˜\×ÜÛXÙJ
+WJNÂˆ]™XÙ[ÌŒH˜[Y][ÛœÂˆš]\Š
+Bˆ™š[™
+][_][KÚ[™Ý×Ù^\ÈOHŒ
+Bˆ™^XÝ
+ŒŒY^H˜\ÚÙ]˜[Y][ÛˆŠNÂ‚ˆ\ÜÙ\Ù\HJ™XÙ[ÌŒœÝ]\ËœÚYÛšYšXØ[ÙXØ^HŠNÂˆ\ÜÙ\Ù\HJ™XÙ[ÌŒœ™XÙ[Ù^WØÛÝ[Œ
+NÂˆ\ÜÙ\Ù\HJ™XÙ[ÌŒœš[Ü—Ù^WØÛÝ[Œ
+NÂˆ\ÜÙ\Jˆ™XÙ[ÌŒˆœ™XÙ[Ù\™XÝ[Û˜[Ù^Ù\Ü×ÛYX[‚ˆš\×ÜÛÛYWØ[™
+˜[Y_˜[YHLŒN
+Bˆ
+NÂˆ\ÜÙ\J™XÙ[ÌŒ™XØ^WØÚ[™ÙKš\×ÜÛÛYWØ[™
+˜[Y_˜[YHLJJNÂˆBŸB
