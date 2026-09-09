@@ -1480,9 +1480,10 @@ fn build_rule_layer_runtime_cache_from_universe_rows(
     let mut universe_valid = vec![false; score_column_len];
     let mut sample_capacities = vec![0usize; trade_dates.len()];
     for row in universe_rows {
-        let (Some(&ts_code_id), Some(&day_group_id)) =
-            (ts_code_ids.get(&row.ts_code), day_group_ids.get(&row.trade_date))
-        else {
+        let (Some(&ts_code_id), Some(&day_group_id)) = (
+            ts_code_ids.get(&row.ts_code),
+            day_group_ids.get(&row.trade_date),
+        ) else {
             continue;
         };
         let flat_index = day_group_id * stock_count + ts_code_id as usize;
