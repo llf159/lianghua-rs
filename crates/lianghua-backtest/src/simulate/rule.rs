@@ -1479,6 +1479,7 @@ fn build_rule_layer_runtime_cache_from_universe_rows(
     let score_column_len = trade_dates.len().saturating_mul(stock_count);
     let mut universe_valid = vec![false; score_column_len];
     let mut sample_capacities = vec![0usize; trade_dates.len()];
+    let trade_day_count = trade_dates.len();
     for row in universe_rows {
         let (Some(&ts_code_id), Some(&day_group_id)) = (
             ts_code_ids.get(&row.ts_code),
@@ -1502,10 +1503,10 @@ fn build_rule_layer_runtime_cache_from_universe_rows(
         })
         .collect::<Vec<_>>();
 
-    let residual_stock_batch_size = if trade_dates.is_empty() {
+    let residual_stock_batch_size = if trade_day_count == 0 {
         RESIDUAL_STOCK_BATCH_MAX
     } else {
-        (RESIDUAL_SERIES_TARGET_POINTS / trade_dates.len())
+        (RESIDUAL_SERIES_TARGET_POINTS / trade_day_count)
             .clamp(RESIDUAL_STOCK_BATCH_MIN, RESIDUAL_STOCK_BATCH_MAX)
     };
     stream_residual_maps(
