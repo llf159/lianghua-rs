@@ -3181,6 +3181,7 @@ mod tests {
 
     use crate::{
         data::{result_db_path, source_db_path},
+        scoring_model::{ScoreDetails, ScoreSummary},
         simulate::ResidualReturnPoint,
     };
 
@@ -3190,8 +3191,11 @@ mod tests {
         TriggeredScoreColumn, TriggeredScoreMap, build_forward_backtest_outcome_map,
         build_rule_day_groups, build_rule_layer_runtime_cache,
         build_rule_layer_runtime_cache_from_stock_data, build_triggered_score_map,
-        calc_all_rule_layer_metrics_from_db, calc_efficiency_ratio_map, calc_rule_layer_metrics,
-        calc_rule_layer_metrics_from_cache, calc_rule_layer_metrics_from_db,
+        calc_all_rule_layer_metrics_from_db,
+        calc_all_rule_layer_metrics_with_validation_from_owned_rows_map,
+        calc_all_rule_layer_metrics_with_validation_from_rows_map, calc_efficiency_ratio_map,
+        calc_rule_layer_metrics, calc_rule_layer_metrics_from_cache,
+        calc_rule_layer_metrics_from_db,
         calc_rule_layer_metrics_with_samples_from_cache,
         calc_rule_layer_metrics_with_triggered_samples_from_cache,
         calc_rule_layer_metrics_with_validation_from_cache,
@@ -3828,6 +3832,87 @@ mod tests {
         assert_opt_close(metrics.ic_mean, Some(1.0));
         assert_opt_close(metrics.ic_std, Some(0.0));
         assert_eq!(metrics.icir, None);
+    }
+
+    #[test]
+    fn owned_detail_rows_match_legacy_validation_results_with_single_rule_batches() {
+        let source_dir = temp_source_dir();
+        let source_dir_str = source_dir.to_str().expect("utf8 source dir");
+        prepare_test_files(source_dir_str);
+        let source_conn = Connection::open(source_db_path(source_dir_str)).expect("open source db");
+        let rule_names = vec!["规则A".to_string(), "规则B".to_string()];
+        let summary_rows = ["20240102", "20240103"]
+            .into_iter()
+            .flat_map(|trade_date| {
+                ["000001.SZ", "000002.SZ"]
+                    .into_iter()
+                    .map(move |ts_code| ScoreSummary {
+                        ts_code: ts_code.to_string(),
+                        trade_date: trade_date.to_string(),
+                        total_score: 1.0,
+                        rank: None,
+                    })
+            })
+            .collect::<Vec<_>>();
+        let detail_rows = rule_names
+            .iter()
+            .flat_map(|rule_name| {
+                ["20240102", "20240103"].into_iter().flat_map(move |trade_date| {
+                    ["000001.SZ", "000002.SZ"]
+                        .into_iter()
+                        .map(move |ts_code| ScoreDetails {
+                            ts_code: ts_code.to_string(),
+                            trade_date: trade_date.to_string(),
+                            rule_name: rule_name.clone(),
+                            rule_score: if ts_code == "000001.SZ" { 1.0 } else { 0.0 },
+                        })
+                })
+            })
+            .collect::<Vec<_>>();
+        let layer_config = RuleLayerConfig {
+            min_samples_per_day: 1,
+            backtest_period: 1,
+            min_listed_trade_days: 0,
+        };
+
+        let legacy = calc_all_rule_layer_metrics_with_validation_from_rows_map(
+            &source_conn,
+            source_dir_str,
+            &rule_names,
+            &summary_rows,
+            &detail_rows,
+            "qfq",
+            "000300.SH",
+            0.0,
+            0.0,
+            0.0,
+            "20240102",
+            "20240104",
+            &layer_config,
+            1,
+            |rule_name, metrics| Ok((rule_name.to_string(), metrics)),
+        )
+        .expect("legacy validation results");
+        let owned = calc_all_rule_layer_metrics_with_validation_from_owned_rows_map(
+            &source_conn,
+            source_dir_str,
+            &rule_names,
+            &summary_rows,
+            detail_rows,
+            "qfq",
+            "000300.SH",
+            0.0,
+            0.0,
+            0.0,
+            "20240102",
+            "20240104",
+            &layer_config,
+            1,
+            |rule_name, metrics| Ok((rule_name.to_string(), metrics)),
+        )
+        .expect("owned validation results");
+
+        assert_eq!(owned, legacy);
     }
 
     #[test]
