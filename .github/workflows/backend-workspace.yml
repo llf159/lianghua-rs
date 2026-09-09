@@ -74,5 +74,8 @@ jobs:
       - name: Check all backend targets
         run: cargo check --all-targets
 
+      - name: Test rule backtest
+        run: cargo test --package lianghua-backtest
+
       - name: Test dependency-free layers
         run: cargo test --package lianghua-core --package lianghua-provider --package lianghua-model
