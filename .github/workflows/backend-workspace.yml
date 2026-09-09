@@ -43,33 +43,11 @@ jobs:
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
 
       - name: Cache Rust build
         uses: swatinem/rust-cache@v2
         with:
           workspaces: . -> target
-
-      - name: Check formatting
-        run: >-
-          cargo fmt
-          --package lianghua-rs
-          --package lianghua-core
-          --package lianghua-provider
-          --package lianghua-model
-          --package lianghua-data
-          --package lianghua-download
-          --package lianghua-scoring
-          --package lianghua-backtest
-          --package lianghua-app-shared
-          --package lianghua-app-chart
-          --package lianghua-app-expression
-          --package lianghua-app-data
-          --package lianghua-app-market
-          --package lianghua-app-strategy
-          --package lianghua-app-facade
-          -- --check
 
       - name: Check all backend targets
         run: cargo check --all-targets

@@ -5,3 +5,4 @@
 - 类型只有在至少两个上层组件共享时才进入 model；单组件内部状态留在所属 crate。
 - 禁止为缩短导入路径反向依赖 data、scoring 或应用层 crate。
 - 只运行 `cargo test -p lianghua-model`，不要因此触发全 workspace 测试。
+- 临时规则回测触发行用 `CompactRuleScore` 引用总榜行和规则表下标；禁止恢复每次触发各自持有股票、日期、规则名三段字符串的表示。

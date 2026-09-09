@@ -809,6 +809,7 @@ mod tests {
                 rule_name: "测试规则".to_string(),
                 rule_score: 1.25,
             }],
+            compact_rule_rows: Vec::new(),
             scene_rows: vec![
                 SceneDetails {
                     ts_code: "000001.SZ".to_string(),
