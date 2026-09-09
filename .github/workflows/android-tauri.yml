@@ -1,6 +1,9 @@
 name: android-tauri-build
 
 on:
+  push:
+    branches:
+      - "refactor/restore-strategy-dev-optimization"
   workflow_dispatch:
     inputs:
       build_variant:
@@ -138,17 +141,17 @@ jobs:
         run: |
           args=(android build --ci)
 
-          if [ "${{ inputs.package_kind }}" = "apk-aab" ]; then
+          if [ "${{ inputs.package_kind || 'apk' }}" = "apk-aab" ]; then
             args+=(--apk --aab)
           else
             args+=(--apk)
           fi
 
-          if [ "${{ inputs.build_variant }}" = "debug" ]; then
+          if [ "${{ inputs.build_variant || 'debug' }}" = "debug" ]; then
             args+=(--debug)
           fi
 
-          if [ "${{ inputs.android_targets }}" = "aarch64" ]; then
+          if [ "${{ inputs.android_targets || 'aarch64' }}" = "aarch64" ]; then
             args+=(--target aarch64)
           fi
 
@@ -157,7 +160,7 @@ jobs:
       - name: Upload Android bundles
         uses: actions/upload-artifact@v4
         with:
-          name: tauri-android-${{ inputs.build_variant }}-${{ inputs.android_targets }}
+          name: tauri-android-${{ inputs.build_variant || 'debug' }}-${{ inputs.android_targets || 'aarch64' }}
           path: |
             ui/lianghua_web/src-tauri/gen/android/app/build/outputs/apk/**/*.apk
             ui/lianghua_web/src-tauri/gen/android/app/build/outputs/bundle/**/*.aab
