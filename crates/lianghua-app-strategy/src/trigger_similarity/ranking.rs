@@ -1993,12 +1993,6 @@ pub fn run_strategy_trigger_similarity_ranking(
         .par_iter()
         .map(|target| {
             let target_started = Instant::now();
-            set_ranking_progress(
-                "ranking",
-                &format!("正在精算 {}：建立候选索引", target.anchor.ts_code),
-                ranking_completed.load(AtomicOrdering::Relaxed),
-                targets.len(),
-            );
             let row = (|target: &RankingSample,
                         candidates: &[RankingSample],
                         candidate_market_similarities: &[Option<f64>],
@@ -2027,7 +2021,6 @@ pub fn run_strategy_trigger_similarity_ranking(
                       rule_weights: &HashMap<String, f64>,
                       scratch: &mut RankingTargetScratch|
                      -> StrategyTriggerRankingRow {
-                        let mut last_progress = Instant::now();
                         let target_rule_weight_sum =
                             trigger_rule_weight_sum(&target.fingerprint.trigger, rule_weights);
                         let per_class_limit = (256) / 2;
@@ -2092,22 +2085,6 @@ pub fn run_strategy_trigger_similarity_ranking(
                         }
 
                         for candidate_position in 0..scratch.candidate_indices.len() {
-                            if candidate_position % 256 == 0
-                                && last_progress.elapsed().as_secs() >= 1
-                            {
-                                set_ranking_progress(
-                                    "ranking",
-                                    &format!(
-                                        "正在精算 {}：已检查候选 {} / {}",
-                                        target.anchor.ts_code,
-                                        candidate_position,
-                                        scratch.candidate_indices.len(),
-                                    ),
-                                    ranking_completed.load(AtomicOrdering::Relaxed),
-                                    targets.len(),
-                                );
-                                last_progress = Instant::now();
-                            }
                             let candidate_index = scratch.candidate_indices[candidate_position];
                             let candidate = &candidates[candidate_index];
                             // Leave-one-stock-out：同一股票的滚动窗口会共享真实 K 线、触发和静态
@@ -2490,7 +2467,7 @@ pub fn run_strategy_trigger_similarity_ranking(
             }
             set_ranking_progress(
                 "ranking",
-                "正在进行全市场近邻精排",
+                &format!("已完成 {} 的近邻精排", target.anchor.ts_code),
                 completed,
                 targets.len(),
             );

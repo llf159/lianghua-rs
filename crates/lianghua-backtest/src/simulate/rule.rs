@@ -546,18 +546,18 @@ where
         layer_config,
         allowed_ts_codes,
     )?;
-    let triggered_score_map_by_rule = load_triggered_score_maps_for_names_filtered(
-        source_dir,
-        rule_names,
-        start_date,
-        end_date,
-        allowed_ts_codes,
-    )?;
-
-    // 每条规则都会物化一份全市场样本。按小批次并行，在恢复规则级吞吐的同时，
-    // 将同时存活的大 Vec 数量限制在固定值，避免峰值随 Rayon 线程数放大。
+    // 每条规则都会物化一份全市场样本和触发分数。两者都按小批次加载、计算、
+    // 释放；否则 parallel_batch_size=1 只限制计算并发，全部规则的触发明细仍会
+    // 在计算前同时常驻，峰值内存不会随该参数下降。
     let mut grouped_results = Vec::with_capacity(rule_names.len());
     for rule_batch in rule_names.chunks(parallel_batch_size.max(1)) {
+        let triggered_score_map_by_rule = load_triggered_score_maps_for_names_filtered(
+            source_dir,
+            rule_batch,
+            start_date,
+            end_date,
+            allowed_ts_codes,
+        )?;
         let mut batch_results: Vec<Result<T, String>> = rule_batch
             .par_iter()
             .map(|rule_name| {
@@ -632,16 +632,15 @@ where
         layer_config,
         allowed_ts_codes,
     )?;
-    let triggered_score_map_by_rule = load_triggered_score_maps_for_names_filtered(
-        source_dir,
-        rule_names,
-        start_date,
-        end_date,
-        allowed_ts_codes,
-    )?;
-
     let mut grouped_results = Vec::with_capacity(rule_names.len());
     for rule_batch in rule_names.chunks(parallel_batch_size.max(1)) {
+        let triggered_score_map_by_rule = load_triggered_score_maps_for_names_filtered(
+            source_dir,
+            rule_batch,
+            start_date,
+            end_date,
+            allowed_ts_codes,
+        )?;
         let mut batch_results: Vec<Result<T, String>> = rule_batch
             .par_iter()
             .map(|rule_name| {
@@ -2262,14 +2261,6 @@ fn build_residual_map_cache(
         input.industry_beta.abs() > EPS,
     )?;
     industry_series_cache.shrink_to_fit();
-    let mut stock_series_cache = load_pct_chg_series_cache_for_ts_codes(
-        source_conn,
-        &ts_codes,
-        input.stock_adj_type,
-        input.start_date,
-        input.end_date,
-    )?;
-    shrink_stock_series_cache(&mut stock_series_cache);
     let index_series = load_pct_chg_series_cache_for_ts_codes(
         source_conn,
         &[input.index_ts_code.to_string()],
@@ -2302,6 +2293,17 @@ fn build_residual_map_cache(
 
     let mut out = HashMap::with_capacity(ts_codes.len());
     for ts_code_batch in ts_codes.chunks(128) {
+        // 只让当前残差计算批次的原始涨跌幅常驻。全市场一次性加载会与逐步增长的
+        // residual_map_cache 重叠，并为每一行重复持有交易日期字符串，导致单策略
+        // 回测也可能在进入规则计算前耗尽内存。
+        let mut stock_series_cache = load_pct_chg_series_cache_for_ts_codes(
+            source_conn,
+            ts_code_batch,
+            input.stock_adj_type,
+            input.start_date,
+            input.end_date,
+        )?;
+        shrink_stock_series_cache(&mut stock_series_cache);
         let mut er_series_cache = match er_column.as_deref() {
             Some(column) => {
                 (|conn: &Connection,
@@ -2501,13 +2503,13 @@ fn build_residual_map_cache(
                 .collect();
 
         drop(er_series_cache);
+        drop(stock_series_cache);
         for item in batch_results {
             let (ts_code, residual_map) = item?;
             out.insert(ts_code, residual_map);
         }
     }
 
-    drop(stock_series_cache);
     drop(concept_series_cache);
     drop(industry_series_cache);
     drop(index_series);
