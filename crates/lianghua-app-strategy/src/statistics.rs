@@ -6278,7 +6278,7 @@ fn load_daily_max_rank(
     let mut rows = stmt
         .query(params![start_date, end_date])
         .map_err(|e| format!("查询策略回测每日排名上限失败: {e}"))?;
-    let mut daily_max_rank = HashMap::new();
+    let mut daily_max_rank: HashMap<String, i64> = HashMap::new();
     while let Some(row) = rows
         .next()
         .map_err(|e| format!("读取策略回测每日排名上限失败: {e}"))?
@@ -8571,8 +8571,9 @@ mod tests {
         ValidationSeedRule, ValidationSimilarityCache, ValidationVariant,
         build_industry_maps_from_rows, build_rank_layer_sample_groups,
         build_recent_decay_dist_points, build_rule_basket_decay_from_daily_groups,
-        build_rule_contribution_averages, build_rule_contribution_averages_from_rows,
-        build_rule_decay_validations, build_validation_cached_rule,
+        build_one_rule_contribution_average, build_rule_contribution_averages,
+        build_rule_contribution_averages_from_rows, build_rule_decay_validations,
+        build_validation_cached_rule,
         build_validation_calibration_specs, build_validation_return_distribution,
         build_validation_return_distribution_from_counts, build_validation_sample_groups,
         build_validation_score_layer_details,
@@ -8582,7 +8583,7 @@ mod tests {
         collect_validation_assigned_names, derive_validation_volatility_group,
         estimate_net_money_flow_yuan, money_flow_rank_items, money_outflow_rank_items,
         resolve_validation_sample_board_label, resolve_validation_trigger_count,
-        scope_way_config_label, trailing_period_gain,
+        load_daily_max_rank, scope_way_config_label, trailing_period_gain, validation_pair_key,
     };
     use crate::data::ScopeWay;
 
