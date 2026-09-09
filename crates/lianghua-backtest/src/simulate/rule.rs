@@ -3310,8 +3310,7 @@ mod tests {
         calc_all_rule_layer_metrics_with_validation_from_owned_rows_map,
         calc_all_rule_layer_metrics_with_validation_from_rows_map, calc_efficiency_ratio_map,
         calc_rule_layer_metrics, calc_rule_layer_metrics_from_cache,
-        calc_rule_layer_metrics_from_db,
-        calc_rule_layer_metrics_with_samples_from_cache,
+        calc_rule_layer_metrics_from_db, calc_rule_layer_metrics_with_samples_from_cache,
         calc_rule_layer_metrics_with_triggered_samples_from_cache,
         calc_rule_layer_metrics_with_validation_from_cache,
         collect_triggered_rule_samples_from_cache, load_rule_rows_filtered,
@@ -3972,16 +3971,18 @@ mod tests {
         let detail_rows = rule_names
             .iter()
             .flat_map(|rule_name| {
-                ["20240102", "20240103"].into_iter().flat_map(move |trade_date| {
-                    ["000001.SZ", "000002.SZ"]
-                        .into_iter()
-                        .map(move |ts_code| ScoreDetails {
-                            ts_code: ts_code.to_string(),
-                            trade_date: trade_date.to_string(),
-                            rule_name: rule_name.clone(),
-                            rule_score: if ts_code == "000001.SZ" { 1.0 } else { 0.0 },
-                        })
-                })
+                ["20240102", "20240103"]
+                    .into_iter()
+                    .flat_map(move |trade_date| {
+                        ["000001.SZ", "000002.SZ"]
+                            .into_iter()
+                            .map(move |ts_code| ScoreDetails {
+                                ts_code: ts_code.to_string(),
+                                trade_date: trade_date.to_string(),
+                                rule_name: rule_name.clone(),
+                                rule_score: if ts_code == "000001.SZ" { 1.0 } else { 0.0 },
+                            })
+                    })
             })
             .collect::<Vec<_>>();
         let layer_config = RuleLayerConfig {

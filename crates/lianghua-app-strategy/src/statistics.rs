@@ -48,8 +48,8 @@ use crate::{
             RuleLayerDailyScoreLayers, RuleLayerFromDbInput, RuleLayerMetricsWithValidation,
             RuleLayerRuntimeCache, RuleLayerSamplePointRef,
             build_rule_layer_runtime_cache_from_stock_data_with_ts_filter,
-            calc_all_rule_layer_metrics_with_validation_from_db_map_with_ts_filter,
             calc_all_rule_layer_metrics_with_validation_from_compact_rows_map,
+            calc_all_rule_layer_metrics_with_validation_from_db_map_with_ts_filter,
             calc_rule_layer_metrics_from_cache, calc_rule_layer_metrics_from_db_with_ts_filter,
             calc_rule_layer_metrics_with_samples_from_cache,
             visit_triggered_rule_samples_from_cache,
@@ -6353,8 +6353,7 @@ fn build_rule_contribution_averages_from_compact_rows(
         ) else {
             continue;
         };
-        agg.contribution_score +=
-            row.rule_score * (*max_rank + 1 - rank) as f64 / *max_rank as f64;
+        agg.contribution_score += row.rule_score * (*max_rank + 1 - rank) as f64 / *max_rank as f64;
     }
 
     let mut acc_by_rule: HashMap<u32, RuleContributionAccumulator> = HashMap::new();

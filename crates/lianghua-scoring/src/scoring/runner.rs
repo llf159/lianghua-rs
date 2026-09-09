@@ -68,7 +68,9 @@ fn format_elapsed_ms(elapsed_ms: u64) -> String {
 }
 
 fn rank_summary_rows_preserving_order(rows: &mut [ScoreSummary]) {
-    let mut order = (0..rows.len()).map(|index| index as u32).collect::<Vec<_>>();
+    let mut order = (0..rows.len())
+        .map(|index| index as u32)
+        .collect::<Vec<_>>();
     order.sort_unstable_by(|&left, &right| {
         let left = &rows[left as usize];
         let right = &rows[right as usize];
@@ -322,21 +324,16 @@ fn scoring_stock_group_batch(
                 st_list.contains(ts_code),
                 total_share_map.get(ts_code).copied(),
             )?;
-            let (
-                summary_rows,
-                detail_rows,
-                compact_rule_rows,
-                scene_rows,
-                scene_backtest_rows,
-            ) = scoring_single_core(
-                row,
-                ts_code,
-                score_start_date,
-                rules_cache,
-                rule_scene_meta,
-                scenes,
-                memory_mode,
-            )?;
+            let (summary_rows, detail_rows, compact_rule_rows, scene_rows, scene_backtest_rows) =
+                scoring_single_core(
+                    row,
+                    ts_code,
+                    score_start_date,
+                    rules_cache,
+                    rule_scene_meta,
+                    scenes,
+                    memory_mode,
+                )?;
 
             Ok(ScoreBatch {
                 summary_rows,
