@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use lianghua_model::scoring::{SceneBacktestRow, SceneDetails, ScoreDetails, ScoreSummary};
+use lianghua_model::scoring::{
+    CompactRuleScore, SceneBacktestRow, SceneDetails, ScoreDetails, ScoreSummary,
+};
 
 use super::{RuleScoreSeries, SceneScoreSeries};
 
@@ -41,6 +43,24 @@ pub fn build_score_details(
                 rule_name: rule.name.clone(),
                 rule_score: rule.series[index],
             });
+        }
+    }
+    out
+}
+
+pub fn build_compact_rule_scores(rule_score_series: &[RuleScoreSeries]) -> Vec<CompactRuleScore> {
+    let mut out = Vec::new();
+    for (rule_id, rule) in rule_score_series.iter().enumerate() {
+        for (summary_index, (&rule_score, &triggered)) in
+            rule.series.iter().zip(&rule.triggered).enumerate()
+        {
+            if triggered {
+                out.push(CompactRuleScore {
+                    summary_index: summary_index as u32,
+                    rule_id: rule_id as u32,
+                    rule_score,
+                });
+            }
         }
     }
     out

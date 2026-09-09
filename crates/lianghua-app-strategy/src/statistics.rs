@@ -36,7 +36,7 @@ use crate::{
         inject_stock_extra_fields, load_st_list, load_total_share_map,
     },
     scoring::{CachedRule, evaluate_cached_rule_scores},
-    scoring_model::{SceneBacktestRow, ScoreDetails, ScoreSummary},
+    scoring_model::{CompactRuleScore, SceneBacktestRow, ScoreBatch, ScoreDetails, ScoreSummary},
     simulate::{
         DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS, build_backtest_sample_eligibility,
         rank::{
@@ -49,7 +49,7 @@ use crate::{
             RuleLayerRuntimeCache, RuleLayerSamplePointRef,
             build_rule_layer_runtime_cache_from_stock_data_with_ts_filter,
             calc_all_rule_layer_metrics_with_validation_from_db_map_with_ts_filter,
-            calc_all_rule_layer_metrics_with_validation_from_owned_rows_map,
+            calc_all_rule_layer_metrics_with_validation_from_compact_rows_map,
             calc_rule_layer_metrics_from_cache, calc_rule_layer_metrics_from_db_with_ts_filter,
             calc_rule_layer_metrics_with_samples_from_cache,
             visit_triggered_rule_samples_from_cache,
@@ -6312,6 +6312,109 @@ fn build_rule_contribution_averages_from_rows(
 })(acc_map)
 }
 
+fn build_rule_contribution_averages_from_compact_rows(
+    summary_rows: &[ScoreSummary],
+    detail_rows: &[CompactRuleScore],
+    scoring_rule_names: &[String],
+    start_date: &str,
+    end_date: &str,
+) -> HashMap<String, RuleContributionAverages> {
+    let mut daily_max_rank: HashMap<&str, i64> = HashMap::new();
+    for row in summary_rows {
+        if row.trade_date.as_str() < start_date || row.trade_date.as_str() > end_date {
+            continue;
+        }
+        if let Some(rank) = row.rank.filter(|value| *value > 0) {
+            daily_max_rank
+                .entry(row.trade_date.as_str())
+                .and_modify(|max_rank| *max_rank = (*max_rank).max(rank))
+                .or_insert(rank);
+        }
+    }
+
+    let mut daily_agg_map: HashMap<(&str, u32), RuleDayAgg> = HashMap::new();
+    for row in detail_rows {
+        if !row.rule_score.is_finite() || row.rule_score.abs() <= RULE_BACKTEST_EPS {
+            continue;
+        }
+        let Some(summary) = summary_rows.get(row.summary_index as usize) else {
+            continue;
+        };
+        if summary.trade_date.as_str() < start_date || summary.trade_date.as_str() > end_date {
+            continue;
+        }
+        let agg = daily_agg_map
+            .entry((summary.trade_date.as_str(), row.rule_id))
+            .or_default();
+        agg.trigger_count += 1;
+        let (Some(rank), Some(max_rank)) = (
+            summary.rank.filter(|value| *value > 0),
+            daily_max_rank.get(summary.trade_date.as_str()),
+        ) else {
+            continue;
+        };
+        agg.contribution_score +=
+            row.rule_score * (*max_rank + 1 - rank) as f64 / *max_rank as f64;
+    }
+
+    let mut acc_by_rule: HashMap<u32, RuleContributionAccumulator> = HashMap::new();
+    for ((_trade_date, rule_id), agg) in daily_agg_map {
+        if agg.trigger_count <= 0 {
+            continue;
+        }
+        let acc = acc_by_rule.entry(rule_id).or_default();
+        acc.contribution_sum += agg.contribution_score;
+        acc.contribution_days += 1;
+        acc.trigger_count += agg.trigger_count;
+    }
+    acc_by_rule
+        .into_iter()
+        .filter_map(|(rule_id, acc)| {
+            let rule_name = scoring_rule_names.get(rule_id as usize)?.clone();
+            Some((
+                rule_name,
+                RuleContributionAverages {
+                    avg_contribution_score: (acc.contribution_days > 0)
+                        .then_some(acc.contribution_sum / acc.contribution_days as f64),
+                    avg_contribution_per_trigger: (acc.trigger_count > 0)
+                        .then_some(acc.contribution_sum / acc.trigger_count as f64),
+                },
+            ))
+        })
+        .collect()
+}
+
+fn filter_compact_rule_score_batch(
+    batch: &mut ScoreBatch,
+    allowed_ts_codes: Option<&HashSet<String>>,
+) {
+    let Some(allowed_ts_codes) = allowed_ts_codes else {
+        return;
+    };
+    let mut remapped_summary_ids = vec![u32::MAX; batch.summary_rows.len()];
+    let mut old_index = 0usize;
+    let mut new_index = 0u32;
+    batch.summary_rows.retain(|row| {
+        let keep = ts_code_allowed_by_filter(Some(allowed_ts_codes), &row.ts_code);
+        if keep {
+            remapped_summary_ids[old_index] = new_index;
+            new_index = new_index.saturating_add(1);
+        }
+        old_index += 1;
+        keep
+    });
+    batch.compact_rule_rows.retain_mut(|row| {
+        let Some(&new_summary_id) = remapped_summary_ids.get(row.summary_index as usize) else {
+            return false;
+        };
+        if new_summary_id == u32::MAX {
+            return false;
+        }
+        row.summary_index = new_summary_id;
+        true
+    });
+}
+
 fn weighted_rule_summary_metric(
     summaries: &[RuleLayerRuleSummary],
     value: impl Fn(&RuleLayerRuleSummary) -> Option<f64>,
@@ -7874,24 +7977,17 @@ pub fn run_transient_rule_layer_backtest(
         backtest_period: params.backtest_period,
         min_listed_trade_days: params.min_listed_trade_days,
     };
-    let (score_batch, _) = scoring_all_to_memory_with_mode(
+    let (mut score_batch, scoring_profile) = scoring_all_to_memory_with_mode(
         &source_path,
         None,
         &params.stock_adj_type,
         &params.start_date,
         &params.end_date,
-        ScoringMemoryMode::SummaryAndDetails,
+        ScoringMemoryMode::RuleBacktest,
     )?;
-    let summary_rows = filter_score_summary_rows_by_ts_codes(
-        score_batch.summary_rows,
-        params.allowed_ts_codes.as_ref(),
-    );
-    let mut detail_rows = score_batch.detail_rows;
-    if params.allowed_ts_codes.is_some() {
-        detail_rows.retain(|row| {
-            ts_code_allowed_by_filter(params.allowed_ts_codes.as_ref(), &row.ts_code)
-        });
-    }
+    filter_compact_rule_score_batch(&mut score_batch, params.allowed_ts_codes.as_ref());
+    let summary_rows = score_batch.summary_rows;
+    let compact_rule_rows = score_batch.compact_rule_rows;
     let (rule_options, rule_meta_map) = load_rule_meta(&source_path)?;
     let explain_map = rule_meta_map
         .iter()
@@ -7914,18 +8010,20 @@ pub fn run_transient_rule_layer_backtest(
     } else {
         empty_validation_similarity_cache()
     };
-    let contribution_averages = build_rule_contribution_averages_from_rows(
+    let contribution_averages = build_rule_contribution_averages_from_compact_rows(
         &summary_rows,
-        &detail_rows,
+        &compact_rule_rows,
+        &scoring_profile.rule_names,
         &params.start_date,
         &params.end_date,
     );
-    let summary_detail_items = calc_all_rule_layer_metrics_with_validation_from_owned_rows_map(
+    let summary_detail_items = calc_all_rule_layer_metrics_with_validation_from_compact_rows_map(
         &source_conn,
         &source_path,
         &rule_options,
+        &scoring_profile.rule_names,
         &summary_rows,
-        detail_rows,
+        compact_rule_rows,
         &params.stock_adj_type,
         &params.index_ts_code,
         params.index_beta,

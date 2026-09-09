@@ -16,7 +16,7 @@ use crate::data::{
     concept_performance_data::{load_concept_trend_series_map, load_industry_trend_series_map},
     load_stock_list, load_ths_concepts_named_map, result_db_path,
 };
-use crate::scoring_model::{ScoreDetails, ScoreSummary};
+use crate::scoring_model::{CompactRuleScore, ScoreDetails, ScoreSummary};
 
 use crate::simulate::fp_utils::{
     EPS, ProfitLossSums, calc_profit_loss_sums, calc_t_value, calc_top_bottom_spread, mean,
@@ -1035,6 +1035,28 @@ where
         indexed_scores_by_rule[rule_id].push((flat_index, row.rule_score));
     }
 
+    compute_validation_from_indexed_scores(
+        &runtime_cache,
+        rule_names,
+        indexed_scores_by_rule,
+        layer_config,
+        parallel_batch_size,
+        map_result,
+    )
+}
+
+fn compute_validation_from_indexed_scores<T, F>(
+    runtime_cache: &RuleLayerRuntimeCache,
+    rule_names: &[String],
+    mut indexed_scores_by_rule: Vec<Vec<(usize, f64)>>,
+    layer_config: &RuleLayerConfig,
+    parallel_batch_size: usize,
+    map_result: F,
+) -> Result<Vec<T>, String>
+where
+    T: Send,
+    F: Fn(&str, RuleLayerMetricsWithValidation) -> Result<T, String> + Sync,
+{
     let batch_size = parallel_batch_size.max(1);
     let mut grouped_results = Vec::with_capacity(rule_names.len());
     for batch_start in (0..rule_names.len()).step_by(batch_size) {
@@ -1052,7 +1074,7 @@ where
             .zip(encoded_scores.par_iter())
             .map(|(rule_name, triggered_scores)| {
                 let computation = compute_rule_layer_from_runtime_cache(
-                    &runtime_cache,
+                    runtime_cache,
                     Some(triggered_scores),
                     layer_config,
                     RuleLayerCollectOptions {
@@ -1081,6 +1103,99 @@ where
         out.push(item?);
     }
     Ok(out)
+}
+
+/// 直接消费评分阶段生成的紧凑触发行；触发行只含两个 `u32` 下标和分数，
+/// 不再构造全市场 `ScoreDetails` 字符串对象。
+pub fn calc_all_rule_layer_metrics_with_validation_from_compact_rows_map<T, F>(
+    source_conn: &Connection,
+    source_dir: &str,
+    rule_names: &[String],
+    scoring_rule_names: &[String],
+    score_summary_rows: &[ScoreSummary],
+    compact_rule_rows: Vec<CompactRuleScore>,
+    stock_adj_type: &str,
+    index_ts_code: &str,
+    index_beta: f64,
+    concept_beta: f64,
+    industry_beta: f64,
+    start_date: &str,
+    end_date: &str,
+    layer_config: &RuleLayerConfig,
+    parallel_batch_size: usize,
+    map_result: F,
+) -> Result<Vec<T>, String>
+where
+    T: Send,
+    F: Fn(&str, RuleLayerMetricsWithValidation) -> Result<T, String> + Sync,
+{
+    validate_rule_common_input(
+        stock_adj_type,
+        index_ts_code,
+        index_beta,
+        concept_beta,
+        industry_beta,
+        start_date,
+        end_date,
+        layer_config,
+    )?;
+    if rule_names.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let runtime_cache = build_rule_layer_runtime_cache_from_summary_rows(
+        source_conn,
+        source_dir,
+        score_summary_rows,
+        stock_adj_type,
+        index_ts_code,
+        index_beta,
+        concept_beta,
+        industry_beta,
+        start_date,
+        end_date,
+        layer_config,
+    )?;
+    let requested_rule_ids = rule_names
+        .iter()
+        .enumerate()
+        .map(|(index, rule_name)| (rule_name.as_str(), index))
+        .collect::<HashMap<_, _>>();
+    let scoring_to_requested = scoring_rule_names
+        .iter()
+        .map(|rule_name| requested_rule_ids.get(rule_name.as_str()).copied())
+        .collect::<Vec<_>>();
+    let mut indexed_scores_by_rule = (0..rule_names.len())
+        .map(|_| Vec::<(usize, f64)>::new())
+        .collect::<Vec<_>>();
+    for row in compact_rule_rows {
+        let (Some(summary), Some(Some(rule_id))) = (
+            score_summary_rows.get(row.summary_index as usize),
+            scoring_to_requested.get(row.rule_id as usize),
+        ) else {
+            continue;
+        };
+        if !row.rule_score.is_finite() {
+            continue;
+        }
+        let (Some(&ts_code_id), Some(&day_group_id)) = (
+            runtime_cache.ts_code_ids.get(&summary.ts_code),
+            runtime_cache.day_group_ids.get(&summary.trade_date),
+        ) else {
+            continue;
+        };
+        let flat_index = runtime_cache.day_groups[day_group_id].score_offset + ts_code_id as usize;
+        indexed_scores_by_rule[*rule_id].push((flat_index, row.rule_score));
+    }
+
+    compute_validation_from_indexed_scores(
+        &runtime_cache,
+        rule_names,
+        indexed_scores_by_rule,
+        layer_config,
+        parallel_batch_size,
+        map_result,
+    )
 }
 
 pub fn build_rule_layer_runtime_cache(

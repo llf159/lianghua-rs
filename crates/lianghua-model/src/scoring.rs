@@ -41,6 +41,15 @@ pub struct ScoreDetails {
     pub rule_score: f64,
 }
 
+/// 规则回测专用的紧凑触发行。通过总榜行下标复用股票与日期，并通过规则
+/// 下标复用规则名，避免为每次触发各分配三段字符串。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CompactRuleScore {
+    pub summary_index: u32,
+    pub rule_id: u32,
+    pub rule_score: f64,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct SceneDetails {
     pub ts_code: String,
@@ -68,14 +77,21 @@ pub struct SceneBacktestRow {
 pub struct ScoreBatch {
     pub summary_rows: Vec<ScoreSummary>,
     pub detail_rows: Vec<ScoreDetails>,
+    pub compact_rule_rows: Vec<CompactRuleScore>,
     pub scene_rows: Vec<SceneDetails>,
     pub scene_backtest_rows: Vec<SceneBacktestRow>,
 }
 
 impl ScoreBatch {
     pub fn extend(&mut self, other: ScoreBatch) {
+        let summary_offset = self.summary_rows.len() as u32;
         self.summary_rows.extend(other.summary_rows);
         self.detail_rows.extend(other.detail_rows);
+        self.compact_rule_rows
+            .extend(other.compact_rule_rows.into_iter().map(|mut row| {
+                row.summary_index = row.summary_index.saturating_add(summary_offset);
+                row
+            }));
         self.scene_rows.extend(other.scene_rows);
         self.scene_backtest_rows.extend(other.scene_backtest_rows);
     }

@@ -1,6 +1,6 @@
 use lianghua_model::scoring::{
-    SceneBacktestRow, SceneDetails, ScoreBatch, ScoreDetails, ScoreSummary, ScoreWriteMessage,
-    ScoreWriteProfile, TieBreakWay,
+    CompactRuleScore, SceneBacktestRow, SceneDetails, ScoreBatch, ScoreDetails, ScoreSummary,
+    ScoreWriteMessage, ScoreWriteProfile, TieBreakWay,
 };
 use rayon::prelude::*;
 use std::{
@@ -22,7 +22,8 @@ use crate::data::{
 use crate::scoring::{
     CachedRule, RuleSceneMeta, build_scene_score_series,
     result_build::{
-        build_scene_backtest_rows, build_scene_details, build_score_details, build_score_summaries,
+        build_compact_rule_scores, build_scene_backtest_rows, build_scene_details,
+        build_score_details, build_score_summaries,
     },
     rule_cache::cache_rule_build,
     scoring_rules_details_cache, scoring_rules_total_cache,
@@ -42,6 +43,7 @@ pub enum ScoringMemoryMode {
     All,
     SummaryOnly,
     SummaryAndDetails,
+    RuleBacktest,
     SceneOnly,
 }
 
@@ -54,6 +56,7 @@ pub struct ScoringRunProfile {
     pub stock_count: usize,
     pub writer: ScoreWriteProfile,
     pub warnings: Vec<String>,
+    pub rule_names: Vec<String>,
 }
 
 fn format_elapsed_ms(elapsed_ms: u64) -> String {
@@ -62,6 +65,35 @@ fn format_elapsed_ms(elapsed_ms: u64) -> String {
     }
 
     format!("{:.3}s", elapsed_ms as f64 / 1_000.0)
+}
+
+fn rank_summary_rows_preserving_order(rows: &mut [ScoreSummary]) {
+    let mut order = (0..rows.len()).map(|index| index as u32).collect::<Vec<_>>();
+    order.sort_unstable_by(|&left, &right| {
+        let left = &rows[left as usize];
+        let right = &rows[right as usize];
+        left.trade_date
+            .cmp(&right.trade_date)
+            .then_with(|| {
+                right
+                    .total_score
+                    .partial_cmp(&left.total_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| left.ts_code.cmp(&right.ts_code))
+    });
+    let mut current_trade_date = String::new();
+    let mut current_rank = 0i64;
+    for row_id in order {
+        let row = &mut rows[row_id as usize];
+        if current_trade_date != row.trade_date {
+            current_trade_date.clone_from(&row.trade_date);
+            current_rank = 1;
+        } else {
+            current_rank += 1;
+        }
+        row.rank = Some(current_rank);
+    }
 }
 
 fn scoring_single_core(
@@ -76,6 +108,7 @@ fn scoring_single_core(
     (
         Vec<ScoreSummary>,
         Vec<ScoreDetails>,
+        Vec<CompactRuleScore>,
         Vec<SceneDetails>,
         Vec<SceneBacktestRow>,
     ),
@@ -89,7 +122,7 @@ fn scoring_single_core(
         .unwrap_or_else(|i| i);
 
     if keep_from >= trade_dates.len() {
-        return Ok((Vec::new(), Vec::new(), Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()));
     }
 
     let kept_trade_dates = &trade_dates[keep_from..];
@@ -98,7 +131,7 @@ fn scoring_single_core(
         let total_scores = scoring_rules_total_cache(&mut rt, rules_cache)?;
         let kept_scores = &total_scores[keep_from..];
         let summary = build_score_summaries(ts_code, kept_trade_dates, kept_scores);
-        return Ok((summary, Vec::new(), Vec::new(), Vec::new()));
+        return Ok((summary, Vec::new(), Vec::new(), Vec::new(), Vec::new()));
     }
 
     let result = scoring_rules_details_cache(&mut rt, rules_cache)?;
@@ -112,7 +145,9 @@ fn scoring_single_core(
 
     let summary = if matches!(
         memory_mode,
-        ScoringMemoryMode::All | ScoringMemoryMode::SummaryAndDetails
+        ScoringMemoryMode::All
+            | ScoringMemoryMode::SummaryAndDetails
+            | ScoringMemoryMode::RuleBacktest
     ) {
         build_score_summaries(ts_code, kept_trade_dates, kept_scores)
     } else {
@@ -123,6 +158,11 @@ fn scoring_single_core(
         ScoringMemoryMode::All | ScoringMemoryMode::SummaryAndDetails
     ) {
         build_score_details(ts_code, kept_trade_dates, &details_series)
+    } else {
+        Vec::new()
+    };
+    let compact_rule_rows = if matches!(memory_mode, ScoringMemoryMode::RuleBacktest) {
+        build_compact_rule_scores(&details_series)
     } else {
         Vec::new()
     };
@@ -146,7 +186,13 @@ fn scoring_single_core(
         (Vec::new(), Vec::new())
     };
 
-    Ok((summary, details, scene_details, scene_backtest_rows))
+    Ok((
+        summary,
+        details,
+        compact_rule_rows,
+        scene_details,
+        scene_backtest_rows,
+    ))
 }
 
 fn collect_scoring_runtime_keys(rules_cache: &[CachedRule]) -> HashSet<String> {
@@ -276,7 +322,13 @@ fn scoring_stock_group_batch(
                 st_list.contains(ts_code),
                 total_share_map.get(ts_code).copied(),
             )?;
-            let (summary_rows, detail_rows, scene_rows, scene_backtest_rows) = scoring_single_core(
+            let (
+                summary_rows,
+                detail_rows,
+                compact_rule_rows,
+                scene_rows,
+                scene_backtest_rows,
+            ) = scoring_single_core(
                 row,
                 ts_code,
                 score_start_date,
@@ -289,6 +341,7 @@ fn scoring_stock_group_batch(
             Ok(ScoreBatch {
                 summary_rows,
                 detail_rows,
+                compact_rule_rows,
                 scene_rows,
                 scene_backtest_rows,
             })
@@ -445,6 +498,7 @@ pub fn scoring_all_to_db(
         stock_count: tc_list.len(),
         writer,
         warnings,
+        rule_names: rules_cache.iter().map(|rule| rule.name.clone()).collect(),
     };
     (|profile: &ScoringRunProfile| {
         println!(
@@ -583,7 +637,11 @@ pub fn scoring_all_to_memory_with_mode(
 
     let mut batch = batch;
     if !batch.summary_rows.is_empty() {
-        rank_summary_rows_by_score(&mut batch.summary_rows);
+        if matches!(memory_mode, ScoringMemoryMode::RuleBacktest) {
+            rank_summary_rows_preserving_order(&mut batch.summary_rows);
+        } else {
+            rank_summary_rows_by_score(&mut batch.summary_rows);
+        }
     }
     if !batch.scene_rows.is_empty() {
         rank_scene_rows(&mut batch.scene_rows);
@@ -600,6 +658,7 @@ pub fn scoring_all_to_memory_with_mode(
             ..ScoreWriteProfile::default()
         },
         warnings,
+        rule_names: rules_cache.iter().map(|rule| rule.name.clone()).collect(),
     };
     Ok((batch, profile))
 }
