@@ -706,7 +706,7 @@ pub fn scoring_single_period(
             })
             .collect();
     let scenes = ScoreScene::load_scenes_with_strategy_path(source_dir, strategy_path)?;
-    let (summary, details, scenes, _) = scoring_single_core(
+    let (summary, details, _, scenes, _) = scoring_single_core(
         row_data,
         ts_code,
         start_date,
