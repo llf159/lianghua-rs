@@ -1319,6 +1319,7 @@ pub fn get_strategy_trigger_similarity_ranking_page(
     exclude_st_board: Option<bool>,
     total_mv_min: Option<f64>,
     total_mv_max: Option<f64>,
+    ts_code: Option<String>,
 ) -> Result<StrategyTriggerRankingPageData, String> {
     let source_path = source_path.trim().to_string();
     if source_path.is_empty() {
@@ -1399,6 +1400,10 @@ pub fn get_strategy_trigger_similarity_ranking_page(
         .filter(|v| *v > 0)
         .unwrap_or(100)
         .min(5_000);
+    let ts_code = ts_code
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_uppercase());
     let all_trade_dates = load_all_trade_dates(&conn)?;
     let target_index = all_trade_dates
         .binary_search(&resolved_trade_date)
@@ -1505,6 +1510,10 @@ pub fn get_strategy_trigger_similarity_ranking_page(
                        top_matches_json
                 FROM strategy_trigger_similarity_rank
                 WHERE trade_date=? AND config_key=?
+                  AND (
+                    COALESCE(?, '') = ''
+                    OR UPPER(ts_code) = ?
+                  )
                 ORDER BY rank NULLS LAST, ts_code
                 LIMIT ?
             )
@@ -1524,7 +1533,14 @@ pub fn get_strategy_trigger_similarity_ranking_page(
                 )
                 .map_err(|e| format!("预编译相似排行读取失败: {e}"))?;
             let mut rows = stmt
-                .query(params![trade_date, config_key, limit as i64, trade_date])
+                .query(params![
+                    trade_date,
+                    config_key,
+                    ts_code,
+                    ts_code,
+                    limit as i64,
+                    trade_date
+                ])
                 .map_err(|e| format!("查询相似排行失败: {e}"))?;
             let mut out = Vec::new();
             while let Some(row) = rows.next().map_err(|e| format!("读取相似排行失败: {e}"))?
@@ -2720,6 +2736,7 @@ pub fn run_strategy_trigger_similarity_ranking(
         exclude_st_board,
         total_mv_min,
         total_mv_max,
+        None,
     )?;
     set_ranking_progress("completed", "走势相似排行榜计算完成", 1, 1);
     Ok(page)
@@ -3299,10 +3316,29 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("read ranking");
         assert!(reread.is_fresh);
         assert_eq!(reread.items.len(), computed.items.len());
+
+        let searched = get_strategy_trigger_similarity_ranking_page(
+            source_path.clone(),
+            Some("20240110".to_string()),
+            Some(3),
+            Some(2),
+            Some(2),
+            Some("000001.SH".to_string()),
+            Some(100),
+            None,
+            None,
+            None,
+            None,
+            Some("TARGET.SZ".to_string()),
+        )
+        .expect("filter ranking by stock code");
+        assert_eq!(searched.items.len(), 1);
+        assert_eq!(searched.items[0].ts_code, "TARGET.SZ");
 
         let result = Connection::open(source_dir.join("scoring_result.db"))
             .expect("reopen result db for mutation");
@@ -3321,6 +3357,7 @@ mod tests {
             Some(2),
             Some("000001.SH".to_string()),
             Some(100),
+            None,
             None,
             None,
             None,

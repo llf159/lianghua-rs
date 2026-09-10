@@ -176,6 +176,7 @@ export type StrategyTriggerRankingQuery = {
   excludeStBoard?: boolean
   totalMvMin?: number
   totalMvMax?: number
+  tsCode?: string
 }
 
 export async function getStrategyTriggerSimilarityRankingPage(

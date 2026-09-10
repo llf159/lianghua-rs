@@ -780,6 +780,8 @@
 .details-prev-rank-card {
   min-height: 0;
   height: var(--details-prev-rank-card-height);
+  box-sizing: border-box;
+  overflow: hidden;
 }
 
 .details-overview-table-wrap {
@@ -859,7 +861,8 @@
 
 .details-prev-rank-card-body {
   display: grid;
-  align-content: start;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .details-similarity-card {
@@ -2101,7 +2104,27 @@
 }
 
 .details-prev-rank-table-wrap {
-  max-height: 100%;
+  min-height: 0;
+  height: 100%;
+}
+
+/* App.css intentionally expands generic table wrappers with !important.
+   These two cards are height-constrained on desktop, so their tables must
+   remain the vertical scroll owners instead of growing the page. */
+body .details-prev-rank-table-wrap {
+  max-height: 100% !important;
+  overflow: auto !important;
+  overscroll-behavior: contain;
+}
+
+@media (min-width: 981px) {
+  body .details-similarity-table-wrap {
+    min-height: 0;
+    height: 100%;
+    max-height: 100% !important;
+    overflow: auto !important;
+    overscroll-behavior: contain;
+  }
 }
 
 .details-prev-rank-row {

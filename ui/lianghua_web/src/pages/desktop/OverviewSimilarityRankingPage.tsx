@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { ensureManagedSourcePath } from '../../apis/managedSource'
-import { listRankTradeDates } from '../../apis/reader'
+import { listRankTradeDates, listStockLookupRows, type StockLookupRow } from '../../apis/reader'
 import {
   getStrategyTriggerSimilarityRankingPage,
   type StrategyTriggerRankingPageData,
@@ -15,6 +15,11 @@ import {
 } from '../../shared/conceptExclusions'
 import { STOCK_PICK_BOARD_OPTIONS } from '../../shared/stockPickShared'
 import { readStoredDefaultBoardFilter } from '../../shared/defaultBoardFilter'
+import {
+  buildStockLookupCandidates,
+  findExactStockLookupMatch,
+  getLookupDigits,
+} from '../../shared/stockLookup'
 import { normalizeTradeDates, pickDateValue } from '../../shared/tradeDate'
 import StickyHorizontalTable from '../../shared/StickyHorizontalTable'
 import './css/StrategyTriggerSimilarityPage.css'
@@ -54,6 +59,10 @@ export default function OverviewSimilarityRankingPage() {
   const { excludedConcepts, excludeStBoard } = useConceptExclusions()
   const [limitInput, setLimitInput] = useState('100')
   const [boardFilter, setBoardFilter] = useState(() => readStoredDefaultBoardFilter())
+  const [lookupRows, setLookupRows] = useState<StockLookupRow[]>([])
+  const [lookupInput, setLookupInput] = useState('')
+  const [lookupFocused, setLookupFocused] = useState(false)
+  const [selectedTsCode, setSelectedTsCode] = useState('')
   const [totalMvMinInput, setTotalMvMinInput] = useState('')
   const [totalMvMaxInput, setTotalMvMaxInput] = useState('')
   const initialAutoReadFiltersRef = useRef({
@@ -65,6 +74,18 @@ export default function OverviewSimilarityRankingPage() {
   })
 
   const boardOptions = useMemo(() => filterBoardItems(STOCK_PICK_BOARD_OPTIONS, excludeStBoard), [excludeStBoard])
+  const deferredLookupInput = useDeferredValue(lookupInput)
+  const stockCandidates = useMemo(
+    () => buildStockLookupCandidates(lookupRows, deferredLookupInput, 12),
+    [deferredLookupInput, lookupRows],
+  )
+  const exactStockMatch = useMemo(
+    () => findExactStockLookupMatch(lookupRows, lookupInput),
+    [lookupInput, lookupRows],
+  )
+  const targetTsCode = selectedTsCode || exactStockMatch?.ts_code || ''
+  const showStockCandidates =
+    lookupFocused && lookupInput.trim() !== '' && stockCandidates.length > 0
 
   useEffect(() => {
     if (excludeStBoard && isStBoard(boardFilter)) {
@@ -102,11 +123,15 @@ export default function OverviewSimilarityRankingPage() {
     let cancelled = false
     void ensureManagedSourcePath()
       .then(async (path) => {
-        const dates = await listRankTradeDates(path)
+        const [dates, stocks] = await Promise.all([
+          listRankTradeDates(path),
+          listStockLookupRows(path),
+        ])
         if (cancelled) return
         const normalizedDates = normalizeTradeDates(dates)
         const initialTradeDate = pickDateValue('', normalizedDates)
         setSourcePath(path)
+        setLookupRows(stocks)
         setDateOptions(normalizedDates)
         setTradeDate(initialTradeDate)
         if (initialTradeDate) {
@@ -135,6 +160,11 @@ export default function OverviewSimilarityRankingPage() {
     if (!sourcePath || !tradeDate) return
     setLoading(true)
     setError('')
+    if (lookupInput.trim() && !targetTsCode) {
+      setError('请从搜索候选中选择股票')
+      setLoading(false)
+      return
+    }
     let limit: number | undefined
     const limitRaw = limitInput.trim()
     if (limitRaw) {
@@ -186,6 +216,7 @@ export default function OverviewSimilarityRankingPage() {
         excludeStBoard: excludeStBoard || undefined,
         totalMvMin,
         totalMvMax,
+        tsCode: targetTsCode || undefined,
       })
       setData(result)
     } catch (readError) {
@@ -262,6 +293,54 @@ export default function OverviewSimilarityRankingPage() {
                 </option>
               ))}
             </select>
+          </label>
+          <label className="overview-field">
+            <span>股票搜索{targetTsCode ? `：${targetTsCode}` : ''}</span>
+            <div className="trigger-sim-autocomplete">
+              <input
+                type="text"
+                value={lookupInput}
+                onChange={(event) => {
+                  setLookupInput(event.target.value)
+                  setSelectedTsCode('')
+                }}
+                onFocus={() => setLookupFocused(true)}
+                onBlur={() => setLookupFocused(false)}
+                onKeyDown={(event) => {
+                  if (event.key !== 'Enter') return
+                  event.preventDefault()
+                  if (stockCandidates.length > 0) {
+                    const stock = stockCandidates[0]
+                    setLookupInput(stock.name || getLookupDigits(stock.ts_code) || stock.ts_code)
+                    setSelectedTsCode(stock.ts_code)
+                    setLookupFocused(false)
+                  } else {
+                    void onRead()
+                  }
+                }}
+                placeholder="输入代码 / 名称 / 拼音首字母"
+              />
+              {showStockCandidates ? (
+                <div className="trigger-sim-autocomplete-menu">
+                  {stockCandidates.map((stock) => (
+                    <button
+                      className="trigger-sim-autocomplete-option"
+                      key={stock.ts_code}
+                      type="button"
+                      onMouseDown={(event) => {
+                        event.preventDefault()
+                        setLookupInput(stock.name || getLookupDigits(stock.ts_code) || stock.ts_code)
+                        setSelectedTsCode(stock.ts_code)
+                        setLookupFocused(false)
+                      }}
+                    >
+                      <strong>{stock.name}</strong>
+                      <span>{getLookupDigits(stock.ts_code) || stock.ts_code}</span>
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </div>
           </label>
           <label className="overview-field">
             <span>总市值最小(亿)</span>

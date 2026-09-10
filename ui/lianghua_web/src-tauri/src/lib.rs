@@ -1008,6 +1008,7 @@ async fn get_strategy_trigger_similarity_ranking_page(
     exclude_st_board: Option<bool>,
     total_mv_min: Option<f64>,
     total_mv_max: Option<f64>,
+    ts_code: Option<String>,
 ) -> Result<StrategyTriggerRankingPageData, String> {
     tauri::async_runtime::spawn_blocking(move || {
         core_get_strategy_trigger_similarity_ranking_page(
@@ -1022,6 +1023,7 @@ async fn get_strategy_trigger_similarity_ranking_page(
             exclude_st_board,
             total_mv_min,
             total_mv_max,
+            ts_code,
         )
     })
     .await
