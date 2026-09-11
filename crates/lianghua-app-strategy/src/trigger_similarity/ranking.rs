@@ -194,13 +194,6 @@ pub struct StrategyTriggerRankingPageData {
 }
 
 #[derive(Debug, Clone)]
-struct ChannelFingerprint {
-    vectors: Vec<Option<Vec<f64>>>,
-    norms: Vec<f64>,
-    has_vectors: bool,
-}
-
-#[derive(Debug, Clone)]
 struct RankingFingerprint {
     trigger: TriggerFingerprint,
     price_volume: ChannelFingerprint,
@@ -609,60 +602,6 @@ pub fn get_strategy_trigger_similarity_active_config(
     }))
 }
 
-fn build_channel_fingerprint(vectors: Vec<Option<Vec<f64>>>) -> ChannelFingerprint {
-    let mut has_vectors = false;
-    let norms = vectors
-        .iter()
-        .map(|vector| {
-            let Some(vector) = vector else {
-                return 0.0;
-            };
-            has_vectors = true;
-            vector_norm(vector)
-        })
-        .collect();
-    ChannelFingerprint {
-        vectors,
-        norms,
-        has_vectors,
-    }
-}
-
-fn share_environment_fingerprints(
-    fingerprints: HashMap<String, Vec<Option<Vec<f64>>>>,
-) -> HashMap<String, Arc<ChannelFingerprint>> {
-    fingerprints
-        .into_iter()
-        .map(|(trade_date, vectors)| (trade_date, Arc::new(build_channel_fingerprint(vectors))))
-        .collect()
-}
-
-fn cached_channel_similarity(
-    target: &ChannelFingerprint,
-    candidate: &ChannelFingerprint,
-) -> Option<f64> {
-    let mut score_sum = 0.0;
-    let mut score_count = 0;
-    for (index, (left, right)) in target.vectors.iter().zip(&candidate.vectors).enumerate() {
-        let (Some(left), Some(right)) = (left, right) else {
-            continue;
-        };
-        let left_norm = target.norms[index];
-        let right_norm = candidate.norms[index];
-        let score = if left_norm <= EPS && right_norm <= EPS {
-            100.0
-        } else if left_norm <= EPS || right_norm <= EPS {
-            0.0
-        } else {
-            let dot = dot_product(left, right);
-            (50.0 * (1.0 + dot / (left_norm * right_norm))).clamp(0.0, 100.0)
-        };
-        score_sum += score;
-        score_count += 1;
-    }
-    (score_count > 0).then(|| score_sum / score_count as f64)
-}
-
 #[allow(clippy::too_many_arguments)]
 fn build_ranking_samples_for_chunk(
     conn: &Connection,
@@ -678,6 +617,7 @@ fn build_ranking_samples_for_chunk(
     target_trade_date: &str,
     include_outcome: bool,
     progress: Option<(&str, usize, usize)>,
+    rule_catalog: &mut RuleCatalog,
 ) -> Result<Vec<RankingSample>, String> {
     if let Some((phase, completed, total)) = progress {
         set_ranking_progress(phase, "正在读取本批股票的行情和指标窗口", completed, total);
@@ -686,11 +626,16 @@ fn build_ranking_samples_for_chunk(
     if let Some((phase, completed, total)) = progress {
         set_ranking_progress(phase, "正在读取本批股票的策略触发窗口", completed, total);
     }
-    let rules_by_anchor = load_rule_rows(conn, &anchors)?;
-    if let Some((phase, completed, total)) = progress {
-        set_ranking_progress(phase, "正在读取本批股票的评分摘要", completed, total);
-    }
-    let summaries = load_summary_rows(conn, &anchors)?;
+    let rules_by_anchor = load_rule_rows(conn, &anchors, rule_catalog)?;
+    // 历史模板不使用原始评分和排名，只有当日目标需要展示这两个字段。
+    let summaries = if include_outcome {
+        HashMap::new()
+    } else {
+        if let Some((phase, completed, total)) = progress {
+            set_ranking_progress(phase, "正在读取本批股票的评分摘要", completed, total);
+        }
+        load_summary_rows(conn, &anchors)?
+    };
     let future_by_anchor = if include_outcome {
         if let Some((phase, completed, total)) = progress {
             set_ranking_progress(phase, "正在读取本批历史模板的后验行情", completed, total);
@@ -794,7 +739,7 @@ fn load_outcome_selected_anchors(
     all_trade_dates: &[String],
     window_trade_days: usize,
     outcome_trade_days: usize,
-    benchmark_index_code: &str,
+    benchmark_rows: &HashMap<String, BenchmarkObservation>,
 ) -> Result<(Vec<OutcomeSelectedAnchor>, usize), String> {
     let date_index = all_trade_dates
         .iter()
@@ -810,8 +755,6 @@ fn load_outcome_selected_anchors(
         .copied()
         .ok_or_else(|| format!("历史截止日不在评分交易日中: {cutoff_date}"))?;
 
-    let benchmark_rows =
-        load_benchmark_rows(conn, earliest_date, target_date, benchmark_index_code)?;
     let mut scored_dates = HashMap::<String, Vec<bool>>::new();
     let mut score_stmt = conn
         .prepare(
@@ -1793,7 +1736,7 @@ pub fn run_strategy_trigger_similarity_ranking(
         &all_trade_dates,
         window_trade_days,
         outcome_trade_days,
-        &benchmark_index_code,
+        &benchmark_rows,
     )?;
     let selected_quality = selected_anchors
         .iter()
@@ -1809,6 +1752,7 @@ pub fn run_strategy_trigger_similarity_ranking(
         .into_iter()
         .map(|selected| selected.anchor)
         .collect::<Vec<_>>();
+    let mut rule_catalog = RuleCatalog::default();
     let mut candidates = Vec::with_capacity(candidate_anchor_count);
     let mut candidate_anchor_iter = candidate_anchors.into_iter();
     set_ranking_progress(
@@ -1845,6 +1789,7 @@ pub fn run_strategy_trigger_similarity_ranking(
                 candidate_completed,
                 candidate_anchor_count,
             )),
+            &mut rule_catalog,
         )?;
         for sample in &mut chunk_samples {
             if let Some((quality_score, quality_class)) = selected_quality.get(&sample.anchor.id) {
@@ -1925,6 +1870,7 @@ pub fn run_strategy_trigger_similarity_ranking(
             &resolved_trade_date,
             false,
             Some(("target-fingerprints", target_completed, target_anchor_count)),
+            &mut rule_catalog,
         )?);
         target_completed += chunk_len;
         set_ranking_progress(
@@ -1939,28 +1885,35 @@ pub fn run_strategy_trigger_similarity_ranking(
         elapsed_ms: elapsed_ms(phase),
     });
 
+    let phase = Instant::now();
     set_ranking_progress("candidate-index", "正在建立历史模板的规则倒排索引", 0, 0);
-    let mut candidate_by_rule = HashMap::<&str, Vec<CandidateRulePosting>>::new();
+    let mut candidate_by_rule = vec![Vec::<CandidateRulePosting>::new(); rule_catalog.names.len()];
     for (index, candidate) in candidates.iter().enumerate() {
         for (rule_name, hits) in &candidate.fingerprint.trigger.by_rule {
-            candidate_by_rule
-                .entry(rule_name.as_str())
-                .or_default()
-                .push(CandidateRulePosting {
-                    candidate_index: index,
-                    hit_count: hits.len(),
-                });
+            candidate_by_rule[*rule_name].push(CandidateRulePosting {
+                candidate_index: index,
+                hit_count: hits.len(),
+            });
         }
     }
     let industry_map = build_industry_map(&source_path).unwrap_or_default();
     let concept_map = build_concepts_map(&source_path).unwrap_or_default();
     set_ranking_progress("candidate-index", "正在读取并计算规则权重", 0, 0);
-    let rule_weights =
-        load_rule_idf_weights(&conn, earliest_candidate_date, &historical_cutoff_date)?;
+    let rule_weights = load_rule_idf_weights(
+        &conn,
+        earliest_candidate_date,
+        &historical_cutoff_date,
+        &mut rule_catalog,
+    )?;
     let candidate_rule_weight_sums = candidates
         .par_iter()
         .map(|candidate| trigger_rule_weight_sum(&candidate.fingerprint.trigger, &rule_weights))
         .collect::<Vec<_>>();
+
+    timings.push(StrategyTriggerRankingTiming {
+        label: "规则倒排索引与权重".to_string(),
+        elapsed_ms: elapsed_ms(phase),
+    });
 
     let phase = Instant::now();
     let ranking_completed = AtomicUsize::new(0);
@@ -2013,28 +1966,28 @@ pub fn run_strategy_trigger_similarity_ranking(
                         candidates: &[RankingSample],
                         candidate_market_similarities: &[Option<f64>],
                         candidate_rule_weight_sums: &[f64],
-                        candidate_by_rule: &HashMap<&str, Vec<CandidateRulePosting>>,
+                        candidate_by_rule: &[Vec<CandidateRulePosting>],
                         all_trade_dates: &[String],
                         window_trade_days: usize,
                         outcome_trade_days: usize,
                         name_map: &HashMap<String, String>,
                         industry_map: &HashMap<String, String>,
                         concept_map: &HashMap<String, String>,
-                        rule_weights: &HashMap<String, f64>|
+                        rule_weights: &[f64]|
              -> StrategyTriggerRankingRow {
                 RANKING_TARGET_SCRATCH.with(|scratch| {
                     (|target: &RankingSample,
                       candidates: &[RankingSample],
                       candidate_market_similarities: &[Option<f64>],
                       candidate_rule_weight_sums: &[f64],
-                      candidate_by_rule: &HashMap<&str, Vec<CandidateRulePosting>>,
+                      candidate_by_rule: &[Vec<CandidateRulePosting>],
                       all_trade_dates: &[String],
                       window_trade_days: usize,
                       outcome_trade_days: usize,
                       name_map: &HashMap<String, String>,
                       industry_map: &HashMap<String, String>,
                       concept_map: &HashMap<String, String>,
-                      rule_weights: &HashMap<String, f64>,
+                      rule_weights: &[f64],
                       scratch: &mut RankingTargetScratch|
                      -> StrategyTriggerRankingRow {
                         let target_rule_weight_sum =
@@ -2044,10 +1997,10 @@ pub fn run_strategy_trigger_similarity_ranking(
                         // 实际命中的候选，不再全量清零 candidates.len() 个浮点数。
                         scratch.prepare(candidates.len(), per_class_limit);
                         for (rule_name, target_hits) in &target.fingerprint.trigger.by_rule {
-                            let Some(indices) = candidate_by_rule.get(rule_name.as_str()) else {
+                            let Some(indices) = candidate_by_rule.get(*rule_name) else {
                                 continue;
                             };
-                            let weight = rule_weight(rule_weights, rule_name);
+                            let weight = rule_weight(rule_weights, *rule_name);
                             for posting in indices {
                                 let smaller = target_hits.len().min(posting.hit_count) as f64;
                                 let larger = target_hits.len().max(posting.hit_count) as f64;
@@ -2241,11 +2194,13 @@ pub fn run_strategy_trigger_similarity_ranking(
                                         - aggregate * TRIGGER_AGGREGATE_RHYTHM_WEIGHT)
                                         / TRIGGER_RULE_TIMING_WEIGHT
                                 });
-                            let Some(timing) = weighted_rule_timing_similarity_with_minimum(
+                            let Some(timing) = weighted_rule_timing_similarity_with_masses(
                                 &target.fingerprint.trigger,
                                 &candidate.fingerprint.trigger,
                                 rule_weights,
                                 minimum_timing,
+                                scratch.candidate_intersection_weights[candidate_index],
+                                scratch.candidate_timing_upper_weights[candidate_index],
                             ) else {
                                 continue;
                             };
@@ -2640,22 +2595,13 @@ pub fn run_strategy_trigger_similarity_ranking(
                     .map_err(|e| format!("写入相似排行失败 {}: {e}", row.ts_code))?;
             }
         }
-        {
-            let mut insert = tx
-                .prepare(
-                    "INSERT INTO strategy_trigger_similarity_summary (trade_date, ts_code, rank) VALUES (?, ?, ?)",
-                )
-                .map_err(|e| format!("预编译相似排行汇总写入失败: {e}"))?;
-            for row in rows {
-                insert
-                    .execute(params![
-                        trade_date,
-                        row.ts_code,
-                        row.rank.map(|value| value as i64),
-                    ])
-                    .map_err(|e| format!("写入相似排行汇总失败 {}: {e}", row.ts_code))?;
-            }
-        }
+        tx.execute(
+            "INSERT INTO strategy_trigger_similarity_summary (trade_date, ts_code, rank)
+             SELECT trade_date, ts_code, rank FROM strategy_trigger_similarity_rank
+             WHERE trade_date=? AND config_key=?",
+            params![trade_date, config_key],
+        )
+        .map_err(|e| format!("写入相似排行汇总失败: {e}"))?;
         let timings_json =
             serde_json::to_string(timings).map_err(|e| format!("序列化相似排行计时失败: {e}"))?;
         tx.execute(
@@ -2883,6 +2829,110 @@ mod tests {
     }
 
     #[test]
+    fn sample_builders_skip_unused_summary_and_preloaded_rule_queries() {
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        conn.execute_batch("ATTACH ':memory:' AS trigger_market_db;
+            CREATE TABLE trigger_market_db.stock_data(ts_code VARCHAR, trade_date VARCHAR, adj_type VARCHAR, open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE);
+            INSERT INTO trigger_market_db.stock_data VALUES
+            ('A', '20240101', 'qfq', 10, 12, 9, 11),
+            ('A', '20240102', 'qfq', 11, 13, 10, 12),
+            ('A', '20240103', 'qfq', 12, 14, 11, 13),
+            ('A', '20240104', 'qfq', 13, 15, 12, 14);
+            CREATE TABLE rule_details(ts_code VARCHAR, trade_date VARCHAR, rule_name VARCHAR, rule_score DOUBLE);
+            INSERT INTO rule_details VALUES ('A', '20240103', '启动', 1.0);").unwrap();
+        let schema = load_market_schema(&conn).unwrap();
+        let dates = (1..=4)
+            .map(|day| format!("202401{day:02}"))
+            .collect::<Vec<_>>();
+        let anchor = super::Anchor {
+            id: 7,
+            ts_code: "A".into(),
+            start_trade_date: dates[0].clone(),
+            end_trade_date: dates[2].clone(),
+        };
+        let benchmark = HashMap::from([(
+            dates[3].clone(),
+            super::BenchmarkObservation {
+                open: 10.0,
+                close: 11.0,
+            },
+        )]);
+        let environment = HashMap::new();
+        let names = HashMap::new();
+        let market_caps = HashMap::new();
+        let mut catalog = super::RuleCatalog::default();
+        // 不创建 score_summary：历史模板若仍查询摘要，这里会直接失败。
+        let historical = build_ranking_samples_for_chunk(
+            &conn,
+            vec![anchor.clone()],
+            &schema,
+            &dates,
+            &environment,
+            &benchmark,
+            &market_caps,
+            &names,
+            2,
+            1,
+            &dates[3],
+            true,
+            None,
+            &mut catalog,
+        )
+        .unwrap();
+        assert_eq!(historical.len(), 1);
+        assert!(historical[0].total_score.is_none());
+        assert!(historical[0].original_rank.is_none());
+        assert!(historical[0].outcome.is_some());
+        let rules =
+            super::load_rule_rows(&conn, std::slice::from_ref(&anchor), &mut catalog).unwrap();
+        let context = super::SampleBuildContext {
+            schema: &schema,
+            all_trade_dates: &dates,
+            environment_fingerprints: &environment,
+            benchmark_rows: &benchmark,
+            total_mv_map: &market_caps,
+            name_map: &names,
+            pool_segments: 2,
+            outcome_trade_days: 1,
+            target_trade_date: &dates[3],
+            include_outcome: false,
+            include_summaries: false,
+        };
+        let original = super::build_samples_for_chunk(
+            &conn,
+            vec![anchor.clone()],
+            &context,
+            &mut catalog,
+            None,
+        )
+        .unwrap();
+        conn.execute_batch("DROP TABLE rule_details").unwrap();
+        let reused = super::build_samples_for_chunk(
+            &conn,
+            vec![anchor],
+            &context,
+            &mut catalog,
+            Some(rules),
+        )
+        .unwrap();
+        assert_eq!(reused.len(), 1);
+        assert_eq!(reused[0].trigger_count, original[0].trigger_count);
+        assert_eq!(
+            reused[0].fingerprint.dimension(),
+            original[0].fingerprint.dimension()
+        );
+        assert!(
+            (super::trigger_fingerprint_similarity(
+                &reused[0].fingerprint.trigger,
+                &original[0].fingerprint.trigger,
+                &[]
+            ) - 100.0)
+                .abs()
+                < 1e-9
+        );
+    }
+
+    #[test]
     fn channel_fingerprint_supports_more_than_sixty_four_indicators() {
         let target =
             build_channel_fingerprint((0..80).map(|index| Some(vec![index as f64])).collect());
@@ -2962,6 +3012,8 @@ mod tests {
         let cutoff_index = all_trade_dates.len() - 1 - horizon;
         let earliest_date = all_trade_dates[19].clone();
         let cutoff_date = all_trade_dates[cutoff_index].clone();
+        let benchmark_rows = load_benchmark_rows(&conn, &earliest_date, &target_date, "000001.SH")
+            .expect("load benchmark");
         let started = std::time::Instant::now();
         let (anchors, universe_count) = load_outcome_selected_anchors(
             &conn,
@@ -2971,7 +3023,7 @@ mod tests {
             &all_trade_dates,
             20,
             horizon,
-            "000001.SH",
+            &benchmark_rows,
         )
         .expect("scan real outcome labels");
         eprintln!(
@@ -3014,7 +3066,7 @@ mod tests {
             &all_trade_dates,
             20,
             horizon,
-            "000001.SH",
+            &benchmark_rows,
         )
         .expect("load selected anchors");
         let anchors = selected
@@ -3024,6 +3076,7 @@ mod tests {
         let anchor_count = anchors.len();
         let started = std::time::Instant::now();
         let mut built = 0;
+        let mut rule_catalog = super::RuleCatalog::default();
         let mut anchor_iter = anchors.into_iter();
         loop {
             let chunk = anchor_iter
@@ -3047,6 +3100,7 @@ mod tests {
                 &target_date,
                 true,
                 None,
+                &mut rule_catalog,
             )
             .expect("build candidate fingerprints")
             .len();
@@ -3274,6 +3328,19 @@ mod tests {
         assert!(computed.items.iter().any(|row| row.ts_code == "TARGET.SZ"));
         let result = Connection::open(source_dir.join("scoring_result.db"))
             .expect("reopen result db for active config assertions");
+        let summary_difference: i64 = result.query_row(
+            "SELECT COUNT(*) FROM (
+                (SELECT trade_date, ts_code, rank FROM strategy_trigger_similarity_summary
+                 EXCEPT ALL SELECT trade_date, ts_code, rank FROM strategy_trigger_similarity_rank)
+                UNION ALL
+                (SELECT trade_date, ts_code, rank FROM strategy_trigger_similarity_rank
+                 EXCEPT ALL SELECT trade_date, ts_code, rank FROM strategy_trigger_similarity_summary)
+             ) differences", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(
+            summary_difference, 0,
+            "汇总应保留全部日期和 NULL 排名，且无重复行"
+        );
         let active = get_strategy_trigger_similarity_active_config(&result)
             .expect("read active config")
             .expect("active config should exist");

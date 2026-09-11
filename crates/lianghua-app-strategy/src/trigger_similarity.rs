@@ -143,9 +143,28 @@ struct Anchor {
     end_trade_date: String,
 }
 
+// 一次计算共用同一份字典；编号只用于内存计算，不写入结果库。
+#[derive(Default)]
+struct RuleCatalog {
+    ids: HashMap<String, usize>,
+    names: Vec<String>,
+}
+
+impl RuleCatalog {
+    fn intern(&mut self, name: String) -> usize {
+        if let Some(&id) = self.ids.get(&name) {
+            return id;
+        }
+        let id = self.names.len();
+        self.names.push(name.clone());
+        self.ids.insert(name, id);
+        id
+    }
+}
+
 #[derive(Debug, Clone)]
 struct RuleEvent {
-    rule_name: String,
+    rule_id: usize,
     trade_date: String,
     score: f64,
 }
@@ -191,11 +210,18 @@ struct BenchmarkObservation {
 }
 
 #[derive(Debug, Clone)]
+struct ChannelFingerprint {
+    vectors: Vec<Option<Vec<f64>>>,
+    norms: Vec<f64>,
+    has_vectors: bool,
+}
+
+#[derive(Debug, Clone)]
 struct EventFingerprint {
     trigger: TriggerFingerprint,
-    price_volume: Vec<Option<Vec<f64>>>,
-    indicators: Vec<Option<Vec<f64>>>,
-    market: Arc<Vec<Option<Vec<f64>>>>,
+    price_volume: ChannelFingerprint,
+    indicators: ChannelFingerprint,
+    market: Arc<ChannelFingerprint>,
 }
 
 impl EventFingerprint {
@@ -203,9 +229,10 @@ impl EventFingerprint {
         self.trigger.dimension()
             + self
                 .price_volume
+                .vectors
                 .iter()
-                .chain(self.indicators.iter())
-                .chain(self.market.iter())
+                .chain(self.indicators.vectors.iter())
+                .chain(self.market.vectors.iter())
                 .filter_map(|channel| channel.as_ref().map(Vec::len))
                 .sum::<usize>()
     }
@@ -219,7 +246,7 @@ struct RuleTriggerHit {
 
 #[derive(Debug, Clone)]
 struct TriggerFingerprint {
-    by_rule: HashMap<String, Vec<RuleTriggerHit>>,
+    by_rule: HashMap<usize, Vec<RuleTriggerHit>>,
     total_count: Vec<f64>,
     total_score: Vec<f64>,
     total_count_norm: f64,
@@ -515,6 +542,7 @@ fn load_market_rows(
 fn load_rule_rows(
     conn: &Connection,
     anchors: &[Anchor],
+    rule_catalog: &mut RuleCatalog,
 ) -> Result<HashMap<usize, Vec<RuleEvent>>, String> {
     if anchors.is_empty() {
         return Ok(HashMap::new());
@@ -546,7 +574,8 @@ fn load_rule_rows(
         out.entry(anchor_id.max(0) as usize)
             .or_default()
             .push(RuleEvent {
-                rule_name: row.get(1).map_err(|e| format!("读取规则名失败: {e}"))?,
+                rule_id: rule_catalog
+                    .intern(row.get(1).map_err(|e| format!("读取规则名失败: {e}"))?),
                 trade_date: row.get(2).map_err(|e| format!("读取触发日期失败: {e}"))?,
                 score: row.get(3).map_err(|e| format!("读取规则分数失败: {e}"))?,
             });
@@ -563,8 +592,48 @@ fn load_future_rows(
     if anchors.is_empty() {
         return Ok(HashMap::new());
     }
-    let sql = format!(
-        r#"
+    // 先为批内每只股票的行情编号，再按锚点截取后续 N 行。
+    // ASOF 取锚点之前最后一个序号，兼容锚点当天无行情和停牌；无效行情仍占序号，
+    // 保持原先 ROW_NUMBER 截断后才过滤 NULL/非有限价格的口径。
+    let mut stock_codes = HashSet::with_capacity(anchors.len());
+    let has_repeated_stock = anchors
+        .iter()
+        .any(|anchor| !stock_codes.insert(anchor.ts_code.as_str()));
+    let sql = if has_repeated_stock {
+        format!(
+            r#"
+        WITH anchors(anchor_id, ts_code, start_date, end_date) AS (VALUES {}),
+        stock_scope AS (
+            SELECT ts_code, MIN(end_date) AS first_end_date FROM anchors GROUP BY ts_code
+        ),
+        numbered AS MATERIALIZED (
+            SELECT s.ts_code, s.trade_date,
+                   TRY_CAST(s.open AS DOUBLE) AS open_value,
+                   TRY_CAST(s.close AS DOUBLE) AS close_value,
+                   TRY_CAST(s.high AS DOUBLE) AS high_value,
+                   TRY_CAST(s.low AS DOUBLE) AS low_value,
+                   ROW_NUMBER() OVER (PARTITION BY s.ts_code ORDER BY s.trade_date) AS rn
+            FROM trigger_market_db.stock_data s JOIN stock_scope scope ON s.ts_code=scope.ts_code
+            WHERE s.trade_date > scope.first_end_date AND s.trade_date <= {} AND s.adj_type='qfq'
+        ),
+        anchor_positions AS (
+            SELECT a.anchor_id, a.ts_code, COALESCE(n.rn, 0) AS end_rn
+            FROM anchors a ASOF LEFT JOIN numbered n
+              ON a.ts_code=n.ts_code AND a.end_date >= n.trade_date
+        )
+        SELECT a.anchor_id, n.trade_date, n.open_value, n.close_value, n.high_value, n.low_value
+        FROM anchor_positions a JOIN numbered n ON n.ts_code=a.ts_code
+          AND n.rn > a.end_rn AND n.rn <= a.end_rn + {}
+        ORDER BY a.anchor_id, n.trade_date
+        "#,
+            anchors_values_sql(anchors),
+            sql_string_literal(target_trade_date),
+            outcome_trade_days,
+        )
+    } else {
+        // 每股只有一个锚点时没有重复展开，沿用更轻的原查询。
+        format!(
+            r#"
         WITH anchors(anchor_id, ts_code, start_date, end_date) AS (VALUES {}),
         future AS (
             SELECT a.anchor_id, s.trade_date, TRY_CAST(s.open AS DOUBLE) AS open_value,
@@ -579,10 +648,11 @@ fn load_future_rows(
         FROM future WHERE rn <= {}
         ORDER BY anchor_id, trade_date
         "#,
-        anchors_values_sql(anchors),
-        sql_string_literal(target_trade_date),
-        outcome_trade_days,
-    );
+            anchors_values_sql(anchors),
+            sql_string_literal(target_trade_date),
+            outcome_trade_days,
+        )
+    };
     let mut stmt = conn
         .prepare(&sql)
         .map_err(|e| format!("预编译事件后验查询失败: {e}"))?;
@@ -934,7 +1004,7 @@ fn build_trigger_fingerprint(
         .enumerate()
         .map(|(i, date)| (date.as_str(), i))
         .collect::<HashMap<_, _>>();
-    let mut by_rule = HashMap::<String, Vec<RuleTriggerHit>>::new();
+    let mut by_rule = HashMap::<usize, Vec<RuleTriggerHit>>::new();
     let mut total_count = vec![Some(0.0); window_dates.len()];
     let mut total_score = vec![Some(0.0); window_dates.len()];
     for event in events {
@@ -943,10 +1013,10 @@ fn build_trigger_fingerprint(
                 day_index: index,
                 score: event.score,
             };
-            if let Some(hits) = by_rule.get_mut(&event.rule_name) {
+            if let Some(hits) = by_rule.get_mut(&event.rule_id) {
                 hits.push(hit);
             } else {
-                by_rule.insert(event.rule_name.clone(), vec![hit]);
+                by_rule.insert(event.rule_id, vec![hit]);
             }
         }
     }
@@ -987,7 +1057,8 @@ fn load_rule_idf_weights(
     conn: &Connection,
     start_date: &str,
     end_date: &str,
-) -> Result<HashMap<String, f64>, String> {
+    rule_catalog: &mut RuleCatalog,
+) -> Result<Vec<f64>, String> {
     let mut stmt = conn
         .prepare(
             "SELECT rule_name, COUNT(*) \
@@ -1017,31 +1088,28 @@ fn load_rule_idf_weights(
             counts.push((name, count));
         }
     }
-    Ok(counts
-        .into_iter()
-        .map(|(name, count)| {
-            let idf = (1.0 + total / count).ln().clamp(1.0, 6.0);
-            (name, idf)
-        })
-        .collect())
+    let mut weights = vec![1.0; rule_catalog.names.len()];
+    for (name, count) in counts {
+        let id = rule_catalog.intern(name);
+        weights.resize(rule_catalog.names.len(), 1.0);
+        weights[id] = (1.0 + total / count).ln().clamp(1.0, 6.0);
+    }
+    Ok(weights)
 }
 
-fn rule_weight(rule_weights: &HashMap<String, f64>, rule_name: &str) -> f64 {
+fn rule_weight(rule_weights: &[f64], rule_id: usize) -> f64 {
     rule_weights
-        .get(rule_name)
+        .get(rule_id)
         .copied()
         .filter(|weight| weight.is_finite() && *weight > 0.0)
         .unwrap_or(1.0)
 }
 
-fn trigger_rule_weight_sum(
-    fingerprint: &TriggerFingerprint,
-    rule_weights: &HashMap<String, f64>,
-) -> f64 {
+fn trigger_rule_weight_sum(fingerprint: &TriggerFingerprint, rule_weights: &[f64]) -> f64 {
     fingerprint
         .by_rule
         .keys()
-        .map(|name| rule_weight(rule_weights, name))
+        .map(|name| rule_weight(rule_weights, *name))
         .sum()
 }
 
@@ -1049,7 +1117,7 @@ fn trigger_rule_weight_sum(
 fn weighted_rule_set_similarity(
     target: &TriggerFingerprint,
     candidate: &TriggerFingerprint,
-    rule_weights: &HashMap<String, f64>,
+    rule_weights: &[f64],
 ) -> f64 {
     weighted_rule_set_similarity_with_masses(
         target,
@@ -1063,7 +1131,7 @@ fn weighted_rule_set_similarity(
 fn weighted_rule_set_similarity_with_masses(
     target: &TriggerFingerprint,
     candidate: &TriggerFingerprint,
-    rule_weights: &HashMap<String, f64>,
+    rule_weights: &[f64],
     target_weight: f64,
     candidate_weight: f64,
 ) -> f64 {
@@ -1074,7 +1142,7 @@ fn weighted_rule_set_similarity_with_masses(
         .by_rule
         .keys()
         .filter(|name| candidate.by_rule.contains_key(*name))
-        .map(|name| rule_weight(rule_weights, name))
+        .map(|name| rule_weight(rule_weights, *name))
         .sum::<f64>();
     weighted_rule_set_similarity_from_masses(target_weight, candidate_weight, intersection_weight)
 }
@@ -1110,7 +1178,7 @@ thread_local! {
 fn weighted_rule_timing_similarity(
     target: &TriggerFingerprint,
     candidate: &TriggerFingerprint,
-    rule_weights: &HashMap<String, f64>,
+    rule_weights: &[f64],
 ) -> f64 {
     weighted_rule_timing_similarity_with_minimum(target, candidate, rule_weights, f64::NEG_INFINITY)
         .unwrap_or(0.0)
@@ -1119,17 +1187,49 @@ fn weighted_rule_timing_similarity(
 fn weighted_rule_timing_similarity_with_minimum(
     target: &TriggerFingerprint,
     candidate: &TriggerFingerprint,
-    rule_weights: &HashMap<String, f64>,
+    rule_weights: &[f64],
     minimum_similarity: f64,
 ) -> Option<f64> {
-    let total_weight = target
-        .by_rule
-        .keys()
-        .filter(|name| candidate.by_rule.contains_key(*name))
-        .map(|name| rule_weight(rule_weights, name))
-        .sum::<f64>();
+    let mut total_weight = 0.0;
+    let mut remaining_upper_weight = 0.0;
+    for (name, target_hits) in &target.by_rule {
+        let Some(candidate_hits) = candidate.by_rule.get(name) else {
+            continue;
+        };
+        let weight = rule_weight(rule_weights, *name);
+        total_weight += weight;
+        if minimum_similarity.is_finite() {
+            remaining_upper_weight += weight * target_hits.len().min(candidate_hits.len()) as f64
+                / target_hits.len().max(candidate_hits.len()).max(1) as f64;
+        }
+    }
+    weighted_rule_timing_similarity_with_masses(
+        target,
+        candidate,
+        rule_weights,
+        minimum_similarity,
+        total_weight,
+        remaining_upper_weight,
+    )
+}
+
+fn weighted_rule_timing_similarity_with_masses(
+    target: &TriggerFingerprint,
+    candidate: &TriggerFingerprint,
+    rule_weights: &[f64],
+    minimum_similarity: f64,
+    total_weight: f64,
+    mut remaining_upper_weight: f64,
+) -> Option<f64> {
     if total_weight <= EPS {
         return (0.0 + EPS >= minimum_similarity).then_some(0.0);
+    }
+    if minimum_similarity.is_finite() {
+        if remaining_upper_weight / total_weight + EPS < minimum_similarity {
+            return None;
+        }
+    } else {
+        remaining_upper_weight = total_weight;
     }
     TRIGGER_MATCH_DP.with(|scratch| {
         let time_decay_scores = trigger_time_decay_scores();
@@ -1149,12 +1249,20 @@ fn weighted_rule_timing_similarity_with_minimum(
             time_score * intensity_score
         };
         let mut weighted_sum = 0.0;
-        let mut remaining_weight = total_weight;
+        // 剩余规则最多匹配 min(m,n) 次，不能再把次数悬殊的规则当作满分。
+        // 无门槛的单股查询不计算剪枝上界，保留完整评分。
         for (name, target_hits) in &target.by_rule {
             let Some(candidate_hits) = candidate.by_rule.get(name) else {
                 continue;
             };
-            let weight = rule_weight(rule_weights, name);
+            let weight = rule_weight(rule_weights, *name);
+            let rule_upper_weight = if minimum_similarity.is_finite() {
+                weight * target_hits.len().min(candidate_hits.len()) as f64
+                    / target_hits.len().max(candidate_hits.len()).max(1) as f64
+            } else {
+                weight
+            };
+            let remaining_after_rule = (remaining_upper_weight - rule_upper_weight).max(0.0);
             let timing_score = if !target_hits.is_empty()
                 && target_hits.len() == candidate_hits.len()
                 && target_hits.iter().zip(candidate_hits).all(|(left, right)| {
@@ -1196,9 +1304,7 @@ fn weighted_rule_timing_similarity_with_minimum(
                         + (target_hits.len() - left_index - 1) as f64)
                         .min(target_hits.len().min(candidate_hits.len()) as f64)
                         / target_hits.len().max(candidate_hits.len()) as f64;
-                    let upper_bound = (weighted_sum
-                        + timing_upper * weight
-                        + (remaining_weight - weight).max(0.0))
+                    let upper_bound = (weighted_sum + timing_upper * weight + remaining_after_rule)
                         / total_weight;
                     if upper_bound + EPS < minimum_similarity {
                         return None;
@@ -1207,8 +1313,8 @@ fn weighted_rule_timing_similarity_with_minimum(
                 dp[candidate_hits.len()] / target_hits.len().max(candidate_hits.len()) as f64
             };
             weighted_sum += timing_score * weight;
-            remaining_weight = (remaining_weight - weight).max(0.0);
-            let upper_bound = (weighted_sum + remaining_weight) / total_weight;
+            remaining_upper_weight = remaining_after_rule;
+            let upper_bound = (weighted_sum + remaining_after_rule) / total_weight;
             if upper_bound + EPS < minimum_similarity {
                 return None;
             }
@@ -1221,7 +1327,7 @@ fn weighted_rule_timing_similarity_with_minimum(
 fn trigger_fingerprint_similarity(
     target: &TriggerFingerprint,
     candidate: &TriggerFingerprint,
-    rule_weights: &HashMap<String, f64>,
+    rule_weights: &[f64],
 ) -> f64 {
     trigger_fingerprint_similarity_with_masses(
         target,
@@ -1235,7 +1341,7 @@ fn trigger_fingerprint_similarity(
 fn trigger_fingerprint_similarity_with_masses(
     target: &TriggerFingerprint,
     candidate: &TriggerFingerprint,
-    rule_weights: &HashMap<String, f64>,
+    rule_weights: &[f64],
     target_rule_weight: f64,
     candidate_rule_weight: f64,
 ) -> f64 {
@@ -1427,6 +1533,7 @@ fn build_environment_fingerprint_map(
         .collect()
 }
 
+#[cfg(test)]
 fn cosine_similarity(left: &[f64], right: &[f64]) -> f64 {
     cosine_similarity_with_norms(left, right, vector_norm(left), vector_norm(right))
 }
@@ -1498,16 +1605,51 @@ fn cosine_similarity_with_norms(
     }
 }
 
-fn channel_similarity(target: &[Option<Vec<f64>>], candidate: &[Option<Vec<f64>>]) -> Option<f64> {
-    let scores = target
+fn build_channel_fingerprint(vectors: Vec<Option<Vec<f64>>>) -> ChannelFingerprint {
+    let mut has_vectors = false;
+    let norms = vectors
         .iter()
-        .zip(candidate)
-        .filter_map(|(a, b)| match (a, b) {
-            (Some(a), Some(b)) => Some(cosine_similarity(a, b)),
-            _ => None,
+        .map(|vector| {
+            let Some(vector) = vector else {
+                return 0.0;
+            };
+            has_vectors = true;
+            vector_norm(vector)
         })
-        .collect::<Vec<_>>();
-    (!scores.is_empty()).then(|| scores.iter().sum::<f64>() / scores.len() as f64)
+        .collect();
+    ChannelFingerprint {
+        vectors,
+        norms,
+        has_vectors,
+    }
+}
+
+fn share_environment_fingerprints(
+    fingerprints: HashMap<String, Vec<Option<Vec<f64>>>>,
+) -> HashMap<String, Arc<ChannelFingerprint>> {
+    fingerprints
+        .into_iter()
+        .map(|(trade_date, vectors)| (trade_date, Arc::new(build_channel_fingerprint(vectors))))
+        .collect()
+}
+
+fn cached_channel_similarity(
+    target: &ChannelFingerprint,
+    candidate: &ChannelFingerprint,
+) -> Option<f64> {
+    let mut score_sum = 0.0;
+    let mut score_count = 0;
+    for (index, (left, right)) in target.vectors.iter().zip(&candidate.vectors).enumerate() {
+        let (Some(left), Some(right)) = (left, right) else {
+            continue;
+        };
+        let left_norm = target.norms[index];
+        let right_norm = candidate.norms[index];
+        let score = cosine_similarity_with_norms(left, right, left_norm, right_norm);
+        score_sum += score;
+        score_count += 1;
+    }
+    (score_count > 0).then(|| score_sum / score_count as f64)
 }
 
 fn final_similarity(
@@ -1618,7 +1760,7 @@ fn load_benchmark_rows(
 struct SampleBuildContext<'a> {
     schema: &'a MarketSchema,
     all_trade_dates: &'a [String],
-    environment_fingerprints: &'a HashMap<String, Arc<Vec<Option<Vec<f64>>>>>,
+    environment_fingerprints: &'a HashMap<String, Arc<ChannelFingerprint>>,
     benchmark_rows: &'a HashMap<String, BenchmarkObservation>,
     total_mv_map: &'a HashMap<String, f64>,
     name_map: &'a HashMap<String, String>,
@@ -1633,9 +1775,14 @@ fn build_samples_for_chunk(
     conn: &Connection,
     anchors: Vec<Anchor>,
     context: &SampleBuildContext<'_>,
+    rule_catalog: &mut RuleCatalog,
+    preloaded_rules: Option<HashMap<usize, Vec<RuleEvent>>>,
 ) -> Result<Vec<EventSample>, String> {
     let market_by_anchor = load_market_rows(conn, &anchors, context.schema)?;
-    let rules_by_anchor = load_rule_rows(conn, &anchors)?;
+    let rules_by_anchor = match preloaded_rules {
+        Some(rules) => rules,
+        None => load_rule_rows(conn, &anchors, rule_catalog)?,
+    };
     let summaries = if context.include_summaries {
         load_summary_rows(conn, &anchors)?
     } else {
@@ -1669,7 +1816,7 @@ fn build_samples_for_chunk(
             let trigger = build_trigger_fingerprint(rules, window_dates, context.pool_segments);
             let fingerprint = EventFingerprint {
                 trigger,
-                price_volume: build_price_volume_channels(
+                price_volume: build_channel_fingerprint(build_price_volume_channels(
                     market_rows,
                     context.pool_segments,
                     context.total_mv_map.get(&anchor.ts_code).copied(),
@@ -1677,19 +1824,21 @@ fn build_samples_for_chunk(
                         &anchor.ts_code,
                         context.name_map.get(&anchor.ts_code).map(String::as_str),
                     ),
-                ),
-                indicators: build_indicator_channels(
+                )),
+                indicators: build_channel_fingerprint(build_indicator_channels(
                     market_rows,
                     context.schema.indicator_columns.len(),
                     context.pool_segments,
-                ),
+                )),
                 market: context
                     .environment_fingerprints
                     .get(&anchor.end_trade_date)
                     .cloned()
-                    .unwrap_or_else(|| -> Arc<Vec<Option<Vec<f64>>>> {
-                        static EMPTY: OnceLock<Arc<Vec<Option<Vec<f64>>>>> = OnceLock::new();
-                        Arc::clone(EMPTY.get_or_init(|| Arc::new(Vec::new())))
+                    .unwrap_or_else(|| -> Arc<ChannelFingerprint> {
+                        static EMPTY: OnceLock<Arc<ChannelFingerprint>> = OnceLock::new();
+                        Arc::clone(
+                            EMPTY.get_or_init(|| Arc::new(build_channel_fingerprint(Vec::new()))),
+                        )
                     }),
             };
             let outcome = if context.include_outcome {
@@ -1932,6 +2081,7 @@ pub fn get_strategy_trigger_similarity_page(
     let target_start_index = (target_end_index + 1).saturating_sub(window_trade_days);
     let target_start_date = all_trade_dates[target_start_index].clone();
     let historical_cutoff_date = all_trade_dates[target_end_index - outcome_trade_days].clone();
+    let mut rule_catalog = RuleCatalog::default();
     let target_events = (|conn: &Connection,
                           ts_code: &str,
                           start_date: &str,
@@ -1955,7 +2105,8 @@ pub fn get_strategy_trigger_similarity_page(
         let mut out = Vec::new();
         while let Some(row) = rows.next().map_err(|e| format!("读取目标触发失败: {e}"))? {
             out.push(RuleEvent {
-                rule_name: row.get(0).map_err(|e| format!("读取规则名失败: {e}"))?,
+                rule_id: rule_catalog
+                    .intern(row.get(0).map_err(|e| format!("读取规则名失败: {e}"))?),
                 trade_date: row.get(1).map_err(|e| format!("读取触发日失败: {e}"))?,
                 score: row.get(2).map_err(|e| format!("读取规则分数失败: {e}"))?,
             });
@@ -1970,7 +2121,7 @@ pub fn get_strategy_trigger_similarity_page(
     let target_rule_names = (|events: &[RuleEvent]| -> Vec<String> {
         let mut names = events
             .iter()
-            .map(|event| event.rule_name.clone())
+            .map(|event| rule_catalog.names[event.rule_id].clone())
             .collect::<Vec<_>>();
         names.sort();
         names.dedup();
@@ -1983,12 +2134,7 @@ pub fn get_strategy_trigger_similarity_page(
         .unwrap_or(&target_start_date);
     let environment = load_market_environment(&conn, first_date, &resolved_trade_date, &schema)?;
     let environment_fingerprints =
-        (|fingerprints : HashMap < String , Vec < Option < Vec < f64 > > > >| -> HashMap < String , Arc < Vec < Option < Vec < f64 > > > > > {
-    fingerprints
-        .into_iter()
-        .map(|(trade_date, channels)| (trade_date, Arc::new(channels)))
-        .collect()
-})(build_environment_fingerprint_map(
+        share_environment_fingerprints(build_environment_fingerprint_map(
             &environment,
             &all_trade_dates,
             window_trade_days,
@@ -2021,10 +2167,18 @@ pub fn get_strategy_trigger_similarity_page(
         include_outcome: false,
         include_summaries: false,
     };
-    let target_sample = build_samples_for_chunk(&conn, vec![target_anchor], &target_context)?
-        .into_iter()
-        .next()
-        .ok_or_else(|| format!("{resolved_ts_code} 在 {resolved_trade_date} 没有完整量价窗口"))?;
+    let target_trigger_count = target_events.len();
+    let target_rules = HashMap::from([(target_anchor.id, target_events)]);
+    let target_sample = build_samples_for_chunk(
+        &conn,
+        vec![target_anchor],
+        &target_context,
+        &mut rule_catalog,
+        Some(target_rules),
+    )?
+    .into_iter()
+    .next()
+    .ok_or_else(|| format!("{resolved_ts_code} 在 {resolved_trade_date} 没有完整量价窗口"))?;
 
     let earliest_candidate_date = all_trade_dates
         .get(window_trade_days.saturating_sub(1))
@@ -2127,8 +2281,12 @@ pub fn get_strategy_trigger_similarity_page(
             &all_trade_dates,
             window_trade_days,
         )?;
-    let rule_weights =
-        load_rule_idf_weights(&conn, earliest_candidate_date, &historical_cutoff_date)?;
+    let rule_weights = load_rule_idf_weights(
+        &conn,
+        earliest_candidate_date,
+        &historical_cutoff_date,
+        &mut rule_catalog,
+    )?;
     let target_rule_weight =
         trigger_rule_weight_sum(&target_sample.fingerprint.trigger, &rule_weights);
     let candidate_anchor_count = candidate_anchors.len();
@@ -2142,6 +2300,7 @@ pub fn get_strategy_trigger_similarity_page(
     let concept_map = build_concepts_map(&source_path).unwrap_or_default();
     let mut items = Vec::new();
     let mut evaluated_anchor_count = 0;
+    let mut market_similarity_by_date = HashMap::<String, Option<f64>>::new();
     let mut candidate_anchor_iter = candidate_anchors.into_iter();
     loop {
         let chunk = candidate_anchor_iter
@@ -2151,7 +2310,8 @@ pub fn get_strategy_trigger_similarity_page(
         if chunk.is_empty() {
             break;
         }
-        let samples = build_samples_for_chunk(&conn, chunk, &candidate_context)?;
+        let samples =
+            build_samples_for_chunk(&conn, chunk, &candidate_context, &mut rule_catalog, None)?;
         evaluated_anchor_count += samples.len();
         for sample in samples {
             // 单股查询与全市场排名保持 leave-one-stock-out 口径，避免目标股票
@@ -2168,18 +2328,22 @@ pub fn get_strategy_trigger_similarity_page(
                 target_rule_weight,
                 candidate_rule_weight,
             );
-            let price_volume_similarity = channel_similarity(
+            let price_volume_similarity = cached_channel_similarity(
                 &target_sample.fingerprint.price_volume,
                 &sample.fingerprint.price_volume,
             );
-            let indicator_similarity = channel_similarity(
+            let indicator_similarity = cached_channel_similarity(
                 &target_sample.fingerprint.indicators,
                 &sample.fingerprint.indicators,
             );
-            let market_similarity = channel_similarity(
-                &target_sample.fingerprint.market,
-                &sample.fingerprint.market,
-            );
+            let market_similarity = *market_similarity_by_date
+                .entry(sample.anchor.end_trade_date.clone())
+                .or_insert_with(|| {
+                    cached_channel_similarity(
+                        &target_sample.fingerprint.market,
+                        &sample.fingerprint.market,
+                    )
+                });
             let similarity_score = final_similarity(
                 trigger_similarity,
                 price_volume_similarity,
@@ -2189,14 +2353,14 @@ pub fn get_strategy_trigger_similarity_page(
             let Some(outcome) = sample.outcome else {
                 continue;
             };
-            // 触发指纹在本候选打分后不再使用，直接移动其中已有的规则名，避免
-            // 为每个候选提前维护第二份 matched_rule_names 字符串集合。
+            // 计算只携带规则编号，生成展示行时才还原匹配规则名。
             let mut matched_rule_names = sample
                 .fingerprint
                 .trigger
                 .by_rule
                 .into_keys()
-                .filter(|name| target_sample.fingerprint.trigger.by_rule.contains_key(name))
+                .filter(|id| target_sample.fingerprint.trigger.by_rule.contains_key(id))
+                .map(|id| rule_catalog.names[id].clone())
                 .collect::<Vec<_>>();
             matched_rule_names.sort();
             items.push(StrategyTriggerSimilarityRow {
@@ -2269,7 +2433,7 @@ pub fn get_strategy_trigger_similarity_page(
             concept: concept_map.get(&resolved_ts_code).cloned(),
             start_trade_date: target_start_date,
             end_trade_date: resolved_trade_date,
-            trigger_count: target_events.len(),
+            trigger_count: target_trigger_count,
             rule_names: target_rule_names,
             pooled_feature_dimension: target_dimension,
         },
@@ -2294,7 +2458,6 @@ mod tests {
         weighted_rule_timing_similarity_with_minimum, weighted_winsorized_mean,
     };
     use duckdb::Connection;
-    use std::collections::HashMap;
 
     fn similarity_row(ts_code: &str, end_trade_date: &str) -> StrategyTriggerSimilarityRow {
         StrategyTriggerSimilarityRow {
@@ -2324,6 +2487,146 @@ mod tests {
     }
 
     #[test]
+    fn rule_ids_and_idf_weights_are_shared_across_batches() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE rule_details(ts_code VARCHAR, trade_date VARCHAR, rule_name VARCHAR, rule_score DOUBLE);
+            INSERT INTO rule_details VALUES
+            ('A', '20240101', '规则甲', 1.0), ('A', '20240102', '规则甲', 2.0),
+            ('B', '20240102', '规则乙', 1.0), ('A', '20240103', '当日新规则', 1.0);").unwrap();
+        let mut catalog = super::RuleCatalog::default();
+        let target = super::Anchor {
+            id: 0,
+            ts_code: "A".into(),
+            start_trade_date: "20240103".into(),
+            end_trade_date: "20240103".into(),
+        };
+        let current = super::load_rule_rows(&conn, &[target], &mut catalog).unwrap();
+        let current_id = current[&0][0].rule_id;
+        let weights =
+            super::load_rule_idf_weights(&conn, "20240101", "20240102", &mut catalog).unwrap();
+        let historical = super::Anchor {
+            id: 1,
+            ts_code: "A".into(),
+            start_trade_date: "20240101".into(),
+            end_trade_date: "20240102".into(),
+        };
+        let batch = super::load_rule_rows(&conn, &[historical.clone()], &mut catalog).unwrap();
+        let repeated = super::load_rule_rows(&conn, &[historical], &mut catalog).unwrap();
+        let id = batch[&1][0].rule_id;
+        assert_eq!(batch[&1][1].rule_id, id);
+        assert_eq!(repeated[&1][0].rule_id, id);
+        assert_eq!(catalog.names[id], "规则甲");
+        assert_eq!(catalog.names[current_id], "当日新规则");
+        assert_eq!(super::rule_weight(&weights, current_id), 1.0);
+        assert_eq!(
+            super::rule_weight(&weights, id),
+            (1.0_f64 + 3.0 / 2.0).ln().clamp(1.0, 6.0)
+        );
+        let late_id = catalog.intern("后续批次新规则".into());
+        assert_eq!(super::rule_weight(&weights, late_id), 1.0);
+        assert_eq!(catalog.intern("规则甲".into()), id);
+    }
+
+    #[test]
+    fn bounded_future_query_matches_original_row_number_semantics() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("ATTACH ':memory:' AS trigger_market_db;
+            CREATE TABLE trigger_market_db.stock_data(ts_code VARCHAR, trade_date VARCHAR, adj_type VARCHAR, open DOUBLE, close DOUBLE, high DOUBLE, low DOUBLE);
+            INSERT INTO trigger_market_db.stock_data VALUES
+            ('A', '20240102', 'qfq', 10, 11, 12, 9),
+            ('A', '20240104', 'qfq', NULL, 11, 12, 9),
+            ('A', '20240107', 'qfq', 10, 11, 12, 9),
+            ('A', '20240108', 'qfq', 10, 'NaN', 12, 9),
+            ('A', '20240109', 'qfq', 10, 11, 'Infinity', 9),
+            ('A', '20240112', 'qfq', 11, 12, 13, 10),
+            ('A', '20240107', 'hfq', 90, 91, 92, 89),
+            ('B', '20240103', 'qfq', 20, 21, 22, 19),
+            ('B', '20240109', 'qfq', 21, 22, 23, 20);").unwrap();
+        let anchors = [
+            ("A", "20240101"),
+            ("A", "20240102"),
+            ("A", "20240105"),
+            ("A", "20240107"),
+            ("A", "20240112"),
+            ("B", "20240102"),
+            ("B", "20240104"),
+            ("MISSING", "20240101"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(id, (code, date))| super::Anchor {
+            id,
+            ts_code: code.into(),
+            start_trade_date: "20240101".into(),
+            end_trade_date: date.into(),
+        })
+        .collect::<Vec<_>>();
+        let unique_anchors = vec![anchors[0].clone(), anchors[5].clone(), anchors[7].clone()];
+        for anchors in [&anchors, &unique_anchors] {
+            for target_date in ["20240109", "20240120"] {
+                for horizon in [0, 1, 3, 5] {
+                    let actual =
+                        super::load_future_rows(&conn, &anchors, horizon, target_date).unwrap();
+                    let sql = format!(
+                        r#"
+                    WITH anchors(anchor_id, ts_code, start_date, end_date) AS (VALUES {}),
+                    future AS (
+                        SELECT a.anchor_id, s.trade_date, s.open, s.close, s.high, s.low,
+                               ROW_NUMBER() OVER (PARTITION BY a.anchor_id ORDER BY s.trade_date) rn
+                        FROM anchors a JOIN trigger_market_db.stock_data s ON s.ts_code=a.ts_code
+                          AND s.trade_date>a.end_date AND s.trade_date<={} AND s.adj_type='qfq'
+                    )
+                    SELECT anchor_id, trade_date, open, close, high, low FROM future WHERE rn<={}
+                    ORDER BY anchor_id, trade_date
+                "#,
+                        super::anchors_values_sql(&anchors),
+                        super::sql_string_literal(target_date),
+                        horizon
+                    );
+                    let mut stmt = conn.prepare(&sql).unwrap();
+                    let mut rows = stmt.query([]).unwrap();
+                    let mut expected = Vec::new();
+                    while let Some(row) = rows.next().unwrap() {
+                        let values = [
+                            row.get::<_, Option<f64>>(2).unwrap(),
+                            row.get(3).unwrap(),
+                            row.get(4).unwrap(),
+                            row.get(5).unwrap(),
+                        ];
+                        if let [Some(open), Some(close), Some(high), Some(low)] = values {
+                            if values.iter().all(|value| value.unwrap().is_finite()) {
+                                expected.push((
+                                    row.get::<_, usize>(0).unwrap(),
+                                    row.get::<_, String>(1).unwrap(),
+                                    open,
+                                    close,
+                                    high,
+                                    low,
+                                ));
+                            }
+                        }
+                    }
+                    let mut actual = actual
+                        .into_iter()
+                        .flat_map(|(id, rows)| {
+                            rows.into_iter().map(move |row| {
+                                (id, row.trade_date, row.open, row.close, row.high, row.low)
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    actual.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+                    assert_eq!(actual, expected, "target={target_date}, horizon={horizon}");
+                }
+            }
+        }
+        assert!(
+            super::load_future_rows(&conn, &[], 3, "20240120")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn temporal_signature_contains_pool_and_multiple_kernels() {
         let values = (1..=20).map(|value| Some(value as f64)).collect::<Vec<_>>();
         let signature = temporal_signature(&values, 5, true).expect("signature");
@@ -2336,7 +2639,7 @@ mod tests {
             .map(|day| format!("202401{day:02}"))
             .collect::<Vec<_>>();
         let event = |name: &str, date: &str, score: f64| RuleEvent {
-            rule_name: name.to_string(),
+            rule_id: (name.as_bytes()[0] - b'A') as usize,
             trade_date: date.to_string(),
             score,
         };
@@ -2346,8 +2649,8 @@ mod tests {
             event("B", "20240105", -3.0),
         ];
         let target = build_trigger_fingerprint(&target_events, &dates, 3);
-        assert_eq!(target.by_rule["A"].len(), 1);
-        assert_eq!(target.by_rule["A"][0].score, 2.0);
+        assert_eq!(target.by_rule[&0].len(), 1);
+        assert_eq!(target.by_rule[&0][0].score, 2.0);
         let identical = build_trigger_fingerprint(
             &[event("A", "20240110", 2.0), event("B", "20240105", -3.0)],
             &dates,
@@ -2367,11 +2670,7 @@ mod tests {
             &dates,
             3,
         );
-        let weights = HashMap::from([
-            ("A".to_string(), 2.0),
-            ("B".to_string(), 1.0),
-            ("C".to_string(), 1.0),
-        ]);
+        let weights = [2.0, 1.0, 1.0];
 
         assert!(
             (trigger_fingerprint_similarity(&target, &identical, &weights) - 100.0).abs() < 1e-9
@@ -2405,13 +2704,13 @@ mod tests {
         let events = dates
             .iter()
             .map(|date| RuleEvent {
-                rule_name: "dense".into(),
+                rule_id: 0,
                 trade_date: date.clone(),
                 score: 1.0,
             })
             .collect::<Vec<_>>();
         let target = build_trigger_fingerprint(&events, &dates, 3);
-        let weights = HashMap::new();
+        let weights = [];
         super::TRIGGER_MATCH_DP.with(|scratch| scratch.borrow_mut().clear());
         assert_eq!(
             weighted_rule_timing_similarity_with_minimum(&target, &target, &weights, 1.0),
@@ -2441,19 +2740,138 @@ mod tests {
     }
 
     #[test]
+    fn timing_count_bounds_preserve_exact_scores_at_cutoff() {
+        let dates = (0..48).map(|day| day.to_string()).collect::<Vec<_>>();
+        let weights = [1.3, 5.7];
+        for seed in 0..24 {
+            let mut events = [Vec::new(), Vec::new()];
+            for (side, rows) in events.iter_mut().enumerate() {
+                for (day, date) in dates.iter().enumerate() {
+                    for rule in 0..2 {
+                        if (day + seed + rule * 3) % (2 + (seed + side * 3 + rule) % 7) == 0 {
+                            rows.push(RuleEvent {
+                                rule_id: rule,
+                                trade_date: date.clone(),
+                                score: ((day + seed + side + rule) % 5) as f64 - 2.0,
+                            });
+                        }
+                    }
+                }
+            }
+            let target = build_trigger_fingerprint(&events[0], &dates, 3);
+            let candidate = build_trigger_fingerprint(&events[1], &dates, 3);
+            let exact = weighted_rule_timing_similarity(&target, &candidate, &weights);
+            let mut intersection_weight = 0.0;
+            let mut timing_upper_weight = 0.0;
+            for (id, hits) in &target.by_rule {
+                if let Some(other) = candidate.by_rule.get(id) {
+                    let weight = super::rule_weight(&weights, *id);
+                    intersection_weight += weight;
+                    timing_upper_weight += weight
+                        * (hits.len().min(other.len()) as f64 / hits.len().max(other.len()) as f64);
+                }
+            }
+            for cutoff in [
+                f64::NEG_INFINITY,
+                0.0,
+                exact - 1e-6,
+                exact,
+                exact + 1e-6,
+                0.9,
+            ] {
+                let retained = weighted_rule_timing_similarity_with_minimum(
+                    &target, &candidate, &weights, cutoff,
+                );
+                let cached = super::weighted_rule_timing_similarity_with_masses(
+                    &target,
+                    &candidate,
+                    &weights,
+                    cutoff,
+                    intersection_weight,
+                    timing_upper_weight,
+                );
+                assert_eq!(
+                    cached, retained,
+                    "cached bounds: seed={seed}, cutoff={cutoff}"
+                );
+                if exact + super::EPS >= cutoff {
+                    assert_eq!(retained, Some(exact), "seed={seed}, cutoff={cutoff}");
+                } else {
+                    assert_eq!(retained, None, "seed={seed}, cutoff={cutoff}");
+                }
+            }
+        }
+        // 次数上界已不达标时，不进入 DP，也不扩展线程缓冲。
+        let dense = build_trigger_fingerprint(
+            &dates
+                .iter()
+                .map(|date| RuleEvent {
+                    rule_id: 0,
+                    trade_date: date.clone(),
+                    score: 1.0,
+                })
+                .collect::<Vec<_>>(),
+            &dates,
+            3,
+        );
+        let mut sparse = dense.clone();
+        sparse.by_rule.get_mut(&0).unwrap().truncate(2);
+        super::TRIGGER_MATCH_DP.with(|scratch| scratch.borrow_mut().clear());
+        assert_eq!(
+            weighted_rule_timing_similarity_with_minimum(&dense, &sparse, &weights, 0.5),
+            None
+        );
+        super::TRIGGER_MATCH_DP.with(|scratch| assert!(scratch.borrow().is_empty()));
+    }
+
+    #[test]
+    fn cached_channels_preserve_missing_zero_and_mismatched_vector_scores() {
+        let channels = vec![
+            None,
+            Some(vec![]),
+            Some(vec![0.0; 3]),
+            Some(vec![1.0, -2.0, 3.0]),
+            Some(vec![-1.0, 2.0, -3.0]),
+            Some(vec![1.0, 2.0]),
+        ];
+        for left in &channels {
+            for right in &channels {
+                let target =
+                    super::build_channel_fingerprint(vec![left.clone(), None, Some(vec![0.0; 3])]);
+                let candidate = super::build_channel_fingerprint(vec![
+                    right.clone(),
+                    Some(vec![1.0]),
+                    Some(vec![1.0; 3]),
+                ]);
+                let expected = match (left, right) {
+                    (Some(a), Some(b)) => Some((cosine_similarity(a, b) + 0.0) / 2.0),
+                    _ => Some(0.0),
+                };
+                assert_eq!(
+                    super::cached_channel_similarity(&target, &candidate),
+                    expected
+                );
+            }
+        }
+        let missing = super::build_channel_fingerprint(vec![None]);
+        let present = super::build_channel_fingerprint(vec![Some(vec![1.0])]);
+        assert_eq!(super::cached_channel_similarity(&missing, &present), None);
+    }
+
+    #[test]
     fn single_hit_timing_fast_paths_preserve_one_to_one_matching() {
         let dates = (1..=5)
             .map(|day| format!("202401{day:02}"))
             .collect::<Vec<_>>();
         let event = |date: &str| RuleEvent {
-            rule_name: "A".to_string(),
+            rule_id: 0,
             trade_date: date.to_string(),
             score: 1.0,
         };
         let single = build_trigger_fingerprint(&[event("20240101")], &dates, 2);
         let repeated =
             build_trigger_fingerprint(&[event("20240101"), event("20240104")], &dates, 2);
-        let weights = HashMap::from([("A".to_string(), 1.0)]);
+        let weights = [1.0];
 
         assert!(
             (weighted_rule_timing_similarity(&single, &repeated, &weights) - 0.5).abs() < 1e-12
