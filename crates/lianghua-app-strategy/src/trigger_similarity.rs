@@ -211,9 +211,12 @@ struct BenchmarkObservation {
 
 #[derive(Debug, Clone)]
 struct ChannelFingerprint {
-    vectors: Vec<Option<Vec<f64>>>,
-    norms: Vec<f64>,
+    channel_offsets: Vec<usize>,
+    normalized_values: Vec<f64>,
+    channel_states: Vec<u8>,
+    dimension: usize,
     has_vectors: bool,
+    all_channels_nonzero: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -227,14 +230,9 @@ struct EventFingerprint {
 impl EventFingerprint {
     fn dimension(&self) -> usize {
         self.trigger.dimension()
-            + self
-                .price_volume
-                .vectors
-                .iter()
-                .chain(self.indicators.vectors.iter())
-                .chain(self.market.vectors.iter())
-                .filter_map(|channel| channel.as_ref().map(Vec::len))
-                .sum::<usize>()
+            + self.price_volume.dimension
+            + self.indicators.dimension
+            + self.market.dimension
     }
 }
 
@@ -1256,13 +1254,50 @@ fn weighted_rule_timing_similarity_with_masses(
                 continue;
             };
             let weight = rule_weight(rule_weights, *name);
-            let rule_upper_weight = if minimum_similarity.is_finite() {
-                weight * target_hits.len().min(candidate_hits.len()) as f64
+            let count_upper = if minimum_similarity.is_finite() {
+                target_hits.len().min(candidate_hits.len()) as f64
                     / target_hits.len().max(candidate_hits.len()).max(1) as f64
             } else {
-                weight
+                1.0
             };
-            let remaining_after_rule = (remaining_upper_weight - rule_upper_weight).max(0.0);
+            let count_upper_weight = weight * count_upper;
+            let remaining_after_rule = (remaining_upper_weight - count_upper_weight).max(0.0);
+            let date_upper = if minimum_similarity.is_finite() {
+                // 放宽一对一和顺序约束，让每个触发独立选择另一侧时间上最近的触发。
+                // 放宽问题的得分必不低于真实 DP；两个方向各给出一个上界，取较小值
+                // 仍是安全上界。触发按日期有序，双指针可在线性时间完成最近点查找。
+                let directional_upper = |left: &[RuleTriggerHit], right: &[RuleTriggerHit]| {
+                    let mut right_index = 0;
+                    let mut sum = 0.0;
+                    for left_hit in left {
+                        while right_index + 1 < right.len()
+                            && left_hit
+                                .day_index
+                                .abs_diff(right[right_index + 1].day_index)
+                                <= left_hit.day_index.abs_diff(right[right_index].day_index)
+                        {
+                            right_index += 1;
+                        }
+                        let gap = left_hit.day_index.abs_diff(right[right_index].day_index);
+                        sum += time_decay_scores
+                            .get(gap)
+                            .copied()
+                            .unwrap_or_else(|| (-(gap as f64) / TRIGGER_TIME_DECAY_DAYS).exp());
+                    }
+                    sum
+                };
+                (directional_upper(target_hits, candidate_hits)
+                    .min(directional_upper(candidate_hits, target_hits))
+                    / target_hits.len().max(candidate_hits.len()).max(1) as f64)
+                    .min(count_upper)
+            } else {
+                1.0
+            };
+            if (weighted_sum + date_upper * weight + remaining_after_rule) / total_weight + EPS
+                < minimum_similarity
+            {
+                return None;
+            }
             let timing_score = if !target_hits.is_empty()
                 && target_hits.len() == candidate_hits.len()
                 && target_hits.iter().zip(candidate_hits).all(|(left, right)| {
@@ -1304,6 +1339,7 @@ fn weighted_rule_timing_similarity_with_masses(
                         + (target_hits.len() - left_index - 1) as f64)
                         .min(target_hits.len().min(candidate_hits.len()) as f64)
                         / target_hits.len().max(candidate_hits.len()) as f64;
+                    let timing_upper = timing_upper.min(date_upper);
                     let upper_bound = (weighted_sum + timing_upper * weight + remaining_after_rule)
                         / total_weight;
                     if upper_bound + EPS < minimum_similarity {
@@ -1606,21 +1642,45 @@ fn cosine_similarity_with_norms(
 }
 
 fn build_channel_fingerprint(vectors: Vec<Option<Vec<f64>>>) -> ChannelFingerprint {
+    let mut channel_offsets = Vec::with_capacity(vectors.len() + 1);
+    let mut normalized_values = Vec::with_capacity(
+        vectors
+            .iter()
+            .filter_map(|vector| vector.as_ref().map(Vec::len))
+            .sum(),
+    );
+    let mut channel_states = Vec::with_capacity(vectors.len());
     let mut has_vectors = false;
-    let norms = vectors
-        .iter()
-        .map(|vector| {
-            let Some(vector) = vector else {
-                return 0.0;
-            };
-            has_vectors = true;
-            vector_norm(vector)
-        })
-        .collect();
+    let mut all_channels_nonzero = !vectors.is_empty();
+    let mut dimension = 0;
+    channel_offsets.push(0);
+    for vector in vectors {
+        let Some(vector) = vector else {
+            channel_states.push(0);
+            all_channels_nonzero = false;
+            channel_offsets.push(normalized_values.len());
+            continue;
+        };
+        has_vectors = true;
+        dimension += vector.len();
+        let norm = vector_norm(&vector);
+        if norm <= EPS {
+            channel_states.push(1);
+            all_channels_nonzero = false;
+            normalized_values.extend(std::iter::repeat_n(0.0, vector.len()));
+        } else {
+            channel_states.push(2);
+            normalized_values.extend(vector.into_iter().map(|value| value / norm));
+        }
+        channel_offsets.push(normalized_values.len());
+    }
     ChannelFingerprint {
-        vectors,
-        norms,
+        channel_offsets,
+        normalized_values,
+        channel_states,
+        dimension,
         has_vectors,
+        all_channels_nonzero,
     }
 }
 
@@ -1637,15 +1697,41 @@ fn cached_channel_similarity(
     target: &ChannelFingerprint,
     candidate: &ChannelFingerprint,
 ) -> Option<f64> {
+    if target.all_channels_nonzero
+        && candidate.all_channels_nonzero
+        && target.channel_offsets == candidate.channel_offsets
+    {
+        let channel_count = target.channel_states.len();
+        let cosine_sum = dot_product(&target.normalized_values, &candidate.normalized_values);
+        return (channel_count > 0)
+            .then(|| (50.0 * (1.0 + cosine_sum / channel_count as f64)).clamp(0.0, 100.0));
+    }
+
     let mut score_sum = 0.0;
     let mut score_count = 0;
-    for (index, (left, right)) in target.vectors.iter().zip(&candidate.vectors).enumerate() {
-        let (Some(left), Some(right)) = (left, right) else {
+    for index in 0..target
+        .channel_states
+        .len()
+        .min(candidate.channel_states.len())
+    {
+        let left_state = target.channel_states[index];
+        let right_state = candidate.channel_states[index];
+        if left_state == 0 || right_state == 0 {
             continue;
+        }
+        let left = &target.normalized_values
+            [target.channel_offsets[index]..target.channel_offsets[index + 1]];
+        let right = &candidate.normalized_values
+            [candidate.channel_offsets[index]..candidate.channel_offsets[index + 1]];
+        let score = if left.len() != right.len() || left.is_empty() {
+            0.0
+        } else if left_state == 1 && right_state == 1 {
+            100.0
+        } else if left_state == 1 || right_state == 1 {
+            0.0
+        } else {
+            (50.0 * (1.0 + dot_product(left, right))).clamp(0.0, 100.0)
         };
-        let left_norm = target.norms[index];
-        let right_norm = candidate.norms[index];
-        let score = cosine_similarity_with_norms(left, right, left_norm, right_norm);
         score_sum += score;
         score_count += 1;
     }

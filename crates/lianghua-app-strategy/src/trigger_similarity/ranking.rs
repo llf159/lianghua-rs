@@ -232,18 +232,47 @@ struct CandidateRulePosting {
     hit_count: usize,
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct RankingPruneStats {
+    overlap_candidates: usize,
+    market_pruned: usize,
+    price_evaluated: usize,
+    price_pruned: usize,
+    indicator_evaluated: usize,
+    indicator_pruned: usize,
+    timing_evaluated: usize,
+    timing_pruned: usize,
+    scored: usize,
+}
+
+#[derive(Default)]
+struct RankingPruneCounters {
+    overlap_candidates: AtomicUsize,
+    market_pruned: AtomicUsize,
+    price_evaluated: AtomicUsize,
+    price_pruned: AtomicUsize,
+    indicator_evaluated: AtomicUsize,
+    indicator_pruned: AtomicUsize,
+    timing_evaluated: AtomicUsize,
+    timing_pruned: AtomicUsize,
+    scored: AtomicUsize,
+}
+
 #[derive(Default)]
 struct RankingTargetScratch {
     candidate_intersection_weights: Vec<f64>,
     candidate_timing_upper_weights: Vec<f64>,
+    candidate_rule_set_similarities: Vec<f64>,
     candidate_trigger_upper_bounds: Vec<f64>,
     candidate_aggregate_similarities: Vec<f64>,
     candidate_generations: Vec<u32>,
     generation: u32,
     candidate_indices: Vec<usize>,
-    candidate_upper_buckets: Vec<Vec<usize>>,
+    success_candidate_upper_buckets: Vec<Vec<usize>>,
+    failure_candidate_upper_buckets: Vec<Vec<usize>>,
     success_heap: BinaryHeap<Reverse<ScoredCandidate>>,
     failure_heap: BinaryHeap<Reverse<ScoredCandidate>>,
+    prune_stats: RankingPruneStats,
 }
 
 impl RankingTargetScratch {
@@ -251,6 +280,8 @@ impl RankingTargetScratch {
         self.candidate_intersection_weights
             .resize(candidate_count, 0.0);
         self.candidate_timing_upper_weights
+            .resize(candidate_count, 0.0);
+        self.candidate_rule_set_similarities
             .resize(candidate_count, 0.0);
         self.candidate_trigger_upper_bounds
             .resize(candidate_count, 0.0);
@@ -263,13 +294,19 @@ impl RankingTargetScratch {
             self.generation = 1;
         }
         self.candidate_indices.clear();
-        if self.candidate_upper_buckets.is_empty() {
-            self.candidate_upper_buckets.resize_with(101, Vec::new);
-        } else {
-            for bucket in &mut self.candidate_upper_buckets {
-                bucket.clear();
+        for buckets in [
+            &mut self.success_candidate_upper_buckets,
+            &mut self.failure_candidate_upper_buckets,
+        ] {
+            if buckets.is_empty() {
+                buckets.resize_with(101, Vec::new);
+            } else {
+                for bucket in buckets {
+                    bucket.clear();
+                }
             }
         }
+        self.prune_stats = RankingPruneStats::default();
         self.success_heap.clear();
         self.failure_heap.clear();
         let required_capacity = per_class_limit + 1;
@@ -1917,6 +1954,7 @@ pub fn run_strategy_trigger_similarity_ranking(
 
     let phase = Instant::now();
     let ranking_completed = AtomicUsize::new(0);
+    let prune_counters = RankingPruneCounters::default();
     log::info!(
         "相似榜精排开始: stocks={}, candidates={}, window_days={}, indicator_columns={}",
         targets.len(),
@@ -1974,7 +2012,7 @@ pub fn run_strategy_trigger_similarity_ranking(
                         industry_map: &HashMap<String, String>,
                         concept_map: &HashMap<String, String>,
                         rule_weights: &[f64]|
-             -> StrategyTriggerRankingRow {
+             -> (StrategyTriggerRankingRow, RankingPruneStats) {
                 RANKING_TARGET_SCRATCH.with(|scratch| {
                     (|target: &RankingSample,
                       candidates: &[RankingSample],
@@ -1989,7 +2027,7 @@ pub fn run_strategy_trigger_similarity_ranking(
                       concept_map: &HashMap<String, String>,
                       rule_weights: &[f64],
                       scratch: &mut RankingTargetScratch|
-                     -> StrategyTriggerRankingRow {
+                     -> (StrategyTriggerRankingRow, RankingPruneStats) {
                         let target_rule_weight_sum =
                             trigger_rule_weight_sum(&target.fingerprint.trigger, rule_weights);
                         let per_class_limit = (256) / 2;
@@ -2012,8 +2050,9 @@ pub fn run_strategy_trigger_similarity_ranking(
                             }
                         }
 
-                        // 触发时序的单规则上界不会超过 min(m,n)/max(m,n)。用它
-                        // 给候选排序，尽早填满两个 Top-K 堆，不改变最终的精确结果。
+                        // 触发时序的单规则上界不会超过 min(m,n)/max(m,n)。再合入已经
+                        // 缓存的真实市场分作为最终分上界，并把成功、失败模板分桶，尽早
+                        // 分别填满两个 Top-K 堆，不改变最终的精确结果。
                         for position in 0..scratch.candidate_indices.len() {
                             let candidate_index = scratch.candidate_indices[position];
                             let candidate = &candidates[candidate_index];
@@ -2036,6 +2075,7 @@ pub fn run_strategy_trigger_similarity_ranking(
                                 candidate_rule_weight_sums[candidate_index],
                                 intersection_weight,
                             );
+                            scratch.candidate_rule_set_similarities[candidate_index] = rule_set;
                             let aggregate = trigger_aggregate_similarity(
                                 &target.fingerprint.trigger,
                                 &candidate.fingerprint.trigger,
@@ -2044,14 +2084,58 @@ pub fn run_strategy_trigger_similarity_ranking(
                             let trigger_upper =
                                 combine_trigger_similarity(rule_set, timing_upper, aggregate);
                             scratch.candidate_trigger_upper_bounds[candidate_index] = trigger_upper;
-                            scratch.candidate_upper_buckets
-                                [trigger_upper.clamp(0.0, 100.0).floor() as usize]
+                            let price_available = target.fingerprint.price_volume.has_vectors
+                                && candidate.fingerprint.price_volume.has_vectors;
+                            let indicator_available = target.fingerprint.indicators.has_vectors
+                                && candidate.fingerprint.indicators.has_vectors;
+                            let market_available = target.fingerprint.market.has_vectors
+                                && candidate.fingerprint.market.has_vectors;
+                            let total_weight = TRIGGER_SIMILARITY_WEIGHT
+                                + if price_available {
+                                    PRICE_VOLUME_SIMILARITY_WEIGHT
+                                } else {
+                                    0.0
+                                }
+                                + if indicator_available {
+                                    INDICATOR_SIMILARITY_WEIGHT
+                                } else {
+                                    0.0
+                                }
+                                + if market_available {
+                                    MARKET_SIMILARITY_WEIGHT
+                                } else {
+                                    0.0
+                                };
+                            let remaining_weight = total_weight - TRIGGER_SIMILARITY_WEIGHT;
+                            let market_similarity = market_available
+                                .then(|| candidate_market_similarities[candidate_index])
+                                .flatten();
+                            let market_upper_score =
+                                market_similarity.map_or(remaining_weight * 100.0, |score| {
+                                    score * MARKET_SIMILARITY_WEIGHT
+                                        + (remaining_weight - MARKET_SIMILARITY_WEIGHT) * 100.0
+                                });
+                            let final_upper = (trigger_upper * TRIGGER_SIMILARITY_WEIGHT
+                                + market_upper_score)
+                                / total_weight;
+                            let buckets = if candidate.template_class > 0 {
+                                &mut scratch.success_candidate_upper_buckets
+                            } else {
+                                &mut scratch.failure_candidate_upper_buckets
+                            };
+                            buckets[final_upper.clamp(0.0, 100.0).floor() as usize]
                                 .push(candidate_index);
                         }
                         scratch.candidate_indices.clear();
-                        for bucket in scratch.candidate_upper_buckets.iter_mut().rev() {
-                            scratch.candidate_indices.append(bucket);
+                        for bucket_index in (0..=100).rev() {
+                            scratch.candidate_indices.append(
+                                &mut scratch.success_candidate_upper_buckets[bucket_index],
+                            );
+                            scratch.candidate_indices.append(
+                                &mut scratch.failure_candidate_upper_buckets[bucket_index],
+                            );
                         }
+                        scratch.prune_stats.overlap_candidates = scratch.candidate_indices.len();
 
                         for candidate_position in 0..scratch.candidate_indices.len() {
                             let candidate_index = scratch.candidate_indices[candidate_position];
@@ -2101,11 +2185,8 @@ pub fn run_strategy_trigger_similarity_ranking(
                                 &scratch.failure_heap,
                                 per_class_limit,
                             );
-                            let rule_set = weighted_rule_set_similarity_from_masses(
-                                target_rule_weight_sum,
-                                candidate_rule_weight_sums[candidate_index],
-                                scratch.candidate_intersection_weights[candidate_index],
-                            );
+                            let rule_set =
+                                scratch.candidate_rule_set_similarities[candidate_index];
                             let aggregate =
                                 scratch.candidate_aggregate_similarities[candidate_index];
                             let trigger_upper_bound =
@@ -2128,6 +2209,7 @@ pub fn run_strategy_trigger_similarity_ranking(
                                     / total_weight,
                                 cutoff,
                             ) {
+                                scratch.prune_stats.market_pruned += 1;
                                 continue;
                             }
                             // 先计算线性点积通道，再由真实通道分反推时序项必须达到的最低分。
@@ -2137,6 +2219,7 @@ pub fn run_strategy_trigger_similarity_ranking(
 
                             let price_volume_similarity = price_available
                                 .then(|| {
+                                    scratch.prune_stats.price_evaluated += 1;
                                     cached_channel_similarity(
                                         &target.fingerprint.price_volume,
                                         &candidate.fingerprint.price_volume,
@@ -2159,11 +2242,13 @@ pub fn run_strategy_trigger_similarity_ranking(
                                     / total_weight,
                                 cutoff,
                             ) {
+                                scratch.prune_stats.price_pruned += 1;
                                 continue;
                             }
 
                             let indicator_similarity = indicator_available
                                 .then(|| {
+                                    scratch.prune_stats.indicator_evaluated += 1;
                                     cached_channel_similarity(
                                         &target.fingerprint.indicators,
                                         &candidate.fingerprint.indicators,
@@ -2181,6 +2266,7 @@ pub fn run_strategy_trigger_similarity_ranking(
                                     / total_weight,
                                 cutoff,
                             ) {
+                                scratch.prune_stats.indicator_pruned += 1;
                                 continue;
                             }
 
@@ -2194,6 +2280,7 @@ pub fn run_strategy_trigger_similarity_ranking(
                                         - aggregate * TRIGGER_AGGREGATE_RHYTHM_WEIGHT)
                                         / TRIGGER_RULE_TIMING_WEIGHT
                                 });
+                            scratch.prune_stats.timing_evaluated += 1;
                             let Some(timing) = weighted_rule_timing_similarity_with_masses(
                                 &target.fingerprint.trigger,
                                 &candidate.fingerprint.trigger,
@@ -2202,6 +2289,7 @@ pub fn run_strategy_trigger_similarity_ranking(
                                 scratch.candidate_intersection_weights[candidate_index],
                                 scratch.candidate_timing_upper_weights[candidate_index],
                             ) else {
+                                scratch.prune_stats.timing_pruned += 1;
                                 continue;
                             };
                             let trigger_similarity =
@@ -2215,6 +2303,7 @@ pub fn run_strategy_trigger_similarity_ranking(
                                 ),
                                 candidate_index,
                             };
+                            scratch.prune_stats.scored += 1;
                             if candidate.template_class > 0 {
                                 push_top_candidate(
                                     &mut scratch.success_heap,
@@ -2367,7 +2456,7 @@ pub fn run_strategy_trigger_similarity_ranking(
                                 })
                             })
                             .collect();
-                        StrategyTriggerRankingRow {
+                        let row = StrategyTriggerRankingRow {
                             rank: None,
                             ts_code: target.anchor.ts_code.clone(),
                             name: name_map.get(&target.anchor.ts_code).cloned(),
@@ -2393,7 +2482,8 @@ pub fn run_strategy_trigger_similarity_ranking(
                             best_similarity: rating_candidates.first().map(|row| row.score),
                             trigger_count: target.trigger_count,
                             top_matches,
-                        }
+                        };
+                        (row, scratch.prune_stats)
                     })(
                         target,
                         candidates,
@@ -2424,6 +2514,23 @@ pub fn run_strategy_trigger_similarity_ranking(
                 &concept_map,
                 &rule_weights,
             );
+            let (row, prune_stats) = row;
+            for (counter, value) in [
+                (&prune_counters.overlap_candidates, prune_stats.overlap_candidates),
+                (&prune_counters.market_pruned, prune_stats.market_pruned),
+                (&prune_counters.price_evaluated, prune_stats.price_evaluated),
+                (&prune_counters.price_pruned, prune_stats.price_pruned),
+                (
+                    &prune_counters.indicator_evaluated,
+                    prune_stats.indicator_evaluated,
+                ),
+                (&prune_counters.indicator_pruned, prune_stats.indicator_pruned),
+                (&prune_counters.timing_evaluated, prune_stats.timing_evaluated),
+                (&prune_counters.timing_pruned, prune_stats.timing_pruned),
+                (&prune_counters.scored, prune_stats.scored),
+            ] {
+                counter.fetch_add(value, AtomicOrdering::Relaxed);
+            }
             let completed = ranking_completed.fetch_add(1, AtomicOrdering::Relaxed) + 1;
             if target_started.elapsed().as_secs() >= 5 {
                 log::info!(
@@ -2445,6 +2552,26 @@ pub fn run_strategy_trigger_similarity_ranking(
             row
         })
         .collect::<Vec<_>>();
+    log::info!(
+        "相似榜精排剪枝统计: overlap={}, market_pruned={}, price_evaluated={}, price_pruned={}, indicator_evaluated={}, indicator_pruned={}, timing_evaluated={}, timing_pruned={}, scored={}",
+        prune_counters
+            .overlap_candidates
+            .load(AtomicOrdering::Relaxed),
+        prune_counters.market_pruned.load(AtomicOrdering::Relaxed),
+        prune_counters.price_evaluated.load(AtomicOrdering::Relaxed),
+        prune_counters.price_pruned.load(AtomicOrdering::Relaxed),
+        prune_counters
+            .indicator_evaluated
+            .load(AtomicOrdering::Relaxed),
+        prune_counters
+            .indicator_pruned
+            .load(AtomicOrdering::Relaxed),
+        prune_counters
+            .timing_evaluated
+            .load(AtomicOrdering::Relaxed),
+        prune_counters.timing_pruned.load(AtomicOrdering::Relaxed),
+        prune_counters.scored.load(AtomicOrdering::Relaxed),
+    );
     assign_ranks(&mut ranking_rows);
     timings.push(StrategyTriggerRankingTiming {
         label: "全市场近邻精排与后验聚合".to_string(),
@@ -2955,7 +3082,23 @@ mod tests {
         let first = shared.get("20240102").expect("market fingerprint");
         let second = Arc::clone(first);
         assert!(Arc::ptr_eq(first, &second));
-        assert_eq!(first.norms, second.norms);
+        assert_eq!(first.normalized_values, second.normalized_values);
+    }
+
+    #[test]
+    fn packed_channel_similarity_preserves_missing_and_zero_channel_semantics() {
+        let target =
+            build_channel_fingerprint(vec![Some(vec![3.0, 4.0]), Some(vec![0.0, 0.0]), None]);
+        let candidate = build_channel_fingerprint(vec![
+            Some(vec![4.0, 3.0]),
+            Some(vec![0.0, 0.0]),
+            Some(vec![1.0, 2.0]),
+        ]);
+        let expected = (98.0 + 100.0) / 2.0;
+        assert!(
+            (cached_channel_similarity(&target, &candidate).expect("similarity") - expected).abs()
+                < 1e-9
+        );
     }
 
     #[test]
