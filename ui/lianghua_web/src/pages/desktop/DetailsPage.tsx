@@ -1129,7 +1129,7 @@ function getDetailCyqMainTotal(snapshot: DetailCyqSnapshot | null) {
   }
   const values = snapshot.bins.map((bin) => bin.main_chip);
   return values.some((value) => typeof value === "number" && Number.isFinite(value))
-    ? values.reduce(
+    ? values.reduce<number>(
         (sum, value) =>
           sum + (typeof value === "number" && Number.isFinite(value) ? value : 0),
         0,
@@ -1149,7 +1149,7 @@ function getDetailCyqRetailTotal(snapshot: DetailCyqSnapshot | null) {
   }
   const values = snapshot.bins.map((bin) => bin.retail_chip);
   return values.some((value) => typeof value === "number" && Number.isFinite(value))
-    ? values.reduce(
+    ? values.reduce<number>(
         (sum, value) =>
           sum + (typeof value === "number" && Number.isFinite(value) ? value : 0),
         0,
@@ -2628,7 +2628,7 @@ function buildChartExtremaOverlayPoints(
   let lowPoint: { itemIndex: number; value: number; tradeDate: string } | null =
     null;
 
-  items.forEach((row, itemIndex) => {
+  for (const [itemIndex, row] of items.entries()) {
     const high = getNumericField(row, "high");
     const low = getNumericField(row, "low");
 
@@ -2647,28 +2647,30 @@ function buildChartExtremaOverlayPoints(
         tradeDate: row.trade_date,
       };
     }
-  });
+  }
 
-  return [
-    highPoint ? { kind: "high" as const, point: highPoint } : null,
-    lowPoint ? { kind: "low" as const, point: lowPoint } : null,
-  ].flatMap((item) => {
-    if (!item) {
-      return [];
-    }
+  const extrema: Array<{
+    kind: "high" | "low";
+    point: { itemIndex: number; value: number; tradeDate: string };
+  }> = [];
+  if (highPoint) {
+    extrema.push({ kind: "high", point: highPoint });
+  }
+  if (lowPoint) {
+    extrema.push({ kind: "low", point: lowPoint });
+  }
 
+  return extrema.map((item) => {
     const x = xAt(item.point.itemIndex);
     const y = yAt(item.point.value);
-    return [
-      {
-        key: `${item.kind}-${item.point.tradeDate}`,
-        kind: item.kind,
-        leftPercent: (x / CHART_VIEWBOX_WIDTH) * 100,
-        topPercent: (y / CHART_VIEWBOX_HEIGHT) * 100,
-        side: x < CHART_VIEWBOX_WIDTH / 2 ? "right" : "left",
-        valueText: formatNumber(item.point.value),
-      },
-    ];
+    return {
+      key: `${item.kind}-${item.point.tradeDate}`,
+      kind: item.kind,
+      leftPercent: (x / CHART_VIEWBOX_WIDTH) * 100,
+      topPercent: (y / CHART_VIEWBOX_HEIGHT) * 100,
+      side: x < CHART_VIEWBOX_WIDTH / 2 ? "right" : "left",
+      valueText: formatNumber(item.point.value),
+    };
   });
 }
 
@@ -5361,7 +5363,7 @@ export default function DetailsPage({
           }
           return {
             ...current,
-            prev_ranks: data.prev_ranks ?? null,
+            prev_ranks: data.prev_ranks ?? [],
           };
         });
       } catch (error) {
@@ -6587,6 +6589,7 @@ export default function DetailsPage({
     if (!chartCard) {
       return;
     }
+    const activeChartCard = chartCard;
 
     function handleNativeChartWheel(event: WheelEvent) {
       if (!event.ctrlKey && !event.metaKey) {
@@ -6598,7 +6601,7 @@ export default function DetailsPage({
       const viewport =
         targetElement?.closest<HTMLDivElement>(".details-chart-viewport") ??
         null;
-      if (!viewport || !chartCard.contains(viewport)) {
+      if (!viewport || !activeChartCard.contains(viewport)) {
         return;
       }
 
@@ -6610,11 +6613,11 @@ export default function DetailsPage({
       zoomChartFromWheel(viewport, event.clientX, event.deltaY);
     }
 
-    chartCard.addEventListener("wheel", handleNativeChartWheel, {
+    activeChartCard.addEventListener("wheel", handleNativeChartWheel, {
       passive: false,
     });
     return () => {
-      chartCard.removeEventListener("wheel", handleNativeChartWheel);
+      activeChartCard.removeEventListener("wheel", handleNativeChartWheel);
     };
   });
 

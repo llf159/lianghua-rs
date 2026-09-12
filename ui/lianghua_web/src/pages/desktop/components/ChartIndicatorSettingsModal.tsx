@@ -557,10 +557,12 @@ export default function ChartIndicatorSettingsModal({ open, onClose, onLoaded }:
         setError(result.error || '校验未通过。')
         return
       }
-      setDraft(normalizeConfig(result.config))
+      const config = result.config
+      const summary = result.summary
+      setDraft(normalizeConfig(config))
       setSourceText(text)
       setPayload((current) =>
-        current ? { ...current, config: result.config as ChartIndicatorConfigDraft, summary: result.summary, text, error: null } : current,
+        current ? { ...current, config: config as ChartIndicatorConfigDraft, summary, text, error: null } : current,
       )
       setNotice('校验通过。')
     } catch (validateError) {
