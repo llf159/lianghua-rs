@@ -90,6 +90,7 @@ const SYNTAX_GUIDE_FIELD_SECTIONS: SyntaxGuideFieldSection[] = [
       { name: 'S_RANK', scope: '通用', description: '走势相似榜排名；按已计算并保存的交易日逐日注入，未计算日期为空值。', example: 'S_RANK <= 100' },
       { name: 'I / ISZ / I300', scope: '通用', description: '上证指数 / 深证成指 / 沪深300 的日涨幅，单位是百分比。', example: 'PCT_CHG > I300 + 2' },
       { name: 'I500 / ICY / I50 / I1000', scope: '通用', description: '中证500 / 创业板指 / 上证50 / 中证1000 的日涨幅，单位是百分比。', example: 'I1000 > I50' },
+      { name: '指数字段_指标列名', scope: '通用', description: '读取对应指数在 stock_data 中的原始数值，按交易日与股票对齐；支持 O、H、L、C、V 等行情别名及自定义指标列。指数没有该日数据时为空值。', example: 'I_PCT_CHG > 1 AND I300_C > I300_MA5' },
     ],
   },
   {

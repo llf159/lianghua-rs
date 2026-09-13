@@ -356,44 +356,24 @@ pub struct DataReader {
     pub query_sql: String,
     pub query_tail_rows_sql: String,
     pub cols_table: Vec<(String, String)>, // 数据库列名, runtime规范列名
-    pub runtime_index_pct_cols: Vec<RuntimeIndexPctCol>,
+    pub runtime_index_cols: Vec<RuntimeIndexCol>,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct RuntimeIndexPctCol {
+#[derive(Debug, Clone)]
+pub struct RuntimeIndexCol {
     pub ts_code: &'static str,
-    pub runtime_key: &'static str,
+    pub runtime_key: String,
+    pub db_column: String,
 }
 
-const RUNTIME_INDEX_PCT_COLS: [RuntimeIndexPctCol; 7] = [
-    RuntimeIndexPctCol {
-        ts_code: "000001.SH",
-        runtime_key: "I",
-    },
-    RuntimeIndexPctCol {
-        ts_code: "399001.SZ",
-        runtime_key: "ISZ",
-    },
-    RuntimeIndexPctCol {
-        ts_code: "399300.SZ",
-        runtime_key: "I300",
-    },
-    RuntimeIndexPctCol {
-        ts_code: "399905.SZ",
-        runtime_key: "I500",
-    },
-    RuntimeIndexPctCol {
-        ts_code: "399006.SZ",
-        runtime_key: "ICY",
-    },
-    RuntimeIndexPctCol {
-        ts_code: "000016.SH",
-        runtime_key: "I50",
-    },
-    RuntimeIndexPctCol {
-        ts_code: "000852.SH",
-        runtime_key: "I1000",
-    },
+const RUNTIME_INDEX_COLS: [(&str, &str); 7] = [
+    ("000001.SH", "I"),
+    ("399001.SZ", "ISZ"),
+    ("399300.SZ", "I300"),
+    ("399905.SZ", "I500"),
+    ("399006.SZ", "ICY"),
+    ("000016.SH", "I50"),
+    ("000852.SH", "I1000"),
 ];
 
 impl DataReader {
@@ -466,11 +446,9 @@ impl DataReader {
             })(col) else {
                 continue;
             };
-            if (|runtime_key: &str| -> bool {
-                RUNTIME_INDEX_PCT_COLS
-                    .iter()
-                    .any(|item| item.runtime_key == runtime_key)
-            })(&runtime_key)
+            if RUNTIME_INDEX_COLS
+                .iter()
+                .any(|(_, key)| *key == runtime_key)
             {
                 continue;
             }
@@ -483,25 +461,44 @@ impl DataReader {
             db_cols_table.push((col.clone(), runtime_key));
         }
 
-        let runtime_index_pct_cols =
-            (|required_runtime_keys: Option<&HashSet<String>>| -> Vec<RuntimeIndexPctCol> {
-                let Some(required_runtime_keys) = required_runtime_keys else {
-                    return Vec::new();
+        let mut runtime_index_cols = Vec::new();
+        if let Some(required_runtime_keys) = required_runtime_keys {
+            for runtime_key in required_runtime_keys {
+                let (prefix, field_name) = runtime_key
+                    .split_once('_')
+                    .map_or((runtime_key.as_str(), "PCT_CHG"), |(prefix, field)| {
+                        (prefix, field)
+                    });
+                let Some((ts_code, _)) = RUNTIME_INDEX_COLS.iter().find(|(_, key)| *key == prefix)
+                else {
+                    continue;
                 };
-
-                RUNTIME_INDEX_PCT_COLS
+                let db_field_name = STOCK_DATA_RUNTIME_FIELDS
                     .iter()
-                    .copied()
-                    .filter(|item| required_runtime_keys.contains(item.runtime_key))
-                    .collect()
-            })(required_runtime_keys);
+                    .find(|field| field.runtime_key == field_name)
+                    .map_or(field_name, |field| field.db_column);
+                let Some(db_column) = all_cols_name.iter().find(|column| {
+                    column.eq_ignore_ascii_case(db_field_name)
+                        && !STOCK_DATA_KEY_COLUMN_DEFS
+                            .iter()
+                            .any(|(key, _)| column.eq_ignore_ascii_case(key))
+                }) else {
+                    return Err(format!("数据库缺少指数表达式所需列: {runtime_key}"));
+                };
+                runtime_index_cols.push(RuntimeIndexCol {
+                    ts_code,
+                    runtime_key: runtime_key.clone(),
+                    db_column: db_column.clone(),
+                });
+            }
+        }
         if let Some(required_runtime_keys) = required_runtime_keys {
             let mut selected_runtime_keys = db_cols_table
                 .iter()
                 .map(|(_, runtime_key)| runtime_key.clone())
                 .collect::<HashSet<_>>();
-            for index_col in &runtime_index_pct_cols {
-                selected_runtime_keys.insert(index_col.runtime_key.to_string());
+            for index_col in &runtime_index_cols {
+                selected_runtime_keys.insert(index_col.runtime_key.clone());
             }
             let mut missing_runtime_keys = required_runtime_keys
                 .iter()
@@ -559,7 +556,7 @@ impl DataReader {
             query_sql,
             query_tail_rows_sql,
             cols_table: db_cols_table,
-            runtime_index_pct_cols,
+            runtime_index_cols,
         })
     }
 
@@ -598,7 +595,7 @@ impl DataReader {
         }
 
         let mut out = RowData { trade_dates, cols };
-        self.inject_runtime_index_pct(&mut out)?;
+        self.inject_runtime_index(&mut out)?;
         out.validate()?;
         Ok(out)
     }
@@ -647,7 +644,7 @@ impl DataReader {
         }
 
         let mut out = RowData { trade_dates, cols };
-        self.inject_runtime_index_pct(&mut out)?;
+        self.inject_runtime_index(&mut out)?;
         out.validate()?;
         Ok(out)
     }
@@ -727,10 +724,10 @@ impl DataReader {
         }
 
         result.retain(|_, row_data| !row_data.trade_dates.is_empty());
-        if !result.is_empty() && !self.runtime_index_pct_cols.is_empty() {
-            let index_pct_by_key = self.load_runtime_index_pct_values(start_date, end_date)?;
+        if !result.is_empty() && !self.runtime_index_cols.is_empty() {
+            let index_values_by_key = self.load_runtime_index_values(start_date, end_date)?;
             for row_data in result.values_mut() {
-                self.inject_runtime_index_pct_series(row_data, &index_pct_by_key);
+                self.inject_runtime_index_series(row_data, &index_values_by_key);
                 row_data.validate()?;
             }
         }
@@ -770,8 +767,8 @@ impl DataReader {
         Ok(list)
     }
 
-    fn inject_runtime_index_pct(&self, row_data: &mut RowData) -> Result<(), String> {
-        if self.runtime_index_pct_cols.is_empty() || row_data.trade_dates.is_empty() {
+    fn inject_runtime_index(&self, row_data: &mut RowData) -> Result<(), String> {
+        if self.runtime_index_cols.is_empty() || row_data.trade_dates.is_empty() {
             return Ok(());
         }
 
@@ -785,31 +782,39 @@ impl DataReader {
             .last()
             .map(String::as_str)
             .ok_or_else(|| "trade_dates为空".to_string())?;
-        let index_pct_by_key = self.load_runtime_index_pct_values(start_date, end_date)?;
-        self.inject_runtime_index_pct_series(row_data, &index_pct_by_key);
+        let index_values_by_key = self.load_runtime_index_values(start_date, end_date)?;
+        self.inject_runtime_index_series(row_data, &index_values_by_key);
         Ok(())
     }
 
-    fn load_runtime_index_pct_values(
+    fn load_runtime_index_values(
         &self,
         start_date: &str,
         end_date: &str,
     ) -> Result<HashMap<String, HashMap<String, Option<f64>>>, String> {
-        if self.runtime_index_pct_cols.is_empty() {
+        if self.runtime_index_cols.is_empty() {
             return Ok(HashMap::new());
         }
         let escaped_ts_codes = self
-            .runtime_index_pct_cols
+            .runtime_index_cols
             .iter()
             .map(|item| format!("'{}'", item.ts_code.replace('\'', "''")))
             .collect::<Vec<_>>()
             .join(", ");
+        let selected_columns = self
+            .runtime_index_cols
+            .iter()
+            .map(|item| {
+                format!(
+                    "TRY_CAST(\"{}\" AS DOUBLE)",
+                    item.db_column.replace('"', "\"\"")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
         let sql = format!(
             r#"
-                SELECT
-                    ts_code,
-                    trade_date,
-                    TRY_CAST(pct_chg AS DOUBLE)
+                SELECT ts_code, trade_date, {selected_columns}
                 FROM stock_data
                 WHERE ts_code IN ({escaped_ts_codes})
                   AND adj_type = ?
@@ -821,48 +826,46 @@ impl DataReader {
         let mut stmt = self
             .conn
             .prepare(&sql)
-            .map_err(|e| format!("预编译指数涨幅运行时列SQL失败:{e}"))?;
+            .map_err(|e| format!("预编译指数运行时列SQL失败:{e}"))?;
         let mut rows = stmt
-            .query(params![("ind"), start_date, end_date])
-            .map_err(|e| format!("查询指数涨幅运行时列失败:{e}"))?;
+            .query(params!["ind", start_date, end_date])
+            .map_err(|e| format!("查询指数运行时列失败:{e}"))?;
 
-        let ts_code_to_key = self
-            .runtime_index_pct_cols
-            .iter()
-            .map(|item| (item.ts_code, item.runtime_key))
-            .collect::<HashMap<_, _>>();
         let mut out = self
-            .runtime_index_pct_cols
+            .runtime_index_cols
             .iter()
-            .map(|item| (item.runtime_key.to_string(), HashMap::new()))
+            .map(|item| (item.runtime_key.clone(), HashMap::new()))
             .collect::<HashMap<_, _>>();
         while let Some(row) = rows
             .next()
-            .map_err(|e| format!("读取指数涨幅运行时列失败:{e}"))?
+            .map_err(|e| format!("读取指数运行时列失败:{e}"))?
         {
             let ts_code: String = row.get(0).map_err(|e| format!("读取指数ts_code失败:{e}"))?;
             let trade_date: String = row
                 .get(1)
                 .map_err(|e| format!("读取指数trade_date失败:{e}"))?;
-            let pct_chg: Option<f64> = row.get(2).map_err(|e| format!("读取指数涨幅失败:{e}"))?;
-            let Some(runtime_key) = ts_code_to_key.get(ts_code.as_str()) else {
-                continue;
-            };
-            if let Some(values_by_date) = out.get_mut(*runtime_key) {
-                values_by_date.insert(trade_date, pct_chg);
+            for (i, index_col) in self.runtime_index_cols.iter().enumerate() {
+                if ts_code == index_col.ts_code {
+                    let value: Option<f64> = row
+                        .get(i + 2)
+                        .map_err(|e| format!("读取指数{}失败:{e}", index_col.runtime_key))?;
+                    if let Some(values_by_date) = out.get_mut(&index_col.runtime_key) {
+                        values_by_date.insert(trade_date.clone(), value);
+                    }
+                }
             }
         }
 
         Ok(out)
     }
 
-    fn inject_runtime_index_pct_series(
+    fn inject_runtime_index_series(
         &self,
         row_data: &mut RowData,
-        index_pct_by_key: &HashMap<String, HashMap<String, Option<f64>>>,
+        index_values_by_key: &HashMap<String, HashMap<String, Option<f64>>>,
     ) {
-        for index_col in &self.runtime_index_pct_cols {
-            let values_by_date = index_pct_by_key.get(index_col.runtime_key);
+        for index_col in &self.runtime_index_cols {
+            let values_by_date = index_values_by_key.get(&index_col.runtime_key);
             let mut series = Vec::with_capacity(row_data.trade_dates.len());
             for trade_date in &row_data.trade_dates {
                 series.push(
@@ -872,9 +875,7 @@ impl DataReader {
                         .flatten(),
                 );
             }
-            row_data
-                .cols
-                .insert(index_col.runtime_key.to_string(), series);
+            row_data.cols.insert(index_col.runtime_key.clone(), series);
         }
     }
 }
@@ -1487,14 +1488,15 @@ impl IndsData {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
     use std::fs::{create_dir_all, remove_dir_all};
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        DataReader, RuleTag, ScopeWay, ScoreConfig, collect_assigned_names_from_expr_program,
+        DataReader, RuleTag, RuntimeKeyCollectOptions, ScopeWay, ScoreConfig,
+        collect_assigned_names_from_expr_program, collect_runtime_keys_from_expr_programs,
     };
+    use crate::expr::validation::parse_expression_program;
     use duckdb::{Connection, params};
 
     fn parse_score_config(text: &str) -> ScoreConfig {
@@ -1745,7 +1747,7 @@ when = "C > O"
     }
 
     #[test]
-    fn data_reader_injects_requested_index_pct_runtime_columns() {
+    fn data_reader_injects_requested_index_runtime_columns() {
         let source_dir = temp_dir_path("runtime-index-pct");
         create_dir_all(&source_dir).expect("create temp dir");
         let db_path = source_dir.join("stock_data.db");
@@ -1756,35 +1758,91 @@ when = "C > O"
                 ts_code VARCHAR,
                 trade_date VARCHAR,
                 adj_type VARCHAR,
+                open DOUBLE,
                 close DOUBLE,
-                pct_chg DOUBLE
+                pct_chg DOUBLE,
+                vol DOUBLE,
+                MA5 DOUBLE
             )
             "#,
         )
         .expect("create stock_data");
 
-        for (ts_code, trade_date, adj_type, close, pct_chg) in [
-            ("000001.SZ", "20240102", "qfq", 10.0, 1.0),
-            ("000001.SZ", "20240103", "qfq", 11.0, 2.0),
-            ("000001.SH", "20240102", "ind", 3000.0, 0.5),
-            ("000001.SH", "20240103", "ind", 3010.0, 0.7),
-            ("399300.SZ", "20240102", "ind", 3500.0, 1.5),
-            ("399300.SZ", "20240103", "ind", 3520.0, 1.7),
-            ("000852.SH", "20240103", "ind", 5000.0, -0.2),
+        for (ts_code, trade_date, adj_type, open, close, pct_chg, vol, ma5) in [
+            ("000001.SZ", "20240102", "qfq", 9.0, 10.0, 1.0, 100.0, 9.5),
+            ("000001.SZ", "20240103", "qfq", 10.0, 11.0, 2.0, 110.0, 10.0),
+            (
+                "000001.SH",
+                "20240102",
+                "ind",
+                2990.0,
+                3000.0,
+                0.5,
+                900.0,
+                2980.0,
+            ),
+            (
+                "000001.SH",
+                "20240103",
+                "ind",
+                3000.0,
+                3010.0,
+                0.7,
+                920.0,
+                2990.0,
+            ),
+            (
+                "399300.SZ",
+                "20240102",
+                "ind",
+                3490.0,
+                3500.0,
+                1.5,
+                800.0,
+                3450.0,
+            ),
+            (
+                "399300.SZ",
+                "20240103",
+                "ind",
+                3510.0,
+                3520.0,
+                1.7,
+                810.0,
+                3470.0,
+            ),
+            (
+                "000852.SH",
+                "20240103",
+                "ind",
+                4990.0,
+                5000.0,
+                -0.2,
+                700.0,
+                4900.0,
+            ),
         ] {
             conn.execute(
-                "INSERT INTO stock_data VALUES (?, ?, ?, ?, ?)",
-                params![ts_code, trade_date, adj_type, close, pct_chg],
+                "INSERT INTO stock_data VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    ts_code, trade_date, adj_type, open, close, pct_chg, vol, ma5
+                ],
             )
             .expect("insert row");
         }
 
-        let required = HashSet::from([
-            "C".to_string(),
-            "I".to_string(),
-            "I300".to_string(),
-            "I1000".to_string(),
-        ]);
+        let program = parse_expression_program(
+            "C > 0 AND I > 0 AND I300 > 0 AND I1000 > 0 AND I_PCT_CHG > 0 AND I_V > 0 AND I_O > 0 AND I300_C > 0 AND I300_MA5 > 0",
+        )
+        .expect("parse index expression");
+        let required = collect_runtime_keys_from_expr_programs(
+            &[&program],
+            RuntimeKeyCollectOptions {
+                always_keys: &[],
+                injected_keys: &[],
+                aliases: &[],
+            },
+        );
         let reader = DataReader::new_with_runtime_keys(
             source_dir.to_str().expect("utf8 source dir"),
             &required,
@@ -1798,7 +1856,24 @@ when = "C > O"
         assert_eq!(row_data.cols["I"], vec![Some(0.5), Some(0.7)]);
         assert_eq!(row_data.cols["I300"], vec![Some(1.5), Some(1.7)]);
         assert_eq!(row_data.cols["I1000"], vec![None, Some(-0.2)]);
+        assert_eq!(row_data.cols["I_PCT_CHG"], row_data.cols["I"]);
+        assert_eq!(row_data.cols["I_V"], vec![Some(900.0), Some(920.0)]);
+        assert_eq!(row_data.cols["I_O"], vec![Some(2990.0), Some(3000.0)]);
+        assert_eq!(row_data.cols["I300_C"], vec![Some(3500.0), Some(3520.0)]);
+        assert_eq!(row_data.cols["I300_MA5"], vec![Some(3450.0), Some(3470.0)]);
         assert!(!row_data.cols.contains_key("ISZ"));
+
+        let tail = reader
+            .load_one_tail_rows("000001.SZ", "qfq", "20240103", 1)
+            .expect("load tail");
+        assert_eq!(tail.cols["I_V"], vec![Some(920.0)]);
+        let batch = reader
+            .load_batch(&["000001.SZ".to_string()], "qfq", "20240102", "20240103")
+            .expect("load batch");
+        assert_eq!(
+            batch["000001.SZ"].cols["I300_MA5"],
+            row_data.cols["I300_MA5"]
+        );
 
         let _ = remove_dir_all(source_dir);
     }
