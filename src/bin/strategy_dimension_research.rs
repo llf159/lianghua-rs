@@ -1,0 +1,136 @@
+use std::{env, process, time::Instant};
+
+use lianghua_app_strategy::dimension_research::{
+    get_strategy_dimension_research_defaults, run_strategy_dimension_research,
+};
+
+fn main() {
+    let arguments = env::args().skip(1).collect::<Vec<_>>();
+    if arguments.is_empty() || arguments.len() > 5 {
+        eprintln!(
+            "用法: strategy_dimension_research <数据目录> [开始日期] [结束日期] [规则数] [非线性样本数]"
+        );
+        process::exit(2);
+    }
+
+    let source_path = arguments[0].clone();
+    let defaults = match get_strategy_dimension_research_defaults(source_path.clone()) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("读取研究默认参数失败:{error}");
+            process::exit(1);
+        }
+    };
+    let start_date = arguments
+        .get(1)
+        .cloned()
+        .or(defaults.start_date)
+        .unwrap_or_else(|| {
+            eprintln!("结果库没有可用的开始日期");
+            process::exit(1);
+        });
+    let end_date = arguments
+        .get(2)
+        .cloned()
+        .or(defaults.end_date)
+        .unwrap_or_else(|| {
+            eprintln!("结果库没有可用的结束日期");
+            process::exit(1);
+        });
+    let rule_count = arguments
+        .get(3)
+        .map(|value| value.parse::<usize>())
+        .transpose()
+        .unwrap_or_else(|error| {
+            eprintln!("规则数必须是正整数:{error}");
+            process::exit(2);
+        })
+        .unwrap_or(10);
+    let nonlinear_sample_limit = arguments
+        .get(4)
+        .map(|value| value.parse::<usize>())
+        .transpose()
+        .unwrap_or_else(|error| {
+            eprintln!("非线性样本数必须是正整数:{error}");
+            process::exit(2);
+        })
+        .unwrap_or(defaults.default_nonlinear_sample_limit);
+
+    let mut rule_options = defaults.rule_options;
+    rule_options.sort_by(|left, right| {
+        right
+            .trigger_count
+            .cmp(&left.trigger_count)
+            .then_with(|| left.rule_name.cmp(&right.rule_name))
+    });
+    let rule_names = rule_options
+        .into_iter()
+        .take(rule_count)
+        .map(|option| option.rule_name)
+        .collect::<Vec<_>>();
+
+    println!(
+        "开始研究:区间={start_date}..{end_date},规则数={},非线性样本上限={nonlinear_sample_limit}",
+        rule_names.len()
+    );
+    let started_at = Instant::now();
+    let result = match run_strategy_dimension_research(
+        source_path,
+        start_date,
+        end_date,
+        rule_names,
+        Some(nonlinear_sample_limit),
+        None,
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("相关性与正交研究失败:{error}");
+            process::exit(1);
+        }
+    };
+    println!(
+        "完成:耗时={:.3}s,评分宇宙={},策略={},策略对={}",
+        started_at.elapsed().as_secs_f64(),
+        result.universe_sample_count,
+        result.strategies.len(),
+        result.pair_metrics.len()
+    );
+
+    let mut pairs = result.pair_metrics.iter().collect::<Vec<_>>();
+    pairs.sort_by(|left, right| {
+        right
+            .distance_correlation_daily_mean
+            .unwrap_or(f64::NEG_INFINITY)
+            .total_cmp(
+                &left
+                    .distance_correlation_daily_mean
+                    .unwrap_or(f64::NEG_INFINITY),
+            )
+    });
+    println!("距离相关最高的策略对:");
+    for pair in pairs.into_iter().take(10) {
+        println!(
+            "  {} / {}: dCor={:.4}, Spearman={:.4}, Pearson={:.4}, Jaccard={:.4}, nonlinear_n={}",
+            pair.left_rule_name,
+            pair.right_rule_name,
+            pair.distance_correlation_daily_mean.unwrap_or(f64::NAN),
+            pair.score_spearman_daily_mean.unwrap_or(f64::NAN),
+            pair.score_pearson_with_zeros.unwrap_or(f64::NAN),
+            pair.jaccard.unwrap_or(f64::NAN),
+            pair.nonlinear_sample_count
+        );
+    }
+
+    println!("按上述规则顺序的线性正交残差:");
+    for diagnostic in &result.orthogonal_diagnostics {
+        println!(
+            "  {}: residual={:.4}, explained={:.4}",
+            diagnostic.rule_name,
+            diagnostic.residual_variance_ratio.unwrap_or(f64::NAN),
+            diagnostic.explained_variance_ratio.unwrap_or(f64::NAN)
+        );
+    }
+    for pending in result.pending_layers {
+        println!("待接入:{pending}");
+    }
+}

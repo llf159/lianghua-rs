@@ -112,7 +112,7 @@ const ALGORITHM_SECTIONS: AlgorithmSection[] = [
         heading: '残差收益率',
         description: '先用指数 / 概念 / 行业 beta 估算股票"应有收益"，再用实际收益减去它，得到剔除市场影响后的纯选股能力。',
         formula: 'expected_pct = index_beta × index_pct + concept_beta × concept_pct + industry_beta × industry_pct\nresidual_pct = stock_pct - expected_pct',
-        interpretation: '正值表示跑赢基准，负值表示跑输基准。回测窗口内多日累加称为 forward residual。',
+        interpretation: '正值表示跑赢基准，负值表示跑输基准。形态在评分日收盘后确认，收益从下一交易日开盘开始，到持有期末收盘结束；各收益腿先复合，再按配置 Beta 扣减。',
       },
       {
         heading: 'IC（信息系数）',
@@ -128,9 +128,9 @@ const ALGORITHM_SECTIONS: AlgorithmSection[] = [
       },
       {
         heading: 't 统计量',
-        description: '检验 IC 均值是否显著不为零。',
-        formula: 't = IC_mean × √sample_count / IC_std',
-        interpretation: '|t| > 2 通常认为统计显著（约 95% 置信度）。t 越大，IC 不是随机波动的证据越强。',
+        description: '检验 IC 均值是否显著不为零，并修正多日持有造成的相邻前瞻收益重叠。',
+        formula: 't = IC_mean / Newey-West_HAC_SE，滞后阶数 = 持有期 - 1',
+        interpretation: '|t| > 2 可作约 95% 显著性的初步参考。HAC 会计入异方差和相邻日期相关性，但仍需结合样本外与多重检验。',
       },
       {
         heading: '残差均值',

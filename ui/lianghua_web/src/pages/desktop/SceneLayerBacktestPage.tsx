@@ -2187,7 +2187,7 @@ export default function SceneLayerBacktestPage() {
             <input type="date" value={endDateInput} onChange={(event) => setEndDateInput(event.target.value)} />
           </label>
           <label className="scene-layer-field">
-            <span>日最少样本</span>
+            <span title="规则回测按实际触发数过滤；排名和场景回测按当日有效横截面样本数过滤">日最少样本（规则=触发数）</span>
             <input type="number" min="1" value={minSamplesPerDay} onChange={(event) => setMinSamplesPerDay(event.target.value)} />
           </label>
           <label className="scene-layer-field">
@@ -2616,7 +2616,7 @@ export default function SceneLayerBacktestPage() {
       <section className="scene-layer-card">
         <h2 className="scene-layer-title">策略回测</h2>
         <p className="scene-layer-caption">
-          使用 rule_details 中的策略得分与残差收益，计算策略日度残差均值、贡献度、IC / ICIR。
+          使用 rule_details 中的策略得分与次日开盘起算的复合残差收益，按实际触发数过滤有效日期，计算策略日度残差均值、贡献度、IC / ICIR；多日持有的 IC t值使用 HAC 修正。
         </p>
 
         <div className="scene-layer-actions">

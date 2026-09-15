@@ -1,3 +1,4 @@
+pub mod dimension;
 pub mod fp_utils;
 pub mod rank;
 pub mod rule;
@@ -17,6 +18,9 @@ pub const DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS: usize = 60;
 pub(super) fn build_forward_backtest_residual_map(
     mut residual_points: Vec<ResidualReturnPoint>,
     backtest_period: usize,
+    index_beta: f64,
+    concept_beta: f64,
+    industry_beta: f64,
 ) -> HashMap<String, f64> {
     if backtest_period == 0 || residual_points.len() < backtest_period + 1 {
         return HashMap::new();
@@ -24,44 +28,54 @@ pub(super) fn build_forward_backtest_residual_map(
 
     residual_points.sort_by(|a, b| a.trade_date.cmp(&b.trade_date));
 
-    let mut sum = 0.0;
-    let mut invalid_count = 0usize;
-    for point in &residual_points[1..=backtest_period] {
-        if point.residual_pct.is_finite() {
-            sum += point.residual_pct;
-        } else {
-            invalid_count += 1;
-        }
-    }
-
     let mut out = HashMap::with_capacity(residual_points.len() - backtest_period);
     for index in 0..(residual_points.len() - backtest_period) {
-        if invalid_count == 0 {
-            out.insert(residual_points[index].trade_date.clone(), sum);
-        }
-
-        let remove_index = index + 1;
-        let add_index = index + backtest_period + 1;
-        if add_index >= residual_points.len() {
-            break;
-        }
-
-        let removed = residual_points[remove_index].residual_pct;
-        if removed.is_finite() {
-            sum -= removed;
-        } else {
-            invalid_count -= 1;
-        }
-
-        let added = residual_points[add_index].residual_pct;
-        if added.is_finite() {
-            sum += added;
-        } else {
-            invalid_count += 1;
+        let window = &residual_points[index + 1..=index + backtest_period];
+        if let Some(value) = calc_forward_residual_return(
+            window,
+            index_beta,
+            concept_beta,
+            industry_beta,
+        ) {
+            out.insert(residual_points[index].trade_date.clone(), value);
         }
     }
 
     out
+}
+
+pub(super) fn calc_forward_residual_return(
+    window: &[ResidualReturnPoint],
+    index_beta: f64,
+    concept_beta: f64,
+    industry_beta: f64,
+) -> Option<f64> {
+    let first = window.first()?;
+    let stock_return = compound_pct_returns(
+        std::iter::once(first.stock_open_pct).chain(window.iter().skip(1).map(|p| p.stock_pct)),
+    )?;
+    let index_return = compound_pct_returns(
+        std::iter::once(first.index_open_pct).chain(window.iter().skip(1).map(|p| p.index_pct)),
+    )?;
+    let concept_return = compound_pct_returns(window.iter().map(|point| point.concept_pct))?;
+    let industry_return = compound_pct_returns(window.iter().map(|point| point.industry_pct))?;
+    let residual = stock_return
+        - index_beta * index_return
+        - concept_beta * concept_return
+        - industry_beta * industry_return;
+    residual.is_finite().then_some(residual)
+}
+
+fn compound_pct_returns(values: impl Iterator<Item = f64>) -> Option<f64> {
+    let mut growth = 1.0;
+    for value in values {
+        if !value.is_finite() {
+            return None;
+        }
+        growth *= 1.0 + value / 100.0;
+    }
+    let result = (growth - 1.0) * 100.0;
+    result.is_finite().then_some(result)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -224,6 +238,34 @@ pub struct ResidualReturnPoint {
     pub industry_pct: f64,
     pub expected_pct: f64,
     pub residual_pct: f64,
+    pub stock_open_pct: f64,
+    pub index_open_pct: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct DailyReturnPoint {
+    pub close_pct: f64,
+    pub open_pct: f64,
+}
+
+pub(super) fn stock_data_has_open_close(conn: &Connection) -> Result<bool, String> {
+    let mut stmt = conn
+        .prepare("DESCRIBE stock_data")
+        .map_err(|e| format!("预编译 stock_data 列查询失败:{e}"))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| format!("查询 stock_data 列失败:{e}"))?;
+    let mut has_open = false;
+    let mut has_close = false;
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取 stock_data 列失败:{e}"))?
+    {
+        let name: String = row.get(0).map_err(|e| format!("读取 stock_data 列名失败:{e}"))?;
+        has_open |= name.eq_ignore_ascii_case("open");
+        has_close |= name.eq_ignore_ascii_case("close");
+    }
+    Ok(has_open && has_close)
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -253,7 +295,7 @@ pub fn calc_stock_residual_returns_with_factor_series(
 ) -> Result<Vec<ResidualReturnPoint>, String> {
     input.validate()?;
 
-    let stock_series = load_pct_chg_series(
+    let stock_series = load_return_series(
         source_conn,
         input.ts_code.trim(),
         input.stock_adj_type.trim(),
@@ -264,7 +306,7 @@ pub fn calc_stock_residual_returns_with_factor_series(
         return Ok(Vec::new());
     }
 
-    let index_series = load_pct_chg_series(
+    let index_series = load_return_series(
         source_conn,
         input.index_ts_code.trim(),
         "ind",
@@ -330,7 +372,7 @@ pub fn calc_stock_residual_returns_with_factor_series(
 
     let concept_map: Option<&HashMap<String, f64>> = if use_concept {
         if input.concept.trim().is_empty() {
-            Some(&index_series)
+            None
         } else if let Some(series) = factor_series.concept_series {
             if series.is_empty() {
                 return Ok(Vec::new());
@@ -345,7 +387,7 @@ pub fn calc_stock_residual_returns_with_factor_series(
 
     let industry_map: Option<&HashMap<String, f64>> = if use_industry {
         if input.industry.trim().is_empty() {
-            Some(&index_series)
+            None
         } else if let Some(series) = factor_series.industry_series {
             if series.is_empty() {
                 return Ok(Vec::new());
@@ -371,8 +413,8 @@ pub fn calc_stock_residual_returns_with_factor_series(
 
 pub(super) fn calc_stock_residual_returns_from_loaded_series(
     input: &ResidualReturnInput,
-    stock_series: &HashMap<String, f64>,
-    index_series: &HashMap<String, f64>,
+    stock_series: &HashMap<String, DailyReturnPoint>,
+    index_series: &HashMap<String, DailyReturnPoint>,
     factor_series: ResidualFactorSeriesRefs<'_>,
 ) -> Result<Vec<ResidualReturnPoint>, String> {
     input.validate()?;
@@ -382,10 +424,14 @@ pub(super) fn calc_stock_residual_returns_from_loaded_series(
 
     let use_concept = input.concept_beta.abs() > f64::EPSILON;
     let use_industry = input.industry_beta.abs() > f64::EPSILON;
+    let index_close_series = index_series
+        .iter()
+        .map(|(trade_date, point)| (trade_date.clone(), point.close_pct))
+        .collect::<HashMap<_, _>>();
 
     let concept_map: Option<&HashMap<String, f64>> = if use_concept {
         if input.concept.trim().is_empty() {
-            Some(index_series)
+            Some(&index_close_series)
         } else if let Some(series) = factor_series.concept_series {
             if series.is_empty() {
                 return Ok(Vec::new());
@@ -400,7 +446,7 @@ pub(super) fn calc_stock_residual_returns_from_loaded_series(
 
     let industry_map: Option<&HashMap<String, f64>> = if use_industry {
         if input.industry.trim().is_empty() {
-            Some(index_series)
+            Some(&index_close_series)
         } else if let Some(series) = factor_series.industry_series {
             if series.is_empty() {
                 return Ok(Vec::new());
@@ -418,12 +464,14 @@ pub(super) fn calc_stock_residual_returns_from_loaded_series(
 
     let mut points = Vec::with_capacity(trade_dates.len());
     for trade_date in trade_dates {
-        let Some(stock_pct) = stock_series.get(trade_date).copied() else {
+        let Some(stock_return) = stock_series.get(trade_date).copied() else {
             continue;
         };
-        let Some(index_pct) = index_series.get(trade_date).copied() else {
+        let Some(index_return) = index_series.get(trade_date).copied() else {
             continue;
         };
+        let stock_pct = stock_return.close_pct;
+        let index_pct = index_return.close_pct;
 
         let concept_pct = if use_concept {
             let Some(series) = concept_map else {
@@ -462,25 +510,33 @@ pub(super) fn calc_stock_residual_returns_from_loaded_series(
             industry_pct,
             expected_pct,
             residual_pct,
+            stock_open_pct: stock_return.open_pct,
+            index_open_pct: index_return.open_pct,
         });
     }
 
     Ok(points)
 }
 
-fn load_pct_chg_series(
+fn load_return_series(
     conn: &Connection,
     ts_code: &str,
     adj_type: &str,
     start_date: &str,
     end_date: &str,
-) -> Result<HashMap<String, f64>, String> {
+) -> Result<HashMap<String, DailyReturnPoint>, String> {
+    let price_select = if stock_data_has_open_close(conn)? {
+        "TRY_CAST(open AS DOUBLE), TRY_CAST(close AS DOUBLE)"
+    } else {
+        "CAST(NULL AS DOUBLE), CAST(NULL AS DOUBLE)"
+    };
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             r#"
             SELECT
                 trade_date,
-                TRY_CAST(pct_chg AS DOUBLE)
+                TRY_CAST(pct_chg AS DOUBLE),
+                {price_select}
             FROM stock_data
             WHERE ts_code = ?
               AND adj_type = ?
@@ -488,7 +544,7 @@ fn load_pct_chg_series(
               AND trade_date <= ?
             ORDER BY trade_date ASC
             "#,
-        )
+        ))
         .map_err(|e| format!("预编译涨跌幅查询失败:{e}"))?;
 
     let mut rows = stmt
@@ -499,11 +555,24 @@ fn load_pct_chg_series(
     while let Some(row) = rows.next().map_err(|e| format!("读取涨跌幅失败:{e}"))? {
         let trade_date: String = row.get(0).map_err(|e| format!("读取trade_date失败:{e}"))?;
         let pct: Option<f64> = row.get(1).map_err(|e| format!("读取pct_chg失败:{e}"))?;
+        let open: Option<f64> = row.get(2).map_err(|e| format!("读取open失败:{e}"))?;
+        let close: Option<f64> = row.get(3).map_err(|e| format!("读取close失败:{e}"))?;
 
-        let Some(pct) = pct.filter(|value| value.is_finite()) else {
+        let Some(close_pct) = pct.filter(|value| value.is_finite()) else {
             continue;
         };
-        series.insert(trade_date, pct);
+        let open_pct = open
+            .filter(|value| value.is_finite() && value.abs() > f64::EPSILON)
+            .zip(close.filter(|value| value.is_finite()))
+            .map(|(open, close)| (close / open - 1.0) * 100.0)
+            .unwrap_or(close_pct);
+        series.insert(
+            trade_date,
+            DailyReturnPoint {
+                close_pct,
+                open_pct,
+            },
+        );
     }
 
     Ok(series)
@@ -714,18 +783,20 @@ mod tests {
             .enumerate()
             .map(|(index, residual_pct)| ResidualReturnPoint {
                 trade_date: format!("2024010{}", index + 1),
-                stock_pct: 0.0,
+                stock_pct: residual_pct,
                 index_pct: 0.0,
                 concept_pct: 0.0,
                 industry_pct: 0.0,
                 expected_pct: 0.0,
                 residual_pct,
+                stock_open_pct: residual_pct,
+                index_open_pct: 0.0,
             })
             .collect();
 
-        let result = build_forward_backtest_residual_map(points, 2);
+        let result = build_forward_backtest_residual_map(points, 2, 0.0, 0.0, 0.0);
 
-        assert_eq!(result.get("20240103"), Some(&9.0));
+        assert_eq!(result.get("20240103"), Some(&9.200000000000008));
         assert!(!result.contains_key("20240101"));
         assert!(!result.contains_key("20240102"));
     }

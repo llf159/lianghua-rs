@@ -46,6 +46,7 @@ use crate::{
     scoring_model::{CompactRuleScore, SceneBacktestRow, ScoreBatch, ScoreSummary},
     simulate::{
         DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS, build_backtest_sample_eligibility,
+        fp_utils::calc_newey_west_standard_error,
         rank::{
             RankLayerConfig, RankLayerFromDbInput, RankLayerMethod,
             calc_rank_layer_metrics_from_rank_samples, calc_rank_layer_metrics_from_score_rows,
@@ -2493,7 +2494,7 @@ fn build_rule_backtest_payload(
     metrics: crate::simulate::rule::RuleLayerMetrics,
     layer_details: Option<ValidationScoreLayerDetails>,
 ) -> RuleLayerBacktestData {
-    let decay_validations = build_rule_decay_validations(&metrics.points);
+    let decay_validations = build_rule_decay_validations(&metrics.points, params.backtest_period);
     let (spread_mean, layer_count, layer_method, layer_method_label, layer_summaries) =
         match layer_details {
             Some(layer_details) => {
@@ -4395,7 +4396,10 @@ pub fn run_rule_expression_calibration(
                 .collect::<Vec<_>>();
             let daily_mean = mean_f64(&daily_values);
             let daily_std = sample_std_f64(&daily_values);
-            let standard_error = daily_std.map(|std| std / (daily_values.len() as f64).sqrt());
+            let standard_error = calc_newey_west_standard_error(
+                &daily_values,
+                session.params.backtest_period.saturating_sub(1),
+            );
             let conservative_edge = daily_mean.zip(standard_error).map(|(mean, se)| {
                 let oriented_lcb = mean * direction_sign - (1.28) * se;
                 direction_sign * oriented_lcb
@@ -6900,6 +6904,7 @@ fn aggregate_all_rule_summary_metrics(
 
 fn build_decay_validations_from_daily_values(
     mut daily_values: Vec<(String, f64)>,
+    backtest_period: usize,
 ) -> Vec<RuleDecayValidation> {
     daily_values.retain(|(_, value)| value.is_finite());
     daily_values.sort_by(|left, right| left.0.cmp(&right.0));
@@ -6945,11 +6950,10 @@ fn build_decay_validations_from_daily_values(
             let prior_mean = mean_f64(&prior).unwrap_or_default();
             let change = recent_mean - prior_mean;
             let t_value = (|recent: &[f64], prior: &[f64], change: f64| -> Option<f64> {
-                let recent_std = sample_std_f64(recent)?;
-                let prior_std = sample_std_f64(prior)?;
-                let standard_error = ((recent_std * recent_std / recent.len() as f64)
-                    + (prior_std * prior_std / prior.len() as f64))
-                    .sqrt();
+                let lag = backtest_period.saturating_sub(1);
+                let recent_se = calc_newey_west_standard_error(recent, lag)?;
+                let prior_se = calc_newey_west_standard_error(prior, lag)?;
+                let standard_error = (recent_se * recent_se + prior_se * prior_se).sqrt();
                 if !standard_error.is_finite() || standard_error <= RULE_BACKTEST_EPS {
                     None
                 } else {
@@ -7013,12 +7017,17 @@ fn build_rule_directional_excess_daily_values(
 
 fn build_rule_decay_validations(
     points: &[crate::simulate::rule::RuleLayerPoint],
+    backtest_period: usize,
 ) -> Vec<RuleDecayValidation> {
-    build_decay_validations_from_daily_values(build_rule_directional_excess_daily_values(points))
+    build_decay_validations_from_daily_values(
+        build_rule_directional_excess_daily_values(points),
+        backtest_period,
+    )
 }
 
 fn build_rule_basket_decay_from_daily_groups<'a>(
     daily_groups: impl IntoIterator<Item = &'a [(String, f64)]>,
+    backtest_period: usize,
 ) -> Vec<RuleDecayValidation> {
     let mut daily_aggregates = HashMap::<String, (f64, usize)>::new();
     for (trade_date, value) in daily_groups.into_iter().flatten() {
@@ -7036,16 +7045,19 @@ fn build_rule_basket_decay_from_daily_groups<'a>(
                 (count > 0).then_some((trade_date, sum / count as f64))
             })
             .collect(),
+        backtest_period,
     )
 }
 
 fn build_all_rule_decay_validations(
     summaries: &[RuleLayerRuleSummary],
+    backtest_period: usize,
 ) -> Vec<RuleDecayValidation> {
     build_rule_basket_decay_from_daily_groups(
         summaries
             .iter()
             .map(|summary| summary.decay_daily_values.as_slice()),
+        backtest_period,
     )
 }
 
@@ -7065,7 +7077,10 @@ fn build_one_rule_backtest_summary_and_detail(
         .cloned()
         .unwrap_or_default();
     let decay_daily_values = build_rule_directional_excess_daily_values(&metrics.points);
-    let decay_validations = build_decay_validations_from_daily_values(decay_daily_values.clone());
+    let decay_validations = build_decay_validations_from_daily_values(
+        decay_daily_values.clone(),
+        params.backtest_period,
+    );
     let summary = RuleLayerRuleSummary {
         rule_name: one_rule_name.to_string(),
         point_count: metrics.points.len(),
@@ -7778,7 +7793,8 @@ pub fn run_rule_layer_backtest(
                 &input,
                 params.allowed_ts_codes.as_ref(),
             )?;
-            let decay_validations = build_rule_decay_validations(&metrics.points);
+            let decay_validations =
+                build_rule_decay_validations(&metrics.points, params.backtest_period);
 
             return Ok(RuleLayerBacktestData {
                 rule_name: input.rule_name,
@@ -7917,7 +7933,8 @@ pub fn run_rule_layer_backtest(
             },
         )?;
         let (all_rule_summaries, _) = split_and_sort_rule_backtest_summaries_and_details(items);
-        let decay_validations = build_all_rule_decay_validations(&all_rule_summaries);
+        let decay_validations =
+            build_all_rule_decay_validations(&all_rule_summaries, params.backtest_period);
 
         let (
             avg_residual_mean,
@@ -8411,7 +8428,8 @@ pub fn run_transient_rule_layer_backtest(
     );
     let (all_rule_summaries, _) =
         split_and_sort_rule_backtest_summaries_and_details(summary_detail_items?);
-    let decay_validations = build_all_rule_decay_validations(&all_rule_summaries);
+    let decay_validations =
+        build_all_rule_decay_validations(&all_rule_summaries, params.backtest_period);
 
     let (
         avg_residual_mean,
@@ -9801,7 +9819,7 @@ explain = "test"
             })
             .collect::<Vec<_>>();
 
-        let validations = build_rule_decay_validations(&points);
+        let validations = build_rule_decay_validations(&points, 1);
         let recent_20 = validations
             .iter()
             .find(|item| item.window_days == 20)
@@ -9832,7 +9850,7 @@ explain = "test"
             })
             .collect::<Vec<_>>();
 
-        let validations = build_rule_decay_validations(&points);
+        let validations = build_rule_decay_validations(&points, 1);
         let recent_20 = validations
             .iter()
             .find(|item| item.window_days == 20)
@@ -9858,7 +9876,7 @@ explain = "test"
             .map(|index| decay_test_point(index, 1.0, 0.10))
             .collect::<Vec<_>>();
 
-        let validations = build_rule_decay_validations(&points);
+        let validations = build_rule_decay_validations(&points, 1);
 
         assert_eq!(validations.len(), 3);
         assert!(validations.iter().all(|item| item.status == "insufficient"));
@@ -9895,7 +9913,7 @@ explain = "test"
             .collect::<Vec<_>>();
 
         let validations =
-            build_rule_basket_decay_from_daily_groups([first.as_slice(), second.as_slice()]);
+            build_rule_basket_decay_from_daily_groups([first.as_slice(), second.as_slice()], 1);
         let recent_20 = validations
             .iter()
             .find(|item| item.window_days == 20)

@@ -111,6 +111,7 @@ pub(crate) fn sample_std(values: &[f64]) -> Option<f64> {
     Some(var.sqrt())
 }
 
+#[cfg(test)]
 pub(crate) fn calc_t_value(
     mean: Option<f64>,
     std: Option<f64>,
@@ -128,7 +129,7 @@ pub(crate) fn calc_t_value(
 ///
 /// `max_lag` 通常取 `holding_period - 1`。相比把每天视为独立样本的普通
 /// t 值，这会把相邻重叠收益的自相关计入标准误，避免显著性被系统性高估。
-pub(crate) fn calc_newey_west_t_value(values: &[f64], max_lag: usize) -> Option<f64> {
+pub fn calc_newey_west_standard_error(values: &[f64], max_lag: usize) -> Option<f64> {
     let finite = values
         .iter()
         .copied()
@@ -162,7 +163,18 @@ pub(crate) fn calc_newey_west_t_value(values: &[f64], max_lag: usize) -> Option<
         return None;
     }
     let standard_error = (long_run_variance / denominator).sqrt();
-    (standard_error > EPS).then_some(avg / standard_error)
+    (standard_error > EPS).then_some(standard_error)
+}
+
+pub fn calc_newey_west_t_value(values: &[f64], max_lag: usize) -> Option<f64> {
+    let finite = values
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite())
+        .collect::<Vec<_>>();
+    let avg = mean(&finite)?;
+    let standard_error = calc_newey_west_standard_error(&finite, max_lag)?;
+    Some(avg / standard_error)
 }
 
 pub fn spearman_corr(x: &[f64], y: &[f64]) -> Option<f64> {

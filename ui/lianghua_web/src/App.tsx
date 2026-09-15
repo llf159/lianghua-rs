@@ -28,6 +28,7 @@ import StrategyPaperValidationPage from './pages/desktop/StrategyPaperValidation
 import StrategyTriggerPage from './pages/desktop/StrategyTriggerPage'
 import StrategyTriggerSimilarityPage from './pages/desktop/StrategyTriggerSimilarityPage'
 import SceneLayerBacktestPage from './pages/desktop/SceneLayerBacktestPage'
+import StrategyDimensionResearchPage from './pages/desktop/StrategyDimensionResearchPage'
 import ExpressionValidationSamplesPage, {
   EXPRESSION_VALIDATION_SAMPLES_ROUTE_PATH,
 } from './pages/desktop/ExpressionValidationSamplesPage'
@@ -100,6 +101,7 @@ function AppRoutes() {
             <Route path="strategy-trigger" element={<StrategyTriggerPage />} />
             <Route path="strategy-paper-validation" element={<StrategyPaperValidationPage />} />
             <Route path="scene-layer" element={<SceneLayerBacktestPage />} />
+            <Route path="correlation-orthogonality" element={<StrategyDimensionResearchPage />} />
             <Route
               path={EXPRESSION_VALIDATION_SAMPLES_ROUTE_PATH}
               element={<ExpressionValidationSamplesPage />}

@@ -7,9 +7,10 @@ use duckdb::{Connection, params_from_iter};
 use rayon::prelude::*;
 
 use super::{
-    BacktestSampleEligibility, DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS, ResidualFactorSeriesRefs,
-    ResidualReturnInput, build_backtest_sample_eligibility, build_forward_backtest_residual_map,
-    calc_stock_residual_returns_from_loaded_series,
+    BacktestSampleEligibility, DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS, DailyReturnPoint,
+    ResidualFactorSeriesRefs, ResidualReturnInput, build_backtest_sample_eligibility,
+    build_forward_backtest_residual_map, calc_stock_residual_returns_from_loaded_series,
+    stock_data_has_open_close,
 };
 use crate::{
     data::{
@@ -17,7 +18,7 @@ use crate::{
         load_stock_list, load_ths_concepts_named_map, result_db_path,
     },
     scoring_model::SceneBacktestRow,
-    simulate::fp_utils::{EPS, calc_t_value, mean, sample_std, spearman_corr},
+    simulate::fp_utils::{EPS, calc_newey_west_t_value, mean, sample_std, spearman_corr},
 };
 
 const PCT_CHG_BATCH_SIZE: usize = 512;
@@ -539,7 +540,8 @@ pub fn calc_scene_layer_metrics(
         (Some(m), Some(s)) if s.abs() >= EPS => Some(m / s),
         _ => None,
     };
-    let ic_t_value = calc_t_value(ic_mean, ic_std, ic_values.len());
+    let ic_t_value =
+        calc_newey_west_t_value(&ic_values, config.backtest_period.saturating_sub(1));
 
     Ok(SceneLayerMetrics {
         points,
@@ -731,8 +733,8 @@ fn build_residual_map_cache(
 
 fn build_residual_map_for_ts_code(
     ts_code: &str,
-    stock_series_cache: &HashMap<String, HashMap<String, f64>>,
-    index_series: &HashMap<String, f64>,
+    stock_series_cache: &HashMap<String, HashMap<String, DailyReturnPoint>>,
+    index_series: &HashMap<String, DailyReturnPoint>,
     concept_map: &HashMap<String, String>,
     industry_map: &HashMap<String, String>,
     concept_series_cache: &HashMap<String, HashMap<String, f64>>,
@@ -778,14 +780,19 @@ fn build_residual_map_for_ts_code(
         },
     )?;
 
-    let mut residual_map =
-        build_forward_backtest_residual_map(residual_points, input.backtest_period);
+    let mut residual_map = build_forward_backtest_residual_map(
+        residual_points,
+        input.backtest_period,
+        input.index_beta,
+        input.concept_beta,
+        input.industry_beta,
+    );
     residual_map.retain(|trade_date, _| sample_eligibility.allows_sample(ts_code, trade_date));
     residual_map.shrink_to_fit();
     Ok(residual_map)
 }
 
-fn shrink_stock_series_cache(cache: &mut HashMap<String, HashMap<String, f64>>) {
+fn shrink_stock_series_cache(cache: &mut HashMap<String, HashMap<String, DailyReturnPoint>>) {
     for series in cache.values_mut() {
         series.shrink_to_fit();
     }
@@ -798,12 +805,18 @@ fn load_pct_chg_series_cache_for_ts_codes(
     adj_type: &str,
     start_date: &str,
     end_date: &str,
-) -> Result<HashMap<String, HashMap<String, f64>>, String> {
+) -> Result<HashMap<String, HashMap<String, DailyReturnPoint>>, String> {
     if ts_codes.is_empty() {
         return Ok(HashMap::new());
     }
+    let price_select = if stock_data_has_open_close(conn)? {
+        "TRY_CAST(open AS DOUBLE), TRY_CAST(close AS DOUBLE)"
+    } else {
+        "CAST(NULL AS DOUBLE), CAST(NULL AS DOUBLE)"
+    };
 
-    let mut out = HashMap::<String, HashMap<String, f64>>::with_capacity(ts_codes.len());
+    let mut out =
+        HashMap::<String, HashMap<String, DailyReturnPoint>>::with_capacity(ts_codes.len());
     for chunk in ts_codes.chunks(PCT_CHG_BATCH_SIZE) {
         let placeholders = std::iter::repeat_n("?", chunk.len())
             .collect::<Vec<_>>()
@@ -813,7 +826,8 @@ fn load_pct_chg_series_cache_for_ts_codes(
             SELECT
                 ts_code,
                 trade_date,
-                TRY_CAST(pct_chg AS DOUBLE)
+                TRY_CAST(pct_chg AS DOUBLE),
+                {price_select}
             FROM stock_data
             WHERE adj_type = ?
               AND ts_code IN ({placeholders})
@@ -837,11 +851,24 @@ fn load_pct_chg_series_cache_for_ts_codes(
             let ts_code: String = row.get(0).map_err(|e| format!("读取ts_code失败:{e}"))?;
             let trade_date: String = row.get(1).map_err(|e| format!("读取trade_date失败:{e}"))?;
             let pct: Option<f64> = row.get(2).map_err(|e| format!("读取pct_chg失败:{e}"))?;
+            let open: Option<f64> = row.get(3).map_err(|e| format!("读取open失败:{e}"))?;
+            let close: Option<f64> = row.get(4).map_err(|e| format!("读取close失败:{e}"))?;
 
-            let Some(pct) = pct.filter(|value| value.is_finite()) else {
+            let Some(close_pct) = pct.filter(|value| value.is_finite()) else {
                 continue;
             };
-            out.entry(ts_code).or_default().insert(trade_date, pct);
+            let open_pct = open
+                .filter(|value| value.is_finite() && value.abs() > EPS)
+                .zip(close.filter(|value| value.is_finite()))
+                .map(|(open, close)| (close / open - 1.0) * 100.0)
+                .unwrap_or(close_pct);
+            out.entry(ts_code).or_default().insert(
+                trade_date,
+                DailyReturnPoint {
+                    close_pct,
+                    open_pct,
+                },
+            );
         }
     }
 

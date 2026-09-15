@@ -8,9 +8,10 @@ use duckdb::{Connection, params_from_iter};
 use rayon::prelude::*;
 
 use super::{
-    BacktestSampleEligibility, DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS, ResidualFactorSeriesRefs,
-    ResidualReturnInput, build_backtest_sample_eligibility,
-    calc_stock_residual_returns_from_loaded_series,
+    BacktestSampleEligibility, DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS, DailyReturnPoint,
+    ResidualFactorSeriesRefs, ResidualReturnInput, build_backtest_sample_eligibility,
+    calc_forward_residual_return, calc_stock_residual_returns_from_loaded_series,
+    stock_data_has_open_close,
 };
 use crate::data::{
     concept_performance_data::{load_concept_trend_series_map, load_industry_trend_series_map},
@@ -19,8 +20,8 @@ use crate::data::{
 use crate::scoring_model::{CompactRuleScore, ScoreDetails, ScoreSummary};
 
 use crate::simulate::fp_utils::{
-    EPS, ProfitLossSums, calc_profit_loss_sums, calc_t_value, calc_top_bottom_spread, mean,
-    sample_std, spearman_corr,
+    EPS, ProfitLossSums, calc_newey_west_t_value, calc_profit_loss_sums,
+    calc_top_bottom_spread, mean, sample_std, spearman_corr,
 };
 const PCT_CHG_BATCH_SIZE: usize = 512;
 const RESIDUAL_SERIES_TARGET_POINTS: usize = 256 * 1024;
@@ -2089,7 +2090,8 @@ pub fn calc_rule_layer_metrics(
         (Some(m), Some(s)) if s.abs() >= EPS => Some(m / s),
         _ => None,
     };
-    let ic_t_value = calc_t_value(ic_mean, ic_std, ic_values.len());
+    let ic_t_value =
+        calc_newey_west_t_value(&ic_values, config.backtest_period.saturating_sub(1));
 
     Ok(RuleLayerMetrics {
         points,
@@ -2157,7 +2159,10 @@ fn compute_rule_layer_from_runtime_cache(
         (Some(m), Some(s)) if s.abs() >= EPS => Some(m / s),
         _ => None,
     };
-    let ic_t_value = calc_t_value(ic_mean, ic_std, accum.ic_values.len());
+    let ic_t_value = calc_newey_west_t_value(
+        &accum.ic_values,
+        config.backtest_period.saturating_sub(1),
+    );
 
     Ok(RuleLayerComputation {
         metrics: RuleLayerMetrics {
@@ -2294,7 +2299,7 @@ impl DayGroupsFoldAccum {
             }
         }
 
-        if collect_metrics && rule_scores.len() >= config.min_samples_per_day {
+        if collect_metrics && triggered_residuals.len() >= config.min_samples_per_day {
             let avg_rule_score = mean(&rule_scores);
             let avg_residual_return = mean(&triggered_residuals);
             let market_avg_residual_return = mean(&residuals);
@@ -2971,9 +2976,9 @@ where
 
 fn build_residual_map_for_ts_code(
     ts_code: &str,
-    stock_series_cache: &HashMap<String, HashMap<String, f64>>,
+    stock_series_cache: &HashMap<String, HashMap<String, DailyReturnPoint>>,
     er_series_cache: &HashMap<String, HashMap<String, f64>>,
-    index_series: &HashMap<String, f64>,
+    index_series: &HashMap<String, DailyReturnPoint>,
     concept_map: &HashMap<String, String>,
     industry_map: &HashMap<String, String>,
     concept_series_cache: &HashMap<String, HashMap<String, f64>>,
@@ -3021,8 +3026,14 @@ fn build_residual_map_for_ts_code(
 
     let empty_er_by_date = HashMap::new();
     let er_by_date = er_series_cache.get(ts_code).unwrap_or(&empty_er_by_date);
-    let mut residual_map =
-        build_forward_backtest_outcome_map(residual_points, input.backtest_period, er_by_date);
+    let mut residual_map = build_forward_backtest_outcome_map(
+        residual_points,
+        input.backtest_period,
+        er_by_date,
+        input.index_beta,
+        input.concept_beta,
+        input.industry_beta,
+    );
     residual_map.retain(|trade_date, _| sample_eligibility.allows_sample(ts_code, trade_date));
     residual_map.shrink_to_fit();
     Ok(residual_map)
@@ -3032,6 +3043,9 @@ fn build_forward_backtest_outcome_map(
     mut residual_points: Vec<crate::simulate::ResidualReturnPoint>,
     backtest_period: usize,
     er_by_date: &HashMap<String, f64>,
+    index_beta: f64,
+    concept_beta: f64,
+    industry_beta: f64,
 ) -> HashMap<String, RuleBacktestOutcome> {
     if backtest_period == 0 || residual_points.len() < backtest_period + 1 {
         return HashMap::new();
@@ -3039,19 +3053,14 @@ fn build_forward_backtest_outcome_map(
 
     residual_points.sort_by(|left, right| left.trade_date.cmp(&right.trade_date));
 
-    let mut residual_sum = 0.0;
-    let mut invalid_count = 0usize;
-    for point in &residual_points[1..=backtest_period] {
-        if point.residual_pct.is_finite() {
-            residual_sum += point.residual_pct;
-        } else {
-            invalid_count += 1;
-        }
-    }
-
     let mut out = HashMap::with_capacity(residual_points.len() - backtest_period);
     for index in 0..(residual_points.len() - backtest_period) {
-        if invalid_count == 0 {
+        if let Some(residual_return) = calc_forward_residual_return(
+            &residual_points[index + 1..=index + backtest_period],
+            index_beta,
+            concept_beta,
+            industry_beta,
+        ) {
             let end_trade_date = &residual_points[index + backtest_period].trade_date;
             let er_change = er_by_date
                 .get(end_trade_date)
@@ -3062,30 +3071,10 @@ fn build_forward_backtest_outcome_map(
             out.insert(
                 residual_points[index].trade_date.clone(),
                 RuleBacktestOutcome {
-                    residual_return: residual_sum,
+                    residual_return,
                     er_change,
                 },
             );
-        }
-
-        let remove_index = index + 1;
-        let add_index = index + backtest_period + 1;
-        if add_index >= residual_points.len() {
-            break;
-        }
-
-        let removed = residual_points[remove_index].residual_pct;
-        if removed.is_finite() {
-            residual_sum -= removed;
-        } else {
-            invalid_count -= 1;
-        }
-
-        let added = residual_points[add_index].residual_pct;
-        if added.is_finite() {
-            residual_sum += added;
-        } else {
-            invalid_count += 1;
         }
     }
 
@@ -3128,7 +3117,7 @@ fn calc_efficiency_ratio_map(
     out
 }
 
-fn shrink_stock_series_cache(cache: &mut HashMap<String, HashMap<String, f64>>) {
+fn shrink_stock_series_cache(cache: &mut HashMap<String, HashMap<String, DailyReturnPoint>>) {
     for series in cache.values_mut() {
         series.shrink_to_fit();
     }
@@ -3141,12 +3130,18 @@ fn load_pct_chg_series_cache_for_ts_codes(
     adj_type: &str,
     start_date: &str,
     end_date: &str,
-) -> Result<HashMap<String, HashMap<String, f64>>, String> {
+) -> Result<HashMap<String, HashMap<String, DailyReturnPoint>>, String> {
     if ts_codes.is_empty() {
         return Ok(HashMap::new());
     }
+    let price_select = if stock_data_has_open_close(conn)? {
+        "TRY_CAST(open AS DOUBLE), TRY_CAST(close AS DOUBLE)"
+    } else {
+        "CAST(NULL AS DOUBLE), CAST(NULL AS DOUBLE)"
+    };
 
-    let mut out = HashMap::<String, HashMap<String, f64>>::with_capacity(ts_codes.len());
+    let mut out =
+        HashMap::<String, HashMap<String, DailyReturnPoint>>::with_capacity(ts_codes.len());
     for chunk in ts_codes.chunks(PCT_CHG_BATCH_SIZE) {
         let placeholders = std::iter::repeat_n("?", chunk.len())
             .collect::<Vec<_>>()
@@ -3156,7 +3151,8 @@ fn load_pct_chg_series_cache_for_ts_codes(
             SELECT
                 ts_code,
                 trade_date,
-                TRY_CAST(pct_chg AS DOUBLE)
+                TRY_CAST(pct_chg AS DOUBLE),
+                {price_select}
             FROM stock_data
             WHERE adj_type = ?
               AND ts_code IN ({placeholders})
@@ -3180,11 +3176,24 @@ fn load_pct_chg_series_cache_for_ts_codes(
             let ts_code: String = row.get(0).map_err(|e| format!("读取ts_code失败:{e}"))?;
             let trade_date: String = row.get(1).map_err(|e| format!("读取trade_date失败:{e}"))?;
             let pct: Option<f64> = row.get(2).map_err(|e| format!("读取pct_chg失败:{e}"))?;
+            let open: Option<f64> = row.get(3).map_err(|e| format!("读取open失败:{e}"))?;
+            let close: Option<f64> = row.get(4).map_err(|e| format!("读取close失败:{e}"))?;
 
-            let Some(pct) = pct.filter(|value| value.is_finite()) else {
+            let Some(close_pct) = pct.filter(|value| value.is_finite()) else {
                 continue;
             };
-            out.entry(ts_code).or_default().insert(trade_date, pct);
+            let open_pct = open
+                .filter(|value| value.is_finite() && value.abs() > EPS)
+                .zip(close.filter(|value| value.is_finite()))
+                .map(|(open, close)| (close / open - 1.0) * 100.0)
+                .unwrap_or(close_pct);
+            out.entry(ts_code).or_default().insert(
+                trade_date,
+                DailyReturnPoint {
+                    close_pct,
+                    open_pct,
+                },
+            );
         }
     }
 
@@ -3718,14 +3727,17 @@ mod tests {
                 industry_pct: 0.0,
                 expected_pct: 0.0,
                 residual_pct,
+                stock_open_pct: residual_pct,
+                index_open_pct: 0.0,
             })
             .collect::<Vec<_>>();
         let er_by_date = HashMap::from([("d0".to_string(), -0.10), ("d2".to_string(), 0.25)]);
 
-        let outcomes = build_forward_backtest_outcome_map(residual_points, 2, &er_by_date);
+        let outcomes =
+            build_forward_backtest_outcome_map(residual_points, 2, &er_by_date, 0.0, 0.0, 0.0);
         let outcome = outcomes.get("d0").expect("d0 outcome");
 
-        assert!((outcome.residual_return - 3.0).abs() < 1e-12);
+        assert!((outcome.residual_return - 3.02).abs() < 1e-12);
         assert!((outcome.er_change - 0.35).abs() < 1e-12);
     }
 
@@ -4026,7 +4038,7 @@ mod tests {
                 start_date: "20240102".to_string(),
                 end_date: "20240104".to_string(),
                 layer_config: RuleLayerConfig {
-                    min_samples_per_day: 2,
+                    min_samples_per_day: 1,
                     backtest_period: 1,
                     min_listed_trade_days: 0,
                 },
@@ -4221,7 +4233,7 @@ mod tests {
                 start_date: "20240102".to_string(),
                 end_date: "20240104".to_string(),
                 layer_config: RuleLayerConfig {
-                    min_samples_per_day: 2,
+                    min_samples_per_day: 1,
                     backtest_period: 1,
                     min_listed_trade_days: 0,
                 },
@@ -4229,7 +4241,7 @@ mod tests {
         )
         .expect("rule metrics");
 
-        assert_eq!(metrics.points.len(), 2);
+        assert_eq!(metrics.points.len(), 1);
         let p0 = &metrics.points[0];
         assert_eq!(p0.trade_date, "20240102");
         assert_eq!(p0.sample_count, 2);
@@ -4237,9 +4249,6 @@ mod tests {
         assert_opt_close(p0.avg_residual_return, Some(3.0));
         assert_opt_close(p0.avg_excess_residual_return, Some(1.0));
 
-        let p1 = &metrics.points[1];
-        assert_eq!(p1.trade_date, "20240103");
-        assert_eq!(p1.avg_residual_return, None);
     }
 
     #[test]
@@ -4270,25 +4279,7 @@ mod tests {
         )
         .expect("rule metrics");
 
-        assert_eq!(metrics.points.len(), 2);
-
-        let p0 = &metrics.points[0];
-        assert_eq!(p0.trade_date, "20240102");
-        assert_eq!(p0.sample_count, 2);
-        assert_opt_close(p0.avg_rule_score, Some(0.0));
-        assert_eq!(p0.avg_residual_return, None);
-        assert_eq!(p0.avg_excess_residual_return, None);
-        assert_eq!(p0.top_bottom_spread, None);
-        assert_eq!(p0.ic, None);
-
-        let p1 = &metrics.points[1];
-        assert_eq!(p1.trade_date, "20240103");
-        assert_eq!(p1.sample_count, 2);
-        assert_opt_close(p1.avg_rule_score, Some(0.0));
-        assert_eq!(p1.avg_residual_return, None);
-        assert_eq!(p1.avg_excess_residual_return, None);
-        assert_eq!(p1.top_bottom_spread, None);
-        assert_eq!(p1.ic, None);
+        assert!(metrics.points.is_empty());
 
         assert_eq!(metrics.avg_residual_mean, None);
         assert_eq!(metrics.avg_excess_residual_mean, None);
@@ -4413,7 +4404,7 @@ mod tests {
 
         assert_eq!(full_samples.metrics, triggered_samples.metrics);
         assert_eq!(full_samples.metrics, validation.metrics);
-        assert_eq!(full_samples.metrics.points.len(), 2);
+        assert_eq!(full_samples.metrics.points.len(), 1);
         assert_eq!(full_samples.metrics.points[0].trade_date, "20240102");
         assert_eq!(full_samples.metrics.points[0].sample_count, 2);
         assert_opt_close(full_samples.metrics.points[0].avg_rule_score, Some(0.75));
@@ -4427,16 +4418,6 @@ mod tests {
         );
         assert_opt_close(full_samples.metrics.points[0].top_bottom_spread, Some(2.0));
         assert_opt_close(full_samples.metrics.points[0].ic, Some(1.0));
-        assert_eq!(full_samples.metrics.points[1].trade_date, "20240103");
-        assert_eq!(full_samples.metrics.points[1].sample_count, 2);
-        assert_opt_close(full_samples.metrics.points[1].avg_rule_score, Some(0.0));
-        assert_eq!(full_samples.metrics.points[1].avg_residual_return, None);
-        assert_eq!(
-            full_samples.metrics.points[1].avg_excess_residual_return,
-            None
-        );
-        assert_eq!(full_samples.metrics.points[1].top_bottom_spread, None);
-        assert_eq!(full_samples.metrics.points[1].ic, None);
         assert_opt_close(full_samples.metrics.avg_residual_mean, Some(3.0));
         assert_opt_close(full_samples.metrics.avg_excess_residual_mean, Some(1.0));
         assert_opt_close(full_samples.metrics.spread_mean, Some(2.0));
@@ -4454,16 +4435,13 @@ mod tests {
         assert_eq!(triggered_samples.triggered_samples.len(), 1);
         assert_eq!(triggered_samples.triggered_samples, collected_triggered);
         assert_eq!(validation.triggered_samples, collected_triggered);
-        assert_eq!(validation.daily_score_layers.len(), 2);
+        assert_eq!(validation.daily_score_layers.len(), 1);
         assert_eq!(validation.daily_score_layers[0].trade_date, "20240102");
         assert_eq!(validation.daily_score_layers[0].groups.len(), 2);
         assert_eq!(validation.daily_score_layers[0].groups[0].score, 0.0);
         assert_eq!(validation.daily_score_layers[0].groups[0].sample_count, 1);
         assert_eq!(validation.daily_score_layers[0].groups[1].score, 1.5);
         assert_eq!(validation.daily_score_layers[0].groups[1].sample_count, 1);
-        assert_eq!(validation.daily_score_layers[1].groups.len(), 1);
-        assert_eq!(validation.daily_score_layers[1].groups[0].score, 0.0);
-        assert_eq!(validation.daily_score_layers[1].groups[0].sample_count, 2);
         assert_eq!(
             validation.return_distribution_counts.iter().sum::<usize>(),
             4

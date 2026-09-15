@@ -136,6 +136,11 @@ use {
         run_convolution_rank_compute as core_run_convolution_rank_compute,
         ConvolutionRankComputeResult, ConvolutionRankPageData,
     },
+    strategy::dimension_research::{
+        get_strategy_dimension_research_defaults as core_get_strategy_dimension_research_defaults,
+        run_strategy_dimension_research as core_run_strategy_dimension_research,
+        StrategyDimensionResearchData, StrategyDimensionResearchDefaultsData,
+    },
     strategy::manage::{
         check_strategy_manage_rule_draft as core_check_strategy_manage_rule_draft,
         check_strategy_manage_scene_draft as core_check_strategy_manage_scene_draft,
@@ -1170,6 +1175,40 @@ async fn get_strategy_triggered_stocks(
 ) -> Result<Vec<TriggeredStockRow>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         core_get_strategy_triggered_stocks(source_path, strategy_name, analysis_trade_date)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn get_strategy_dimension_research_defaults(
+    source_path: String,
+) -> Result<StrategyDimensionResearchDefaultsData, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        core_get_strategy_dimension_research_defaults(source_path)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn run_strategy_dimension_research(
+    source_path: String,
+    start_date: String,
+    end_date: String,
+    rule_names: Vec<String>,
+    nonlinear_sample_limit: Option<usize>,
+    ridge_lambda: Option<f64>,
+) -> Result<StrategyDimensionResearchData, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        core_run_strategy_dimension_research(
+            source_path,
+            start_date,
+            end_date,
+            rule_names,
+            nonlinear_sample_limit,
+            ridge_lambda,
+        )
     })
     .await
     .map_err(|error| error.to_string())?
@@ -2640,6 +2679,8 @@ pub fn run() {
             get_scene_statistics_page,
             get_strategy_statistics_detail,
             get_strategy_triggered_stocks,
+            get_strategy_dimension_research_defaults,
+            run_strategy_dimension_research,
             get_scene_layer_backtest_defaults,
             get_rule_layer_backtest_defaults,
             get_cached_rule_layer_backtest_detail,

@@ -8,6 +8,7 @@ use lianghua_model::scoring as scoring_model;
 use lianghua_scoring::scoring;
 
 pub mod convolution_rank;
+pub mod dimension_research;
 pub mod manage;
 pub mod overview;
 pub mod overview_classic;

@@ -43,6 +43,7 @@ default-members = [
 
 [dependencies]
 lianghua-backtest = { path = "crates/lianghua-backtest" }
+lianghua-app-strategy = { path = "crates/lianghua-app-strategy" }
 lianghua-data = { path = "crates/lianghua-data" }
 lianghua-model = { path = "crates/lianghua-model" }
 lianghua-scoring = { path = "crates/lianghua-scoring" }
