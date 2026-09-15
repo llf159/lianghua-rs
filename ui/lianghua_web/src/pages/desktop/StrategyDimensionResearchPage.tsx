@@ -10,25 +10,6 @@ import {
 import { readStoredSourcePath } from "../../shared/storage";
 import "./css/StrategyDimensionResearchPage.css";
 
-const STYLE_DIMENSIONS = [
-  ["方向反应", "趋势延续 ↔ 均值回归", "前序收益方向、反转窗口、趋势持续率"],
-  ["入场形态", "突破追随 ↔ 回撤 / 反转", "突破幅度、回撤深度、形态确认耗时"],
-  ["时间尺度", "短周期 ↔ 中长周期", "信号半衰期、持有天数、换手率"],
-  [
-    "价格位置",
-    "低位 / 区间内 ↔ 高位 / 区间外",
-    "区间分位、距均线幅度、累计涨跌幅",
-  ],
-  ["波动与跳跃", "平稳低波 ↔ 高波动 / 跳跃", "实现波动率、ATR、缺口、极端收益"],
-  ["量能与流动性", "缩量低关注 ↔ 放量高参与", "量比、换手率、成交额、冲击成本"],
-  [
-    "市场状态依赖",
-    "跨状态稳健 ↔ 依赖特定状态",
-    "分状态触发率、收益、IC 与离散度",
-  ],
-  ["收益形态", "高胜率小盈亏 ↔ 低胜率右尾", "胜率、盈亏比、偏度、回撤与修复"],
-] as const;
-
 const formatNumber = (value: number | null | undefined, digits = 3) =>
   value == null || !Number.isFinite(value) ? "—" : value.toFixed(digits);
 
@@ -246,30 +227,13 @@ export default function StrategyDimensionResearchPage() {
     <main className="dimension-research-page">
       <section className="dimension-research-hero">
         <div className="dimension-research-hero-copy">
-          <span className="dimension-research-status">
-            {result
-              ? `实证结果 · ${result.start_date}—${result.end_date}`
-              : "信号层实证研究"}
-          </span>
-          <p className="dimension-research-eyebrow">
-            STRATEGY DIMENSION RESEARCH
-          </p>
+          {result ? (
+            <span className="dimension-research-status">
+              实证结果 · {result.start_date}—{result.end_date}
+            </span>
+          ) : null}
           <h2>相关性与正交研究</h2>
-          <p className="dimension-research-lead">
-            从结果库读取真实规则触发和分数，在完整股票日宇宙中比较覆盖、重叠、线性相关与一般依赖，
-            再按所选顺序检查每条规则还有多少不能被前序规则线性解释的方差。
-          </p>
         </div>
-        <aside
-          className="dimension-research-principle"
-          aria-label="研究结论边界"
-        >
-          <span>当前能力边界</span>
-          <strong>低线性相关，不等于策略独立</strong>
-          <p>
-            当前结果确认信号层结构；风格、收益路径和样本外组合增量尚未接入，不能据此直接决定资金配置。
-          </p>
-        </aside>
       </section>
 
       <section
@@ -278,13 +242,9 @@ export default function StrategyDimensionResearchPage() {
       >
         <div className="dimension-research-section-heading">
           <div>
-            <p className="dimension-research-eyebrow">RESEARCH WORKBENCH</p>
             <h3 id="dimension-workbench-title">选择规则并运行研究</h3>
           </div>
           <div className="dimension-research-load-control">
-            <p>
-              规则顺序会影响线性正交结果；后面的规则只用排在它前面的规则进行解释。
-            </p>
             <button
               type="button"
               onClick={() => void loadResearchDefaults()}
@@ -341,10 +301,6 @@ export default function StrategyDimensionResearchPage() {
                 }}
                 disabled={initializing || running}
               />
-              <small>
-                距离相关为 O(n²)，默认确定性抽取{" "}
-                {defaults?.default_nonlinear_sample_limit ?? 512} 日。
-              </small>
             </label>
             <label>
               <span>岭正则系数</span>
@@ -359,7 +315,6 @@ export default function StrategyDimensionResearchPage() {
                 }}
                 disabled={initializing || running}
               />
-              <small>用于稳定高度共线规则的回归求解，不是策略权重。</small>
             </label>
           </div>
 
@@ -484,13 +439,6 @@ export default function StrategyDimensionResearchPage() {
           </div>
         ) : null}
         <div className="dimension-research-run-row">
-          <small>
-            {initializing
-              ? "正在读取规则统计…"
-              : defaults
-                ? `结果库：${sourcePath}`
-                : "进入页面不会扫描结果库；请按需加载日期与规则。"}
-          </small>
           <button
             className="dimension-research-run-button"
             type="button"
@@ -533,14 +481,8 @@ export default function StrategyDimensionResearchPage() {
           <section className="dimension-research-section">
             <div className="dimension-research-section-heading">
               <div>
-                <p className="dimension-research-eyebrow">
-                  DATA-GROUNDED READING
-                </p>
-                <h3>先读这组数据告诉我们的内容</h3>
+                <h3>数据结论</h3>
               </div>
-              <p>
-                下面是描述性诊断，不包含显著性检验，也不构成新增策略维度的最终证明。
-              </p>
             </div>
             <div className="dimension-research-insight-grid">
               <article>
@@ -584,10 +526,8 @@ export default function StrategyDimensionResearchPage() {
           <section className="dimension-research-section">
             <div className="dimension-research-section-heading">
               <div>
-                <p className="dimension-research-eyebrow">SIGNAL PROFILE</p>
                 <h3>规则覆盖与分数分布</h3>
               </div>
-              <p>均值和标准差均在完整股票日宇宙上计算，未触发记为 0。</p>
             </div>
             <div className="dimension-research-table-wrap dimension-research-profile-table-wrap">
               <table>
@@ -620,17 +560,10 @@ export default function StrategyDimensionResearchPage() {
           <section className="dimension-research-section">
             <div className="dimension-research-section-heading">
               <div>
-                <p className="dimension-research-eyebrow">
-                  PAIRWISE DEPENDENCE
-                </p>
                 <h3>两两相关明细</h3>
               </div>
-              <p>
-                Pearson 看股票日线性联动；Spearman
-                与距离相关看日度横截面平均强度。
-              </p>
             </div>
-            <div className="dimension-research-table-wrap">
+            <div className="dimension-research-table-wrap dimension-research-pair-table-wrap">
               <table>
                 <thead>
                   <tr>
@@ -680,14 +613,8 @@ export default function StrategyDimensionResearchPage() {
           <section className="dimension-research-section">
             <div className="dimension-research-section-heading">
               <div>
-                <p className="dimension-research-eyebrow">
-                  ORTHOGONAL RESIDUAL
-                </p>
                 <h3>按顺序剥离已有规则</h3>
               </div>
-              <p>
-                残差比例越低，当前规则越容易被前序规则线性解释；它不是收益增量。
-              </p>
             </div>
             <div className="dimension-research-orthogonal-results">
               {result.orthogonal_diagnostics.map((diagnostic, index) => (
@@ -741,10 +668,8 @@ export default function StrategyDimensionResearchPage() {
           <section className="dimension-research-section">
             <div className="dimension-research-section-heading">
               <div>
-                <p className="dimension-research-eyebrow">CORRELATION MATRIX</p>
                 <h3>股票日 Pearson 矩阵</h3>
               </div>
-              <p>颜色深浅表示绝对线性相关强度，正负号表示同向或反向。</p>
             </div>
             <div className="dimension-research-table-wrap dimension-research-matrix-wrap">
               <table>
@@ -804,110 +729,6 @@ export default function StrategyDimensionResearchPage() {
           ) : null}
         </>
       ) : null}
-
-      <section className="dimension-research-details" aria-label="研究方法说明">
-        <details open={!result}>
-          <summary>
-            <span>
-              <strong>怎样结合上面的具体数据读相关性</strong>
-              <small>Jaccard、Pearson、Spearman 和距离相关回答不同问题</small>
-            </span>
-            <i aria-hidden="true" />
-          </summary>
-          <div className="dimension-research-detail-body dimension-research-method-grid">
-            <article>
-              <h4>共同选中：Jaccard / Phi</h4>
-              <p>
-                Jaccard 只看至少一方触发的集合；Phi
-                把共同不触发也纳入二元关联。覆盖率悬殊时，两者出现差异是正常现象。
-              </p>
-            </article>
-            <article>
-              <h4>线性同向：Pearson</h4>
-              <p>
-                本页在全部评分股票日上补零计算。数值接近 0
-                只表示直线关系弱，不能推出两个策略独立。
-              </p>
-            </article>
-            <article>
-              <h4>日度单调：Spearman</h4>
-              <p>
-                先把每条规则聚合为当日总分除以当日股票数，再比较日期排序，回答策略是否随市场环境共同增强或减弱。
-              </p>
-            </article>
-            <article>
-              <h4>一般依赖：距离相关</h4>
-              <p>
-                能够捕捉 U
-                形、阈值和分群关系，但不提供方向，也不是显著性概率。受 O(n²)
-                成本限制，本页使用确定性日期抽样。
-              </p>
-            </article>
-          </div>
-        </details>
-        <details>
-          <summary>
-            <span>
-              <strong>怎样理解线性正交残差</strong>
-              <small>顺序、正则化和结论边界</small>
-            </span>
-            <i aria-hidden="true" />
-          </summary>
-          <div className="dimension-research-detail-body">
-            <ol className="dimension-research-orthogonal-steps">
-              <li>
-                <span>01</span>
-                <div>
-                  <strong>顺序就是研究假设</strong>
-                  <p>
-                    第 N 条规则只由前 N−1
-                    条解释。改变顺序后残差会改变，所以应把成熟基准策略放在前面、候选策略放在后面。
-                  </p>
-                </div>
-              </li>
-              <li>
-                <span>02</span>
-                <div>
-                  <strong>残差不是可交易组合</strong>
-                  <p>
-                    残差比例表示分数方差中未被线性解释的部分，没有计入换手、成本、容量或收益。
-                  </p>
-                </div>
-              </li>
-              <li>
-                <span>03</span>
-                <div>
-                  <strong>还要检查一般依赖</strong>
-                  <p>
-                    线性残差高仍可能存在强距离相关；只有后续收益路径与样本外组合增量也成立，才可称为独立策略维度。
-                  </p>
-                </div>
-              </li>
-            </ol>
-          </div>
-        </details>
-        <details>
-          <summary>
-            <span>
-              <strong>八维风格画像：下一阶段要解释什么</strong>
-              <small>目前仅展示定义，不生成没有数据支持的分数</small>
-            </span>
-            <i aria-hidden="true" />
-          </summary>
-          <div className="dimension-research-detail-body dimension-research-style-grid">
-            {STYLE_DIMENSIONS.map(([title, poles, observable], index) => (
-              <article className="dimension-research-style-card" key={title}>
-                <div className="dimension-research-style-card-head">
-                  <span>{String(index + 1).padStart(2, "0")}</span>
-                  <h4>{title}</h4>
-                </div>
-                <strong className="dimension-research-poles">{poles}</strong>
-                <p>待结果库物化：{observable}</p>
-              </article>
-            ))}
-          </div>
-        </details>
-      </section>
     </main>
   );
 }

@@ -5,6 +5,7 @@
 - 筹码策略导入与数据管理导入统一通过 `FilePath` 和 `app.fs().open` 读取选择器结果，并在 `spawn_blocking` 内执行；Android 返回的是 URI，不能直接交给 `std::fs`，否则会报路径不存在。百分号解码仅用于展示文件名，不改写读取 URI；业务层接收文本后继续完成 TOML 校验和备份。
 
 - Android 的 `MainActivity` 必须先调用 `super.onCreate`，再通过自定义 JNI 方法初始化 `rustls-platform-verifier`。Wry 0.54.4 会在加载 `WryActivity` 类时加载 Tauri 原生库，曾掩盖 JNI 调用过早的问题；Wry 0.55.1 改为在 `WryActivity.onCreate` 首次访问惰性的 `Rust` 对象时才执行 `System.loadLibrary`，因此禁止依赖类加载副作用，也禁止吞掉 `UnsatisfiedLinkError` 后继续启动，否则 verifier 实际未初始化，后续 HTTPS 请求会表现为证书验证失败。
+- 问题：桌面壳曾在任意路由开屏时预载自选数据，且自选水合与排名日期查询通过同步 Tauri command 执行多次 DuckDB 查询，导致事件线程在窗口初次绘制期间卡顿；解决方案选择：删除桌面壳的全局预载，只由自选页请求自身数据，并将自选水合、实时刷新和排名日期查询放入 `spawn_blocking`；解释：非自选路由不再支付无关数据库成本，自选首页仍自动加载所需内容，但磁盘与 DuckDB 工作不阻塞 WebView 事件处理。
 - `tauri = "2.10.3"` 是兼容版本约束，不会固定在 2.10.3；合并或重建 workspace 锁文件可能升级 Tauri/Wry。涉及 Android 启动代码时，必须结合 `Cargo.lock` 中实际解析的 Wry 版本检查原生库加载时序。
 - Linux 相似度批量计算期间通过 `systemd-inhibit --what=idle:sleep` 临时阻止空闲息屏和睡眠，计算结束由 RAII 释放；问题是长时间同步计算会被桌面电源策略误认为空闲，选择 systemd-logind inhibitor 是为了不改永久电源配置，且命令不可用时只记录警告、不阻断计算。
 - 问题：进程启动成功不代表防休眠申请成功，且同步回收子进程可能阻塞异步执行器；解决方案选择：异步等待退出或 RAII 释放通知，保留 stderr 并记录提前退出状态；解释：让申请失败可见，释放时异步终止并回收进程，不等待防休眠申请成功才开始计算。

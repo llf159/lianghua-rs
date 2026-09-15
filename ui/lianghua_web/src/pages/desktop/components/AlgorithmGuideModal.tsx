@@ -10,7 +10,6 @@ type AlgorithmSection = {
     interpretation?: string
   }[]
 }
-
 const ALGORITHM_SECTIONS: AlgorithmSection[] = [
   {
     title: '1. 评分 / 排名算法',
@@ -199,7 +198,100 @@ const ALGORITHM_SECTIONS: AlgorithmSection[] = [
     ],
   },
   {
-    title: '6. 关键数据表解读',
+    title: '6. 相关性与正交研究',
+    items: [
+      {
+        heading: '共同触发：Jaccard / Phi',
+        description: 'Jaccard 只看至少一方触发的集合；Phi 把共同不触发也纳入二元关联。覆盖率悬殊时，两者出现差异是正常现象。',
+        formula: 'Jaccard = |A ∩ B| / |A ∪ B|\nPhi = 二元触发变量的相关系数',
+        interpretation: '它们回答的是规则是否共同选中，不回答分数方向，也不能单独证明策略逻辑等价。',
+      },
+      {
+        heading: '线性关系：Pearson',
+        description: '在完整股票日宇宙上计算规则分数的线性相关，未触发规则按 0 分进入统计。',
+        formula: 'Pearson = Corr(score_A_with_zeros, score_B_with_zeros)',
+        interpretation: '接近 0 只表示直线关系弱，不能推出两个策略独立。',
+      },
+      {
+        heading: '日度单调关系：Spearman',
+        description: '先按交易日聚合每条规则的横截面平均分，再比较交易日之间的排序关系。',
+        formula: 'daily_mean_score = 当日规则总分 / 当日股票数\nSpearman = Corr(rank(daily_mean_A), rank(daily_mean_B))',
+        interpretation: '用于观察两条策略是否随市场环境共同增强或减弱，不要求分数之间存在线性比例。',
+      },
+      {
+        heading: '一般依赖：距离相关',
+        description: '距离相关可以捕捉 U 形、阈值和分群关系。受 O(n²) 成本限制，页面使用确定性日期抽样。',
+        formula: 'distance_correlation ∈ [0, 1]',
+        interpretation: '它能判断一般依赖强弱，但不提供方向，也不是显著性概率。',
+      },
+      {
+        heading: '正交残差：顺序就是研究假设',
+        description: '第 N 条规则只由前 N−1 条规则解释。改变规则顺序后，线性残差和解释比例也会改变。',
+        formula: 'score_N = 前序规则线性拟合值 + residual_N\nresidual_variance_ratio = Var(residual_N) / Var(score_N)',
+        interpretation: '成熟的基准策略应放在前面，候选策略放在后面。残差比例越高，当前规则在线性层面留下的增量越多。',
+      },
+      {
+        heading: '结论边界',
+        description: '相关性和正交研究只确认信号层的统计结构，不直接生成收益、换手、成本或容量结论。',
+        interpretation: '线性残差高仍可能存在强距离相关；只有收益路径、样本外检验和组合增量也成立，才可称为独立策略维度。',
+      },
+    ],
+  },
+  {
+    title: '7. 策略风格维度',
+    items: [
+      {
+        heading: '方向反应',
+        description: '观察策略偏向趋势延续还是均值回归。',
+        formula: '可观测变量：前序收益方向、反转窗口、趋势持续率',
+        interpretation: '当前研究页只提供相关性与正交结果，不在没有数据支持时生成风格分数。',
+      },
+      {
+        heading: '入场形态',
+        description: '观察策略偏向突破追随还是回撤 / 反转。',
+        formula: '可观测变量：突破幅度、回撤深度、形态确认耗时',
+        interpretation: '需要结合规则触发前后的价格路径，不能仅凭共同触发率判断。',
+      },
+      {
+        heading: '时间尺度',
+        description: '观察策略偏向短周期还是中长周期。',
+        formula: '可观测变量：信号半衰期、持有天数、换手率',
+        interpretation: '时间尺度需要收益路径和持有期数据支持，不能由单日分数相关性替代。',
+      },
+      {
+        heading: '价格位置',
+        description: '观察策略偏向低位 / 区间内还是高位 / 区间外。',
+        formula: '可观测变量：区间分位、距均线幅度、累计涨跌幅',
+        interpretation: '价格位置属于后续风格解释维度，不是相关性系数本身。',
+      },
+      {
+        heading: '波动与跳跃',
+        description: '观察策略偏向平稳低波还是高波动 / 跳跃。',
+        formula: '可观测变量：实现波动率、ATR、缺口、极端收益',
+        interpretation: '需要把触发样本与对应行情状态对齐后再比较。',
+      },
+      {
+        heading: '量能与流动性',
+        description: '观察策略偏向缩量低关注还是放量高参与。',
+        formula: '可观测变量：量比、换手率、成交额、冲击成本',
+        interpretation: '量能和流动性还会影响可交易性，不能只按信号覆盖率判断。',
+      },
+      {
+        heading: '市场状态依赖',
+        description: '观察策略是否跨市场状态稳健，还是依赖特定状态。',
+        formula: '可观测变量：分状态触发率、收益、IC 与离散度',
+        interpretation: '需要先定义状态切分，再进行分组统计和样本外验证。',
+      },
+      {
+        heading: '收益形态',
+        description: '观察策略偏向高胜率小盈亏，还是低胜率右尾。',
+        formula: '可观测变量：胜率、盈亏比、偏度、回撤与修复',
+        interpretation: '收益形态必须基于后续收益路径评估，不能由规则分数分布直接推断。',
+      },
+    ],
+  },
+  {
+    title: '8. 关键数据表解读',
     items: [
       {
         heading: 'score_summary 表',

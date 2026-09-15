@@ -8,37 +8,51 @@ import {
 import type { Location } from "react-router-dom";
 import { lazy, Suspense } from "react";
 import PageDesktop from "./PageDesktop.tsx";
-import DownloadComputePage from "./pages/desktop/DownloadComputePage";
-import DataImportPage from "./pages/desktop/DataImportPage";
-import DataViewerPage from "./pages/desktop/DataViewerPage";
-import DetailsLinkedPage from "./pages/desktop/DetailsLinkedPage";
-import OverviewSimilarityRankingPage from "./pages/desktop/OverviewSimilarityRankingPage";
-import OverviewScenePage from "./pages/desktop/OverviewScenePage";
-import OverviewRawPage from "./pages/desktop/OverviewRawPage";
-import RankingOverviewPage from "./pages/desktop/RankingOverviewPage";
-import SettingsPage from "./pages/desktop/SettingsPage";
-import StockPickPage from "./pages/desktop/StockPickPage";
-import ExpressionStockPickPage from "./pages/desktop/ExpressionStockPickPage";
-import ConceptStockPickPage from "./pages/desktop/ConceptStockPickPage";
-import CyqChenPage from "./pages/desktop/CyqChenPage";
-import StrategyManagePage from "./pages/desktop/StrategyManagePage";
-import WatchObservePage from "./pages/desktop/WatchObservePage";
-import AllMarketMonitorPage from "./pages/desktop/AllMarketMonitorPage";
-import BacktestPage from "./pages/desktop/BacktestPage";
-import StrategyPaperValidationPage from "./pages/desktop/StrategyPaperValidationPage";
-import StrategyTriggerPage from "./pages/desktop/StrategyTriggerPage";
-import StrategyTriggerSimilarityPage from "./pages/desktop/StrategyTriggerSimilarityPage";
-import SceneLayerBacktestPage from "./pages/desktop/SceneLayerBacktestPage";
-import ExpressionValidationSamplesPage, {
-  EXPRESSION_VALIDATION_SAMPLES_ROUTE_PATH,
-} from "./pages/desktop/ExpressionValidationSamplesPage";
-import MarketAnalysisPage from "./pages/desktop/MarketAnalysisPage";
-import DetailsLinkedOverlayRoute from "./shared/DetailsLinkedOverlayRoute";
 import "./App.css";
 
-const StrategyDimensionResearchPage = lazy(
-  () => import("./pages/desktop/StrategyDimensionResearchPage"),
-);
+const pages = {
+  AllMarketMonitor: lazy(() => import("./pages/desktop/AllMarketMonitorPage")),
+  Backtest: lazy(() => import("./pages/desktop/BacktestPage")),
+  ConceptStockPick: lazy(() => import("./pages/desktop/ConceptStockPickPage")),
+  CyqChen: lazy(() => import("./pages/desktop/CyqChenPage")),
+  DataImport: lazy(() => import("./pages/desktop/DataImportPage")),
+  DataViewer: lazy(() => import("./pages/desktop/DataViewerPage")),
+  DetailsLinked: lazy(() => import("./pages/desktop/DetailsLinkedPage")),
+  DetailsLinkedOverlay: lazy(
+    () => import("./shared/DetailsLinkedOverlayRoute"),
+  ),
+  DownloadCompute: lazy(() => import("./pages/desktop/DownloadComputePage")),
+  ExpressionStockPick: lazy(
+    () => import("./pages/desktop/ExpressionStockPickPage"),
+  ),
+  ExpressionValidationSamples: lazy(
+    () => import("./pages/desktop/ExpressionValidationSamplesPage"),
+  ),
+  MarketAnalysis: lazy(() => import("./pages/desktop/MarketAnalysisPage")),
+  OverviewRaw: lazy(() => import("./pages/desktop/OverviewRawPage")),
+  OverviewScene: lazy(() => import("./pages/desktop/OverviewScenePage")),
+  OverviewSimilarityRanking: lazy(
+    () => import("./pages/desktop/OverviewSimilarityRankingPage"),
+  ),
+  RankingOverview: lazy(() => import("./pages/desktop/RankingOverviewPage")),
+  SceneLayerBacktest: lazy(
+    () => import("./pages/desktop/SceneLayerBacktestPage"),
+  ),
+  Settings: lazy(() => import("./pages/desktop/SettingsPage")),
+  StockPick: lazy(() => import("./pages/desktop/StockPickPage")),
+  StrategyDimensionResearch: lazy(
+    () => import("./pages/desktop/StrategyDimensionResearchPage"),
+  ),
+  StrategyManage: lazy(() => import("./pages/desktop/StrategyManagePage")),
+  StrategyPaperValidation: lazy(
+    () => import("./pages/desktop/StrategyPaperValidationPage"),
+  ),
+  StrategyTrigger: lazy(() => import("./pages/desktop/StrategyTriggerPage")),
+  StrategyTriggerSimilarity: lazy(
+    () => import("./pages/desktop/StrategyTriggerSimilarityPage"),
+  ),
+  WatchObserve: lazy(() => import("./pages/desktop/WatchObservePage")),
+};
 
 type BackgroundLocationState = {
   backgroundLocation?: Location;
@@ -65,125 +79,146 @@ function AppRoutes() {
 
   return (
     <>
-      <Routes location={backgroundLocation ?? location}>
-        <Route path="/" element={<PageDesktop />}>
-          <Route index element={<Navigate to="/watch-observe" replace />} />
-          <Route path="watch-observe" element={<WatchObservePage />} />
-          <Route path="overview" element={<RankingOverviewPage />}>
-            <Route index element={<Navigate to="/overview/raw" replace />} />
-            <Route path="raw" element={<OverviewRawPage />} />
+      <Suspense fallback={<div>正在加载页面…</div>}>
+        <Routes location={backgroundLocation ?? location}>
+          <Route path="/" element={<PageDesktop />}>
+            <Route index element={<Navigate to="/watch-observe" replace />} />
+            <Route path="watch-observe" element={<pages.WatchObserve />} />
+            <Route path="overview" element={<pages.RankingOverview />}>
+              <Route index element={<Navigate to="/overview/raw" replace />} />
+              <Route path="raw" element={<pages.OverviewRaw />} />
+              <Route
+                path="convolution"
+                element={<pages.OverviewSimilarityRanking />}
+              />
+              <Route path="scene" element={<pages.OverviewScene />} />
+            </Route>
+            <Route path="details" element={<LegacyDetailsRedirect />} />
+            <Route path="details-linked" element={<pages.DetailsLinked />} />
             <Route
-              path="convolution"
-              element={<OverviewSimilarityRankingPage />}
-            />
-            <Route path="scene" element={<OverviewScenePage />} />
-          </Route>
-          <Route path="details" element={<LegacyDetailsRedirect />} />
-          <Route path="details-linked" element={<DetailsLinkedPage />} />
-          <Route
-            path="data-import"
-            element={<Navigate to="/raw-data/data-import" replace />}
-          />
-          <Route
-            path="data-viewer"
-            element={<Navigate to="/raw-data/data-viewer" replace />}
-          />
-          <Route
-            path="data-download"
-            element={<Navigate to="/raw-data/download-compute" replace />}
-          />
-          <Route path="stock-pick" element={<StockPickPage />}>
-            <Route
-              index
-              element={<Navigate to="/stock-pick/expression" replace />}
-            />
-            <Route path="expression" element={<ExpressionStockPickPage />} />
-            <Route path="concept" element={<ConceptStockPickPage />} />
-          </Route>
-          <Route
-            path="cyq-chen"
-            element={<Navigate to="/strategy/cyq-chen" replace />}
-          />
-          <Route path="strategy">
-            <Route index element={<Navigate to="/strategy/rules" replace />} />
-            <Route
-              path="manage"
-              element={<Navigate to="/strategy/rules" replace />}
-            />
-            <Route path="rules" element={<StrategyManagePage view="rules" />} />
-            <Route
-              path="chip-change"
-              element={<StrategyManagePage view="chip" />}
-            />
-            <Route path="cyq-chen" element={<CyqChenPage />} />
-          </Route>
-          <Route
-            path="strategy-trigger-similarity"
-            element={<StrategyTriggerSimilarityPage />}
-          />
-          <Route path="settings" element={<SettingsPage />} />
-          <Route path="raw-data">
-            <Route
-              index
+              path="data-import"
               element={<Navigate to="/raw-data/data-import" replace />}
             />
-            <Route path="data-import" element={<DataImportPage />} />
-            <Route path="data-viewer" element={<DataViewerPage />} />
-            <Route path="download-compute" element={<DownloadComputePage />} />
+            <Route
+              path="data-viewer"
+              element={<Navigate to="/raw-data/data-viewer" replace />}
+            />
             <Route
               path="data-download"
               element={<Navigate to="/raw-data/download-compute" replace />}
             />
+            <Route path="stock-pick" element={<pages.StockPick />}>
+              <Route
+                index
+                element={<Navigate to="/stock-pick/expression" replace />}
+              />
+              <Route
+                path="expression"
+                element={<pages.ExpressionStockPick />}
+              />
+              <Route path="concept" element={<pages.ConceptStockPick />} />
+            </Route>
             <Route
-              path="ranking-compute"
-              element={<Navigate to="/raw-data/download-compute" replace />}
+              path="cyq-chen"
+              element={<Navigate to="/strategy/cyq-chen" replace />}
             />
+            <Route path="strategy">
+              <Route
+                index
+                element={<Navigate to="/strategy/rules" replace />}
+              />
+              <Route
+                path="manage"
+                element={<Navigate to="/strategy/rules" replace />}
+              />
+              <Route
+                path="rules"
+                element={<pages.StrategyManage view="rules" />}
+              />
+              <Route
+                path="chip-change"
+                element={<pages.StrategyManage view="chip" />}
+              />
+              <Route path="cyq-chen" element={<pages.CyqChen />} />
+            </Route>
             <Route
-              path="strategy-manage"
-              element={<Navigate to="/strategy/rules" replace />}
+              path="strategy-trigger-similarity"
+              element={<pages.StrategyTriggerSimilarity />}
             />
+            <Route path="settings" element={<pages.Settings />} />
+            <Route path="raw-data">
+              <Route
+                index
+                element={<Navigate to="/raw-data/data-import" replace />}
+              />
+              <Route path="data-import" element={<pages.DataImport />} />
+              <Route path="data-viewer" element={<pages.DataViewer />} />
+              <Route
+                path="download-compute"
+                element={<pages.DownloadCompute />}
+              />
+              <Route
+                path="data-download"
+                element={<Navigate to="/raw-data/download-compute" replace />}
+              />
+              <Route
+                path="ranking-compute"
+                element={<Navigate to="/raw-data/download-compute" replace />}
+              />
+              <Route
+                path="strategy-manage"
+                element={<Navigate to="/strategy/rules" replace />}
+              />
+            </Route>
+            <Route
+              path="intraday-monitor"
+              element={<pages.AllMarketMonitor />}
+            />
+            <Route path="market-analysis" element={<pages.MarketAnalysis />} />
+            <Route path="backtest" element={<pages.Backtest />}>
+              <Route
+                index
+                element={<Navigate to="/backtest/strategy-trigger" replace />}
+              />
+              <Route
+                path="strategy-trigger"
+                element={<pages.StrategyTrigger />}
+              />
+              <Route
+                path="strategy-paper-validation"
+                element={<pages.StrategyPaperValidation />}
+              />
+              <Route
+                path="scene-layer"
+                element={<pages.SceneLayerBacktest />}
+              />
+              <Route
+                path="correlation-orthogonality"
+                element={<pages.StrategyDimensionResearch />}
+              />
+              <Route
+                path="scene-layer/expression-validation-samples"
+                element={<pages.ExpressionValidationSamples />}
+              />
+              <Route
+                path="market-analysis"
+                element={<Navigate to="/market-analysis" replace />}
+              />
+            </Route>
           </Route>
-          <Route path="intraday-monitor" element={<AllMarketMonitorPage />} />
-          <Route path="market-analysis" element={<MarketAnalysisPage />} />
-          <Route path="backtest" element={<BacktestPage />}>
-            <Route
-              index
-              element={<Navigate to="/backtest/strategy-trigger" replace />}
-            />
-            <Route path="strategy-trigger" element={<StrategyTriggerPage />} />
-            <Route
-              path="strategy-paper-validation"
-              element={<StrategyPaperValidationPage />}
-            />
-            <Route path="scene-layer" element={<SceneLayerBacktestPage />} />
-            <Route
-              path="correlation-orthogonality"
-              element={
-                <Suspense fallback={<div>正在加载相关性研究页面…</div>}>
-                  <StrategyDimensionResearchPage />
-                </Suspense>
-              }
-            />
-            <Route
-              path={EXPRESSION_VALIDATION_SAMPLES_ROUTE_PATH}
-              element={<ExpressionValidationSamplesPage />}
-            />
-            <Route
-              path="market-analysis"
-              element={<Navigate to="/market-analysis" replace />}
-            />
-          </Route>
-        </Route>
-      </Routes>
+        </Routes>
+      </Suspense>
 
       {backgroundLocation ? (
-        <Routes>
-          <Route path="/details" element={<LegacyDetailsRedirect />} />
-          <Route
-            path="/details-linked"
-            element={<DetailsLinkedOverlayRoute />}
-          />
-        </Routes>
+        <Suspense fallback={<div>正在加载详情页…</div>}>
+          <Routes>
+            <Route path="/details" element={<LegacyDetailsRedirect />} />
+            <Route
+              path="/details-linked"
+              element={<pages.DetailsLinkedOverlay />}
+            />
+          </Routes>
+        </Suspense>
       ) : null}
     </>
   );

@@ -1,73 +1,72 @@
-import { NavLink, Outlet, useLocation } from 'react-router-dom'
-import { useEffect, useRef, useState } from 'react'
-import { preloadWatchObserveRows } from './apis/watchObserve'
-import GlobalStockSearch from './shared/GlobalStockSearch'
-import './Desktop.css'
+import { NavLink, Outlet, useLocation } from "react-router-dom";
+import { useRef, useState } from "react";
+import GlobalStockSearch from "./shared/GlobalStockSearch";
+import "./Desktop.css";
 
-const menuList = [
-  { path: '/watch-observe', label: '自选观察' },
-]
+const menuList = [{ path: "/watch-observe", label: "自选观察" }];
 
 const overviewSubRoutes = [
-  { path: '/overview/raw', label: '原始排名' },
-  { path: '/overview/convolution', label: '走势相似排名' },
-  { path: '/overview/scene', label: '场景排名' },
-]
+  { path: "/overview/raw", label: "原始排名" },
+  { path: "/overview/convolution", label: "走势相似排名" },
+  { path: "/overview/scene", label: "场景排名" },
+];
 
 const strategyTriggerSimilarityMenuItem = {
-  path: '/strategy-trigger-similarity',
-  label: '综合相似走势分析',
-}
-const marketAnalysisMenuItem = { path: '/market-analysis', label: '市场分析' }
-const settingsMenuItem = { path: '/settings', label: '设置' }
+  path: "/strategy-trigger-similarity",
+  label: "综合相似走势分析",
+};
+const marketAnalysisMenuItem = { path: "/market-analysis", label: "市场分析" };
+const settingsMenuItem = { path: "/settings", label: "设置" };
 
 const strategySubRoutes = [
-  { path: '/strategy/rules', label: '打分策略' },
-  { path: '/strategy/chip-change', label: '筹码策略' },
-  { path: '/strategy/cyq-chen', label: '筹码测试' },
-]
+  { path: "/strategy/rules", label: "打分策略" },
+  { path: "/strategy/chip-change", label: "筹码策略" },
+  { path: "/strategy/cyq-chen", label: "筹码测试" },
+];
 
 const backtestSubRoutes = [
-  { path: '/backtest/strategy-trigger', label: '策略触发统计' },
-  { path: '/backtest/strategy-paper-validation', label: '策略模拟盘验证' },
-  { path: '/backtest/scene-layer', label: '策略回测' },
-  { path: '/backtest/correlation-orthogonality', label: '相关性与正交研究' },
-]
+  { path: "/backtest/strategy-trigger", label: "策略触发统计" },
+  { path: "/backtest/strategy-paper-validation", label: "策略模拟盘验证" },
+  { path: "/backtest/scene-layer", label: "策略回测" },
+  { path: "/backtest/correlation-orthogonality", label: "相关性与正交研究" },
+];
 
 const stockPickSubRoutes = [
-  { path: '/stock-pick/expression', label: '表达式选股' },
-  { path: '/stock-pick/concept', label: '基础信息选股' },
-]
+  { path: "/stock-pick/expression", label: "表达式选股" },
+  { path: "/stock-pick/concept", label: "基础信息选股" },
+];
 
 const rawDataSubRoutes = [
-  { path: '/raw-data/data-import', label: '管理' },
-  { path: '/raw-data/data-viewer', label: '查看' },
-  { path: '/raw-data/download-compute', label: '下载/计算' },
-]
+  { path: "/raw-data/data-import", label: "管理" },
+  { path: "/raw-data/data-viewer", label: "查看" },
+  { path: "/raw-data/download-compute", label: "下载/计算" },
+];
 
 export default function PageDesktop() {
-  const location = useLocation()
-  const [isCollapsed, setIsCollapsed] = useState(false)
-  const [isOverviewOpen, setIsOverviewOpen] = useState(true)
-  const [isStockPickOpen, setIsStockPickOpen] = useState(true)
-  const [isRawDataOpen, setIsRawDataOpen] = useState(true)
-  const [isStrategyOpen, setIsStrategyOpen] = useState(true)
-  const [isBacktestOpen, setIsBacktestOpen] = useState(true)
-  const contentRef = useRef<HTMLElement | null>(null)
-  const isOverviewActive = location.pathname.startsWith('/overview')
-  const isStockPickActive = location.pathname.startsWith('/stock-pick')
-  const isRawDataActive = location.pathname.startsWith('/raw-data')
-  const isStrategyActive = location.pathname.startsWith('/strategy') || location.pathname === '/cyq-chen'
-  const isBacktestActive = location.pathname.startsWith('/backtest')
-
-  useEffect(() => {
-    void preloadWatchObserveRows().catch(() => {})
-  }, [])
+  const location = useLocation();
+  const [isCollapsed, setIsCollapsed] = useState(false);
+  const [isOverviewOpen, setIsOverviewOpen] = useState(true);
+  const [isStockPickOpen, setIsStockPickOpen] = useState(true);
+  const [isRawDataOpen, setIsRawDataOpen] = useState(true);
+  const [isStrategyOpen, setIsStrategyOpen] = useState(true);
+  const [isBacktestOpen, setIsBacktestOpen] = useState(true);
+  const contentRef = useRef<HTMLElement | null>(null);
+  const isOverviewActive = location.pathname.startsWith("/overview");
+  const isStockPickActive = location.pathname.startsWith("/stock-pick");
+  const isRawDataActive = location.pathname.startsWith("/raw-data");
+  const isStrategyActive =
+    location.pathname.startsWith("/strategy") ||
+    location.pathname === "/cyq-chen";
+  const isBacktestActive = location.pathname.startsWith("/backtest");
 
   return (
-    <div className={isCollapsed ? 'desktop-shell collapsed' : 'desktop-shell'}>
-      <button className="sidebar-toggle" type="button" onClick={() => setIsCollapsed((v) => !v)}>
-        {isCollapsed ? '☰' : '✕'}
+    <div className={isCollapsed ? "desktop-shell collapsed" : "desktop-shell"}>
+      <button
+        className="sidebar-toggle"
+        type="button"
+        onClick={() => setIsCollapsed((v) => !v)}
+      >
+        {isCollapsed ? "☰" : "✕"}
       </button>
       <aside className="sidebar">
         <div className="brand">明元量化</div>
@@ -77,7 +76,9 @@ export default function PageDesktop() {
             <NavLink
               key={menuItem.path}
               to={menuItem.path}
-              className={({ isActive }) => (isActive ? 'menu-item active' : 'menu-item')}
+              className={({ isActive }) =>
+                isActive ? "menu-item active" : "menu-item"
+              }
             >
               {menuItem.label}
             </NavLink>
@@ -85,12 +86,16 @@ export default function PageDesktop() {
 
           <div className="menu-group">
             <button
-              className={isOverviewActive ? 'menu-item menu-group-toggle active' : 'menu-item menu-group-toggle'}
+              className={
+                isOverviewActive
+                  ? "menu-item menu-group-toggle active"
+                  : "menu-item menu-group-toggle"
+              }
               type="button"
               onClick={() => setIsOverviewOpen((value) => !value)}
             >
               <span>排名总览</span>
-              <span>{isOverviewOpen ? '▾' : '▸'}</span>
+              <span>{isOverviewOpen ? "▾" : "▸"}</span>
             </button>
 
             {isOverviewOpen ? (
@@ -99,7 +104,9 @@ export default function PageDesktop() {
                   <NavLink
                     key={menuItem.path}
                     to={menuItem.path}
-                    className={({ isActive }) => (isActive ? 'submenu-item active' : 'submenu-item')}
+                    className={({ isActive }) =>
+                      isActive ? "submenu-item active" : "submenu-item"
+                    }
                   >
                     {menuItem.label}
                   </NavLink>
@@ -110,26 +117,34 @@ export default function PageDesktop() {
 
           <NavLink
             to="/intraday-monitor"
-            className={({ isActive }) => (isActive ? 'menu-item active' : 'menu-item')}
+            className={({ isActive }) =>
+              isActive ? "menu-item active" : "menu-item"
+            }
           >
             实时监控
           </NavLink>
 
           <NavLink
             to={marketAnalysisMenuItem.path}
-            className={({ isActive }) => (isActive ? 'menu-item active' : 'menu-item')}
+            className={({ isActive }) =>
+              isActive ? "menu-item active" : "menu-item"
+            }
           >
             {marketAnalysisMenuItem.label}
           </NavLink>
 
           <div className="menu-group">
             <button
-              className={isStockPickActive ? 'menu-item menu-group-toggle active' : 'menu-item menu-group-toggle'}
+              className={
+                isStockPickActive
+                  ? "menu-item menu-group-toggle active"
+                  : "menu-item menu-group-toggle"
+              }
               type="button"
               onClick={() => setIsStockPickOpen((value) => !value)}
             >
               <span>选股</span>
-              <span>{isStockPickOpen ? '▾' : '▸'}</span>
+              <span>{isStockPickOpen ? "▾" : "▸"}</span>
             </button>
 
             {isStockPickOpen ? (
@@ -138,7 +153,9 @@ export default function PageDesktop() {
                   <NavLink
                     key={menuItem.path}
                     to={menuItem.path}
-                    className={({ isActive }) => (isActive ? 'submenu-item active' : 'submenu-item')}
+                    className={({ isActive }) =>
+                      isActive ? "submenu-item active" : "submenu-item"
+                    }
                   >
                     {menuItem.label}
                   </NavLink>
@@ -149,12 +166,16 @@ export default function PageDesktop() {
 
           <div className="menu-group">
             <button
-              className={isStrategyActive ? 'menu-item menu-group-toggle active' : 'menu-item menu-group-toggle'}
+              className={
+                isStrategyActive
+                  ? "menu-item menu-group-toggle active"
+                  : "menu-item menu-group-toggle"
+              }
               type="button"
               onClick={() => setIsStrategyOpen((value) => !value)}
             >
               <span>策略管理</span>
-              <span>{isStrategyOpen ? '▾' : '▸'}</span>
+              <span>{isStrategyOpen ? "▾" : "▸"}</span>
             </button>
 
             {isStrategyOpen ? (
@@ -163,7 +184,9 @@ export default function PageDesktop() {
                   <NavLink
                     key={menuItem.path}
                     to={menuItem.path}
-                    className={({ isActive }) => (isActive ? 'submenu-item active' : 'submenu-item')}
+                    className={({ isActive }) =>
+                      isActive ? "submenu-item active" : "submenu-item"
+                    }
                   >
                     {menuItem.label}
                   </NavLink>
@@ -174,12 +197,16 @@ export default function PageDesktop() {
 
           <div className="menu-group">
             <button
-              className={isRawDataActive ? 'menu-item menu-group-toggle active' : 'menu-item menu-group-toggle'}
+              className={
+                isRawDataActive
+                  ? "menu-item menu-group-toggle active"
+                  : "menu-item menu-group-toggle"
+              }
               type="button"
               onClick={() => setIsRawDataOpen((value) => !value)}
             >
               <span>原数据管理</span>
-              <span>{isRawDataOpen ? '▾' : '▸'}</span>
+              <span>{isRawDataOpen ? "▾" : "▸"}</span>
             </button>
 
             {isRawDataOpen ? (
@@ -188,7 +215,9 @@ export default function PageDesktop() {
                   <NavLink
                     key={menuItem.path}
                     to={menuItem.path}
-                    className={({ isActive }) => (isActive ? 'submenu-item active' : 'submenu-item')}
+                    className={({ isActive }) =>
+                      isActive ? "submenu-item active" : "submenu-item"
+                    }
                   >
                     {menuItem.label}
                   </NavLink>
@@ -199,12 +228,16 @@ export default function PageDesktop() {
 
           <div className="menu-group">
             <button
-              className={isBacktestActive ? 'menu-item menu-group-toggle active' : 'menu-item menu-group-toggle'}
+              className={
+                isBacktestActive
+                  ? "menu-item menu-group-toggle active"
+                  : "menu-item menu-group-toggle"
+              }
               type="button"
               onClick={() => setIsBacktestOpen((value) => !value)}
             >
               <span>统计回测</span>
-              <span>{isBacktestOpen ? '▾' : '▸'}</span>
+              <span>{isBacktestOpen ? "▾" : "▸"}</span>
             </button>
 
             {isBacktestOpen ? (
@@ -213,7 +246,9 @@ export default function PageDesktop() {
                   <NavLink
                     key={menuItem.path}
                     to={menuItem.path}
-                    className={({ isActive }) => (isActive ? 'submenu-item active' : 'submenu-item')}
+                    className={({ isActive }) =>
+                      isActive ? "submenu-item active" : "submenu-item"
+                    }
                   >
                     {menuItem.label}
                   </NavLink>
@@ -224,14 +259,18 @@ export default function PageDesktop() {
 
           <NavLink
             to={strategyTriggerSimilarityMenuItem.path}
-            className={({ isActive }) => (isActive ? 'menu-item active' : 'menu-item')}
+            className={({ isActive }) =>
+              isActive ? "menu-item active" : "menu-item"
+            }
           >
             {strategyTriggerSimilarityMenuItem.label}
           </NavLink>
 
           <NavLink
             to={settingsMenuItem.path}
-            className={({ isActive }) => (isActive ? 'menu-item active' : 'menu-item')}
+            className={({ isActive }) =>
+              isActive ? "menu-item active" : "menu-item"
+            }
           >
             {settingsMenuItem.label}
           </NavLink>
@@ -243,5 +282,5 @@ export default function PageDesktop() {
       </main>
       <GlobalStockSearch />
     </div>
-  )
+  );
 }
