@@ -2440,7 +2440,6 @@ name = "lianghua-rs"
 version = "0.1.0"
 dependencies = [
  "duckdb",
- "lianghua-app-strategy",
  "lianghua-backtest",
  "lianghua-data",
  "lianghua-model",

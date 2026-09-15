@@ -111,7 +111,7 @@ export default function OverviewSimilarityRankingPage() {
           tsCode: match.tsCode,
           tradeDate: match.candidateEndTradeDate,
           intervalStartTradeDate: match.candidateStartTradeDate,
-          intervalEndTradeDate: match.candidateEndTradeDate,
+          intervalEndTradeDate: match.outcomeEndTradeDate,
           sourcePath: sourcePath || undefined,
           name: match.name || match.tsCode,
         })),
@@ -243,7 +243,7 @@ export default function OverviewSimilarityRankingPage() {
           <th>置信度</th>
           <th>相似度</th>
           <th>三日优排名</th>
-          <th>代表历史事件</th>
+          <th>成功 / 失败模板</th>
           <th>概念</th>
         </tr>
       </thead>
@@ -410,6 +410,28 @@ export default function OverviewSimilarityRankingPage() {
               <tbody>
                 {data.items.map((row) => {
                   const conceptText = formatConceptText(row.concept, excludedConcepts)
+                  const successMatch = row.topMatches.find((match) => match.templateClass > 0)
+                  const failureMatch = row.topMatches.find((match) => match.templateClass < 0)
+                  const renderTemplateMatch = (
+                    label: string,
+                    match: typeof successMatch,
+                  ) => match ? (
+                    <DetailsLink
+                      className="trigger-sim-stock-link trigger-sim-history-link"
+                      tsCode={match.tsCode}
+                      tradeDate={match.candidateEndTradeDate}
+                      intervalStartTradeDate={match.candidateStartTradeDate}
+                      intervalEndTradeDate={match.outcomeEndTradeDate}
+                      sourcePath={sourcePath}
+                      navigationItems={historicalNavigationItems}
+                      title={`查看${label}${match.name || match.tsCode}的启动窗口及后验走势`}
+                    >
+                      <strong>{label} {match.name || match.tsCode}</strong>
+                      <span>{match.candidateEndTradeDate} · 超额 {formatPercent(match.forwardExcessReturnPct)}</span>
+                    </DetailsLink>
+                  ) : (
+                    <span>{label} --</span>
+                  )
                   return (
                     <tr key={row.tsCode}>
                       <td>{row.rank ?? '--'}</td>
@@ -443,24 +465,9 @@ export default function OverviewSimilarityRankingPage() {
                         {formatNumber(row.averageSimilarity)} / {formatNumber(row.bestSimilarity)}
                       </td>
                       <td>{row.bestRank3d ?? '--'}</td>
-                      <td>
-                        {row.topMatches[0] ? (
-                          <DetailsLink
-                            className="trigger-sim-stock-link trigger-sim-history-link"
-                            tsCode={row.topMatches[0].tsCode}
-                            tradeDate={row.topMatches[0].candidateEndTradeDate}
-                            intervalStartTradeDate={row.topMatches[0].candidateStartTradeDate}
-                            intervalEndTradeDate={row.topMatches[0].candidateEndTradeDate}
-                            sourcePath={sourcePath}
-                            navigationItems={historicalNavigationItems}
-                            title={`查看 ${row.topMatches[0].name || row.topMatches[0].tsCode} 历史事件详情`}
-                          >
-                            <strong>{row.topMatches[0].name || row.topMatches[0].tsCode}</strong>
-                            <span>{row.topMatches[0].candidateEndTradeDate}</span>
-                          </DetailsLink>
-                        ) : (
-                          '--'
-                        )}
+                      <td className="trigger-sim-rules-cell">
+                        {renderTemplateMatch('成功', successMatch)}
+                        {renderTemplateMatch('失败', failureMatch)}
                       </td>
                       <td className="trigger-sim-concept-cell" title={conceptText}>
                         {conceptText}

@@ -1,3 +1,5 @@
+//! Command-line entry point for strategy dimension research.
+
 use std::{env, process, time::Instant};
 
 use lianghua_app_strategy::dimension_research::{

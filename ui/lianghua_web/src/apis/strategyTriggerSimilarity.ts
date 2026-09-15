@@ -94,6 +94,9 @@ export type StrategyTriggerRankingMatch = {
   name?: string | null
   candidateStartTradeDate: string
   candidateEndTradeDate: string
+  outcomeStartTradeDate: string
+  outcomeEndTradeDate: string
+  templateClass: number
   similarityScore: number
   forwardExcessReturnPct?: number | null
   mfePct: number

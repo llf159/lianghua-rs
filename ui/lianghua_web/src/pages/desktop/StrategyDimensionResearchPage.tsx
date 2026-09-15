@@ -1,367 +1,910 @@
+import { useMemo, useState } from "react";
+import { ensureManagedSourcePath } from "../../apis/managedSource";
+import {
+  getStrategyDimensionResearchDefaults,
+  runStrategyDimensionResearch,
+  type StrategyDimensionPairMetrics,
+  type StrategyDimensionResearchData,
+  type StrategyDimensionResearchDefaultsData,
+} from "../../apis/strategyDimensionResearch";
+import { readStoredSourcePath } from "../../shared/storage";
 import "./css/StrategyDimensionResearchPage.css";
 
 const STYLE_DIMENSIONS = [
-  {
-    title: "方向反应",
-    poles: "趋势延续 ↔ 均值回归",
-    description: "信号是在已有方向上继续下注，还是等待价格偏离后回归。",
-    observable: "前序收益方向、信号后收益方向、反转窗口、趋势持续率",
-    misunderstanding: "使用均线不必然等于趋势策略，关键是触发后实际承担的方向暴露。",
-  },
-  {
-    title: "入场形态",
-    poles: "突破追随 ↔ 回撤 / 反转入场",
-    description: "信号发生在价格越过边界时，还是发生在趋势中的回撤或极值反转处。",
-    observable: "滚动高低点距离、突破幅度、回撤深度、形态确认耗时",
-    misunderstanding: "突破和趋势并非同义；突破也可能服务于短期反转或失败形态。",
-  },
-  {
-    title: "时间尺度",
-    poles: "短周期 ↔ 中长周期",
-    description: "描述形态形成、信号衰减和计划持有收益兑现所处的时间尺度。",
-    observable: "回看窗口、信号半衰期、持有天数、换手率、领先滞后峰值",
-    misunderstanding: "指标参数短不代表收益周期短，应以样本外收益衰减和持仓行为为准。",
-  },
-  {
-    title: "价格位置",
-    poles: "低位 / 区间内 ↔ 高位 / 区间外",
-    description: "描述触发时价格处于自身历史区间、趋势带和近期成本区域的相对位置。",
-    observable: "滚动区间分位、距均线或中枢幅度、创新高低比例、累计涨跌幅",
-    misunderstanding: "绝对价格高低没有可比性，位置必须在同股、同窗口内标准化。",
-  },
-  {
-    title: "波动与跳跃",
-    poles: "平稳低波 ↔ 高波动 / 跳跃事件",
-    description: "描述策略偏好平滑演化，还是依赖缺口、急涨跌和波动扩张等离散事件。",
-    observable: "实现波动率、ATR、隔夜缺口、极端收益占比、波动率变化",
-    misunderstanding: "高收益波动不等于高信号波动，应分别看入场环境和持有期风险。",
-  },
-  {
-    title: "量能与流动性",
-    poles: "缩量低关注 ↔ 放量高参与",
-    description: "描述信号对成交扩张、市场关注度、可交易容量和拥挤程度的偏好。",
-    observable: "量比、换手率、成交额分位、冲击成本代理、放缩量持续时间",
-    misunderstanding: "放量既可能确认趋势也可能代表派发，必须结合价格方向与后续结果解释。",
-  },
-  {
-    title: "市场状态依赖",
-    poles: "跨状态稳健 ↔ 集中依赖特定状态",
-    description: "描述策略是否只在上涨、下跌、趋势或震荡等特定环境中有效。",
-    observable: "分状态触发率、收益与 IC、状态间离散度、最弱状态表现",
-    misunderstanding: "全样本稳定可能只是主导状态样本较多，不能替代分状态检验。",
-  },
-  {
-    title: "收益形态",
-    poles: "高胜率小盈亏 ↔ 低胜率右尾收益",
-    description: "描述策略依靠频繁小收益，还是依靠少数大收益，以及对应的尾部风险。",
-    observable: "胜率、盈亏比、偏度、尾部损失、最大回撤、回撤修复时间",
-    misunderstanding: "相同期望收益可能拥有完全不同的资金曲线和组合分散价值。",
-  },
+  ["方向反应", "趋势延续 ↔ 均值回归", "前序收益方向、反转窗口、趋势持续率"],
+  ["入场形态", "突破追随 ↔ 回撤 / 反转", "突破幅度、回撤深度、形态确认耗时"],
+  ["时间尺度", "短周期 ↔ 中长周期", "信号半衰期、持有天数、换手率"],
+  [
+    "价格位置",
+    "低位 / 区间内 ↔ 高位 / 区间外",
+    "区间分位、距均线幅度、累计涨跌幅",
+  ],
+  ["波动与跳跃", "平稳低波 ↔ 高波动 / 跳跃", "实现波动率、ATR、缺口、极端收益"],
+  ["量能与流动性", "缩量低关注 ↔ 放量高参与", "量比、换手率、成交额、冲击成本"],
+  [
+    "市场状态依赖",
+    "跨状态稳健 ↔ 依赖特定状态",
+    "分状态触发率、收益、IC 与离散度",
+  ],
+  ["收益形态", "高胜率小盈亏 ↔ 低胜率右尾", "胜率、盈亏比、偏度、回撤与修复"],
 ] as const;
 
-const CORRELATION_LAYERS = [
-  {
-    index: "01",
-    title: "信号层",
-    question: "是否在相同股票、相同日期做出相近判断？",
-    methods: "二元触发看 Jaccard、重叠率与 Phi；连续分数看秩相关；另查领先滞后。",
-    caution: "共同不触发的样本很多时，普通一致率会虚高。",
-  },
-  {
-    index: "02",
-    title: "风格层",
-    question: "是否以不同规则承担了相似的市场行为暴露？",
-    methods: "比较标准化八维画像，并逐维报告方向、强度、稳定性和置信范围。",
-    caution: "不把八维压成一个总分，否则距离相同的策略可能来源完全不同。",
-  },
-  {
-    index: "03",
-    title: "收益层",
-    question: "进入组合后，收益路径与下行风险是否仍然同步？",
-    methods: "并列观察 Pearson、秩相关、距离相关或 HSIC，以及状态条件和下行相关。",
-    caution: "低收益相关可能仅由频率错配、错位持有期或样本缺失造成。",
-  },
-] as const;
+const formatNumber = (value: number | null | undefined, digits = 3) =>
+  value == null || !Number.isFinite(value) ? "—" : value.toFixed(digits);
 
-const METHOD_LADDER = [
-  {
-    name: "Pearson",
-    scope: "线性联动",
-    meaning: "衡量两个标准化序列能否由一条直线解释。适合收益与连续暴露的基础诊断。",
-    boundary: "对异常值敏感，也无法识别 U 形、阈值形等非单调依赖。",
-  },
-  {
-    name: "Spearman / Kendall",
-    scope: "单调非线性",
-    meaning: "比较排序或成对次序，只要求一方随另一方大体单调变化。",
-    boundary: "仍可能漏掉非单调关系；大量并列值时需要报告有效样本和并列处理。",
-  },
-  {
-    name: "距离相关 / HSIC",
-    scope: "一般统计依赖",
-    meaning: "用于发现线性与秩相关看不到的曲线、阈值、分群等依赖结构。",
-    boundary: "数值不是经济暴露方向；显著性需用保持时间结构的置换或分块重采样。",
-  },
-  {
-    name: "状态条件与尾部检查",
-    scope: "结构性依赖",
-    meaning: "分别在趋势、震荡、上涨、下跌与压力区间检查相关是否集中出现。",
-    boundary: "切分过细会迅速耗尽样本；状态定义必须只使用当时可见信息。",
-  },
-] as const;
+const formatPercent = (value: number | null | undefined) =>
+  value == null || !Number.isFinite(value)
+    ? "—"
+    : `${(value * 100).toFixed(2)}%`;
 
-const ORTHOGONAL_STEPS = [
-  {
-    title: "统一比较口径",
-    text: "对齐股票池、交易日期、信号时点、持有周期和毛净收益，显式保留未触发样本。",
-  },
-  {
-    title: "剥离共同暴露",
-    text: "先移除市场收益以及已经定义的量价风格暴露，避免把大盘同步误认为策略同质。",
-  },
-  {
-    title: "线性残差化",
-    text: "用已有策略解释候选策略，取不可解释的残差；共线严重时采用正则化回归。",
-  },
-  {
-    title: "非线性残差化",
-    text: "按时间切分做交叉拟合，在训练段学习非线性关系，仅在未参与拟合的时间段生成残差。",
-  },
-  {
-    title: "检查剩余依赖",
-    text: "对残差继续计算距离相关或 HSIC，并检查领先滞后、市场状态和下行尾部依赖。",
-  },
-  {
-    title: "验证真实增量",
-    text: "只有样本外增量收益、增量 IC、回撤改善和跨状态稳定性共同支持，才认为新增了策略维度。",
-  },
-] as const;
+const compactToInputDate = (value: string | null | undefined) =>
+  value && /^\d{8}$/.test(value)
+    ? `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}`
+    : (value ?? "");
 
-const RESULT_DATABASE_INPUTS = [
-  ["策略总览", "score_summary：股票、日期、总分与当日排名"],
-  ["规则信号", "rule_details：股票、日期、规则名称与规则分数"],
-  ["场景状态", "scene_details：场景、方向、阶段、风险、确认强度与场景排名"],
-  ["收益路径", "未来由回测产出并写入或物化到结果库：持仓、周期、换手、成本、毛净收益与基准收益"],
-  ["风格画像", "未来由结果库信号和回测结果派生：八维暴露、状态内表现、样本量与估计版本"],
-  ["复现信息", "策略配置版本、市场状态版本、回测参数与计算时间"],
-] as const;
+const inputToCompactDate = (value: string) => value.replaceAll("-", "");
+
+const dependenceLabel = (value: number | null | undefined) => {
+  if (value == null || !Number.isFinite(value)) return "样本不足";
+  const strength = Math.abs(value);
+  if (strength >= 0.8) return "很强";
+  if (strength >= 0.6) return "较强";
+  if (strength >= 0.3) return "中等";
+  return "较弱";
+};
+
+const residualLabel = (value: number | null | undefined) => {
+  if (value == null || !Number.isFinite(value)) return "无法估计";
+  if (value < 0.25) return "高度可解释";
+  if (value < 0.6) return "部分独立";
+  return "线性增量较高";
+};
 
 export default function StrategyDimensionResearchPage() {
+  const [sourcePath, setSourcePath] = useState(() => readStoredSourcePath());
+  const [defaults, setDefaults] =
+    useState<StrategyDimensionResearchDefaultsData | null>(null);
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
+  const [selectedRules, setSelectedRules] = useState<string[]>([]);
+  const [ruleFilter, setRuleFilter] = useState("");
+  const [nonlinearSampleLimit, setNonlinearSampleLimit] = useState("512");
+  const [ridgeLambda, setRidgeLambda] = useState("0.000001");
+  const [initializing, setInitializing] = useState(false);
+  const [running, setRunning] = useState(false);
+  const [error, setError] = useState("");
+  const [result, setResult] = useState<StrategyDimensionResearchData | null>(
+    null,
+  );
+
+  const loadResearchDefaults = async () => {
+    setInitializing(true);
+    setError("");
+    setResult(null);
+    try {
+      const resolvedSourcePath = await ensureManagedSourcePath();
+      const loadedDefaults =
+        await getStrategyDimensionResearchDefaults(resolvedSourcePath);
+      const rulesByActivity = [...loadedDefaults.rule_options].sort(
+        (left, right) =>
+          right.trigger_count - left.trigger_count ||
+          left.rule_name.localeCompare(right.rule_name),
+      );
+      setSourcePath(resolvedSourcePath);
+      setDefaults(loadedDefaults);
+      setStartDate(compactToInputDate(loadedDefaults.start_date));
+      setEndDate(compactToInputDate(loadedDefaults.end_date));
+      setNonlinearSampleLimit(
+        String(loadedDefaults.default_nonlinear_sample_limit),
+      );
+      setRidgeLambda(String(loadedDefaults.default_ridge_lambda));
+      setSelectedRules(
+        rulesByActivity
+          .slice(0, Math.min(10, loadedDefaults.max_strategy_count))
+          .map((rule) => rule.rule_name),
+      );
+    } catch (initializeError) {
+      setDefaults(null);
+      setError(`读取研究数据失败：${String(initializeError)}`);
+    } finally {
+      setInitializing(false);
+    }
+  };
+
+  const filteredRuleOptions = useMemo(() => {
+    const keyword = ruleFilter.trim().toLocaleLowerCase();
+    return [...(defaults?.rule_options ?? [])]
+      .filter(
+        (rule) =>
+          !keyword || rule.rule_name.toLocaleLowerCase().includes(keyword),
+      )
+      .sort(
+        (left, right) =>
+          right.trigger_count - left.trigger_count ||
+          left.rule_name.localeCompare(right.rule_name),
+      );
+  }, [defaults, ruleFilter]);
+
+  const pairByRules = useMemo(() => {
+    const pairs = new Map<string, StrategyDimensionPairMetrics>();
+    for (const pair of result?.pair_metrics ?? []) {
+      pairs.set(`${pair.left_rule_name}\u0000${pair.right_rule_name}`, pair);
+      pairs.set(`${pair.right_rule_name}\u0000${pair.left_rule_name}`, pair);
+    }
+    return pairs;
+  }, [result]);
+
+  const strongestDistancePair = useMemo(
+    () =>
+      [...(result?.pair_metrics ?? [])]
+        .filter((pair) => pair.distance_correlation_daily_mean != null)
+        .sort(
+          (left, right) =>
+            (right.distance_correlation_daily_mean ?? -1) -
+            (left.distance_correlation_daily_mean ?? -1),
+        )[0],
+    [result],
+  );
+
+  const strongestOverlapPair = useMemo(
+    () =>
+      [...(result?.pair_metrics ?? [])]
+        .filter((pair) => pair.jaccard != null)
+        .sort((left, right) => (right.jaccard ?? -1) - (left.jaccard ?? -1))[0],
+    [result],
+  );
+
+  const mostExplainedRule = useMemo(
+    () =>
+      [...(result?.orthogonal_diagnostics ?? [])]
+        .filter(
+          (item) =>
+            item.residual_variance_ratio != null &&
+            item.basis_coefficients.length > 0,
+        )
+        .sort(
+          (left, right) =>
+            (left.residual_variance_ratio ?? 1) -
+            (right.residual_variance_ratio ?? 1),
+        )[0],
+    [result],
+  );
+
+  const toggleRule = (ruleName: string) => {
+    setResult(null);
+    setSelectedRules((current) => {
+      if (current.includes(ruleName))
+        return current.filter((name) => name !== ruleName);
+      if (current.length >= (defaults?.max_strategy_count ?? 20))
+        return current;
+      return [...current, ruleName];
+    });
+  };
+
+  const moveRule = (index: number, direction: -1 | 1) => {
+    setResult(null);
+    setSelectedRules((current) => {
+      const target = index + direction;
+      if (target < 0 || target >= current.length) return current;
+      const next = [...current];
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    });
+  };
+
+  const runResearch = async () => {
+    if (!sourcePath) {
+      setError("尚未找到结果库路径，请先在原数据管理中完成数据初始化。");
+      return;
+    }
+    if (!startDate || !endDate) {
+      setError("请选择完整的开始和结束日期。");
+      return;
+    }
+    if (selectedRules.length < 2) {
+      setError("至少选择两个不同规则才能进行相关性研究。");
+      return;
+    }
+    const sampleLimit = Number(nonlinearSampleLimit);
+    const lambda = Number(ridgeLambda);
+    if (
+      !Number.isInteger(sampleLimit) ||
+      sampleLimit < 3 ||
+      sampleLimit > (defaults?.max_nonlinear_sample_limit ?? 1024)
+    ) {
+      setError(
+        `非线性样本数必须是 3 到 ${defaults?.max_nonlinear_sample_limit ?? 1024} 的整数。`,
+      );
+      return;
+    }
+    if (!Number.isFinite(lambda) || lambda < 0) {
+      setError("岭正则系数必须是有限的非负数。");
+      return;
+    }
+    setRunning(true);
+    setError("");
+    try {
+      setResult(
+        await runStrategyDimensionResearch({
+          sourcePath,
+          startDate: inputToCompactDate(startDate),
+          endDate: inputToCompactDate(endDate),
+          ruleNames: selectedRules,
+          nonlinearSampleLimit: sampleLimit,
+          ridgeLambda: lambda,
+        }),
+      );
+    } catch (researchError) {
+      setResult(null);
+      setError(`研究计算失败：${String(researchError)}`);
+    } finally {
+      setRunning(false);
+    }
+  };
+
   return (
     <main className="dimension-research-page">
       <section className="dimension-research-hero">
         <div className="dimension-research-hero-copy">
-          <span className="dimension-research-status">理论阶段 · 暂无实证数据</span>
-          <p className="dimension-research-eyebrow">STRATEGY DIMENSION RESEARCH</p>
+          <span className="dimension-research-status">
+            {result
+              ? `实证结果 · ${result.start_date}—${result.end_date}`
+              : "信号层实证研究"}
+          </span>
+          <p className="dimension-research-eyebrow">
+            STRATEGY DIMENSION RESEARCH
+          </p>
           <h2>相关性与正交研究</h2>
           <p className="dimension-research-lead">
-            K 线策略的原始信息只有价格与成交量，但规则如何组合这些信息，会形成不同的方向、周期、状态与收益暴露。
-            因此“量价两类输入”不等于“策略只有两个维度”。
+            从结果库读取真实规则触发和分数，在完整股票日宇宙中比较覆盖、重叠、线性相关与一般依赖，
+            再按所选顺序检查每条规则还有多少不能被前序规则线性解释的方差。
           </p>
         </div>
-        <aside className="dimension-research-principle" aria-label="研究结论边界">
-          <span>核心边界</span>
-          <strong>低线性相关，不代表统计独立</strong>
-          <p>风格坐标负责解释，非线性依赖负责排查，样本外增量才负责确认正交价值。</p>
+        <aside
+          className="dimension-research-principle"
+          aria-label="研究结论边界"
+        >
+          <span>当前能力边界</span>
+          <strong>低线性相关，不等于策略独立</strong>
+          <p>
+            当前结果确认信号层结构；风格、收益路径和样本外组合增量尚未接入，不能据此直接决定资金配置。
+          </p>
         </aside>
       </section>
 
-      <section className="dimension-research-pipeline" aria-labelledby="research-pipeline-title">
+      <section
+        className="dimension-research-workbench"
+        aria-labelledby="dimension-workbench-title"
+      >
         <div className="dimension-research-section-heading">
           <div>
-            <p className="dimension-research-eyebrow">RESEARCH MAP</p>
-            <h3 id="research-pipeline-title">从原始信息到可验证的新维度</h3>
+            <p className="dimension-research-eyebrow">RESEARCH WORKBENCH</p>
+            <h3 id="dimension-workbench-title">选择规则并运行研究</h3>
           </div>
-          <p>先描述策略“在做什么”，再判断它是否真的提供组合增量。</p>
+          <div className="dimension-research-load-control">
+            <p>
+              规则顺序会影响线性正交结果；后面的规则只用排在它前面的规则进行解释。
+            </p>
+            <button
+              type="button"
+              onClick={() => void loadResearchDefaults()}
+              disabled={initializing || running}
+            >
+              {initializing
+                ? "正在扫描结果库…"
+                : defaults
+                  ? "重新加载日期与规则"
+                  : "加载日期与规则"}
+            </button>
+          </div>
         </div>
-        <ol>
-          {["量价输入", "交易规则", "风格暴露", "信号相关", "收益相关", "正交增量"].map(
-            (item, index) => (
-              <li key={item}>
-                <span>{String(index + 1).padStart(2, "0")}</span>
-                <strong>{item}</strong>
-              </li>
-            ),
-          )}
-        </ol>
-      </section>
 
-      <section className="dimension-research-section" aria-labelledby="style-dictionary-title">
-        <div className="dimension-research-section-heading">
-          <div>
-            <p className="dimension-research-eyebrow">STYLE DICTIONARY</p>
-            <h3 id="style-dictionary-title">八维策略风格字典</h3>
+        <div className="dimension-research-config-grid">
+          <div className="dimension-research-fields">
+            <label>
+              <span>开始日期</span>
+              <input
+                type="date"
+                value={startDate}
+                max={endDate || undefined}
+                onChange={(event) => {
+                  setStartDate(event.target.value);
+                  setResult(null);
+                }}
+                disabled={initializing || running}
+              />
+            </label>
+            <label>
+              <span>结束日期</span>
+              <input
+                type="date"
+                value={endDate}
+                min={startDate || undefined}
+                onChange={(event) => {
+                  setEndDate(event.target.value);
+                  setResult(null);
+                }}
+                disabled={initializing || running}
+              />
+            </label>
+            <label>
+              <span>非线性抽样交易日</span>
+              <input
+                type="number"
+                min={3}
+                max={defaults?.max_nonlinear_sample_limit ?? 1024}
+                step={1}
+                value={nonlinearSampleLimit}
+                onChange={(event) => {
+                  setNonlinearSampleLimit(event.target.value);
+                  setResult(null);
+                }}
+                disabled={initializing || running}
+              />
+              <small>
+                距离相关为 O(n²)，默认确定性抽取{" "}
+                {defaults?.default_nonlinear_sample_limit ?? 512} 日。
+              </small>
+            </label>
+            <label>
+              <span>岭正则系数</span>
+              <input
+                type="number"
+                min={0}
+                step="0.000001"
+                value={ridgeLambda}
+                onChange={(event) => {
+                  setRidgeLambda(event.target.value);
+                  setResult(null);
+                }}
+                disabled={initializing || running}
+              />
+              <small>用于稳定高度共线规则的回归求解，不是策略权重。</small>
+            </label>
           </div>
-          <p>这些是可解释坐标，不预设彼此正交；每一维都需要未来数据重新估计。</p>
-        </div>
-        <div className="dimension-research-style-grid">
-          {STYLE_DIMENSIONS.map((dimension, index) => (
-            <article className="dimension-research-style-card" key={dimension.title}>
-              <div className="dimension-research-style-card-head">
-                <span>{String(index + 1).padStart(2, "0")}</span>
-                <h4>{dimension.title}</h4>
+
+          <div className="dimension-research-selection">
+            <div className="dimension-research-selection-head">
+              <div>
+                <strong>正交解释顺序</strong>
+                <small>
+                  已选 {selectedRules.length}/
+                  {defaults?.max_strategy_count ?? 20}
+                </small>
               </div>
-              <strong className="dimension-research-poles">{dimension.poles}</strong>
-              <p>{dimension.description}</p>
-              <dl>
-                <div>
-                  <dt>未来观测</dt>
-                  <dd>{dimension.observable}</dd>
-                </div>
-                <div>
-                  <dt>避免误读</dt>
-                  <dd>{dimension.misunderstanding}</dd>
-                </div>
-              </dl>
-            </article>
-          ))}
-        </div>
-      </section>
-
-      <section className="dimension-research-section" aria-labelledby="correlation-layers-title">
-        <div className="dimension-research-section-heading">
-          <div>
-            <p className="dimension-research-eyebrow">THREE-LAYER VIEW</p>
-            <h3 id="correlation-layers-title">相关性必须分三层回答</h3>
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedRules([]);
+                  setResult(null);
+                }}
+                disabled={running || selectedRules.length === 0}
+              >
+                清空
+              </button>
+            </div>
+            <ol>
+              {selectedRules.map((ruleName, index) => (
+                <li key={ruleName}>
+                  <span>{index + 1}</span>
+                  <strong title={ruleName}>{ruleName}</strong>
+                  <button
+                    type="button"
+                    aria-label={`上移 ${ruleName}`}
+                    onClick={() => moveRule(index, -1)}
+                    disabled={running || index === 0}
+                  >
+                    ↑
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={`下移 ${ruleName}`}
+                    onClick={() => moveRule(index, 1)}
+                    disabled={running || index === selectedRules.length - 1}
+                  >
+                    ↓
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={`移除 ${ruleName}`}
+                    onClick={() => toggleRule(ruleName)}
+                    disabled={running}
+                  >
+                    ×
+                  </button>
+                </li>
+              ))}
+            </ol>
           </div>
-          <p>三层结论可以不同，差异本身就是策略结构的重要信息。</p>
         </div>
-        <div className="dimension-research-layer-grid">
-          {CORRELATION_LAYERS.map((layer) => (
-            <article key={layer.title} data-index={layer.index}>
-              <span>{layer.index}</span>
-              <h4>{layer.title}</h4>
-              <strong>{layer.question}</strong>
-              <p>{layer.methods}</p>
-              <small>{layer.caution}</small>
-            </article>
-          ))}
+
+        <div className="dimension-research-rule-picker">
+          <div className="dimension-research-rule-picker-head">
+            <label>
+              <span>筛选规则</span>
+              <input
+                type="search"
+                value={ruleFilter}
+                placeholder="输入规则名称"
+                onChange={(event) => setRuleFilter(event.target.value)}
+                disabled={initializing || running}
+              />
+            </label>
+            <button
+              type="button"
+              onClick={() => {
+                setSelectedRules(
+                  filteredRuleOptions
+                    .slice(0, defaults?.max_strategy_count ?? 20)
+                    .map((rule) => rule.rule_name),
+                );
+                setResult(null);
+              }}
+              disabled={
+                initializing || running || filteredRuleOptions.length === 0
+              }
+            >
+              选择当前前{" "}
+              {Math.min(
+                filteredRuleOptions.length,
+                defaults?.max_strategy_count ?? 20,
+              )}{" "}
+              条
+            </button>
+          </div>
+          <div className="dimension-research-rule-options">
+            {filteredRuleOptions.map((rule) => (
+              <label
+                className={
+                  selectedRules.includes(rule.rule_name) ? "selected" : ""
+                }
+                key={rule.rule_name}
+              >
+                <input
+                  type="checkbox"
+                  checked={selectedRules.includes(rule.rule_name)}
+                  onChange={() => toggleRule(rule.rule_name)}
+                  disabled={
+                    running ||
+                    (!selectedRules.includes(rule.rule_name) &&
+                      selectedRules.length >=
+                        (defaults?.max_strategy_count ?? 20))
+                  }
+                />
+                <span title={rule.rule_name}>{rule.rule_name}</span>
+                <small>{rule.trigger_count.toLocaleString()} 次</small>
+              </label>
+            ))}
+          </div>
+        </div>
+
+        {error ? (
+          <div className="dimension-research-error" role="alert">
+            {error}
+          </div>
+        ) : null}
+        <div className="dimension-research-run-row">
+          <small>
+            {initializing
+              ? "正在读取规则统计…"
+              : defaults
+                ? `结果库：${sourcePath}`
+                : "进入页面不会扫描结果库；请按需加载日期与规则。"}
+          </small>
+          <button
+            className="dimension-research-run-button"
+            type="button"
+            onClick={() => void runResearch()}
+            disabled={initializing || running || !defaults}
+          >
+            {running ? "正在计算相关性…" : "运行相关性与正交研究"}
+          </button>
         </div>
       </section>
 
-      <section className="dimension-research-details" aria-label="展开研究细节">
-        <details>
-          <summary>
-            <span>
-              <strong>非线性相关：稳健指标阶梯</strong>
-              <small>为什么不能只看一个相关系数</small>
-            </span>
-            <i aria-hidden="true" />
-          </summary>
-          <div className="dimension-research-detail-body">
-            <div className="dimension-research-method-grid">
-              {METHOD_LADDER.map((method, index) => (
-                <article key={method.name}>
+      {result ? (
+        <>
+          <section className="dimension-research-summary" aria-label="研究概览">
+            <article>
+              <span>完整股票日宇宙</span>
+              <strong>{result.universe_sample_count.toLocaleString()}</strong>
+              <small>未触发规则按 0 分进入线性统计</small>
+            </article>
+            <article>
+              <span>研究规则</span>
+              <strong>{result.strategies.length}</strong>
+              <small>按当前正交解释顺序</small>
+            </article>
+            <article>
+              <span>规则组合</span>
+              <strong>{result.pair_metrics.length}</strong>
+              <small>每一对均计算重叠和相关</small>
+            </article>
+            <article>
+              <span>非线性样本</span>
+              <strong>{result.nonlinear_sample_limit}</strong>
+              <small>
+                实际共同交易日{" "}
+                {result.pair_metrics[0]?.nonlinear_sample_count ?? 0}
+              </small>
+            </article>
+          </section>
+
+          <section className="dimension-research-section">
+            <div className="dimension-research-section-heading">
+              <div>
+                <p className="dimension-research-eyebrow">
+                  DATA-GROUNDED READING
+                </p>
+                <h3>先读这组数据告诉我们的内容</h3>
+              </div>
+              <p>
+                下面是描述性诊断，不包含显著性检验，也不构成新增策略维度的最终证明。
+              </p>
+            </div>
+            <div className="dimension-research-insight-grid">
+              <article>
+                <span>触发重叠最高</span>
+                <strong>
+                  {strongestOverlapPair
+                    ? `${strongestOverlapPair.left_rule_name} / ${strongestOverlapPair.right_rule_name}`
+                    : "样本不足"}
+                </strong>
+                <p>
+                  {strongestOverlapPair
+                    ? `Jaccard 为 ${formatNumber(strongestOverlapPair.jaccard)}，两规则触发集合的交集约占并集的 ${formatPercent(strongestOverlapPair.jaccard)}。它描述共同选中，不描述分数方向。`
+                    : "没有可计算的共同触发数据。"}
+                </p>
+              </article>
+              <article>
+                <span>一般依赖最强</span>
+                <strong>
+                  {strongestDistancePair
+                    ? `${strongestDistancePair.left_rule_name} / ${strongestDistancePair.right_rule_name}`
+                    : "样本不足"}
+                </strong>
+                <p>
+                  {strongestDistancePair
+                    ? `日度距离相关为 ${formatNumber(strongestDistancePair.distance_correlation_daily_mean)}（${dependenceLabel(strongestDistancePair.distance_correlation_daily_mean)}）。即使 Pearson 较低，也要警惕曲线或阈值型共同变化。`
+                    : "有效抽样交易日不足，无法计算距离相关。"}
+                </p>
+              </article>
+              <article>
+                <span>最易被前序规则解释</span>
+                <strong>{mostExplainedRule?.rule_name ?? "暂无"}</strong>
+                <p>
+                  {mostExplainedRule
+                    ? `线性残差比例为 ${formatPercent(mostExplainedRule.residual_variance_ratio)}，属于“${residualLabel(mostExplainedRule.residual_variance_ratio)}”。该结论依赖当前规则顺序与岭系数。`
+                    : "首条规则没有前序基准；增加规则后才能形成解释关系。"}
+                </p>
+              </article>
+            </div>
+          </section>
+
+          <section className="dimension-research-section">
+            <div className="dimension-research-section-heading">
+              <div>
+                <p className="dimension-research-eyebrow">SIGNAL PROFILE</p>
+                <h3>规则覆盖与分数分布</h3>
+              </div>
+              <p>均值和标准差均在完整股票日宇宙上计算，未触发记为 0。</p>
+            </div>
+            <div className="dimension-research-table-wrap dimension-research-profile-table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>顺序</th>
+                    <th>规则</th>
+                    <th>触发数</th>
+                    <th>覆盖率</th>
+                    <th>补零均值</th>
+                    <th>补零标准差</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {result.strategies.map((strategy, index) => (
+                    <tr key={strategy.rule_name}>
+                      <td>{index + 1}</td>
+                      <th>{strategy.rule_name}</th>
+                      <td>{strategy.trigger_count.toLocaleString()}</td>
+                      <td>{formatPercent(strategy.coverage)}</td>
+                      <td>{formatNumber(strategy.score_mean_with_zeros, 4)}</td>
+                      <td>{formatNumber(strategy.score_std_with_zeros, 4)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section className="dimension-research-section">
+            <div className="dimension-research-section-heading">
+              <div>
+                <p className="dimension-research-eyebrow">
+                  PAIRWISE DEPENDENCE
+                </p>
+                <h3>两两相关明细</h3>
+              </div>
+              <p>
+                Pearson 看股票日线性联动；Spearman
+                与距离相关看日度横截面平均强度。
+              </p>
+            </div>
+            <div className="dimension-research-table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>规则对</th>
+                    <th>共同触发</th>
+                    <th>并集</th>
+                    <th>Jaccard</th>
+                    <th>Phi</th>
+                    <th>Pearson</th>
+                    <th>日度 Spearman</th>
+                    <th>日度距离相关</th>
+                    <th>解读</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {result.pair_metrics.map((pair) => (
+                    <tr key={`${pair.left_rule_name}-${pair.right_rule_name}`}>
+                      <th>
+                        {pair.left_rule_name}
+                        <small>{pair.right_rule_name}</small>
+                      </th>
+                      <td>{pair.joint_trigger_count.toLocaleString()}</td>
+                      <td>{pair.union_trigger_count.toLocaleString()}</td>
+                      <td>{formatNumber(pair.jaccard)}</td>
+                      <td>{formatNumber(pair.phi)}</td>
+                      <td>{formatNumber(pair.score_pearson_with_zeros)}</td>
+                      <td>{formatNumber(pair.score_spearman_daily_mean)}</td>
+                      <td>
+                        {formatNumber(pair.distance_correlation_daily_mean)}
+                      </td>
+                      <td>
+                        <span
+                          className={`dimension-research-strength strength-${dependenceLabel(pair.distance_correlation_daily_mean)}`}
+                        >
+                          {dependenceLabel(
+                            pair.distance_correlation_daily_mean,
+                          )}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section className="dimension-research-section">
+            <div className="dimension-research-section-heading">
+              <div>
+                <p className="dimension-research-eyebrow">
+                  ORTHOGONAL RESIDUAL
+                </p>
+                <h3>按顺序剥离已有规则</h3>
+              </div>
+              <p>
+                残差比例越低，当前规则越容易被前序规则线性解释；它不是收益增量。
+              </p>
+            </div>
+            <div className="dimension-research-orthogonal-results">
+              {result.orthogonal_diagnostics.map((diagnostic, index) => (
+                <article key={diagnostic.rule_name}>
                   <div>
                     <span>{index + 1}</span>
-                    <small>{method.scope}</small>
+                    <strong>{diagnostic.rule_name}</strong>
+                    <em>{residualLabel(diagnostic.residual_variance_ratio)}</em>
                   </div>
-                  <h4>{method.name}</h4>
-                  <p>{method.meaning}</p>
-                  <p className="dimension-research-method-boundary">边界：{method.boundary}</p>
+                  <div className="dimension-research-residual-bar">
+                    <i
+                      style={{
+                        width: `${Math.max(0, Math.min(100, (diagnostic.residual_variance_ratio ?? 0) * 100))}%`,
+                      }}
+                    />
+                  </div>
+                  <dl>
+                    <div>
+                      <dt>残差方差</dt>
+                      <dd>
+                        {formatPercent(diagnostic.residual_variance_ratio)}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>已解释方差</dt>
+                      <dd>
+                        {formatPercent(diagnostic.explained_variance_ratio)}
+                      </dd>
+                    </div>
+                  </dl>
+                  <p>
+                    {diagnostic.basis_coefficients.length === 0 ? (
+                      "首条规则作为比较基准，残差为自身。"
+                    ) : (
+                      <>
+                        前序系数：
+                        {diagnostic.basis_coefficients
+                          .map(
+                            (coefficient) =>
+                              `${coefficient.rule_name} ${formatNumber(coefficient.coefficient)}`,
+                          )
+                          .join("；")}
+                      </>
+                    )}
+                  </p>
                 </article>
               ))}
             </div>
-            <div className="dimension-research-formula-grid">
+          </section>
+
+          <section className="dimension-research-section">
+            <div className="dimension-research-section-heading">
               <div>
-                <span>二元信号重叠</span>
-                <code>J(A,B) = |A ∩ B| / |A ∪ B|</code>
-                <p>只在至少一个策略触发的样本上衡量共同触发，避免大量共同空白抬高一致率。</p>
+                <p className="dimension-research-eyebrow">CORRELATION MATRIX</p>
+                <h3>股票日 Pearson 矩阵</h3>
               </div>
-              <div>
-                <span>线性正交条件</span>
-                <code>Cov(residual, existing) = 0</code>
-                <p>它只保证所选样本和表示下的线性不相关，并不自动得到非线性独立。</p>
-              </div>
+              <p>颜色深浅表示绝对线性相关强度，正负号表示同向或反向。</p>
             </div>
+            <div className="dimension-research-table-wrap dimension-research-matrix-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>规则</th>
+                    {result.strategies.map((strategy, index) => (
+                      <th title={strategy.rule_name} key={strategy.rule_name}>
+                        {index + 1}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {result.strategies.map((row, rowIndex) => (
+                    <tr key={row.rule_name}>
+                      <th>
+                        {rowIndex + 1}. {row.rule_name}
+                      </th>
+                      {result.strategies.map((column, columnIndex) => {
+                        const value =
+                          rowIndex === columnIndex
+                            ? 1
+                            : pairByRules.get(
+                                `${row.rule_name}\u0000${column.rule_name}`,
+                              )?.score_pearson_with_zeros;
+                        return (
+                          <td
+                            key={column.rule_name}
+                            style={{
+                              backgroundColor:
+                                value == null
+                                  ? undefined
+                                  : `rgba(${value < 0 ? "59, 130, 246" : "249, 115, 22"}, ${0.08 + Math.abs(value) * 0.38})`,
+                            }}
+                          >
+                            {formatNumber(value, 2)}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          {result.pending_layers.length > 0 ? (
+            <section className="dimension-research-pending">
+              <strong>尚不能从本次结果回答</strong>
+              <ul>
+                {result.pending_layers.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
+        </>
+      ) : null}
+
+      <section className="dimension-research-details" aria-label="研究方法说明">
+        <details open={!result}>
+          <summary>
+            <span>
+              <strong>怎样结合上面的具体数据读相关性</strong>
+              <small>Jaccard、Pearson、Spearman 和距离相关回答不同问题</small>
+            </span>
+            <i aria-hidden="true" />
+          </summary>
+          <div className="dimension-research-detail-body dimension-research-method-grid">
+            <article>
+              <h4>共同选中：Jaccard / Phi</h4>
+              <p>
+                Jaccard 只看至少一方触发的集合；Phi
+                把共同不触发也纳入二元关联。覆盖率悬殊时，两者出现差异是正常现象。
+              </p>
+            </article>
+            <article>
+              <h4>线性同向：Pearson</h4>
+              <p>
+                本页在全部评分股票日上补零计算。数值接近 0
+                只表示直线关系弱，不能推出两个策略独立。
+              </p>
+            </article>
+            <article>
+              <h4>日度单调：Spearman</h4>
+              <p>
+                先把每条规则聚合为当日总分除以当日股票数，再比较日期排序，回答策略是否随市场环境共同增强或减弱。
+              </p>
+            </article>
+            <article>
+              <h4>一般依赖：距离相关</h4>
+              <p>
+                能够捕捉 U
+                形、阈值和分群关系，但不提供方向，也不是显著性概率。受 O(n²)
+                成本限制，本页使用确定性日期抽样。
+              </p>
+            </article>
           </div>
         </details>
-
         <details>
           <summary>
             <span>
-              <strong>正交研究：从残差到真实增量</strong>
-              <small>固定六步流程与结果解释边界</small>
+              <strong>怎样理解线性正交残差</strong>
+              <small>顺序、正则化和结论边界</small>
             </span>
             <i aria-hidden="true" />
           </summary>
           <div className="dimension-research-detail-body">
             <ol className="dimension-research-orthogonal-steps">
-              {ORTHOGONAL_STEPS.map((step, index) => (
-                <li key={step.title}>
-                  <span>{String(index + 1).padStart(2, "0")}</span>
-                  <div>
-                    <strong>{step.title}</strong>
-                    <p>{step.text}</p>
-                  </div>
-                </li>
-              ))}
-            </ol>
-            <div className="dimension-research-callout">
-              <strong>报告原则</strong>
-              <p>
-                原策略、共同暴露和正交残差必须分开呈现。数学残差可能换手很高、无法成交或缺乏稳定经济含义，不能直接命名为新策略。
-              </p>
-            </div>
-          </div>
-        </details>
-
-        <details>
-          <summary>
-            <span>
-              <strong>实证纪律：常见失真来源</strong>
-              <small>时间序列、样本外与多重检验约束</small>
-            </span>
-            <i aria-hidden="true" />
-          </summary>
-          <div className="dimension-research-detail-body dimension-research-discipline-grid">
-            <article>
-              <h4>保持时间结构</h4>
-              <p>收益和重叠持有期存在自相关。显著性使用按时间连续成块的重采样或置换，不能随机打散单日样本。</p>
-            </article>
-            <article>
-              <h4>严格样本外</h4>
-              <p>标准化、状态划分、模型拟合和阈值选择都只使用训练期信息；按时间滚动或扩展窗口验证。</p>
-            </article>
-            <article>
-              <h4>避免频率错配</h4>
-              <p>不同触发频率和持有期先投影到共同决策时点与收益周期，否则低相关可能只是时间轴没有对齐。</p>
-            </article>
-            <article>
-              <h4>约束多重检验</h4>
-              <p>维度、状态、滞后与指标组合越多，偶然显著越常见。预先声明主指标，并校正探索结果。</p>
-            </article>
-            <article>
-              <h4>报告有效样本</h4>
-              <p>同时报告共同日期、共同股票、共同触发次数和各状态样本量；小样本结果只作为待验证线索。</p>
-            </article>
-            <article>
-              <h4>稳定优先于单点最优</h4>
-              <p>关注滚动窗口、不同市场状态和轻微参数扰动下的结论方向，不用全样本最优值替代稳定性。</p>
-            </article>
-          </div>
-        </details>
-
-        <details>
-          <summary>
-            <span>
-              <strong>未来接入：结果库读取边界</strong>
-              <small>结果库是唯一策略数据源，本阶段不创建接口或数据库表</small>
-            </span>
-            <i aria-hidden="true" />
-          </summary>
-          <div className="dimension-research-detail-body">
-            <div className="dimension-research-contract-table" role="table" aria-label="未来结果库读取边界">
-              {RESULT_DATABASE_INPUTS.map(([category, fields]) => (
-                <div role="row" key={category}>
-                  <strong role="cell">{category}</strong>
-                  <span role="cell">{fields}</span>
+              <li>
+                <span>01</span>
+                <div>
+                  <strong>顺序就是研究假设</strong>
+                  <p>
+                    第 N 条规则只由前 N−1
+                    条解释。改变顺序后残差会改变，所以应把成熟基准策略放在前面、候选策略放在后面。
+                  </p>
                 </div>
-              ))}
-            </div>
-            <p className="dimension-research-contract-note">
-              接入时不再建立平行的策略数据源：已有触发与评分直接读取结果库；缺失的收益路径和风格画像由回测计算后进入结果库，再供本研究读取。页面当前不会连接结果库、调用后端或生成任何统计结论。
-            </p>
+              </li>
+              <li>
+                <span>02</span>
+                <div>
+                  <strong>残差不是可交易组合</strong>
+                  <p>
+                    残差比例表示分数方差中未被线性解释的部分，没有计入换手、成本、容量或收益。
+                  </p>
+                </div>
+              </li>
+              <li>
+                <span>03</span>
+                <div>
+                  <strong>还要检查一般依赖</strong>
+                  <p>
+                    线性残差高仍可能存在强距离相关；只有后续收益路径与样本外组合增量也成立，才可称为独立策略维度。
+                  </p>
+                </div>
+              </li>
+            </ol>
+          </div>
+        </details>
+        <details>
+          <summary>
+            <span>
+              <strong>八维风格画像：下一阶段要解释什么</strong>
+              <small>目前仅展示定义，不生成没有数据支持的分数</small>
+            </span>
+            <i aria-hidden="true" />
+          </summary>
+          <div className="dimension-research-detail-body dimension-research-style-grid">
+            {STYLE_DIMENSIONS.map(([title, poles, observable], index) => (
+              <article className="dimension-research-style-card" key={title}>
+                <div className="dimension-research-style-card-head">
+                  <span>{String(index + 1).padStart(2, "0")}</span>
+                  <h4>{title}</h4>
+                </div>
+                <strong className="dimension-research-poles">{poles}</strong>
+                <p>待结果库物化：{observable}</p>
+              </article>
+            ))}
           </div>
         </details>
       </section>

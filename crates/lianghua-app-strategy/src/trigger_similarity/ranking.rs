@@ -19,7 +19,7 @@ use crate::data::{ind_toml_path, score_rule_path, stock_list_path};
 use crate::utils::utils::board_category;
 use lianghua_app_shared::build_total_mv_map;
 
-const ALGORITHM_VERSION: &str = "outcome-reverse-startup-ranking-v8";
+const ALGORITHM_VERSION: &str = "outcome-reverse-startup-ranking-v9";
 const SUCCESS_QUALITY_THRESHOLD: f64 = 0.80;
 const FAILURE_QUALITY_THRESHOLD: f64 = 0.20;
 const SEMANTIC_DEFINITION_SIGNATURE_PREFIX: &str = "definitions-v1|";
@@ -109,6 +109,9 @@ pub struct StrategyTriggerRankingMatch {
     pub name: Option<String>,
     pub candidate_start_trade_date: String,
     pub candidate_end_trade_date: String,
+    pub outcome_start_trade_date: String,
+    pub outcome_end_trade_date: String,
+    pub template_class: i8,
     pub similarity_score: f64,
     pub forward_excess_return_pct: Option<f64>,
     pub mfe_pct: f64,
@@ -2435,9 +2438,28 @@ pub fn run_strategy_trigger_similarity_ranking(
                                 .sum::<f64>()
                                 / rating_candidates.len() as f64
                         });
-                        let top_matches = rating_candidates
-                            .iter()
-                            .take(5)
+                        let mut display_candidates = Vec::with_capacity(5);
+                        for template_class in [1_i8, -1_i8] {
+                            if let Some(scored) = rating_candidates.iter().find(|scored| {
+                                candidates[scored.candidate_index].template_class == template_class
+                            }) {
+                                display_candidates.push(scored);
+                            }
+                        }
+                        for scored in &rating_candidates {
+                            if display_candidates
+                                .iter()
+                                .any(|selected| selected.candidate_index == scored.candidate_index)
+                            {
+                                continue;
+                            }
+                            display_candidates.push(scored);
+                            if display_candidates.len() >= 5 {
+                                break;
+                            }
+                        }
+                        let top_matches = display_candidates
+                            .into_iter()
                             .filter_map(|scored| {
                                 let candidate = &candidates[scored.candidate_index];
                                 let outcome = candidate.outcome.as_ref()?;
@@ -2449,6 +2471,9 @@ pub fn run_strategy_trigger_similarity_ranking(
                                         .start_trade_date
                                         .clone(),
                                     candidate_end_trade_date: candidate.anchor.end_trade_date.clone(),
+                                    outcome_start_trade_date: outcome.start_trade_date.clone(),
+                                    outcome_end_trade_date: outcome.end_trade_date.clone(),
+                                    template_class: candidate.template_class,
                                     similarity_score: scored.score,
                                     forward_excess_return_pct: outcome.excess_return_pct,
                                     mfe_pct: outcome.mfe_pct,

@@ -458,10 +458,16 @@
 }
 
 .trigger-sim-rules-cell {
-  max-width: 120px;
+  width: 190px;
+  min-width: 190px;
+  max-width: 190px;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+}
+
+.trigger-sim-rules-cell .trigger-sim-history-link + .trigger-sim-history-link {
+  margin-top: 6px;
 }
 
 @media (max-width: 1280px) {
