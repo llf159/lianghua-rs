@@ -46,7 +46,9 @@ use crate::{
     scoring_model::{CompactRuleScore, SceneBacktestRow, ScoreBatch, ScoreSummary},
     simulate::{
         DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS, build_backtest_sample_eligibility,
-        fp_utils::calc_newey_west_standard_error,
+        fp_utils::{
+            calc_newey_west_standard_error, calc_newey_west_t_value, calc_profit_loss_sums,
+        },
         rank::{
             RankLayerConfig, RankLayerFromDbInput, RankLayerMethod,
             calc_rank_layer_metrics_from_rank_samples, calc_rank_layer_metrics_from_score_rows,
@@ -299,6 +301,17 @@ pub struct RuleLayerRuleSummary {
     pub decay_validations: Vec<RuleDecayValidation>,
     #[serde(skip)]
     pub decay_daily_values: Vec<(String, f64)>,
+    #[serde(skip)]
+    portfolio_daily_values: Vec<RulePortfolioDailyValue>,
+}
+
+#[derive(Debug, Clone)]
+struct RulePortfolioDailyValue {
+    trade_date: String,
+    avg_residual_return: Option<f64>,
+    avg_excess_residual_return: Option<f64>,
+    top_bottom_spread: Option<f64>,
+    ic: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -704,6 +717,12 @@ pub struct RuleExpressionCalibrationCandidate {
     pub status_label: String,
     pub score_buckets: Vec<RuleExpressionCalibrationBucket>,
     pub suggested_dist_points: Vec<RuleExpressionCalibrationDistancePoint>,
+    #[serde(skip)]
+    training_eligible: bool,
+    #[serde(skip)]
+    validation_trigger_samples: usize,
+    #[serde(skip)]
+    validation_triggered_days: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -4250,27 +4269,13 @@ fn round_to_half(value: f64) -> f64 {
     (value * 2.0).round() / 2.0
 }
 
-fn calibration_stability_factor(
-    direction_sign: f64,
-    early_mean: Option<f64>,
-    late_mean: Option<f64>,
-) -> f64 {
-    match (
-        early_mean.map(|value| value * direction_sign),
-        late_mean.map(|value| value * direction_sign),
-    ) {
-        (Some(early), Some(late)) if early > 0.0 && late > 0.0 => 1.0,
-        (Some(early), Some(late)) if early > 0.0 || late > 0.0 => 0.5,
-        _ => 0.0,
-    }
-}
-
 fn calibration_status_rank(status: &str) -> usize {
     match status {
         "reliable" => 0,
-        "unstable" => 1,
-        "no_edge" => 2,
-        _ => 3,
+        "validation_failed" | "validation_insufficient" => 1,
+        "not_selected" => 2,
+        "no_edge" => 3,
+        _ => 4,
     }
 }
 
@@ -4304,6 +4309,10 @@ pub fn run_rule_expression_calibration(
         1.0
     };
     let specs = build_validation_calibration_specs(&session.seed_rule);
+    let runtime_trade_dates = session.runtime_cache.trade_dates().collect::<Vec<_>>();
+    let validation_start_date = runtime_trade_dates
+        .get(runtime_trade_dates.len() / 2)
+        .copied();
     let mut prepared = Vec::with_capacity(specs.len());
     for spec in &specs {
         let cached_rule = build_validation_cached_rule(
@@ -4390,38 +4399,55 @@ pub fn run_rule_expression_calibration(
                 })
                 .collect::<Vec<_>>();
             daily_excess.sort_by(|left, right| left.0.cmp(&right.0));
-            let daily_values = daily_excess
+            let early_values = daily_excess
                 .iter()
+                .filter(|(trade_date, _)| {
+                    validation_start_date.is_none_or(|start_date| trade_date.as_str() < start_date)
+                })
                 .map(|(_, value)| *value)
                 .collect::<Vec<_>>();
-            let daily_mean = mean_f64(&daily_values);
-            let daily_std = sample_std_f64(&daily_values);
+            let late_values = daily_excess
+                .iter()
+                .filter(|(trade_date, _)| {
+                    validation_start_date
+                        .is_some_and(|start_date| trade_date.as_str() >= start_date)
+                })
+                .map(|(_, value)| *value)
+                .collect::<Vec<_>>();
+            let early_mean = mean_f64(&early_values);
+            let late_mean = mean_f64(&late_values);
+            let daily_mean = early_mean;
+            let daily_std = sample_std_f64(&early_values);
             let standard_error = calc_newey_west_standard_error(
-                &daily_values,
+                &early_values,
                 session.params.backtest_period.saturating_sub(1),
             );
             let conservative_edge = daily_mean.zip(standard_error).map(|(mean, se)| {
                 let oriented_lcb = mean * direction_sign - (1.28) * se;
                 direction_sign * oriented_lcb
             });
-
-            let split_index = daily_excess.len() / 2;
-            let early_values = daily_excess[..split_index]
+            let training_ic_values = metrics
+                .points
                 .iter()
-                .map(|(_, value)| *value)
+                .filter(|point| {
+                    validation_start_date
+                        .is_none_or(|start_date| point.trade_date.as_str() < start_date)
+                })
+                .filter_map(|point| point.ic.filter(|value| value.is_finite()))
                 .collect::<Vec<_>>();
-            let late_values = daily_excess[split_index..]
-                .iter()
-                .map(|(_, value)| *value)
-                .collect::<Vec<_>>();
-            let early_mean = mean_f64(&early_values);
-            let late_mean = mean_f64(&late_values);
-            let stability_factor =
-                calibration_stability_factor(direction_sign, early_mean, late_mean);
+            let training_ic_mean = mean_f64(&training_ic_values);
+            let training_ic_t_value = calc_newey_west_t_value(
+                &training_ic_values,
+                session.params.backtest_period.saturating_sub(1),
+            );
 
             let mut trigger_samples = 0usize;
             let mut triggered_days = HashSet::new();
-            let mut multiplier_sum = 0.0;
+            let mut training_trigger_samples = 0usize;
+            let mut training_triggered_days = HashSet::new();
+            let mut validation_trigger_samples = 0usize;
+            let mut validation_triggered_days = HashSet::new();
+            let mut training_multiplier_sum = 0.0;
             let mut bucket_map = HashMap::<u64, ValidationCalibrationBucketAgg>::new();
             visit_triggered_rule_samples_from_cache(
                 runtime_cache,
@@ -4433,7 +4459,16 @@ pub fn run_rule_expression_calibration(
                     }
                     trigger_samples += 1;
                     triggered_days.insert(sample.trade_date.to_string());
-                    multiplier_sum += score_multiplier;
+                    let is_training = validation_start_date
+                        .is_none_or(|start_date| sample.trade_date < start_date);
+                    if !is_training {
+                        validation_trigger_samples += 1;
+                        validation_triggered_days.insert(sample.trade_date.to_string());
+                        return Ok(());
+                    }
+                    training_trigger_samples += 1;
+                    training_triggered_days.insert(sample.trade_date.to_string());
+                    training_multiplier_sum += score_multiplier;
                     let entry = bucket_map
                         .entry(score_multiplier.to_bits())
                         .or_insert_with(|| ValidationCalibrationBucketAgg {
@@ -4446,8 +4481,8 @@ pub fn run_rule_expression_calibration(
                 },
             )?;
             let triggered_day_count = triggered_days.len();
-            let avg_score_multiplier = if trigger_samples > 0 {
-                Some(multiplier_sum / trigger_samples as f64)
+            let avg_score_multiplier = if training_trigger_samples > 0 {
+                Some(training_multiplier_sum / training_trigger_samples as f64)
             } else {
                 None
             };
@@ -4485,16 +4520,15 @@ pub fn run_rule_expression_calibration(
                 None
             };
 
-            let enough_samples = trigger_samples >= (100) && triggered_day_count >= (20);
+            let enough_samples =
+                training_trigger_samples >= 50 && training_triggered_days.len() >= 10;
             let oriented_lcb = conservative_edge.map(|value| value * direction_sign);
             let (status, status_label) = if !enough_samples {
-                ("insufficient", "样本不足")
+                ("insufficient", "训练样本不足")
             } else if oriented_lcb.is_none_or(|value| value <= 0.0) {
-                ("no_edge", "保守边际不足")
-            } else if stability_factor < 1.0 {
-                ("unstable", "前后段不稳定")
+                ("no_edge", "训练边际不足")
             } else {
-                ("reliable", "相对稳定")
+                ("training_candidate", "训练候选")
             };
 
             let normalized_edge = match (oriented_lcb, daily_std) {
@@ -4508,21 +4542,17 @@ pub fn run_rule_expression_calibration(
                     _ => 1.0,
                 }
             })(spec.scope_way, score_monotonicity);
-            let ic_support = metrics
-                .ic_t_value
+            let ic_support = training_ic_t_value
                 .filter(|value| value.is_finite() && *value > 0.0)
-                .map(|value| value / (daily_values.len().max(1) as f64).sqrt())
+                .map(|value| value / (training_ic_values.len().max(1) as f64).sqrt())
                 .unwrap_or(0.0);
             let calibration_score = if enough_samples {
-                (normalized_edge + ic_support * 0.15) * stability_factor * structure_factor
+                (normalized_edge + ic_support * 0.15) * structure_factor
             } else {
                 0.0
             };
             let desired_total_points = if enough_samples && normalized_edge > 0.0 {
-                round_to_half(
-                    ((40.0) * normalized_edge * stability_factor * structure_factor)
-                        .clamp(0.0, 10.0),
-                )
+                round_to_half(((40.0) * normalized_edge * structure_factor).clamp(0.0, 10.0))
             } else {
                 0.0
             };
@@ -4567,8 +4597,8 @@ pub fn run_rule_expression_calibration(
                 conservative_edge,
                 early_excess_residual_mean: early_mean,
                 late_excess_residual_mean: late_mean,
-                ic_mean: metrics.ic_mean,
-                ic_t_value: metrics.ic_t_value,
+                ic_mean: training_ic_mean,
+                ic_t_value: training_ic_t_value,
                 score_monotonicity,
                 avg_score_multiplier,
                 suggested_points,
@@ -4578,6 +4608,9 @@ pub fn run_rule_expression_calibration(
                 status_label: status_label.to_string(),
                 score_buckets,
                 suggested_dist_points,
+                training_eligible: enough_samples && oriented_lcb.is_some_and(|value| value > 0.0),
+                validation_trigger_samples,
+                validation_triggered_days: validation_triggered_days.len(),
             })
         })(
             spec,
@@ -4588,19 +4621,43 @@ pub fn run_rule_expression_calibration(
         )?);
     }
 
-    let recommended_candidate_key = candidates
+    let frozen_candidate_key = candidates
         .iter()
-        .filter(|item| matches!(item.status.as_str(), "reliable" | "unstable"))
+        .filter(|item| item.training_eligible)
         .max_by(|left, right| {
-            calibration_status_rank(right.status.as_str())
-                .cmp(&calibration_status_rank(left.status.as_str()))
-                .then_with(|| {
-                    left.calibration_score
-                        .partial_cmp(&right.calibration_score)
-                        .unwrap_or(Ordering::Equal)
-                })
+            left.calibration_score
+                .partial_cmp(&right.calibration_score)
+                .unwrap_or(Ordering::Equal)
         })
         .map(|item| item.candidate_key.clone());
+    for candidate in &mut candidates {
+        if !candidate.training_eligible {
+            continue;
+        }
+        if frozen_candidate_key.as_deref() != Some(candidate.candidate_key.as_str()) {
+            candidate.status = "not_selected".to_string();
+            candidate.status_label = "训练期未入选".to_string();
+            continue;
+        }
+        if candidate.validation_trigger_samples < 50 || candidate.validation_triggered_days < 10 {
+            candidate.status = "validation_insufficient".to_string();
+            candidate.status_label = "样本外不足".to_string();
+        } else if candidate
+            .late_excess_residual_mean
+            .is_some_and(|value| value * direction_sign > 0.0)
+        {
+            candidate.status = "reliable".to_string();
+            candidate.status_label = "样本外方向通过".to_string();
+        } else {
+            candidate.status = "validation_failed".to_string();
+            candidate.status_label = "样本外未通过".to_string();
+        }
+    }
+    let recommended_candidate_key = frozen_candidate_key.filter(|candidate_key| {
+        candidates.iter().any(|candidate| {
+            candidate.candidate_key == *candidate_key && candidate.status == "reliable"
+        })
+    });
     candidates.sort_by(|left, right| {
         calibration_status_rank(left.status.as_str())
             .cmp(&calibration_status_rank(right.status.as_str()))
@@ -6837,6 +6894,7 @@ fn weighted_rule_summary_metric(
 
 fn aggregate_all_rule_summary_metrics(
     summaries: &[RuleLayerRuleSummary],
+    backtest_period: usize,
 ) -> (
     Option<f64>,
     Option<f64>,
@@ -6848,9 +6906,52 @@ fn aggregate_all_rule_summary_metrics(
     Option<f64>,
     Option<f64>,
 ) {
-    let avg_residual_mean = weighted_rule_summary_metric(summaries, |item| item.avg_residual_mean);
-    let avg_excess_residual_mean =
-        weighted_rule_summary_metric(summaries, |item| item.avg_excess_residual_mean);
+    let mut daily_values = HashMap::<String, (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>)>::new();
+    for value in summaries
+        .iter()
+        .flat_map(|summary| summary.portfolio_daily_values.iter())
+    {
+        let entry = daily_values.entry(value.trade_date.clone()).or_default();
+        if let Some(metric) = value
+            .avg_residual_return
+            .filter(|metric| metric.is_finite())
+        {
+            entry.0.push(metric);
+        }
+        if let Some(metric) = value
+            .avg_excess_residual_return
+            .filter(|metric| metric.is_finite())
+        {
+            entry.1.push(metric);
+        }
+        if let Some(metric) = value.top_bottom_spread.filter(|metric| metric.is_finite()) {
+            entry.2.push(metric);
+        }
+        if let Some(metric) = value.ic.filter(|metric| metric.is_finite()) {
+            entry.3.push(metric);
+        }
+    }
+    let mut daily_values = daily_values.into_iter().collect::<Vec<_>>();
+    daily_values.sort_by(|left, right| left.0.cmp(&right.0));
+    let avg_residual_values = daily_values
+        .iter()
+        .filter_map(|(_, values)| mean_f64(&values.0))
+        .collect::<Vec<_>>();
+    let avg_excess_residual_values = daily_values
+        .iter()
+        .filter_map(|(_, values)| mean_f64(&values.1))
+        .collect::<Vec<_>>();
+    let spread_values = daily_values
+        .iter()
+        .filter_map(|(_, values)| mean_f64(&values.2))
+        .collect::<Vec<_>>();
+    let ic_values = daily_values
+        .iter()
+        .filter_map(|(_, values)| mean_f64(&values.3))
+        .collect::<Vec<_>>();
+
+    let avg_residual_mean = mean_f64(&avg_residual_values);
+    let avg_excess_residual_mean = mean_f64(&avg_excess_residual_values);
     let avg_er_change = (|summaries: &[RuleLayerRuleSummary]| -> Option<f64> {
         let mut weighted_sum = 0.0;
         let mut total_weight = 0usize;
@@ -6873,21 +6974,15 @@ fn aggregate_all_rule_summary_metrics(
             Some(weighted_sum / total_weight as f64)
         }
     })(summaries);
-    let profit_loss_ratio = weighted_rule_summary_metric(summaries, |item| item.profit_loss_ratio);
-    let spread_mean = weighted_rule_summary_metric(summaries, |item| item.spread_mean);
-    let ic_mean = weighted_rule_summary_metric(summaries, |item| item.ic_mean);
-    let ic_std = weighted_rule_summary_metric(summaries, |item| item.ic_std);
+    let profit_loss_ratio = calc_profit_loss_sums(&avg_residual_values).ratio();
+    let spread_mean = mean_f64(&spread_values);
+    let ic_mean = mean_f64(&ic_values);
+    let ic_std = sample_std_f64(&ic_values);
     let icir = match (ic_mean, ic_std) {
         (Some(mean), Some(std)) if std.abs() >= RULE_BACKTEST_EPS => Some(mean / std),
-        _ => weighted_rule_summary_metric(summaries, |item| item.icir),
+        _ => None,
     };
-    let total_points = summaries.iter().map(|item| item.point_count).sum::<usize>();
-    let ic_t_value = match (ic_mean, ic_std) {
-        (Some(mean), Some(std)) if total_points > 1 && std.abs() >= RULE_BACKTEST_EPS => {
-            Some(mean * (total_points as f64).sqrt() / std)
-        }
-        _ => weighted_rule_summary_metric(summaries, |item| item.ic_t_value),
-    };
+    let ic_t_value = calc_newey_west_t_value(&ic_values, backtest_period.saturating_sub(1));
 
     (
         avg_residual_mean,
@@ -7077,6 +7172,17 @@ fn build_one_rule_backtest_summary_and_detail(
         .cloned()
         .unwrap_or_default();
     let decay_daily_values = build_rule_directional_excess_daily_values(&metrics.points);
+    let portfolio_daily_values = metrics
+        .points
+        .iter()
+        .map(|point| RulePortfolioDailyValue {
+            trade_date: point.trade_date.clone(),
+            avg_residual_return: point.avg_residual_return,
+            avg_excess_residual_return: point.avg_excess_residual_return,
+            top_bottom_spread: point.top_bottom_spread,
+            ic: point.ic,
+        })
+        .collect();
     let decay_validations = build_decay_validations_from_daily_values(
         decay_daily_values.clone(),
         params.backtest_period,
@@ -7098,6 +7204,7 @@ fn build_one_rule_backtest_summary_and_detail(
         ic_t_value: metrics.ic_t_value,
         decay_validations,
         decay_daily_values,
+        portfolio_daily_values,
     };
     let detail = rule_meta_map.get(one_rule_name).map(|rule_meta| {
         (|params: &RuleLayerBacktestRunParams,
@@ -7946,7 +8053,7 @@ pub fn run_rule_layer_backtest(
             ic_std,
             icir,
             ic_t_value,
-        ) = aggregate_all_rule_summary_metrics(&all_rule_summaries);
+        ) = aggregate_all_rule_summary_metrics(&all_rule_summaries, params.backtest_period);
         let result = RuleLayerBacktestData {
             rule_name: String::new(),
             stock_adj_type: params.stock_adj_type.clone(),
@@ -8441,7 +8548,7 @@ pub fn run_transient_rule_layer_backtest(
         ic_std,
         icir,
         ic_t_value,
-    ) = aggregate_all_rule_summary_metrics(&all_rule_summaries);
+    ) = aggregate_all_rule_summary_metrics(&all_rule_summaries, params.backtest_period);
     let result = RuleLayerBacktestData {
         rule_name: String::new(),
         stock_adj_type: params.stock_adj_type,
@@ -8649,9 +8756,10 @@ mod tests {
     };
 
     use super::{
-        CompactRuleSimilarityCache, PreparedValidationCombo, VALIDATION_EPS,
-        ValidationSampleRawRow, ValidationSampleStockMeta, ValidationSeedRule,
-        ValidationSimilarityCache, ValidationVariant, build_compact_rule_similarity_rows,
+        CompactRuleSimilarityCache, PreparedValidationCombo, RuleLayerRuleSummary,
+        RulePortfolioDailyValue, VALIDATION_EPS, ValidationSampleRawRow, ValidationSampleStockMeta,
+        ValidationSeedRule, ValidationSimilarityCache, ValidationVariant,
+        aggregate_all_rule_summary_metrics, build_compact_rule_similarity_rows,
         build_industry_maps_from_rows, build_one_rule_contribution_average,
         build_rank_layer_sample_groups, build_recent_decay_dist_points,
         build_rule_basket_decay_from_daily_groups, build_rule_contribution_averages,
@@ -8661,10 +8769,9 @@ mod tests {
         build_validation_sample_groups, build_validation_score_layer_details,
         build_validation_score_layer_details_from_daily_layers, build_validation_similarity_rows,
         build_validation_triggered_scores, build_validation_triggered_scores_for_combos,
-        calibration_stability_factor, collect_rule_validation_runtime_keys,
-        collect_validation_assigned_names, derive_validation_volatility_group,
-        estimate_net_money_flow_yuan, load_daily_max_rank, money_flow_rank_items,
-        money_outflow_rank_items, resolve_validation_sample_board_label,
+        collect_rule_validation_runtime_keys, collect_validation_assigned_names,
+        derive_validation_volatility_group, estimate_net_money_flow_yuan, load_daily_max_rank,
+        money_flow_rank_items, money_outflow_rank_items, resolve_validation_sample_board_label,
         resolve_validation_trigger_count, scope_way_config_label, trailing_period_gain,
         validation_pair_hash, validation_pair_key,
     };
@@ -9774,24 +9881,49 @@ explain = "test"
     }
 
     #[test]
-    fn validation_calibration_stability_requires_both_time_halves() {
-        assert_eq!(calibration_stability_factor(1.0, Some(0.3), Some(0.1)), 1.0);
-        assert_eq!(
-            calibration_stability_factor(-1.0, Some(-0.3), Some(-0.1)),
-            1.0
-        );
-        assert_eq!(
-            calibration_stability_factor(1.0, Some(0.3), Some(-0.1)),
-            0.5
-        );
-        assert_eq!(
-            calibration_stability_factor(-1.0, Some(0.3), Some(-0.1)),
-            0.5
-        );
-        assert_eq!(
-            calibration_stability_factor(1.0, Some(-0.3), Some(-0.1)),
-            0.0
-        );
+    fn all_rule_summary_recomputes_metrics_from_daily_portfolio() {
+        let make_summary =
+            |rule_name: &str, residuals: [f64; 3], ics: [f64; 3]| RuleLayerRuleSummary {
+                rule_name: rule_name.to_string(),
+                point_count: 3,
+                avg_residual_mean: None,
+                avg_excess_residual_mean: None,
+                avg_er_change: None,
+                er_change_sample_count: 0,
+                profit_loss_ratio: None,
+                spread_mean: None,
+                avg_contribution_score: None,
+                avg_contribution_per_trigger: None,
+                ic_mean: None,
+                ic_std: None,
+                icir: None,
+                ic_t_value: None,
+                decay_validations: Vec::new(),
+                decay_daily_values: Vec::new(),
+                portfolio_daily_values: residuals
+                    .into_iter()
+                    .zip(ics)
+                    .enumerate()
+                    .map(|(index, (residual, ic))| RulePortfolioDailyValue {
+                        trade_date: format!("2024010{}", index + 1),
+                        avg_residual_return: Some(residual),
+                        avg_excess_residual_return: Some(residual),
+                        top_bottom_spread: None,
+                        ic: Some(ic),
+                    })
+                    .collect(),
+            };
+        let summaries = [
+            make_summary("a", [4.0, -2.0, 4.0], [1.0, 1.0, -1.0]),
+            make_summary("b", [0.0, -2.0, 0.0], [-1.0, 1.0, 1.0]),
+        ];
+
+        let (mean, _, _, profit_factor, _, _, ic_std, _, _) =
+            aggregate_all_rule_summary_metrics(&summaries, 1);
+
+        assert!((mean.expect("portfolio mean") - 2.0 / 3.0).abs() < VALIDATION_EPS);
+        assert!((profit_factor.expect("portfolio profit factor") - 2.0).abs() < VALIDATION_EPS);
+        assert!((ic_std.expect("portfolio IC std") - 3.0_f64.sqrt() / 3.0).abs() < VALIDATION_EPS);
     }
 
     fn decay_test_point(index: usize, score: f64, excess: f64) -> RuleLayerPoint {

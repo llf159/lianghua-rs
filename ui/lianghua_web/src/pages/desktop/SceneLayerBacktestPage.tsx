@@ -2685,11 +2685,11 @@ export default function SceneLayerBacktestPage() {
                       </th>
                       <th aria-sort={getAriaSort(ruleSummarySortKey === "profit_loss_ratio", ruleSummarySortDirection)}>
                         <TableSortButton
-                          label="盈亏比"
+                          label="样本利润因子"
                           isActive={ruleSummarySortKey === "profit_loss_ratio" && ruleSummarySortDirection !== null}
                           direction={ruleSummarySortDirection}
                           onClick={() => toggleRuleSummarySort("profit_loss_ratio")}
-                          title="按盈亏比排序"
+                          title="按触发股票样本的 Profit Factor 排序"
                         />
                       </th>
                       <th aria-sort={getAriaSort(ruleSummarySortKey === "avg_excess_residual_mean", ruleSummarySortDirection)}>
@@ -3036,7 +3036,7 @@ export default function SceneLayerBacktestPage() {
                     {renderValidationComboSortHeader("triggered_days", "触发交易日")}
                     {renderValidationComboSortHeader("avg_daily_trigger", "平均每日触发")}
                     {renderValidationComboSortHeader("spread_mean", "分层差均值（按得分值）")}
-                    {renderValidationComboSortHeader("profit_loss_ratio", "盈亏比")}
+                    {renderValidationComboSortHeader("profit_loss_ratio", "样本利润因子")}
                     {renderValidationComboSortHeader("avg_excess_residual_mean", "超额残差（日度）")}
                     {renderValidationComboSortHeader("avg_er_change", "ΔER(20)")}
                     {renderValidationComboSortHeader("ic_mean", "IC 均值")}
@@ -3110,7 +3110,7 @@ export default function SceneLayerBacktestPage() {
               <h3>继续验证：量化定分与触发方式</h3>
               <p>
                 复用上面的收益样本，对选中组合比较 LAST、ANY、EACH、CONSEC 和带衰减的
-                RECENT；这一步不会随基础回测自动执行。
+                RECENT；前半区间只用于选择并冻结候选，后半区间只做样本外评价。
               </p>
             </div>
             <button
@@ -3139,7 +3139,7 @@ export default function SceneLayerBacktestPage() {
                 </div>
                 <div className="scene-layer-summary-item">
                   <span>建议触发方式</span>
-                  <strong>{recommendedValidationCalibration?.scope_label ?? "暂无可靠建议"}</strong>
+                  <strong>{recommendedValidationCalibration?.scope_label ?? "暂无样本外通过建议"}</strong>
                 </div>
                 <div className="scene-layer-summary-item">
                   <span>建议单次分 / 典型总分</span>
@@ -3161,10 +3161,10 @@ export default function SceneLayerBacktestPage() {
                       <th>结论</th>
                       <th>样本 / 交易日</th>
                       <th>日均触发</th>
-                      <th>日度超额残差</th>
-                      <th>90%保守边际</th>
-                      <th>前半 / 后半</th>
-                      <th>IC / t值</th>
+                      <th>训练期日度超额</th>
+                      <th>训练期90%保守边际</th>
+                      <th>训练 / 样本外</th>
+                      <th>训练期 IC / t值</th>
                       <th>分数单调性</th>
                       <th>平均分倍数</th>
                       <th>建议单次分</th>

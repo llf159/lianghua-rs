@@ -31,12 +31,9 @@ pub(super) fn build_forward_backtest_residual_map(
     let mut out = HashMap::with_capacity(residual_points.len() - backtest_period);
     for index in 0..(residual_points.len() - backtest_period) {
         let window = &residual_points[index + 1..=index + backtest_period];
-        if let Some(value) = calc_forward_residual_return(
-            window,
-            index_beta,
-            concept_beta,
-            industry_beta,
-        ) {
+        if let Some(value) =
+            calc_forward_residual_return(window, index_beta, concept_beta, industry_beta)
+        {
             out.insert(residual_points[index].trade_date.clone(), value);
         }
     }
@@ -261,7 +258,9 @@ pub(super) fn stock_data_has_open_close(conn: &Connection) -> Result<bool, Strin
         .next()
         .map_err(|e| format!("读取 stock_data 列失败:{e}"))?
     {
-        let name: String = row.get(0).map_err(|e| format!("读取 stock_data 列名失败:{e}"))?;
+        let name: String = row
+            .get(0)
+            .map_err(|e| format!("读取 stock_data 列名失败:{e}"))?;
         has_open |= name.eq_ignore_ascii_case("open");
         has_close |= name.eq_ignore_ascii_case("close");
     }
@@ -525,18 +524,19 @@ fn load_return_series(
     start_date: &str,
     end_date: &str,
 ) -> Result<HashMap<String, DailyReturnPoint>, String> {
-    let price_select = if stock_data_has_open_close(conn)? {
-        "TRY_CAST(open AS DOUBLE), TRY_CAST(close AS DOUBLE)"
-    } else {
-        "CAST(NULL AS DOUBLE), CAST(NULL AS DOUBLE)"
-    };
+    if !stock_data_has_open_close(conn)? {
+        return Err(
+            "stock_data 缺少 open/close 列，无法按次日开盘后的可成交区间回测；请重新同步行情数据"
+                .to_string(),
+        );
+    }
     let mut stmt = conn
         .prepare(&format!(
             r#"
             SELECT
                 trade_date,
                 TRY_CAST(pct_chg AS DOUBLE),
-                {price_select}
+                TRY_CAST(open AS DOUBLE), TRY_CAST(close AS DOUBLE)
             FROM stock_data
             WHERE ts_code = ?
               AND adj_type = ?
@@ -561,11 +561,14 @@ fn load_return_series(
         let Some(close_pct) = pct.filter(|value| value.is_finite()) else {
             continue;
         };
-        let open_pct = open
+        let Some(open_pct) = open
             .filter(|value| value.is_finite() && value.abs() > f64::EPSILON)
             .zip(close.filter(|value| value.is_finite()))
             .map(|(open, close)| (close / open - 1.0) * 100.0)
-            .unwrap_or(close_pct);
+            .filter(|value| value.is_finite())
+        else {
+            continue;
+        };
         series.insert(
             trade_date,
             DailyReturnPoint {
@@ -613,7 +616,9 @@ mod tests {
                 ts_code VARCHAR,
                 trade_date VARCHAR,
                 adj_type VARCHAR,
-                pct_chg DOUBLE
+                pct_chg DOUBLE,
+                open DOUBLE,
+                close DOUBLE
             )
             "#,
             [],
@@ -622,15 +627,43 @@ mod tests {
 
         {
             let mut app = conn.appender("stock_data").expect("appender stock_data");
-            app.append_row(params!["000001.SZ", "20240102", "qfq", 3.0_f64])
-                .expect("row1");
-            app.append_row(params!["000001.SZ", "20240103", "qfq", 1.0_f64])
-                .expect("row2");
+            app.append_row(params![
+                "000001.SZ",
+                "20240102",
+                "qfq",
+                3.0_f64,
+                100.0_f64,
+                103.0_f64
+            ])
+            .expect("row1");
+            app.append_row(params![
+                "000001.SZ",
+                "20240103",
+                "qfq",
+                1.0_f64,
+                103.0_f64,
+                104.03_f64
+            ])
+            .expect("row2");
 
-            app.append_row(params!["000300.SH", "20240102", "ind", 1.0_f64])
-                .expect("row3");
-            app.append_row(params!["000300.SH", "20240103", "ind", 0.5_f64])
-                .expect("row4");
+            app.append_row(params![
+                "000300.SH",
+                "20240102",
+                "ind",
+                1.0_f64,
+                100.0_f64,
+                101.0_f64
+            ])
+            .expect("row3");
+            app.append_row(params![
+                "000300.SH",
+                "20240103",
+                "ind",
+                0.5_f64,
+                101.0_f64,
+                101.505_f64
+            ])
+            .expect("row4");
 
             app.flush().expect("flush stock_data");
         }
@@ -799,5 +832,33 @@ mod tests {
         assert_eq!(result.get("20240103"), Some(&9.200000000000008));
         assert!(!result.contains_key("20240101"));
         assert!(!result.contains_key("20240102"));
+    }
+
+    #[test]
+    fn forward_return_starts_at_next_open_and_compounds_following_days() {
+        let points = [
+            ("20240101", 0.0, 0.0),
+            ("20240102", 10.0, 2.0),
+            ("20240103", 3.0, 8.0),
+        ]
+        .into_iter()
+        .map(
+            |(trade_date, stock_pct, stock_open_pct)| ResidualReturnPoint {
+                trade_date: trade_date.to_string(),
+                stock_pct,
+                index_pct: 0.0,
+                concept_pct: 0.0,
+                industry_pct: 0.0,
+                expected_pct: 0.0,
+                residual_pct: stock_pct,
+                stock_open_pct,
+                index_open_pct: 0.0,
+            },
+        )
+        .collect();
+
+        let result = build_forward_backtest_residual_map(points, 2, 0.0, 0.0, 0.0);
+
+        assert!((result["20240101"] - 5.06).abs() < 1e-12);
     }
 }

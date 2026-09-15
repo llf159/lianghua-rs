@@ -145,10 +145,10 @@ const ALGORITHM_SECTIONS: AlgorithmSection[] = [
         interpretation: '剔除了市场整体涨跌后的相对优势，更能反映策略本身能力。',
       },
       {
-        heading: '盈亏比',
-        description: '盈利日残差总和与亏损日残差总和的比值。',
+        heading: '样本利润因子（Profit Factor）',
+        description: '所有触发股票样本中，正残差总和与负残差绝对值总和的比值；它不是按盈利日统计的盈亏比。',
         formula: 'profit_loss_ratio = Σ(正残差) / Σ(|负残差|)',
-        interpretation: '> 1 表示赢多亏少；1.5 以上较好；< 1 说明亏损幅度大于盈利幅度。',
+        interpretation: '> 1 表示样本盈利总额大于亏损总额。全部策略汇总则先形成等权策略日度组合，再从组合日收益重新计算，避免平均各规则比率。',
       },
       {
         heading: '效率比率 (ER) 变化',

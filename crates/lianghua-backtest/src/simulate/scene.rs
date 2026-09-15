@@ -540,8 +540,7 @@ pub fn calc_scene_layer_metrics(
         (Some(m), Some(s)) if s.abs() >= EPS => Some(m / s),
         _ => None,
     };
-    let ic_t_value =
-        calc_newey_west_t_value(&ic_values, config.backtest_period.saturating_sub(1));
+    let ic_t_value = calc_newey_west_t_value(&ic_values, config.backtest_period.saturating_sub(1));
 
     Ok(SceneLayerMetrics {
         points,
@@ -809,11 +808,12 @@ fn load_pct_chg_series_cache_for_ts_codes(
     if ts_codes.is_empty() {
         return Ok(HashMap::new());
     }
-    let price_select = if stock_data_has_open_close(conn)? {
-        "TRY_CAST(open AS DOUBLE), TRY_CAST(close AS DOUBLE)"
-    } else {
-        "CAST(NULL AS DOUBLE), CAST(NULL AS DOUBLE)"
-    };
+    if !stock_data_has_open_close(conn)? {
+        return Err(
+            "stock_data 缺少 open/close 列，无法按次日开盘后的可成交区间回测；请重新同步行情数据"
+                .to_string(),
+        );
+    }
 
     let mut out =
         HashMap::<String, HashMap<String, DailyReturnPoint>>::with_capacity(ts_codes.len());
@@ -827,7 +827,7 @@ fn load_pct_chg_series_cache_for_ts_codes(
                 ts_code,
                 trade_date,
                 TRY_CAST(pct_chg AS DOUBLE),
-                {price_select}
+                TRY_CAST(open AS DOUBLE), TRY_CAST(close AS DOUBLE)
             FROM stock_data
             WHERE adj_type = ?
               AND ts_code IN ({placeholders})
@@ -857,11 +857,14 @@ fn load_pct_chg_series_cache_for_ts_codes(
             let Some(close_pct) = pct.filter(|value| value.is_finite()) else {
                 continue;
             };
-            let open_pct = open
+            let Some(open_pct) = open
                 .filter(|value| value.is_finite() && value.abs() > EPS)
                 .zip(close.filter(|value| value.is_finite()))
                 .map(|(open, close)| (close / open - 1.0) * 100.0)
-                .unwrap_or(close_pct);
+                .filter(|value| value.is_finite())
+            else {
+                continue;
+            };
             out.entry(ts_code).or_default().insert(
                 trade_date,
                 DailyReturnPoint {
@@ -1113,7 +1116,9 @@ mod tests {
                     ts_code VARCHAR,
                     trade_date VARCHAR,
                     adj_type VARCHAR,
-                    pct_chg DOUBLE
+                    pct_chg DOUBLE,
+                    open DOUBLE,
+                    close DOUBLE
                 )
                 "#,
                 [],
@@ -1124,22 +1129,64 @@ mod tests {
             .appender("stock_data")
             .expect("stock_data appender");
         source_app
-            .append_row(params!["000001.SZ", "20240102", "qfq", 2.0_f64])
+            .append_row(params![
+                "000001.SZ",
+                "20240102",
+                "qfq",
+                2.0_f64,
+                100.0_f64,
+                102.0_f64
+            ])
             .expect("stock row1");
         source_app
-            .append_row(params!["000001.SZ", "20240103", "qfq", 4.0_f64])
+            .append_row(params![
+                "000001.SZ",
+                "20240103",
+                "qfq",
+                4.0_f64,
+                100.0_f64,
+                104.0_f64
+            ])
             .expect("stock row2");
         source_app
-            .append_row(params!["000001.SZ", "20240104", "qfq", 6.0_f64])
+            .append_row(params![
+                "000001.SZ",
+                "20240104",
+                "qfq",
+                6.0_f64,
+                100.0_f64,
+                106.0_f64
+            ])
             .expect("stock row3");
         source_app
-            .append_row(params!["000300.SH", "20240102", "ind", 1.0_f64])
+            .append_row(params![
+                "000300.SH",
+                "20240102",
+                "ind",
+                1.0_f64,
+                100.0_f64,
+                101.0_f64
+            ])
             .expect("index row1");
         source_app
-            .append_row(params!["000300.SH", "20240103", "ind", 1.0_f64])
+            .append_row(params![
+                "000300.SH",
+                "20240103",
+                "ind",
+                1.0_f64,
+                100.0_f64,
+                101.0_f64
+            ])
             .expect("index row2");
         source_app
-            .append_row(params!["000300.SH", "20240104", "ind", 1.0_f64])
+            .append_row(params![
+                "000300.SH",
+                "20240104",
+                "ind",
+                1.0_f64,
+                100.0_f64,
+                101.0_f64
+            ])
             .expect("index row3");
         source_app.flush().expect("flush stock_data");
 
