@@ -1205,10 +1205,9 @@
   }
 }
 
-/* Keep the stocks side panel bounded, but leave statistics/backtest result
-   tables unrestricted so headers stick to the outer content viewport. */
-body .strategy-trigger-page .strategy-trigger-table-wrap-stocks {
-  flex: 1 !important;
-  min-height: 0 !important;
-  overflow-y: auto !important;
+/* This table sits in a portal, outside .strategy-trigger-page. Restore its
+   bounded two-axis scroller after App.css expands generic table wrappers. */
+body .strategy-trigger-table-wrap-stocks {
+  max-height: 100% !important;
+  overflow: auto !important;
 }

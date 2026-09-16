@@ -580,7 +580,7 @@ export default function StrategyTriggerSimilarityPage() {
             {rankingLoading ? '全市场批量计算中，请保持页面打开' : '当前参数尚无排行榜结果'}
           </div>
         ) : (
-          <div className="trigger-sim-table-wrap">
+          <div className="trigger-sim-ranking-scroll">
             <table className="trigger-sim-table trigger-sim-ranking-table">
               <thead>
                 <tr>
@@ -596,19 +596,14 @@ export default function StrategyTriggerSimilarityPage() {
                   <th>相似度</th>
                   <th>策略触发</th>
                   <th>当前策略排名</th>
-                  <th>成功 / 失败模板</th>
+                  <th>最相似成功模板</th>
+                  <th>最相似失败模板</th>
                 </tr>
               </thead>
               <tbody>
                 {rankingData.items.map((row) => {
                   const successMatch = row.topMatches.find((match) => match.templateClass > 0)
                   const failureMatch = row.topMatches.find((match) => match.templateClass < 0)
-                  const matchTitle = row.topMatches
-                    .map(
-                      (match) =>
-                        `${match.templateClass > 0 ? '成功' : '失败'} · ${match.name || match.tsCode} ${match.candidateEndTradeDate} · 相似 ${formatNumber(match.similarityScore, 1)} · 后验超额 ${formatPercent(match.forwardExcessReturnPct)}`,
-                    )
-                    .join('\n')
                   return (
                     <tr key={row.tsCode}>
                       <td>{row.rank ?? '--'}</td>
@@ -659,7 +654,7 @@ export default function StrategyTriggerSimilarityPage() {
                       </td>
                       <td>{row.triggerCount}</td>
                       <td>{row.originalRank ?? '--'}</td>
-                      <td className="trigger-sim-rules-cell" title={matchTitle}>
+                      <td className="trigger-sim-template-cell">
                         {successMatch ? (
                           <DetailsLink
                             className="trigger-sim-stock-link trigger-sim-history-link"
@@ -671,10 +666,12 @@ export default function StrategyTriggerSimilarityPage() {
                             navigationItems={rankingHistoricalNavigationItems}
                             title={`查看成功模板${successMatch.name || successMatch.tsCode}的启动窗口及后验走势`}
                           >
-                            <strong>成功 {successMatch.name || successMatch.tsCode}</strong>
+                            <strong>{successMatch.name || successMatch.tsCode}</strong>
                             <span>{successMatch.candidateEndTradeDate} · 超额 {formatPercent(successMatch.forwardExcessReturnPct)}</span>
                           </DetailsLink>
-                        ) : <span>成功 --</span>}
+                        ) : <span>--</span>}
+                      </td>
+                      <td className="trigger-sim-template-cell">
                         {failureMatch ? (
                           <DetailsLink
                             className="trigger-sim-stock-link trigger-sim-history-link"
@@ -686,10 +683,10 @@ export default function StrategyTriggerSimilarityPage() {
                             navigationItems={rankingHistoricalNavigationItems}
                             title={`查看失败模板${failureMatch.name || failureMatch.tsCode}的启动窗口及后验走势`}
                           >
-                            <strong>失败 {failureMatch.name || failureMatch.tsCode}</strong>
+                            <strong>{failureMatch.name || failureMatch.tsCode}</strong>
                             <span>{failureMatch.candidateEndTradeDate} · 超额 {formatPercent(failureMatch.forwardExcessReturnPct)}</span>
                           </DetailsLink>
-                        ) : <span>失败 --</span>}
+                        ) : <span>--</span>}
                       </td>
                     </tr>
                   )

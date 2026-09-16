@@ -337,8 +337,8 @@
 }
 
 .trigger-sim-ranking-table {
-  width: 1720px;
-  min-width: 1720px;
+  width: 1910px;
+  min-width: 1910px;
   table-layout: fixed;
 }
 
@@ -466,8 +466,11 @@
   white-space: normal;
 }
 
-.trigger-sim-rules-cell .trigger-sim-history-link + .trigger-sim-history-link {
-  margin-top: 6px;
+.trigger-sim-template-cell {
+  width: 190px;
+  min-width: 190px;
+  max-width: 190px;
+  white-space: normal;
 }
 
 @media (max-width: 1280px) {

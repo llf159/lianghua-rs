@@ -475,7 +475,12 @@ function inferUnknownConfigs(expression: string): ValidationUnknownConfigDraft[]
     }
     const upper = token.toUpperCase();
 
-    if (RESERVED_BOOLEAN_IDENTIFIERS.has(upper) || BASE_SERIES_IDENTIFIERS.has(upper) || assigned.has(upper)) {
+    if (
+      RESERVED_BOOLEAN_IDENTIFIERS.has(upper) ||
+      BASE_SERIES_IDENTIFIERS.has(upper) ||
+      /^(?:I|ISZ|I300|I500|ICY|I50|I1000)(?:_[A-Z][A-Z0-9_]*)?$/.test(upper) ||
+      assigned.has(upper)
+    ) {
       continue;
     }
 
