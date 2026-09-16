@@ -12,9 +12,9 @@ use lianghua_app_data::{
         resolve_managed_source_file_path, resolve_source_root, validate_target_relative_path,
     },
     viewer::{
-        ManagedSourceDatasetPreviewResult, ManagedSourceDbPreviewResult,
         preview_managed_source_dataset as core_preview_managed_source_dataset,
         preview_managed_source_stock_data as core_preview_managed_source_stock_data,
+        ManagedSourceDatasetPreviewResult, ManagedSourceDbPreviewResult,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -54,7 +54,7 @@ fn hex_val(b: u8) -> Option<u8> {
     }
 }
 use tauri_plugin_fs::{FilePath, FsExt};
-use zip::{CompressionMethod, ZipArchive, ZipWriter, write::FileOptions};
+use zip::{write::FileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
 const IMPORT_BUFFER_SIZE: usize = 1024 * 1024;
 const IMPORT_PROGRESS_STEP_BYTES: u64 = 32 * 1024 * 1024;
@@ -1430,8 +1430,8 @@ pub async fn import_managed_strategy_backup(
 #[cfg(test)]
 mod tests {
     use super::{
-        StrategyBackupMeta, normalize_archive_root, strip_archive_root,
-        write_strategy_backup_meta_atomically,
+        normalize_archive_root, strip_archive_root, write_strategy_backup_meta_atomically,
+        StrategyBackupMeta,
     };
     use std::{
         path::Path,

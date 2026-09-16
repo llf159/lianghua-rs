@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use duckdb::{AccessMode, Config, Connection, params, params_from_iter};
 use lianghua_backtest::simulate::{
@@ -6,16 +6,27 @@ use lianghua_backtest::simulate::{
         SignalPairMoments, calc_distance_correlation, calc_linear_orthogonal_diagnostics,
         calc_signal_pair_metrics,
     },
-    fp_utils::spearman_corr,
+    fp_utils::{calc_newey_west_t_value, mean, pearson_corr, spearman_corr},
+    rule::{RuleLayerConfig, calc_all_rule_layer_metrics_from_db},
 };
 use serde::Serialize;
 
-use crate::data::result_db_path;
+use crate::data::{result_db_path, source_db_path};
 
 const MAX_RESEARCH_STRATEGY_COUNT: usize = 20;
 const DEFAULT_NONLINEAR_SAMPLE_LIMIT: usize = 512;
 const MAX_NONLINEAR_SAMPLE_LIMIT: usize = 1024;
 const DEFAULT_RIDGE_LAMBDA: f64 = 1e-6;
+const DEFAULT_HOLDING_PERIOD: usize = 5;
+const MAX_HOLDING_PERIOD: usize = 60;
+const RETURN_MIN_SAMPLES_PER_DAY: usize = 5;
+const RETURN_MIN_LISTED_TRADE_DAYS: usize = 60;
+const OOS_TRAIN_RATIO: f64 = 0.7;
+const RETURN_STOCK_ADJ_TYPE: &str = "qfq";
+const RETURN_INDEX_TS_CODE: &str = "000300.SH";
+const RETURN_INDEX_BETA: f64 = 0.5;
+const RETURN_CONCEPT_BETA: f64 = 0.2;
+const RETURN_INDUSTRY_BETA: f64 = 0.0;
 const VARIANCE_EPS: f64 = 1e-12;
 
 #[derive(Debug, Clone, Serialize)]
@@ -33,6 +44,8 @@ pub struct StrategyDimensionResearchDefaultsData {
     pub default_nonlinear_sample_limit: usize,
     pub max_nonlinear_sample_limit: usize,
     pub default_ridge_lambda: f64,
+    pub default_holding_period: usize,
+    pub max_holding_period: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -56,6 +69,31 @@ pub struct StrategyDimensionPairMetrics {
     pub score_spearman_daily_mean: Option<f64>,
     pub distance_correlation_daily_mean: Option<f64>,
     pub nonlinear_sample_count: usize,
+    pub return_pearson: Option<f64>,
+    pub return_shared_day_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StrategyDimensionReturnSummary {
+    pub rule_name: String,
+    pub valid_day_count: usize,
+    pub train_day_count: usize,
+    pub test_day_count: usize,
+    pub avg_residual_return: Option<f64>,
+    pub hac_t_value: Option<f64>,
+    pub train_avg_residual_return: Option<f64>,
+    pub test_avg_residual_return: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StrategyDimensionReturnIncrement {
+    pub rule_name: String,
+    pub basis_coefficients: Vec<StrategyDimensionBasisCoefficient>,
+    pub train_sample_count: usize,
+    pub test_sample_count: usize,
+    pub test_incremental_mean: Option<f64>,
+    pub test_incremental_hac_t_value: Option<f64>,
+    pub test_incremental_positive_ratio: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -85,6 +123,18 @@ pub struct StrategyDimensionResearchData {
     pub strategies: Vec<StrategyDimensionRuleSummary>,
     pub pair_metrics: Vec<StrategyDimensionPairMetrics>,
     pub orthogonal_diagnostics: Vec<StrategyDimensionOrthogonalDiagnostic>,
+    pub holding_period: usize,
+    pub return_min_samples_per_day: usize,
+    pub return_min_listed_trade_days: usize,
+    pub return_stock_adj_type: String,
+    pub return_index_ts_code: String,
+    pub return_index_beta: f64,
+    pub return_concept_beta: f64,
+    pub return_industry_beta: f64,
+    pub oos_train_ratio: f64,
+    pub oos_test_start_date: Option<String>,
+    pub return_summaries: Vec<StrategyDimensionReturnSummary>,
+    pub return_increments: Vec<StrategyDimensionReturnIncrement>,
     pub pending_layers: Vec<String>,
 }
 
@@ -139,6 +189,8 @@ pub fn get_strategy_dimension_research_defaults(
         default_nonlinear_sample_limit: DEFAULT_NONLINEAR_SAMPLE_LIMIT,
         max_nonlinear_sample_limit: MAX_NONLINEAR_SAMPLE_LIMIT,
         default_ridge_lambda: DEFAULT_RIDGE_LAMBDA,
+        default_holding_period: DEFAULT_HOLDING_PERIOD,
+        max_holding_period: MAX_HOLDING_PERIOD,
     })
 }
 
@@ -149,6 +201,7 @@ pub fn run_strategy_dimension_research(
     rule_names: Vec<String>,
     nonlinear_sample_limit: Option<usize>,
     ridge_lambda: Option<f64>,
+    holding_period: Option<usize>,
 ) -> Result<StrategyDimensionResearchData, String> {
     validate_date_range(&start_date, &end_date)?;
     let rule_names = normalize_rule_names(rule_names)?;
@@ -161,6 +214,10 @@ pub fn run_strategy_dimension_research(
     let ridge_lambda = ridge_lambda.unwrap_or(DEFAULT_RIDGE_LAMBDA);
     if !ridge_lambda.is_finite() || ridge_lambda < 0.0 {
         return Err("岭正则系数必须是有限的非负数".to_string());
+    }
+    let holding_period = holding_period.unwrap_or(DEFAULT_HOLDING_PERIOD);
+    if !(1..=MAX_HOLDING_PERIOD).contains(&holding_period) {
+        return Err(format!("持有交易日必须在1..={MAX_HOLDING_PERIOD}之间"));
     }
 
     let connection = open_result_database(&source_path)?;
@@ -222,6 +279,14 @@ pub fn run_strategy_dimension_research(
         }
     }
 
+    let return_layer = load_return_layer(
+        &source_path,
+        &start_date,
+        &end_date,
+        &rule_names,
+        holding_period,
+        ridge_lambda,
+    )?;
     let mut pair_metrics = Vec::with_capacity(rule_names.len() * (rule_names.len() - 1) / 2);
     let pair_cross_moments =
         load_pair_cross_moments(&connection, &start_date, &end_date, &rule_names)?;
@@ -287,6 +352,15 @@ pub fn run_strategy_dimension_research(
                     right_daily_means,
                 ),
                 nonlinear_sample_count,
+                return_pearson: return_layer
+                    .pair_correlations
+                    .get(&pair_key)
+                    .and_then(|value| value.0),
+                return_shared_day_count: return_layer
+                    .pair_correlations
+                    .get(&pair_key)
+                    .map(|value| value.1)
+                    .unwrap_or(0),
             });
         }
     }
@@ -327,10 +401,277 @@ pub fn run_strategy_dimension_research(
         strategies,
         pair_metrics,
         orthogonal_diagnostics,
-        pending_layers: vec![
-            "结果库尚未物化八维量价风格暴露，当前不输出风格距离".to_string(),
-            "结果库尚未物化策略持仓收益路径，当前不输出收益相关与样本外增量".to_string(),
-        ],
+        holding_period,
+        return_min_samples_per_day: RETURN_MIN_SAMPLES_PER_DAY,
+        return_min_listed_trade_days: RETURN_MIN_LISTED_TRADE_DAYS,
+        return_stock_adj_type: RETURN_STOCK_ADJ_TYPE.to_string(),
+        return_index_ts_code: RETURN_INDEX_TS_CODE.to_string(),
+        return_index_beta: RETURN_INDEX_BETA,
+        return_concept_beta: RETURN_CONCEPT_BETA,
+        return_industry_beta: RETURN_INDUSTRY_BETA,
+        oos_train_ratio: OOS_TRAIN_RATIO,
+        oos_test_start_date: return_layer.oos_test_start_date,
+        return_summaries: return_layer.summaries,
+        return_increments: return_layer.increments,
+        pending_layers: vec!["结果库尚未物化八维量价风格暴露，当前不输出风格距离".to_string()],
+    })
+}
+
+struct ReturnLayerData {
+    pair_correlations: HashMap<(String, String), (Option<f64>, usize)>,
+    oos_test_start_date: Option<String>,
+    summaries: Vec<StrategyDimensionReturnSummary>,
+    increments: Vec<StrategyDimensionReturnIncrement>,
+}
+
+fn load_return_layer(
+    source_path: &str,
+    start_date: &str,
+    end_date: &str,
+    rule_names: &[String],
+    holding_period: usize,
+    ridge_lambda: f64,
+) -> Result<ReturnLayerData, String> {
+    let database_path = source_db_path(source_path);
+    if !database_path.is_file() {
+        return Err(format!("原始行情库不存在:{}", database_path.display()));
+    }
+    let database_path_text = database_path
+        .to_str()
+        .ok_or_else(|| "原始行情库路径不是有效UTF-8".to_string())?;
+    let config = Config::default()
+        .access_mode(AccessMode::ReadOnly)
+        .map_err(|error| format!("配置原始行情库只读模式失败:{error}"))?;
+    let source_connection = Connection::open_with_flags(database_path_text, config)
+        .map_err(|error| format!("打开原始行情库失败:{database_path_text}:{error}"))?;
+    let layer_config = RuleLayerConfig {
+        min_samples_per_day: RETURN_MIN_SAMPLES_PER_DAY,
+        backtest_period: holding_period,
+        min_listed_trade_days: RETURN_MIN_LISTED_TRADE_DAYS,
+    };
+    let metrics = calc_all_rule_layer_metrics_from_db(
+        &source_connection,
+        source_path,
+        rule_names,
+        RETURN_STOCK_ADJ_TYPE,
+        RETURN_INDEX_TS_CODE,
+        RETURN_INDEX_BETA,
+        RETURN_CONCEPT_BETA,
+        RETURN_INDUSTRY_BETA,
+        start_date,
+        end_date,
+        &layer_config,
+    )?;
+
+    let returns_by_rule = metrics
+        .into_iter()
+        .map(|(rule_name, metrics)| {
+            let series = metrics
+                .points
+                .into_iter()
+                .filter_map(|point| {
+                    point
+                        .avg_residual_return
+                        .filter(|value| value.is_finite())
+                        .map(|value| (point.trade_date, value))
+                })
+                .collect::<BTreeMap<_, _>>();
+            (rule_name, series)
+        })
+        .collect::<HashMap<_, _>>();
+    let all_dates = returns_by_rule
+        .values()
+        .flat_map(|series| series.keys().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let test_start_index = if all_dates.len() >= 2 {
+        ((all_dates.len() as f64 * OOS_TRAIN_RATIO).floor() as usize).clamp(1, all_dates.len() - 1)
+    } else {
+        all_dates.len()
+    };
+    let oos_test_start_date = all_dates.get(test_start_index).cloned();
+
+    let mut pair_correlations = HashMap::new();
+    for left_index in 0..rule_names.len() {
+        for right_index in (left_index + 1)..rule_names.len() {
+            let left_name = &rule_names[left_index];
+            let right_name = &rule_names[right_index];
+            let left_series = &returns_by_rule[left_name];
+            let right_series = &returns_by_rule[right_name];
+            let mut left_values = Vec::new();
+            let mut right_values = Vec::new();
+            for (date, left_value) in left_series {
+                if let Some(right_value) = right_series.get(date) {
+                    left_values.push(*left_value);
+                    right_values.push(*right_value);
+                }
+            }
+            let key = if left_name < right_name {
+                (left_name.clone(), right_name.clone())
+            } else {
+                (right_name.clone(), left_name.clone())
+            };
+            pair_correlations.insert(
+                key,
+                (pearson_corr(&left_values, &right_values), left_values.len()),
+            );
+        }
+    }
+
+    let mut summaries = Vec::with_capacity(rule_names.len());
+    for rule_name in rule_names {
+        let series = &returns_by_rule[rule_name];
+        let all_values = series.values().copied().collect::<Vec<_>>();
+        let (train_values, test_values): (Vec<_>, Vec<_>) = series.iter().partition(|(date, _)| {
+            oos_test_start_date
+                .as_ref()
+                .is_none_or(|test_start| *date < test_start)
+        });
+        let train_values = train_values
+            .into_iter()
+            .map(|(_, value)| *value)
+            .collect::<Vec<_>>();
+        let test_values = test_values
+            .into_iter()
+            .map(|(_, value)| *value)
+            .collect::<Vec<_>>();
+        summaries.push(StrategyDimensionReturnSummary {
+            rule_name: rule_name.clone(),
+            valid_day_count: all_values.len(),
+            train_day_count: train_values.len(),
+            test_day_count: test_values.len(),
+            avg_residual_return: mean(&all_values),
+            hac_t_value: calc_newey_west_t_value(&all_values, holding_period - 1),
+            train_avg_residual_return: mean(&train_values),
+            test_avg_residual_return: mean(&test_values),
+        });
+    }
+
+    let mut increments = Vec::with_capacity(rule_names.len());
+    for target_index in 0..rule_names.len() {
+        let relevant_names = &rule_names[..=target_index];
+        let mut train_rows = Vec::new();
+        let mut test_rows = Vec::new();
+        for date in &all_dates {
+            let Some(row) = relevant_names
+                .iter()
+                .map(|rule_name| returns_by_rule[rule_name].get(date).copied())
+                .collect::<Option<Vec<_>>>()
+            else {
+                continue;
+            };
+            if oos_test_start_date
+                .as_ref()
+                .is_some_and(|test_start| date >= test_start)
+            {
+                test_rows.push(row);
+            } else {
+                train_rows.push(row);
+            }
+        }
+
+        let column_count = relevant_names.len();
+        let mut means = vec![0.0; column_count];
+        let mut standard_deviations = vec![0.0; column_count];
+        for column in 0..column_count {
+            let values = train_rows.iter().map(|row| row[column]).collect::<Vec<_>>();
+            if let Some(value) = mean(&values) {
+                means[column] = value;
+                standard_deviations[column] = (values
+                    .iter()
+                    .map(|item| (item - value) * (item - value))
+                    .sum::<f64>()
+                    / values.len() as f64)
+                    .sqrt();
+            }
+        }
+
+        let mut raw_coefficients = Vec::new();
+        let mut regression_available = target_index == 0;
+        if target_index > 0
+            && train_rows.len() >= 3
+            && standard_deviations[target_index] > VARIANCE_EPS
+        {
+            let mut correlation_matrix = vec![vec![0.0; column_count]; column_count];
+            for row in 0..column_count {
+                correlation_matrix[row][row] =
+                    (standard_deviations[row] > VARIANCE_EPS) as u8 as f64;
+                for column in (row + 1)..column_count {
+                    let left = train_rows.iter().map(|item| item[row]).collect::<Vec<_>>();
+                    let right = train_rows
+                        .iter()
+                        .map(|item| item[column])
+                        .collect::<Vec<_>>();
+                    let correlation = pearson_corr(&left, &right).unwrap_or(0.0);
+                    correlation_matrix[row][column] = correlation;
+                    correlation_matrix[column][row] = correlation;
+                }
+            }
+            let diagnostic = calc_linear_orthogonal_diagnostics(&correlation_matrix, ridge_lambda)?
+                .pop()
+                .expect("非空相关矩阵必须返回目标诊断");
+            if diagnostic.residual_variance_ratio.is_some() {
+                regression_available = true;
+                raw_coefficients = diagnostic
+                    .basis_coefficients
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, coefficient)| {
+                        if standard_deviations[index] > VARIANCE_EPS {
+                            coefficient * standard_deviations[target_index]
+                                / standard_deviations[index]
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect();
+            }
+        }
+
+        let test_residuals = if regression_available {
+            test_rows
+                .iter()
+                .map(|row| {
+                    let fitted = raw_coefficients
+                        .iter()
+                        .enumerate()
+                        .map(|(index, coefficient)| coefficient * row[index])
+                        .sum::<f64>();
+                    row[target_index] - fitted
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let positive_count = test_residuals.iter().filter(|value| **value > 0.0).count();
+        increments.push(StrategyDimensionReturnIncrement {
+            rule_name: rule_names[target_index].clone(),
+            basis_coefficients: raw_coefficients
+                .into_iter()
+                .enumerate()
+                .map(|(index, coefficient)| StrategyDimensionBasisCoefficient {
+                    rule_name: rule_names[index].clone(),
+                    coefficient,
+                })
+                .collect(),
+            train_sample_count: train_rows.len(),
+            test_sample_count: test_rows.len(),
+            test_incremental_mean: mean(&test_residuals),
+            test_incremental_hac_t_value: calc_newey_west_t_value(
+                &test_residuals,
+                holding_period - 1,
+            ),
+            test_incremental_positive_ratio: (!test_residuals.is_empty())
+                .then_some(positive_count as f64 / test_residuals.len() as f64),
+        });
+    }
+
+    Ok(ReturnLayerData {
+        pair_correlations,
+        oos_test_start_date,
+        summaries,
+        increments,
     })
 }
 
@@ -577,12 +918,15 @@ fn read_usize(value: Result<i64, duckdb::Error>, label: &str) -> Result<usize, S
 
 #[cfg(test)]
 mod tests {
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     use duckdb::Connection;
 
     use super::{normalize_rule_names, run_strategy_dimension_research, validate_date_range};
-    use crate::data::{result_db_path, scoring_store::init_result_db};
+    use crate::data::{result_db_path, scoring_store::init_result_db, source_db_path};
 
     #[test]
     fn research_input_keeps_rule_order_and_removes_duplicates() {
@@ -607,6 +951,44 @@ mod tests {
             "lianghua-dimension-research-{}-{unique}",
             std::process::id()
         ));
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::write(
+            source_dir.join("stock_list.csv"),
+            "ts_code,list_date,industry\n",
+        )
+        .unwrap();
+        fs::write(
+            source_dir.join("stock_concepts.csv"),
+            "ts_code,c1,c2,c3,concept\n",
+        )
+        .unwrap();
+        fs::write(
+            source_dir.join("trade_calendar.csv"),
+            "cal_date\n20240102\n20240103\n",
+        )
+        .unwrap();
+        let source_connection =
+            Connection::open(source_db_path(source_dir.to_str().unwrap())).unwrap();
+        source_connection
+            .execute_batch(
+                "CREATE TABLE stock_data (
+                    ts_code VARCHAR,
+                    trade_date VARCHAR,
+                    adj_type VARCHAR,
+                    pct_chg DOUBLE,
+                    open DOUBLE,
+                    close DOUBLE
+                 );
+                 INSERT INTO stock_data VALUES
+                    ('000001.SZ', '20240102', 'qfq', 0.0, 10.0, 10.0),
+                    ('000001.SZ', '20240103', 'qfq', 1.0, 10.0, 10.1),
+                    ('000002.SZ', '20240102', 'qfq', 0.0, 20.0, 20.0),
+                    ('000002.SZ', '20240103', 'qfq', -1.0, 20.0, 19.8),
+                    ('000300.SH', '20240102', 'ind', 0.0, 100.0, 100.0),
+                    ('000300.SH', '20240103', 'ind', 0.0, 100.0, 100.0);",
+            )
+            .unwrap();
+        drop(source_connection);
         let database_path = result_db_path(source_dir.to_str().unwrap());
         init_result_db(&database_path).unwrap();
         let connection = Connection::open(&database_path).unwrap();
@@ -632,6 +1014,7 @@ mod tests {
             "20240103".to_string(),
             vec!["A".to_string(), "B".to_string()],
             Some(10),
+            None,
             None,
         )
         .unwrap();

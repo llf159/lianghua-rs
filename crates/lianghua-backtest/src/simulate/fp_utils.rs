@@ -219,7 +219,7 @@ pub(crate) fn average_ranks(values: &[f64]) -> Vec<f64> {
 /// Pearson 相关系数。
 ///
 /// 结果会 clamp 到 [-1.0, 1.0] 以防止浮点舍入越界。
-pub(crate) fn pearson_corr(x: &[f64], y: &[f64]) -> Option<f64> {
+pub fn pearson_corr(x: &[f64], y: &[f64]) -> Option<f64> {
     if x.len() != y.len() || x.len() < 2 {
         return None;
     }

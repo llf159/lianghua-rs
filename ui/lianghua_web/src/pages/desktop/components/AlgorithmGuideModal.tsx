@@ -231,9 +231,21 @@ const ALGORITHM_SECTIONS: AlgorithmSection[] = [
         interpretation: '成熟的基准策略应放在前面，候选策略放在后面。残差比例越高，当前规则在线性层面留下的增量越多。',
       },
       {
+        heading: '可交易收益路径与收益相关',
+        description: '对每条规则按评分日触发股票形成日度等权组合，使用次日开盘到持有期末收盘的残差收益，再比较策略日收益的 Pearson 相关。',
+        formula: 'residual_return = stock_return - 0.5 × index_return - 0.2 × concept_return\nreturn_correlation = Corr(规则 A 日度残差收益, 规则 B 日度残差收益)',
+        interpretation: '收益相关回答实际赚亏是否同步。它可能与触发、分数相关明显不同；只有两条策略都有有效收益的共同日期才进入计算。',
+      },
+      {
+        heading: '顺序样本外收益增量',
+        description: '按时间将有效日期前 70% 作为训练期，只在训练期拟合候选规则对前序规则的岭回归系数；后 30% 固定系数并检验候选的未解释收益。',
+        formula: 'incremental_return_test = candidate_return - Σ(训练期系数ᵢ × prior_returnᵢ)\nHAC lag = holding_period - 1',
+        interpretation: '规则顺序决定基准集合。正的样本外未解释收益表示候选在这段检验期提供了前序规则未覆盖的收益，但仍需结合 HAC t 值、检验样本数和多次研究造成的数据窥探。',
+      },
+      {
         heading: '结论边界',
-        description: '相关性和正交研究只确认信号层的统计结构，不直接生成收益、换手、成本或容量结论。',
-        interpretation: '线性残差高仍可能存在强距离相关；只有收益路径、样本外检验和组合增量也成立，才可称为独立策略维度。',
+        description: '研究页同时检查信号结构和毛收益路径，但尚未扣除换手、冲击成本，也不生成容量结论。',
+        interpretation: '线性残差高仍可能存在强距离相关；收益增量也只有在样本外稳定、计入交易成本后仍成立，才可称为可交易的独立策略维度。',
       },
     ],
   },
@@ -244,7 +256,7 @@ const ALGORITHM_SECTIONS: AlgorithmSection[] = [
         heading: '方向反应',
         description: '观察策略偏向趋势延续还是均值回归。',
         formula: '可观测变量：前序收益方向、反转窗口、趋势持续率',
-        interpretation: '当前研究页只提供相关性与正交结果，不在没有数据支持时生成风格分数。',
+        interpretation: '当前研究页已提供信号与收益层结果，但尚未生成八维风格分数。',
       },
       {
         heading: '入场形态',

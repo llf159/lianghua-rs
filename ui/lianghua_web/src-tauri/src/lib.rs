@@ -50,34 +50,32 @@ use lianghua_app_facade as facade;
 use lianghua_app_market as market;
 use lianghua_app_strategy as strategy;
 use lianghua_app_strategy::stock_pick::{
-    ExpressionStockPickTemplateValidationData,
-    StockPickResultData as ExpressionStockPickResultData,
-    run_expression_stock_pick as core_run_expression_stock_pick,
-    validate_expression_stock_pick_template_expression as core_validate_expression_stock_pick_template_expression,
+    run_concept_stock_pick as core_run_concept_stock_pick,
+    StockPickResultData as ConceptStockPickResultData,
 };
 use lianghua_app_strategy::stock_pick::{
-    StockPickResultData as ConceptStockPickResultData,
-    run_concept_stock_pick as core_run_concept_stock_pick,
+    run_expression_stock_pick as core_run_expression_stock_pick,
+    validate_expression_stock_pick_template_expression as core_validate_expression_stock_pick_template_expression,
+    ExpressionStockPickTemplateValidationData,
+    StockPickResultData as ExpressionStockPickResultData,
 };
 use serde::{Deserialize, Serialize};
 use tauri::Emitter;
 use tauri_plugin_fs::{FilePath, FsExt};
-use zip::{CompressionMethod, ZipWriter, write::FileOptions};
+use zip::{write::FileOptions, CompressionMethod, ZipWriter};
 use {
     chart::indicator_settings::{
-        ChartIndicatorSettingsPayload, ChartIndicatorValidationResult,
         get_chart_indicator_settings as core_get_chart_indicator_settings,
         reset_chart_indicator_settings as core_reset_chart_indicator_settings,
         save_chart_indicator_settings as core_save_chart_indicator_settings,
         validate_chart_indicator_settings as core_validate_chart_indicator_settings,
+        ChartIndicatorSettingsPayload, ChartIndicatorValidationResult,
     },
-    data::viewer::{StockLookupRow, list_stock_lookup_rows as core_list_stock_lookup_rows},
+    data::viewer::{list_stock_lookup_rows as core_list_stock_lookup_rows, StockLookupRow},
     expression::{
-        ExpressionCapabilitiesData, get_expression_capabilities as core_get_expression_capabilities,
+        get_expression_capabilities as core_get_expression_capabilities, ExpressionCapabilitiesData,
     },
     facade::cyq_chen::{
-        CyqChenSingleStockData, CyqChenSingleStockRequest, CyqChenStrategyBackupDiff,
-        CyqChenStrategyFileDraft, CyqChenStrategyFileExportResult, CyqChenStrategyPageData,
         activate_cyq_chen_strategy_backup as core_activate_cyq_chen_strategy_backup,
         auto_backup_cyq_chen_strategy_file_on_entry as core_auto_backup_cyq_chen_strategy_file_on_entry,
         backup_cyq_chen_strategy_file as core_backup_cyq_chen_strategy_file,
@@ -89,12 +87,11 @@ use {
         get_cyq_chen_strategy_page as core_get_cyq_chen_strategy_page,
         import_cyq_chen_strategy_backup_from_text as core_import_cyq_chen_strategy_backup_from_text,
         run_cyq_chen_single_stock_test as core_run_cyq_chen_single_stock_test,
-        save_cyq_chen_strategy_file as core_save_cyq_chen_strategy_file,
+        save_cyq_chen_strategy_file as core_save_cyq_chen_strategy_file, CyqChenSingleStockData,
+        CyqChenSingleStockRequest, CyqChenStrategyBackupDiff, CyqChenStrategyFileDraft,
+        CyqChenStrategyFileExportResult, CyqChenStrategyPageData,
     },
     facade::details::{
-        StockDetailCyqData, StockDetailIntradaySnapshotData, StockDetailKlineIndicatorsData,
-        StockDetailOverviewData, StockDetailPageData, StockDetailPrevRanksData,
-        StockDetailRealtimeData, StockDetailStrategySnapshotData,
         get_stock_detail_cyq as core_get_stock_detail_cyq,
         get_stock_detail_intraday as core_get_stock_detail_intraday,
         get_stock_detail_intraday_snapshot as core_get_stock_detail_intraday_snapshot,
@@ -104,46 +101,47 @@ use {
         get_stock_detail_prev_ranks as core_get_stock_detail_prev_ranks,
         get_stock_detail_realtime as core_get_stock_detail_realtime,
         get_stock_detail_strategy_snapshot as core_get_stock_detail_strategy_snapshot,
+        StockDetailCyqData, StockDetailIntradaySnapshotData, StockDetailKlineIndicatorsData,
+        StockDetailOverviewData, StockDetailPageData, StockDetailPrevRanksData,
+        StockDetailRealtimeData, StockDetailStrategySnapshotData,
     },
     market::all_market_monitor::{
-        AllMarketMonitorSnapshotData,
         get_all_market_monitor_snapshot as core_get_all_market_monitor_snapshot,
+        AllMarketMonitorSnapshotData,
     },
     market::dragon_tiger::{
-        DragonTigerMarketData, DragonTigerSeatStatisticsData, DragonTigerStockDetailData,
         get_dragon_tiger_market_data as core_get_dragon_tiger_market_data,
         get_dragon_tiger_seat_statistics as core_get_dragon_tiger_seat_statistics,
-        get_dragon_tiger_stock_detail as core_get_dragon_tiger_stock_detail,
+        get_dragon_tiger_stock_detail as core_get_dragon_tiger_stock_detail, DragonTigerMarketData,
+        DragonTigerSeatStatisticsData, DragonTigerStockDetailData,
     },
     market::intraday_monitor::{
-        IntradayMonitorPageData, IntradayMonitorRankModeConfig, IntradayMonitorRow,
-        IntradayMonitorTemplate, IntradayMonitorTemplateValidationData,
         get_intraday_monitor_page as core_get_intraday_monitor_page,
         refresh_intraday_monitor_realtime as core_refresh_intraday_monitor_realtime,
         refresh_intraday_monitor_template_tags as core_refresh_intraday_monitor_template_tags,
         validate_intraday_monitor_template_expression as core_validate_intraday_monitor_template_expression,
+        IntradayMonitorPageData, IntradayMonitorRankModeConfig, IntradayMonitorRow,
+        IntradayMonitorTemplate, IntradayMonitorTemplateValidationData,
     },
     market::watch_observe::{
-        WatchObserveRow as CoreWatchObserveRow, WatchObserveSnapshotData, WatchObserveStoredRow,
         hydrate_watch_observe_rows as core_hydrate_watch_observe_rows,
         normalize_trade_date as core_normalize_watch_observe_trade_date,
         normalize_ts_code as core_normalize_watch_observe_ts_code,
         refresh_watch_observe_rows as core_refresh_watch_observe_rows,
         resolve_current_watch_date as core_resolve_current_watch_observe_date,
+        WatchObserveRow as CoreWatchObserveRow, WatchObserveSnapshotData, WatchObserveStoredRow,
     },
     strategy::convolution_rank::{
-        ConvolutionRankComputeResult, ConvolutionRankPageData,
         get_convolution_rank_page as core_get_convolution_rank_page,
         run_convolution_rank_compute as core_run_convolution_rank_compute,
+        ConvolutionRankComputeResult, ConvolutionRankPageData,
     },
     strategy::dimension_research::{
-        StrategyDimensionResearchData, StrategyDimensionResearchDefaultsData,
         get_strategy_dimension_research_defaults as core_get_strategy_dimension_research_defaults,
         run_strategy_dimension_research as core_run_strategy_dimension_research,
+        StrategyDimensionResearchData, StrategyDimensionResearchDefaultsData,
     },
     strategy::manage::{
-        StrategyManagePageData, StrategyManageRefactorDraft, StrategyManageRuleDraft,
-        StrategyManageSceneDraft,
         check_strategy_manage_rule_draft as core_check_strategy_manage_rule_draft,
         check_strategy_manage_scene_draft as core_check_strategy_manage_scene_draft,
         create_strategy_manage_rule as core_create_strategy_manage_rule,
@@ -153,27 +151,28 @@ use {
         remove_strategy_manage_scene as core_remove_strategy_manage_scene,
         save_strategy_manage_refactor_file as core_save_strategy_manage_refactor_file,
         update_strategy_manage_rule as core_update_strategy_manage_rule,
-        update_strategy_manage_scene as core_update_strategy_manage_scene,
+        update_strategy_manage_scene as core_update_strategy_manage_scene, StrategyManagePageData,
+        StrategyManageRefactorDraft, StrategyManageRuleDraft, StrategyManageSceneDraft,
     },
     strategy::overview::{
-        SceneOverviewPageData, get_scene_rank_overview_page as core_get_scene_rank_overview_page,
+        get_scene_rank_overview_page as core_get_scene_rank_overview_page,
         get_scene_rank_trade_date_options as core_get_scene_rank_trade_date_options,
+        SceneOverviewPageData,
     },
     strategy::overview_classic::{
-        OverviewPageData, OverviewRow, get_rank_overview as core_get_rank_overview,
+        get_rank_overview as core_get_rank_overview,
         get_rank_overview_page as core_get_rank_overview_page,
-        get_rank_trade_date_options as core_get_rank_trade_date_options,
+        get_rank_trade_date_options as core_get_rank_trade_date_options, OverviewPageData,
+        OverviewRow,
     },
     strategy::paper_validation::{
-        StrategyPaperValidationData, StrategyPaperValidationDefaultsData,
-        StrategyPaperValidationTemplateValidationData,
         get_strategy_paper_validation_defaults as core_get_strategy_paper_validation_defaults,
         run_strategy_paper_validation as core_run_strategy_paper_validation,
         validate_strategy_paper_validation_template_expressions as core_validate_strategy_paper_validation_template_expressions,
+        StrategyPaperValidationData, StrategyPaperValidationDefaultsData,
+        StrategyPaperValidationTemplateValidationData,
     },
     strategy::ranking_compute::{
-        ConceptPerformanceComputeResult, CyqChenComputeResult, CyqComputeResult,
-        RankComputeRunResult, RankComputeStatus,
         get_ranking_compute_status as core_get_ranking_compute_status,
         preview_ranking_score_calculation_warnings as core_preview_ranking_score_calculation_warnings,
         run_concept_performance_compute as core_run_concept_performance_compute,
@@ -181,14 +180,10 @@ use {
         run_cyq_compute_with_range_and_progress as core_run_cyq_compute,
         run_ranking_score_calculation as core_run_ranking_score_calculation,
         run_ranking_tiebreak_fill as core_run_ranking_tiebreak_fill,
+        ConceptPerformanceComputeResult, CyqChenComputeResult, CyqComputeResult,
+        RankComputeRunResult, RankComputeStatus,
     },
     strategy::statistics::{
-        MarketAnalysisData, MarketContributionData, RankLayerBacktestData,
-        RuleExpressionCalibrationData, RuleExpressionValidationData,
-        RuleExpressionValidationManualStrategy, RuleLayerBacktestData,
-        RuleLayerBacktestDefaultsData, RuleValidationUnknownConfig, SceneLayerBacktestData,
-        SceneLayerBacktestDefaultsData, SceneStatisticsPageData, StrategyStatisticsDetailData,
-        StrategyStatisticsPageData, TriggeredStockRow,
         get_cached_rule_layer_backtest_detail as core_get_cached_rule_layer_backtest_detail,
         get_market_analysis as core_get_market_analysis,
         get_market_contribution as core_get_market_contribution,
@@ -206,23 +201,29 @@ use {
         run_transient_rank_layer_backtest as core_run_transient_rank_layer_backtest,
         run_transient_rule_layer_backtest as core_run_transient_rule_layer_backtest,
         run_transient_scene_layer_backtest as core_run_transient_scene_layer_backtest,
+        MarketAnalysisData, MarketContributionData, RankLayerBacktestData,
+        RuleExpressionCalibrationData, RuleExpressionValidationData,
+        RuleExpressionValidationManualStrategy, RuleLayerBacktestData,
+        RuleLayerBacktestDefaultsData, RuleValidationUnknownConfig, SceneLayerBacktestData,
+        SceneLayerBacktestDefaultsData, SceneStatisticsPageData, StrategyStatisticsDetailData,
+        StrategyStatisticsPageData, TriggeredStockRow,
     },
     strategy::stock_pick::{
-        StockPickOptionsData, get_stock_pick_options as core_get_stock_pick_options,
+        get_stock_pick_options as core_get_stock_pick_options, StockPickOptionsData,
     },
     strategy::stock_similarity::{
-        StockSimilarityPageData, get_stock_similarity_page as core_get_stock_similarity_page,
+        get_stock_similarity_page as core_get_stock_similarity_page, StockSimilarityPageData,
     },
     strategy::trigger_similarity::{
-        StrategyTriggerSimilarityPageData,
         get_strategy_trigger_similarity_page as core_get_strategy_trigger_similarity_page,
         list_strategy_trigger_similarity_benchmark_index_codes as core_list_strategy_trigger_similarity_benchmark_index_codes,
         ranking::{
-            StrategyTriggerRankingPageData, StrategyTriggerRankingProgress,
             get_strategy_trigger_similarity_ranking_page as core_get_strategy_trigger_similarity_ranking_page,
             get_strategy_trigger_similarity_ranking_progress as core_get_strategy_trigger_similarity_ranking_progress,
             run_strategy_trigger_similarity_ranking as core_run_strategy_trigger_similarity_ranking,
+            StrategyTriggerRankingPageData, StrategyTriggerRankingProgress,
         },
+        StrategyTriggerSimilarityPageData,
     },
 };
 
@@ -300,7 +301,7 @@ use managed_source_bridge::{
 };
 
 #[cfg(target_os = "android")]
-use jni::{JNIEnv, objects::JObject, sys::jboolean};
+use jni::{objects::JObject, sys::jboolean, JNIEnv};
 
 #[cfg(target_os = "android")]
 use rustls_platform_verifier;
@@ -1200,6 +1201,7 @@ async fn run_strategy_dimension_research(
     rule_names: Vec<String>,
     nonlinear_sample_limit: Option<usize>,
     ridge_lambda: Option<f64>,
+    holding_period: Option<usize>,
 ) -> Result<StrategyDimensionResearchData, String> {
     tauri::async_runtime::spawn_blocking(move || {
         core_run_strategy_dimension_research(
@@ -1209,6 +1211,7 @@ async fn run_strategy_dimension_research(
             rule_names,
             nonlinear_sample_limit,
             ridge_lambda,
+            holding_period,
         )
     })
     .await

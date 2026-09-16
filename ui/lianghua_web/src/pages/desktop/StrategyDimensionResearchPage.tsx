@@ -18,6 +18,9 @@ const formatPercent = (value: number | null | undefined) =>
     ? "—"
     : `${(value * 100).toFixed(2)}%`;
 
+const formatPctPoint = (value: number | null | undefined) =>
+  value == null || !Number.isFinite(value) ? "—" : `${value.toFixed(3)}%`;
+
 const compactToInputDate = (value: string | null | undefined) =>
   value && /^\d{8}$/.test(value)
     ? `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}`
@@ -51,6 +54,7 @@ export default function StrategyDimensionResearchPage() {
   const [ruleFilter, setRuleFilter] = useState("");
   const [nonlinearSampleLimit, setNonlinearSampleLimit] = useState("512");
   const [ridgeLambda, setRidgeLambda] = useState("0.000001");
+  const [holdingPeriod, setHoldingPeriod] = useState("5");
   const [initializing, setInitializing] = useState(false);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState("");
@@ -79,6 +83,7 @@ export default function StrategyDimensionResearchPage() {
         String(loadedDefaults.default_nonlinear_sample_limit),
       );
       setRidgeLambda(String(loadedDefaults.default_ridge_lambda));
+      setHoldingPeriod(String(loadedDefaults.default_holding_period));
       setSelectedRules(
         rulesByActivity
           .slice(0, Math.min(10, loadedDefaults.max_strategy_count))
@@ -188,6 +193,7 @@ export default function StrategyDimensionResearchPage() {
     }
     const sampleLimit = Number(nonlinearSampleLimit);
     const lambda = Number(ridgeLambda);
+    const holdingDays = Number(holdingPeriod);
     if (
       !Number.isInteger(sampleLimit) ||
       sampleLimit < 3 ||
@@ -202,6 +208,16 @@ export default function StrategyDimensionResearchPage() {
       setError("岭正则系数必须是有限的非负数。");
       return;
     }
+    if (
+      !Number.isInteger(holdingDays) ||
+      holdingDays < 1 ||
+      holdingDays > (defaults?.max_holding_period ?? 60)
+    ) {
+      setError(
+        `持有交易日必须是 1 到 ${defaults?.max_holding_period ?? 60} 的整数。`,
+      );
+      return;
+    }
     setRunning(true);
     setError("");
     try {
@@ -213,6 +229,7 @@ export default function StrategyDimensionResearchPage() {
           ruleNames: selectedRules,
           nonlinearSampleLimit: sampleLimit,
           ridgeLambda: lambda,
+          holdingPeriod: holdingDays,
         }),
       );
     } catch (researchError) {
@@ -311,6 +328,21 @@ export default function StrategyDimensionResearchPage() {
                 value={ridgeLambda}
                 onChange={(event) => {
                   setRidgeLambda(event.target.value);
+                  setResult(null);
+                }}
+                disabled={initializing || running}
+              />
+            </label>
+            <label>
+              <span>持有交易日</span>
+              <input
+                type="number"
+                min={1}
+                max={defaults?.max_holding_period ?? 60}
+                step={1}
+                value={holdingPeriod}
+                onChange={(event) => {
+                  setHoldingPeriod(event.target.value);
                   setResult(null);
                 }}
                 disabled={initializing || running}
@@ -445,7 +477,7 @@ export default function StrategyDimensionResearchPage() {
             onClick={() => void runResearch()}
             disabled={initializing || running || !defaults}
           >
-            {running ? "正在计算相关性…" : "运行相关性与正交研究"}
+            {running ? "正在计算研究结果…" : "运行相关性、收益与正交研究"}
           </button>
         </div>
       </section>
@@ -469,11 +501,11 @@ export default function StrategyDimensionResearchPage() {
               <small>每一对均计算重叠和相关</small>
             </article>
             <article>
-              <span>非线性样本</span>
-              <strong>{result.nonlinear_sample_limit}</strong>
+              <span>持仓收益口径</span>
+              <strong>{result.holding_period} 日</strong>
               <small>
-                实际共同交易日{" "}
-                {result.pair_metrics[0]?.nonlinear_sample_count ?? 0}
+                次日开盘入场；每日触发至少 {result.return_min_samples_per_day}{" "}
+                只
               </small>
             </article>
           </section>
@@ -575,6 +607,8 @@ export default function StrategyDimensionResearchPage() {
                     <th>Pearson</th>
                     <th>日度 Spearman</th>
                     <th>日度距离相关</th>
+                    <th>持仓收益相关</th>
+                    <th>收益共同日期</th>
                     <th>解读</th>
                   </tr>
                 </thead>
@@ -594,6 +628,8 @@ export default function StrategyDimensionResearchPage() {
                       <td>
                         {formatNumber(pair.distance_correlation_daily_mean)}
                       </td>
+                      <td>{formatNumber(pair.return_pearson)}</td>
+                      <td>{pair.return_shared_day_count.toLocaleString()}</td>
                       <td>
                         <span
                           className={`dimension-research-strength strength-${dependenceLabel(pair.distance_correlation_daily_mean)}`}
@@ -602,6 +638,115 @@ export default function StrategyDimensionResearchPage() {
                             pair.distance_correlation_daily_mean,
                           )}
                         </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section className="dimension-research-section">
+            <div className="dimension-research-section-heading">
+              <div>
+                <h3>可交易持仓收益路径</h3>
+                <p className="dimension-research-section-note">
+                  评分日确认后从下一交易日开盘进入，持有 {result.holding_period}{" "}
+                  个交易日； 股票收益扣除 {result.return_index_beta}×指数、
+                  {result.return_concept_beta}×概念和{" "}
+                  {result.return_industry_beta}×行业收益。 HAC 滞后阶数为{" "}
+                  {Math.max(0, result.holding_period - 1)}。
+                </p>
+              </div>
+            </div>
+            <div className="dimension-research-table-wrap dimension-research-profile-table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>规则</th>
+                    <th>有效日期</th>
+                    <th>日均残差收益</th>
+                    <th>HAC t值</th>
+                    <th>训练期均值</th>
+                    <th>检验期均值</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {result.return_summaries.map((summary) => (
+                    <tr key={summary.rule_name}>
+                      <th>{summary.rule_name}</th>
+                      <td>{summary.valid_day_count.toLocaleString()}</td>
+                      <td>{formatPctPoint(summary.avg_residual_return)}</td>
+                      <td>{formatNumber(summary.hac_t_value, 2)}</td>
+                      <td>
+                        {formatPctPoint(summary.train_avg_residual_return)}
+                      </td>
+                      <td>
+                        {formatPctPoint(summary.test_avg_residual_return)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section className="dimension-research-section">
+            <div className="dimension-research-section-heading">
+              <div>
+                <h3>顺序样本外收益增量</h3>
+                <p className="dimension-research-section-note">
+                  前 {formatPercent(result.oos_train_ratio)}{" "}
+                  日期只用于拟合候选规则对前序规则的岭回归；
+                  {result.oos_test_start_date
+                    ? `从 ${result.oos_test_start_date} 起只做检验。`
+                    : "当前有效日期不足以切分训练期和检验期。"}
+                </p>
+              </div>
+            </div>
+            <div className="dimension-research-table-wrap dimension-research-profile-table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>规则</th>
+                    <th>训练 / 检验样本</th>
+                    <th>检验期未解释收益</th>
+                    <th>增量 HAC t值</th>
+                    <th>增量为正比例</th>
+                    <th>训练期前序系数</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {result.return_increments.map((increment, index) => (
+                    <tr key={increment.rule_name}>
+                      <th>{increment.rule_name}</th>
+                      <td>
+                        {increment.train_sample_count} /{" "}
+                        {increment.test_sample_count}
+                      </td>
+                      <td>{formatPctPoint(increment.test_incremental_mean)}</td>
+                      <td>
+                        {formatNumber(
+                          increment.test_incremental_hac_t_value,
+                          2,
+                        )}
+                      </td>
+                      <td>
+                        {formatPercent(
+                          increment.test_incremental_positive_ratio,
+                        )}
+                      </td>
+                      <td>
+                        {index === 0
+                          ? "基准规则"
+                          : increment.basis_coefficients.length > 0
+                          ? increment.basis_coefficients
+                              .map(
+                                (coefficient) =>
+                                  `${coefficient.rule_name} ${formatNumber(coefficient.coefficient)}`,
+                              )
+                              .join("；")
+                          : "训练样本不足或收益无方差"}
                       </td>
                     </tr>
                   ))}

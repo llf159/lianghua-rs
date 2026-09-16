@@ -13,6 +13,8 @@ export type StrategyDimensionResearchDefaultsData = {
   default_nonlinear_sample_limit: number
   max_nonlinear_sample_limit: number
   default_ridge_lambda: number
+  default_holding_period: number
+  max_holding_period: number
 }
 
 export type StrategyDimensionRuleSummary = {
@@ -34,6 +36,8 @@ export type StrategyDimensionPairMetrics = {
   score_spearman_daily_mean?: number | null
   distance_correlation_daily_mean?: number | null
   nonlinear_sample_count: number
+  return_pearson?: number | null
+  return_shared_day_count: number
 }
 
 export type StrategyDimensionBasisCoefficient = {
@@ -48,6 +52,27 @@ export type StrategyDimensionOrthogonalDiagnostic = {
   residual_variance_ratio?: number | null
 }
 
+export type StrategyDimensionReturnSummary = {
+  rule_name: string
+  valid_day_count: number
+  train_day_count: number
+  test_day_count: number
+  avg_residual_return?: number | null
+  hac_t_value?: number | null
+  train_avg_residual_return?: number | null
+  test_avg_residual_return?: number | null
+}
+
+export type StrategyDimensionReturnIncrement = {
+  rule_name: string
+  basis_coefficients: StrategyDimensionBasisCoefficient[]
+  train_sample_count: number
+  test_sample_count: number
+  test_incremental_mean?: number | null
+  test_incremental_hac_t_value?: number | null
+  test_incremental_positive_ratio?: number | null
+}
+
 export type StrategyDimensionResearchData = {
   start_date: string
   end_date: string
@@ -60,6 +85,18 @@ export type StrategyDimensionResearchData = {
   strategies: StrategyDimensionRuleSummary[]
   pair_metrics: StrategyDimensionPairMetrics[]
   orthogonal_diagnostics: StrategyDimensionOrthogonalDiagnostic[]
+  holding_period: number
+  return_min_samples_per_day: number
+  return_min_listed_trade_days: number
+  return_stock_adj_type: string
+  return_index_ts_code: string
+  return_index_beta: number
+  return_concept_beta: number
+  return_industry_beta: number
+  oos_train_ratio: number
+  oos_test_start_date?: string | null
+  return_summaries: StrategyDimensionReturnSummary[]
+  return_increments: StrategyDimensionReturnIncrement[]
   pending_layers: string[]
 }
 
@@ -77,6 +114,10 @@ export function runStrategyDimensionResearch(query: {
   ruleNames: string[]
   nonlinearSampleLimit?: number
   ridgeLambda?: number
+  holdingPeriod?: number
 }) {
-  return invoke<StrategyDimensionResearchData>('run_strategy_dimension_research', query)
+  return invoke<StrategyDimensionResearchData>(
+    'run_strategy_dimension_research',
+    query,
+  )
 }

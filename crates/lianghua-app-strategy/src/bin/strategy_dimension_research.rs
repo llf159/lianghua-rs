@@ -8,9 +8,9 @@ use lianghua_app_strategy::dimension_research::{
 
 fn main() {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
-    if arguments.is_empty() || arguments.len() > 5 {
+    if arguments.is_empty() || arguments.len() > 6 {
         eprintln!(
-            "用法: strategy_dimension_research <数据目录> [开始日期] [结束日期] [规则数] [非线性样本数]"
+            "用法: strategy_dimension_research <数据目录> [开始日期] [结束日期] [规则数] [非线性样本数] [持有交易日]"
         );
         process::exit(2);
     }
@@ -57,6 +57,15 @@ fn main() {
             process::exit(2);
         })
         .unwrap_or(defaults.default_nonlinear_sample_limit);
+    let holding_period = arguments
+        .get(5)
+        .map(|value| value.parse::<usize>())
+        .transpose()
+        .unwrap_or_else(|error| {
+            eprintln!("持有交易日必须是正整数:{error}");
+            process::exit(2);
+        })
+        .unwrap_or(defaults.default_holding_period);
 
     let mut rule_options = defaults.rule_options;
     rule_options.sort_by(|left, right| {
@@ -72,7 +81,7 @@ fn main() {
         .collect::<Vec<_>>();
 
     println!(
-        "开始研究:区间={start_date}..{end_date},规则数={},非线性样本上限={nonlinear_sample_limit}",
+        "开始研究:区间={start_date}..{end_date},规则数={},非线性样本上限={nonlinear_sample_limit},持有={holding_period}日",
         rule_names.len()
     );
     let started_at = Instant::now();
@@ -83,6 +92,7 @@ fn main() {
         rule_names,
         Some(nonlinear_sample_limit),
         None,
+        Some(holding_period),
     ) {
         Ok(value) => value,
         Err(error) => {
