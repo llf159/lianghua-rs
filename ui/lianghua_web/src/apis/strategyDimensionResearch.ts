@@ -38,6 +38,8 @@ export type StrategyDimensionPairMetrics = {
   nonlinear_sample_count: number
   return_pearson?: number | null
   return_shared_day_count: number
+  style_distance?: number | null
+  style_shared_dimension_count: number
 }
 
 export type StrategyDimensionBasisCoefficient = {
@@ -73,6 +75,18 @@ export type StrategyDimensionReturnIncrement = {
   test_incremental_positive_ratio?: number | null
 }
 
+export type StrategyDimensionStyleValue = {
+  key: string
+  label: string
+  value?: number | null
+}
+
+export type StrategyDimensionStyleExposure = {
+  rule_name: string
+  sample_count: number
+  dimensions: StrategyDimensionStyleValue[]
+}
+
 export type StrategyDimensionResearchData = {
   start_date: string
   end_date: string
@@ -97,6 +111,7 @@ export type StrategyDimensionResearchData = {
   oos_test_start_date?: string | null
   return_summaries: StrategyDimensionReturnSummary[]
   return_increments: StrategyDimensionReturnIncrement[]
+  style_exposures: StrategyDimensionStyleExposure[]
   pending_layers: string[]
 }
 

@@ -609,6 +609,8 @@ export default function StrategyDimensionResearchPage() {
                     <th>日度距离相关</th>
                     <th>持仓收益相关</th>
                     <th>收益共同日期</th>
+                    <th>八维风格距离</th>
+                    <th>共同风格维度</th>
                     <th>解读</th>
                   </tr>
                 </thead>
@@ -630,6 +632,8 @@ export default function StrategyDimensionResearchPage() {
                       </td>
                       <td>{formatNumber(pair.return_pearson)}</td>
                       <td>{pair.return_shared_day_count.toLocaleString()}</td>
+                      <td>{formatNumber(pair.style_distance)}</td>
+                      <td>{pair.style_shared_dimension_count}</td>
                       <td>
                         <span
                           className={`dimension-research-strength strength-${dependenceLabel(pair.distance_correlation_daily_mean)}`}
@@ -649,10 +653,50 @@ export default function StrategyDimensionResearchPage() {
           <section className="dimension-research-section">
             <div className="dimension-research-section-heading">
               <div>
+                <h3>八维策略风格暴露</h3>
+                <p className="dimension-research-section-note">
+                  数值统一在 -1 到 1：正方向依次表示偏近期上涨、接近 20 日突破、连续触发、
+                  60 日高位、波动放大、高流动性、随指数（{result.return_index_ts_code}）上涨日增加触发、正残差占优；负值表示相反风格。
+                  量价维度使用每日横截面百分位，避免价格和成交额量纲直接混合。
+                </p>
+              </div>
+            </div>
+            <div className="dimension-research-table-wrap dimension-research-pair-table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>规则</th>
+                    <th>有效触发样本</th>
+                    {(result.style_exposures[0]?.dimensions ?? []).map(
+                      (dimension) => (
+                        <th key={dimension.key}>{dimension.label}</th>
+                      ),
+                    )}
+                  </tr>
+                </thead>
+                <tbody>
+                  {result.style_exposures.map((exposure) => (
+                    <tr key={exposure.rule_name}>
+                      <th>{exposure.rule_name}</th>
+                      <td>{exposure.sample_count.toLocaleString()}</td>
+                      {exposure.dimensions.map((dimension) => (
+                        <td key={dimension.key}>{formatNumber(dimension.value)}</td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section className="dimension-research-section">
+            <div className="dimension-research-section-heading">
+              <div>
                 <h3>可交易持仓收益路径</h3>
                 <p className="dimension-research-section-note">
                   评分日确认后从下一交易日开盘进入，持有 {result.holding_period}{" "}
-                  个交易日； 股票收益扣除 {result.return_index_beta}×指数、
+                  个交易日； 股票收益扣除 {result.return_index_beta}×指数（
+                  {result.return_index_ts_code}）、
                   {result.return_concept_beta}×概念和{" "}
                   {result.return_industry_beta}×行业收益。 HAC 滞后阶数为{" "}
                   {Math.max(0, result.holding_period - 1)}。

@@ -11,7 +11,7 @@ use lianghua_backtest::simulate::{
 };
 use serde::Serialize;
 
-use crate::data::{result_db_path, source_db_path};
+use crate::data::{load_trade_date_list, result_db_path, source_db_path};
 
 const MAX_RESEARCH_STRATEGY_COUNT: usize = 20;
 const DEFAULT_NONLINEAR_SAMPLE_LIMIT: usize = 512;
@@ -23,11 +23,21 @@ const RETURN_MIN_SAMPLES_PER_DAY: usize = 5;
 const RETURN_MIN_LISTED_TRADE_DAYS: usize = 60;
 const OOS_TRAIN_RATIO: f64 = 0.7;
 const RETURN_STOCK_ADJ_TYPE: &str = "qfq";
-const RETURN_INDEX_TS_CODE: &str = "000300.SH";
+const RETURN_INDEX_TS_CODES: [&str; 2] = ["000300.SH", "399300.SZ"];
 const RETURN_INDEX_BETA: f64 = 0.5;
 const RETURN_CONCEPT_BETA: f64 = 0.2;
 const RETURN_INDUSTRY_BETA: f64 = 0.0;
 const VARIANCE_EPS: f64 = 1e-12;
+const STYLE_DIMENSIONS: [(&str, &str); 8] = [
+    ("direction_reaction", "方向反应"),
+    ("entry_shape", "入场形态"),
+    ("time_scale", "时间尺度"),
+    ("price_position", "价格位置"),
+    ("volatility_jump", "波动与跳跃"),
+    ("liquidity", "量能与流动性"),
+    ("market_regime", "市场状态依赖"),
+    ("return_shape", "收益形态"),
+];
 
 #[derive(Debug, Clone, Serialize)]
 pub struct StrategyDimensionRuleOption {
@@ -71,6 +81,8 @@ pub struct StrategyDimensionPairMetrics {
     pub nonlinear_sample_count: usize,
     pub return_pearson: Option<f64>,
     pub return_shared_day_count: usize,
+    pub style_distance: Option<f64>,
+    pub style_shared_dimension_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -94,6 +106,20 @@ pub struct StrategyDimensionReturnIncrement {
     pub test_incremental_mean: Option<f64>,
     pub test_incremental_hac_t_value: Option<f64>,
     pub test_incremental_positive_ratio: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StrategyDimensionStyleValue {
+    pub key: String,
+    pub label: String,
+    pub value: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StrategyDimensionStyleExposure {
+    pub rule_name: String,
+    pub sample_count: usize,
+    pub dimensions: Vec<StrategyDimensionStyleValue>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -135,6 +161,7 @@ pub struct StrategyDimensionResearchData {
     pub oos_test_start_date: Option<String>,
     pub return_summaries: Vec<StrategyDimensionReturnSummary>,
     pub return_increments: Vec<StrategyDimensionReturnIncrement>,
+    pub style_exposures: Vec<StrategyDimensionStyleExposure>,
     pub pending_layers: Vec<String>,
 }
 
@@ -361,6 +388,15 @@ pub fn run_strategy_dimension_research(
                     .get(&pair_key)
                     .map(|value| value.1)
                     .unwrap_or(0),
+                style_distance: return_layer
+                    .style_distances
+                    .get(&pair_key)
+                    .and_then(|value| value.0),
+                style_shared_dimension_count: return_layer
+                    .style_distances
+                    .get(&pair_key)
+                    .map(|value| value.1)
+                    .unwrap_or(0),
             });
         }
     }
@@ -405,7 +441,7 @@ pub fn run_strategy_dimension_research(
         return_min_samples_per_day: RETURN_MIN_SAMPLES_PER_DAY,
         return_min_listed_trade_days: RETURN_MIN_LISTED_TRADE_DAYS,
         return_stock_adj_type: RETURN_STOCK_ADJ_TYPE.to_string(),
-        return_index_ts_code: RETURN_INDEX_TS_CODE.to_string(),
+        return_index_ts_code: return_layer.index_ts_code,
         return_index_beta: RETURN_INDEX_BETA,
         return_concept_beta: RETURN_CONCEPT_BETA,
         return_industry_beta: RETURN_INDUSTRY_BETA,
@@ -413,15 +449,19 @@ pub fn run_strategy_dimension_research(
         oos_test_start_date: return_layer.oos_test_start_date,
         return_summaries: return_layer.summaries,
         return_increments: return_layer.increments,
-        pending_layers: vec!["结果库尚未物化八维量价风格暴露，当前不输出风格距离".to_string()],
+        style_exposures: return_layer.style_exposures,
+        pending_layers: Vec::new(),
     })
 }
 
 struct ReturnLayerData {
+    index_ts_code: String,
     pair_correlations: HashMap<(String, String), (Option<f64>, usize)>,
     oos_test_start_date: Option<String>,
     summaries: Vec<StrategyDimensionReturnSummary>,
     increments: Vec<StrategyDimensionReturnIncrement>,
+    style_exposures: Vec<StrategyDimensionStyleExposure>,
+    style_distances: HashMap<(String, String), (Option<f64>, usize)>,
 }
 
 fn load_return_layer(
@@ -449,12 +489,32 @@ fn load_return_layer(
         backtest_period: holding_period,
         min_listed_trade_days: RETURN_MIN_LISTED_TRADE_DAYS,
     };
+    let index_ts_code = source_connection
+        .query_row(
+            "SELECT ts_code
+             FROM stock_data
+             WHERE adj_type = 'ind' AND trade_date >= ? AND trade_date <= ?
+               AND ts_code IN ('000300.SH', '399300.SZ')
+               AND TRY_CAST(pct_chg AS DOUBLE) IS NOT NULL
+             GROUP BY ts_code
+             ORDER BY COUNT(*) DESC,
+                      CASE ts_code WHEN '000300.SH' THEN 0 ELSE 1 END
+             LIMIT 1",
+            params![start_date, end_date],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|error| {
+            format!(
+                "研究区间缺少沪深300指数行情({}):{error}",
+                RETURN_INDEX_TS_CODES.join("或")
+            )
+        })?;
     let metrics = calc_all_rule_layer_metrics_from_db(
         &source_connection,
         source_path,
         rule_names,
         RETURN_STOCK_ADJ_TYPE,
-        RETURN_INDEX_TS_CODE,
+        &index_ts_code,
         RETURN_INDEX_BETA,
         RETURN_CONCEPT_BETA,
         RETURN_INDUSTRY_BETA,
@@ -667,12 +727,343 @@ fn load_return_layer(
         });
     }
 
+    let (style_exposures, style_distances) = load_style_layer(
+        &source_connection,
+        source_path,
+        start_date,
+        end_date,
+        rule_names,
+        &returns_by_rule,
+        &index_ts_code,
+    )?;
+
     Ok(ReturnLayerData {
+        index_ts_code,
         pair_correlations,
         oos_test_start_date,
         summaries,
         increments,
+        style_exposures,
+        style_distances,
     })
+}
+
+fn load_style_layer(
+    source_connection: &Connection,
+    source_path: &str,
+    start_date: &str,
+    end_date: &str,
+    rule_names: &[String],
+    returns_by_rule: &HashMap<String, BTreeMap<String, f64>>,
+    index_ts_code: &str,
+) -> Result<
+    (
+        Vec<StrategyDimensionStyleExposure>,
+        HashMap<(String, String), (Option<f64>, usize)>,
+    ),
+    String,
+> {
+    let result_path = result_db_path(source_path);
+    let result_path = result_path
+        .to_str()
+        .ok_or_else(|| "结果库路径不是有效UTF-8".to_string())?
+        .replace('\'', "''");
+    source_connection
+        .execute_batch(&format!(
+            "ATTACH '{result_path}' AS dimension_result (READ_ONLY)"
+        ))
+        .map_err(|error| format!("挂载结果库以计算风格暴露失败:{error}"))?;
+
+    let trade_dates = load_trade_date_list(source_path)?;
+    let start_index = trade_dates.partition_point(|date| date.as_str() < start_date);
+    let warmup_start_date = trade_dates
+        .get(start_index.saturating_sub(60))
+        .map(String::as_str)
+        .unwrap_or(start_date);
+    let placeholders = std::iter::repeat_n("?", rule_names.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let feature_sql = format!(
+        "WITH history AS (
+             SELECT ts_code, trade_date,
+                    TRY_CAST(close AS DOUBLE) AS close_price,
+                    TRY_CAST(high AS DOUBLE) AS high_price,
+                    TRY_CAST(low AS DOUBLE) AS low_price,
+                    ABS(TRY_CAST(pct_chg AS DOUBLE)) AS abs_pct,
+                    TRY_CAST(amount AS DOUBLE) AS amount_value,
+                    LAG(TRY_CAST(close AS DOUBLE), 5) OVER stock_window AS close_lag_5,
+                    MAX(TRY_CAST(high AS DOUBLE)) OVER (
+                        PARTITION BY ts_code ORDER BY trade_date
+                        ROWS BETWEEN 20 PRECEDING AND 1 PRECEDING
+                    ) AS prior_high_20,
+                    MIN(TRY_CAST(low AS DOUBLE)) OVER (
+                        PARTITION BY ts_code ORDER BY trade_date
+                        ROWS BETWEEN 59 PRECEDING AND CURRENT ROW
+                    ) AS low_60,
+                    MAX(TRY_CAST(high AS DOUBLE)) OVER (
+                        PARTITION BY ts_code ORDER BY trade_date
+                        ROWS BETWEEN 59 PRECEDING AND CURRENT ROW
+                    ) AS high_60,
+                    AVG(ABS(TRY_CAST(pct_chg AS DOUBLE))) OVER (
+                        PARTITION BY ts_code ORDER BY trade_date
+                        ROWS BETWEEN 20 PRECEDING AND 1 PRECEDING
+                    ) AS prior_abs_pct_20
+             FROM stock_data
+             WHERE adj_type = '{RETURN_STOCK_ADJ_TYPE}'
+               AND trade_date >= ? AND trade_date <= ?
+             WINDOW stock_window AS (PARTITION BY ts_code ORDER BY trade_date)
+         ), features AS (
+             SELECT history.ts_code, history.trade_date,
+                    close_price / close_lag_5 - 1.0 AS direction_raw,
+                    close_price / prior_high_20 - 1.0 AS entry_raw,
+                    (close_price - low_60) / NULLIF(high_60 - low_60, 0.0) AS position_raw,
+                    abs_pct / NULLIF(prior_abs_pct_20, 0.0) AS volatility_raw,
+                    LN(amount_value) AS liquidity_raw
+             FROM history
+             INNER JOIN dimension_result.main.score_summary AS summary
+               ON summary.ts_code = history.ts_code
+              AND summary.trade_date = history.trade_date
+             WHERE history.trade_date >= ? AND history.trade_date <= ?
+               AND close_price > 0.0 AND close_lag_5 > 0.0 AND prior_high_20 > 0.0
+               AND high_60 > low_60 AND prior_abs_pct_20 > 0.0 AND amount_value > 0.0
+         ), ranked AS (
+             SELECT ts_code, trade_date,
+                    2.0 * PERCENT_RANK() OVER (PARTITION BY trade_date ORDER BY direction_raw) - 1.0 AS direction_exposure,
+                    2.0 * PERCENT_RANK() OVER (PARTITION BY trade_date ORDER BY entry_raw) - 1.0 AS entry_exposure,
+                    2.0 * PERCENT_RANK() OVER (PARTITION BY trade_date ORDER BY position_raw) - 1.0 AS position_exposure,
+                    2.0 * PERCENT_RANK() OVER (PARTITION BY trade_date ORDER BY volatility_raw) - 1.0 AS volatility_exposure,
+                    2.0 * PERCENT_RANK() OVER (PARTITION BY trade_date ORDER BY liquidity_raw) - 1.0 AS liquidity_exposure
+             FROM features
+         )
+         SELECT details.rule_name, COUNT(*),
+                AVG(direction_exposure), AVG(entry_exposure), AVG(position_exposure),
+                AVG(volatility_exposure), AVG(liquidity_exposure)
+         FROM ranked
+         INNER JOIN dimension_result.main.rule_details AS details
+           ON details.ts_code = ranked.ts_code AND details.trade_date = ranked.trade_date
+         WHERE details.rule_name IN ({placeholders})
+         GROUP BY details.rule_name"
+    );
+    let mut feature_params = vec![
+        warmup_start_date.to_string(),
+        end_date.to_string(),
+        start_date.to_string(),
+        end_date.to_string(),
+    ];
+    feature_params.extend(rule_names.iter().cloned());
+    let mut style_values = rule_names
+        .iter()
+        .map(|rule_name| (rule_name.clone(), ([None; STYLE_DIMENSIONS.len()], 0usize)))
+        .collect::<HashMap<_, _>>();
+    let mut statement = source_connection
+        .prepare(&feature_sql)
+        .map_err(|error| format!("准备八维风格特征查询失败:{error}"))?;
+    let mut rows = statement
+        .query(params_from_iter(feature_params.iter()))
+        .map_err(|error| format!("查询八维风格特征失败:{error}"))?;
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| format!("读取八维风格特征失败:{error}"))?
+    {
+        let rule_name: String = row
+            .get(0)
+            .map_err(|error| format!("读取风格规则名失败:{error}"))?;
+        if let Some((values, sample_count)) = style_values.get_mut(&rule_name) {
+            *sample_count = read_usize(row.get::<_, i64>(1), "风格样本数")?;
+            values[0] = row
+                .get(2)
+                .map_err(|error| format!("读取方向暴露失败:{error}"))?;
+            values[1] = row
+                .get(3)
+                .map_err(|error| format!("读取入场暴露失败:{error}"))?;
+            values[3] = row
+                .get(4)
+                .map_err(|error| format!("读取位置暴露失败:{error}"))?;
+            values[4] = row
+                .get(5)
+                .map_err(|error| format!("读取波动暴露失败:{error}"))?;
+            values[5] = row
+                .get(6)
+                .map_err(|error| format!("读取流动性暴露失败:{error}"))?;
+        }
+    }
+    drop(rows);
+    drop(statement);
+
+    let persistence_sql = format!(
+        "WITH dates AS (
+             SELECT trade_date, DENSE_RANK() OVER (ORDER BY trade_date) AS date_index
+             FROM (SELECT DISTINCT trade_date FROM dimension_result.main.score_summary
+                   WHERE trade_date >= ? AND trade_date <= ?)
+         ), selected AS (
+             SELECT details.rule_name, details.ts_code, dates.date_index,
+                    LAG(dates.date_index) OVER (
+                        PARTITION BY details.rule_name, details.ts_code ORDER BY dates.date_index
+                    ) AS previous_index
+             FROM dimension_result.main.rule_details AS details
+             INNER JOIN dates USING (trade_date)
+             WHERE details.rule_name IN ({placeholders})
+         )
+         SELECT rule_name,
+                2.0 * AVG(CASE WHEN previous_index IS NULL THEN NULL
+                               WHEN date_index = previous_index + 1 THEN 1.0 ELSE 0.0 END) - 1.0
+         FROM selected GROUP BY rule_name"
+    );
+    let mut persistence_params = vec![start_date.to_string(), end_date.to_string()];
+    persistence_params.extend(rule_names.iter().cloned());
+    let mut statement = source_connection
+        .prepare(&persistence_sql)
+        .map_err(|error| format!("准备策略持续性查询失败:{error}"))?;
+    let mut rows = statement
+        .query(params_from_iter(persistence_params.iter()))
+        .map_err(|error| format!("查询策略持续性失败:{error}"))?;
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| format!("读取策略持续性失败:{error}"))?
+    {
+        let rule_name: String = row
+            .get(0)
+            .map_err(|error| format!("读取持续性规则名失败:{error}"))?;
+        if let Some((values, _)) = style_values.get_mut(&rule_name) {
+            values[2] = row
+                .get::<_, Option<f64>>(1)
+                .map_err(|error| format!("读取时间尺度暴露失败:{error}"))?
+                .map(|value| value.clamp(-1.0, 1.0));
+        }
+    }
+    drop(rows);
+    drop(statement);
+
+    let market_sql = format!(
+        "WITH market AS (
+             SELECT trade_date, TRY_CAST(pct_chg AS DOUBLE) AS market_return
+             FROM stock_data
+             WHERE ts_code = ? AND adj_type = 'ind' AND trade_date >= ? AND trade_date <= ?
+         ), universe AS (
+             SELECT trade_date, COUNT(*) AS universe_count
+             FROM dimension_result.main.score_summary
+             WHERE trade_date >= ? AND trade_date <= ? GROUP BY trade_date
+         ), selected_rules AS (
+             SELECT DISTINCT rule_name FROM dimension_result.main.rule_details
+             WHERE rule_name IN ({placeholders})
+         ), daily_rule AS (
+             SELECT rule_name, trade_date, COUNT(*) AS trigger_count
+             FROM dimension_result.main.rule_details
+             WHERE rule_name IN ({placeholders}) AND trade_date >= ? AND trade_date <= ?
+             GROUP BY rule_name, trade_date
+         )
+         SELECT selected_rules.rule_name,
+                CORR(COALESCE(daily_rule.trigger_count, 0)::DOUBLE / universe.universe_count,
+                     market.market_return)
+         FROM selected_rules CROSS JOIN market
+         INNER JOIN universe USING (trade_date)
+         LEFT JOIN daily_rule ON daily_rule.rule_name = selected_rules.rule_name
+                             AND daily_rule.trade_date = market.trade_date
+         WHERE isfinite(market.market_return)
+         GROUP BY selected_rules.rule_name"
+    );
+    let mut market_params = vec![
+        index_ts_code.to_string(),
+        start_date.to_string(),
+        end_date.to_string(),
+        start_date.to_string(),
+        end_date.to_string(),
+    ];
+    market_params.extend(rule_names.iter().cloned());
+    market_params.extend(rule_names.iter().cloned());
+    market_params.push(start_date.to_string());
+    market_params.push(end_date.to_string());
+    let mut statement = source_connection
+        .prepare(&market_sql)
+        .map_err(|error| format!("准备市场状态依赖查询失败:{error}"))?;
+    let mut rows = statement
+        .query(params_from_iter(market_params.iter()))
+        .map_err(|error| format!("查询市场状态依赖失败:{error}"))?;
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| format!("读取市场状态依赖失败:{error}"))?
+    {
+        let rule_name: String = row
+            .get(0)
+            .map_err(|error| format!("读取市场依赖规则名失败:{error}"))?;
+        if let Some((values, _)) = style_values.get_mut(&rule_name) {
+            values[6] = row
+                .get::<_, Option<f64>>(1)
+                .map_err(|error| format!("读取市场状态依赖失败:{error}"))?
+                .map(|value| value.clamp(-1.0, 1.0));
+        }
+    }
+
+    for rule_name in rule_names {
+        let mut positive = 0.0;
+        let mut negative = 0.0;
+        for value in returns_by_rule[rule_name].values() {
+            if *value > 0.0 {
+                positive += value;
+            } else if *value < 0.0 {
+                negative += value.abs();
+            }
+        }
+        if positive + negative > VARIANCE_EPS {
+            style_values
+                .get_mut(rule_name)
+                .expect("规则风格槽必须存在")
+                .0[7] = Some(((positive - negative) / (positive + negative)).clamp(-1.0, 1.0));
+        }
+    }
+
+    let style_exposures = rule_names
+        .iter()
+        .map(|rule_name| {
+            let (values, sample_count) = style_values[rule_name];
+            StrategyDimensionStyleExposure {
+                rule_name: rule_name.clone(),
+                sample_count,
+                dimensions: STYLE_DIMENSIONS
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (key, label))| StrategyDimensionStyleValue {
+                        key: (*key).to_string(),
+                        label: (*label).to_string(),
+                        value: values[index],
+                    })
+                    .collect(),
+            }
+        })
+        .collect::<Vec<_>>();
+    let exposure_by_rule = style_exposures
+        .iter()
+        .map(|exposure| (exposure.rule_name.as_str(), exposure))
+        .collect::<HashMap<_, _>>();
+    let mut style_distances = HashMap::new();
+    for left_index in 0..rule_names.len() {
+        for right_index in (left_index + 1)..rule_names.len() {
+            let left_name = &rule_names[left_index];
+            let right_name = &rule_names[right_index];
+            let left = exposure_by_rule[left_name.as_str()];
+            let right = exposure_by_rule[right_name.as_str()];
+            let squared_differences = left
+                .dimensions
+                .iter()
+                .zip(right.dimensions.iter())
+                .filter_map(|(left, right)| left.value.zip(right.value))
+                .map(|(left, right)| ((left - right) / 2.0).powi(2))
+                .collect::<Vec<_>>();
+            let shared_count = squared_differences.len();
+            let distance = (!squared_differences.is_empty()).then(|| {
+                (squared_differences.iter().sum::<f64>() / shared_count as f64)
+                    .sqrt()
+                    .clamp(0.0, 1.0)
+            });
+            let key = if left_name < right_name {
+                (left_name.clone(), right_name.clone())
+            } else {
+                (right_name.clone(), left_name.clone())
+            };
+            style_distances.insert(key, (distance, shared_count));
+        }
+    }
+    Ok((style_exposures, style_distances))
 }
 
 fn open_result_database(source_path: &str) -> Result<Connection, String> {
@@ -962,9 +1353,14 @@ mod tests {
             "ts_code,c1,c2,c3,concept\n",
         )
         .unwrap();
+        let trade_calendar = std::iter::once("cal_date".to_string())
+            .chain((1..=60).map(|index| format!("202300{index:02}")))
+            .chain(["20240102".to_string(), "20240103".to_string()])
+            .collect::<Vec<_>>()
+            .join("\n");
         fs::write(
             source_dir.join("trade_calendar.csv"),
-            "cal_date\n20240102\n20240103\n",
+            format!("{trade_calendar}\n"),
         )
         .unwrap();
         let source_connection =
@@ -977,15 +1373,28 @@ mod tests {
                     adj_type VARCHAR,
                     pct_chg DOUBLE,
                     open DOUBLE,
-                    close DOUBLE
+                    close DOUBLE,
+                    high DOUBLE,
+                    low DOUBLE,
+                    amount DOUBLE
                  );
+                 INSERT INTO stock_data
+                 SELECT '000001.SZ', printf('202300%02d', value), 'qfq', 0.2,
+                        9.0 + value * 0.01, 9.0 + value * 0.01,
+                        9.1 + value * 0.01, 8.9 + value * 0.01, 1000.0 + value
+                 FROM range(1, 61) AS days(value);
+                 INSERT INTO stock_data
+                 SELECT '000002.SZ', printf('202300%02d', value), 'qfq', -0.1,
+                        21.0 - value * 0.01, 21.0 - value * 0.01,
+                        21.1 - value * 0.01, 20.9 - value * 0.01, 2000.0 - value
+                 FROM range(1, 61) AS days(value);
                  INSERT INTO stock_data VALUES
-                    ('000001.SZ', '20240102', 'qfq', 0.0, 10.0, 10.0),
-                    ('000001.SZ', '20240103', 'qfq', 1.0, 10.0, 10.1),
-                    ('000002.SZ', '20240102', 'qfq', 0.0, 20.0, 20.0),
-                    ('000002.SZ', '20240103', 'qfq', -1.0, 20.0, 19.8),
-                    ('000300.SH', '20240102', 'ind', 0.0, 100.0, 100.0),
-                    ('000300.SH', '20240103', 'ind', 0.0, 100.0, 100.0);",
+                    ('000001.SZ', '20240102', 'qfq', 0.0, 10.0, 10.0, 10.1, 9.9, 1000.0),
+                    ('000001.SZ', '20240103', 'qfq', 1.0, 10.0, 10.1, 10.2, 9.9, 1100.0),
+                    ('000002.SZ', '20240102', 'qfq', 0.0, 20.0, 20.0, 20.2, 19.8, 2000.0),
+                    ('000002.SZ', '20240103', 'qfq', -1.0, 20.0, 19.8, 20.1, 19.7, 1900.0),
+                    ('399300.SZ', '20240102', 'ind', 0.0, 100.0, 100.0, 100.0, 100.0, 0.0),
+                    ('399300.SZ', '20240103', 'ind', 0.0, 100.0, 100.0, 100.0, 100.0, 0.0);",
             )
             .unwrap();
         drop(source_connection);
@@ -1025,6 +1434,12 @@ mod tests {
         assert_eq!(result.pair_metrics[0].nonlinear_sample_count, 2);
         assert!((result.pair_metrics[0].score_spearman_daily_mean.unwrap() - 1.0).abs() < 1e-12);
         assert_eq!(result.orthogonal_diagnostics.len(), 2);
+        assert_eq!(result.return_index_ts_code, "399300.SZ");
+        assert_eq!(result.style_exposures.len(), 2);
+        assert!(result.style_exposures[0].dimensions[0].value.is_some());
+        assert!(result.pair_metrics[0].style_distance.is_some());
+        assert!(result.pair_metrics[0].style_shared_dimension_count >= 5);
+        assert!(result.pending_layers.is_empty());
 
         std::fs::remove_dir_all(source_dir).unwrap();
     }

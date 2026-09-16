@@ -107,6 +107,33 @@ fn main() {
         result.strategies.len(),
         result.pair_metrics.len()
     );
+    println!("收益基准指数:{}", result.return_index_ts_code);
+    println!("持仓收益有效日期:");
+    for summary in &result.return_summaries {
+        println!(
+            "  {}: days={}, mean={:.6}, HAC t={:.3}",
+            summary.rule_name,
+            summary.valid_day_count,
+            summary.avg_residual_return.unwrap_or(f64::NAN),
+            summary.hac_t_value.unwrap_or(f64::NAN)
+        );
+    }
+    println!("市场依赖 / 收益形态:");
+    for exposure in &result.style_exposures {
+        println!(
+            "  {}: market={:.4}, return_shape={:.4}",
+            exposure.rule_name,
+            exposure.dimensions[6].value.unwrap_or(f64::NAN),
+            exposure.dimensions[7].value.unwrap_or(f64::NAN)
+        );
+    }
+    println!("样本外增量有效样本:");
+    for increment in &result.return_increments {
+        println!(
+            "  {}: train={}, test={}",
+            increment.rule_name, increment.train_sample_count, increment.test_sample_count
+        );
+    }
 
     let mut pairs = result.pair_metrics.iter().collect::<Vec<_>>();
     pairs.sort_by(|left, right| {
