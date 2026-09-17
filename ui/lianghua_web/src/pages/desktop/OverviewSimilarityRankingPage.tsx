@@ -243,7 +243,8 @@ export default function OverviewSimilarityRankingPage() {
           <th>置信度</th>
           <th>相似度</th>
           <th>三日优排名</th>
-          <th>成功 / 失败模板</th>
+          <th>最相似成功模板</th>
+          <th>最相似失败模板</th>
           <th>概念</th>
         </tr>
       </thead>
@@ -465,8 +466,10 @@ export default function OverviewSimilarityRankingPage() {
                         {formatNumber(row.averageSimilarity)} / {formatNumber(row.bestSimilarity)}
                       </td>
                       <td>{row.bestRank3d ?? '--'}</td>
-                      <td className="trigger-sim-rules-cell">
+                      <td className="trigger-sim-template-cell">
                         {renderTemplateMatch('成功', successMatch)}
+                      </td>
+                      <td className="trigger-sim-template-cell">
                         {renderTemplateMatch('失败', failureMatch)}
                       </td>
                       <td className="trigger-sim-concept-cell" title={conceptText}>

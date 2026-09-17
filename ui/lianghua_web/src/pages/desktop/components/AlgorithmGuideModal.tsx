@@ -100,7 +100,7 @@ const ALGORITHM_SECTIONS: AlgorithmSection[] = [
         heading: '走势相似排行榜：模板质量、预测信号与排行分',
         description: '全市场榜先在每个历史截面把未来超额、MFE、MAE 和上涨持续性转换为横截面百分位，合成模板质量；只保留首次跨入成功区（≥ 0.80）或失败区（≤ 0.20）且窗口内有策略触发的模板。当前股票分别检索最相似的成功/失败模板并加权预测质量。',
         formula: '模板质量 = 45% × 超额百分位 + 25% × MFE百分位 + 20% × MAE百分位 + 10% × 上涨持续性百分位\nconfidence = √(N_eff / (N_eff + 8))\nprediction_signal = 2 × (预测质量 - 0.5) × confidence\nranking_score = 按 prediction_signal 排名后的 0~100 线性名次分',
-        interpretation: '至少需要 5 个样本且 N_eff ≥ 3 才产生 prediction_signal。信号范围约为 [-1, 1]：正值偏向成功模板，负值偏向失败模板，绝对值同时受样本置信度压缩。ranking_score 只是榜内相对名次刻度，不是相似度、收益率或成功概率。MAE 百分位按数值从小到大排列，因此“跌得没那么深”的样本排名更高。',
+        interpretation: 'N_eff ≥ 8（达到收缩先验强度）才产生 prediction_signal；由于 N_eff 不会超过原始样本数，这也同时要求至少 8 个评级样本。信号范围约为 [-1, 1]：正值偏向成功模板，负值偏向失败模板，绝对值同时受样本置信度压缩。ranking_score 只是榜内相对名次刻度，不是相似度、收益率或成功概率。MAE 百分位按数值从小到大排列，因此“跌得没那么深”的样本排名更高。',
       },
     ],
   },
@@ -225,10 +225,10 @@ const ALGORITHM_SECTIONS: AlgorithmSection[] = [
         interpretation: '它能判断一般依赖强弱，但不提供方向，也不是显著性概率。',
       },
       {
-        heading: '正交残差：顺序就是研究假设',
-        description: '第 N 条规则只由前 N−1 条规则解释。改变规则顺序后，线性残差和解释比例也会改变。',
+        heading: '正交残差：核心策略组是研究基准',
+        description: '页面可选择一个或多个代表性核心策略，系统将核心组放在内部序列前面；第 N 条规则仍由前 N−1 条规则解释。',
         formula: 'score_N = 前序规则线性拟合值 + residual_N\nresidual_variance_ratio = Var(residual_N) / Var(score_N)',
-        interpretation: '成熟的基准策略应放在前面，候选策略放在后面。残差比例越高，当前规则在线性层面留下的增量越多。',
+        interpretation: '核心组用于对齐已有代表能力，非核心规则用于寻找新增信息。残差比例越高，当前规则在线性层面留下的增量越多；组内使用稳定顺序。',
       },
       {
         heading: '可交易收益路径与收益相关',
@@ -237,10 +237,10 @@ const ALGORITHM_SECTIONS: AlgorithmSection[] = [
         interpretation: '收益相关回答实际赚亏是否同步。它可能与触发、分数相关明显不同；只有两条策略都有有效收益的共同日期才进入计算。',
       },
       {
-        heading: '顺序样本外收益增量',
-        description: '按时间将有效日期前 70% 作为训练期，只在训练期拟合候选规则对前序规则的岭回归系数；后 30% 固定系数并检验候选的未解释收益。',
+        heading: '相对核心组的样本外收益增量',
+        description: '按时间将有效日期前 70% 作为训练期，只在训练期拟合候选规则对核心组及此前规则的岭回归系数；后 30% 固定系数并检验候选的未解释收益。',
         formula: 'incremental_return_test = candidate_return - Σ(训练期系数ᵢ × prior_returnᵢ)\nHAC lag = holding_period - 1',
-        interpretation: '规则顺序决定基准集合。正的样本外未解释收益表示候选在这段检验期提供了前序规则未覆盖的收益，但仍需结合 HAC t 值、检验样本数和多次研究造成的数据窥探。',
+        interpretation: '核心策略选择决定主要基准集合。正的样本外未解释收益表示候选在这段检验期提供了已有规则未覆盖的收益，但仍需结合 HAC t 值、检验样本数和多次研究造成的数据窥探。',
       },
       {
         heading: '结论边界',

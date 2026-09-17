@@ -641,7 +641,7 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
               {diffData.backupLabel} 对比当前生效 {diffData.activeLabel}，
               {diffData.changedLineCount === 0
                 ? '没有差异。'
-                : `共 ${diffData.changedLineCount} 行差异。`}
+                : `共 ${diffData.changedLineCount} 行差异；+ 表示设为生效后会加入当前策略，- 表示会从当前策略移除。`}
             </p>
           </div>
           <button className="strategy-asset-btn strategy-asset-btn-ghost" type="button" onClick={() => setDiffData(null)} disabled={isBusy}>
@@ -660,9 +660,9 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
               <span>{line.activeLine ?? ''}</span>
               <code>
                 {line.kind === 'backup'
-                  ? '- '
+                  ? '+ '
                   : line.kind === 'active'
-                    ? '+ '
+                    ? '- '
                     : line.kind === 'omitted'
                       ? '... '
                       : '  '}

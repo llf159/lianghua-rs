@@ -19,7 +19,7 @@ use crate::data::{ind_toml_path, score_rule_path, stock_list_path};
 use crate::utils::utils::board_category;
 use lianghua_app_shared::build_total_mv_map;
 
-const ALGORITHM_VERSION: &str = "outcome-reverse-startup-ranking-v9";
+const ALGORITHM_VERSION: &str = "outcome-reverse-startup-ranking-v10";
 const SUCCESS_QUALITY_THRESHOLD: f64 = 0.80;
 const FAILURE_QUALITY_THRESHOLD: f64 = 0.20;
 const SEMANTIC_DEFINITION_SIGNATURE_PREFIX: &str = "definitions-v1|";
@@ -2425,8 +2425,8 @@ pub fn run_strategy_trigger_similarity_ranking(
                             });
                         let predicted_quality = (quality_weight_sum > EPS)
                             .then_some(quality_weighted_sum / quality_weight_sum);
-                        let prediction_signal = (summary.sample_count >= (5)
-                            && summary.effective_sample_count >= (3.0))
+                        let prediction_signal = (summary.effective_sample_count
+                            >= SHRINKAGE_STRENGTH)
                             .then(|| {
                                 predicted_quality.map(|quality| (quality - 0.5) * 2.0 * confidence)
                             })

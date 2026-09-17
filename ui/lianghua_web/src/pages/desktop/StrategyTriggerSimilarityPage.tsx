@@ -560,7 +560,7 @@ export default function StrategyTriggerSimilarityPage() {
               历史质量由未来超额分位45%、MFE分位25%、MAE分位20%和上涨持续性分位10%组成；
               取首次进入每日横截面前20%的成功启动，以及首次进入后20%的失败对照。规则不决定历史样本身份，
               但启动窗口必须存在策略触发，当前股票也必须在观察窗口内有触发。预测分由相似成功/失败模板的
-              连续质量加权并结合有效样本置信度后，在当日股票池内转为百分位。
+              连续质量加权并结合有效样本置信度后，在当日股票池内转为百分位；有效样本数至少达到 8 才进入排名。
             </p>
             {rankingData.timings.length > 0 ? (
               <details className="trigger-sim-indicator-details">

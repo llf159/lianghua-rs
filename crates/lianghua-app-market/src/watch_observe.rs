@@ -392,9 +392,9 @@ pub fn hydrate_watch_observe_rows(
     let concepts_map = build_concepts_map(source_path).unwrap_or_default();
     let source_conn = open_source_conn(source_path).ok();
     let result_conn = open_result_conn(source_path).ok();
-    let resolved_rank_trade_date = match (result_conn.as_ref(), reference_trade_date) {
-        (Some(conn), trade_date) => Some(resolve_trade_date(conn, trade_date)?),
-        (None, trade_date) => trade_date,
+    let resolved_rank_trade_date = match result_conn.as_ref() {
+        Some(conn) => resolve_trade_date(conn, reference_trade_date).ok(),
+        None => reference_trade_date,
     };
     let ts_codes = stored_rows
         .iter()
@@ -414,12 +414,14 @@ pub fn hydrate_watch_observe_rows(
         .as_ref()
         .and_then(|conn| query_latest_snapshot_map(conn, &ts_codes).ok())
         .unwrap_or_default();
-    let post_watch_open_map = match source_conn.as_ref() {
-        Some(conn) => query_post_watch_open_map(conn, &observe_dates)?,
-        None => HashMap::new(),
-    };
+    let post_watch_open_map = source_conn
+        .as_ref()
+        .and_then(|conn| query_post_watch_open_map(conn, &observe_dates).ok())
+        .unwrap_or_default();
     let today_rank_map = match (result_conn.as_ref(), resolved_rank_trade_date.as_deref()) {
-        (Some(conn), Some(trade_date)) => query_rank_map(conn, trade_date, &ts_codes)?,
+        (Some(conn), Some(trade_date)) => {
+            query_rank_map(conn, trade_date, &ts_codes).unwrap_or_default()
+        }
         _ => HashMap::new(),
     };
     let scene_marker_map = match (result_conn.as_ref(), resolved_rank_trade_date.as_deref()) {
@@ -506,12 +508,10 @@ pub fn build_watch_observe_snapshot_data(
     fetch_meta: RealtimeFetchMeta,
 ) -> Result<WatchObserveSnapshotData, String> {
     let name_map = source_path
-        .map(build_name_map)
-        .transpose()?
+        .and_then(|path| build_name_map(path).ok())
         .unwrap_or_default();
     let concepts_map = source_path
-        .map(build_concepts_map)
-        .transpose()?
+        .and_then(|path| build_concepts_map(path).ok())
         .unwrap_or_default();
     let source_conn = source_path.and_then(|path| open_source_conn(path).ok());
     let result_conn = source_path.and_then(|path| open_result_conn(path).ok());
@@ -520,7 +520,7 @@ pub fn build_watch_observe_snapshot_data(
         .and_then(|path| build_latest_vol_map(path, &ts_codes).ok())
         .unwrap_or_default();
     let resolved_reference_trade_date = match (result_conn.as_ref(), reference_trade_date) {
-        (Some(conn), trade_date) => Some(resolve_trade_date(conn, trade_date)?),
+        (Some(conn), trade_date) => resolve_trade_date(conn, trade_date).ok(),
         (None, trade_date) => trade_date.and_then(|value| normalize_trade_date(&value)),
     };
     let observe_dates = stored_rows
@@ -537,15 +537,17 @@ pub fn build_watch_observe_snapshot_data(
         .as_ref()
         .and_then(|conn| query_latest_snapshot_map(conn, &ts_codes).ok())
         .unwrap_or_default();
-    let post_watch_open_map = match source_conn.as_ref() {
-        Some(conn) => query_post_watch_open_map(conn, &observe_dates)?,
-        None => HashMap::new(),
-    };
+    let post_watch_open_map = source_conn
+        .as_ref()
+        .and_then(|conn| query_post_watch_open_map(conn, &observe_dates).ok())
+        .unwrap_or_default();
     let today_rank_map = match (
         result_conn.as_ref(),
         resolved_reference_trade_date.as_deref(),
     ) {
-        (Some(conn), Some(trade_date)) => query_rank_map(conn, trade_date, &ts_codes)?,
+        (Some(conn), Some(trade_date)) => {
+            query_rank_map(conn, trade_date, &ts_codes).unwrap_or_default()
+        }
         _ => HashMap::new(),
     };
     let scene_marker_map = match (
@@ -637,10 +639,15 @@ pub fn build_watch_observe_snapshot_data(
 #[cfg(test)]
 mod tests {
     use duckdb::{Connection, params};
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     use super::{
-        calc_return_pct, query_latest_snapshot_map, query_post_watch_open_map,
-        query_scene_marker_map, resolve_watch_date_for_clock,
+        WatchObserveStoredRow, calc_return_pct, hydrate_watch_observe_rows,
+        query_latest_snapshot_map, query_post_watch_open_map, query_scene_marker_map,
+        resolve_watch_date_for_clock,
     };
 
     fn dates() -> Vec<String> {
@@ -789,5 +796,38 @@ mod tests {
         )
         .unwrap();
         assert_eq!(next_opens.get("000001.SZ"), Some(&11.5));
+    }
+
+    #[test]
+    fn hydrate_keeps_watchlist_when_result_database_has_no_score_data() {
+        let source_dir = std::env::temp_dir().join(format!(
+            "lianghua-watch-observe-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&source_dir).unwrap();
+        Connection::open(source_dir.join("scoring_result.db")).unwrap();
+
+        let rows = hydrate_watch_observe_rows(
+            Some(source_dir.to_str().unwrap()),
+            &[WatchObserveStoredRow {
+                ts_code: "000001.SZ".to_string(),
+                name: "平安银行".to_string(),
+                watch_date: "20260729".to_string(),
+                tag: String::new(),
+                concept: String::new(),
+                marked_date: None,
+            }],
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].ts_code, "000001.SZ");
+        assert_eq!(rows[0].today_rank, None);
+        fs::remove_dir_all(source_dir).unwrap();
     }
 }

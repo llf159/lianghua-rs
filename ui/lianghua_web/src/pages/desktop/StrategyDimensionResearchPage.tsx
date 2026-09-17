@@ -51,6 +51,7 @@ export default function StrategyDimensionResearchPage() {
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
   const [selectedRules, setSelectedRules] = useState<string[]>([]);
+  const [coreRules, setCoreRules] = useState<string[]>([]);
   const [ruleFilter, setRuleFilter] = useState("");
   const [nonlinearSampleLimit, setNonlinearSampleLimit] = useState("512");
   const [ridgeLambda, setRidgeLambda] = useState("0.000001");
@@ -84,11 +85,11 @@ export default function StrategyDimensionResearchPage() {
       );
       setRidgeLambda(String(loadedDefaults.default_ridge_lambda));
       setHoldingPeriod(String(loadedDefaults.default_holding_period));
-      setSelectedRules(
-        rulesByActivity
-          .slice(0, Math.min(10, loadedDefaults.max_strategy_count))
-          .map((rule) => rule.rule_name),
-      );
+      const initiallySelectedRules = rulesByActivity
+        .slice(0, Math.min(10, loadedDefaults.max_strategy_count))
+        .map((rule) => rule.rule_name);
+      setSelectedRules(initiallySelectedRules);
+      setCoreRules(initiallySelectedRules.slice(0, 1));
     } catch (initializeError) {
       setDefaults(null);
       setError(`读取研究数据失败：${String(initializeError)}`);
@@ -123,21 +124,31 @@ export default function StrategyDimensionResearchPage() {
   const strongestDistancePair = useMemo(
     () =>
       [...(result?.pair_metrics ?? [])]
-        .filter((pair) => pair.distance_correlation_daily_mean != null)
+        .filter(
+          (pair) =>
+            pair.distance_correlation_daily_mean != null &&
+            (coreRules.includes(pair.left_rule_name) ||
+              coreRules.includes(pair.right_rule_name)),
+        )
         .sort(
           (left, right) =>
             (right.distance_correlation_daily_mean ?? -1) -
             (left.distance_correlation_daily_mean ?? -1),
         )[0],
-    [result],
+    [coreRules, result],
   );
 
   const strongestOverlapPair = useMemo(
     () =>
       [...(result?.pair_metrics ?? [])]
-        .filter((pair) => pair.jaccard != null)
+        .filter(
+          (pair) =>
+            pair.jaccard != null &&
+            (coreRules.includes(pair.left_rule_name) ||
+              coreRules.includes(pair.right_rule_name)),
+        )
         .sort((left, right) => (right.jaccard ?? -1) - (left.jaccard ?? -1))[0],
-    [result],
+    [coreRules, result],
   );
 
   const mostExplainedRule = useMemo(
@@ -156,25 +167,126 @@ export default function StrategyDimensionResearchPage() {
     [result],
   );
 
+  const strongestFullPeriodReturn = useMemo(
+    () =>
+      [...(result?.return_summaries ?? [])]
+        .filter(
+          (summary) =>
+            (summary.avg_residual_return ?? 0) > 0 &&
+            summary.hac_t_value != null,
+        )
+        .sort(
+          (left, right) =>
+            (right.hac_t_value ?? Number.NEGATIVE_INFINITY) -
+            (left.hac_t_value ?? Number.NEGATIVE_INFINITY),
+        )[0],
+    [result],
+  );
+
+  const strongestPositiveIncrement = useMemo(
+    () =>
+      [...(result?.return_increments ?? [])]
+        .filter(
+          (increment) =>
+            !coreRules.includes(increment.rule_name) &&
+            (increment.test_incremental_mean ?? 0) > 0 &&
+            increment.test_incremental_hac_t_value != null,
+        )
+        .sort(
+          (left, right) =>
+            (right.test_incremental_hac_t_value ?? Number.NEGATIVE_INFINITY) -
+            (left.test_incremental_hac_t_value ?? Number.NEGATIVE_INFINITY),
+        )[0],
+    [coreRules, result],
+  );
+
+  const strongestNegativeIncrement = useMemo(
+    () =>
+      [...(result?.return_increments ?? [])]
+        .filter(
+          (increment) =>
+            !coreRules.includes(increment.rule_name) &&
+            (increment.test_incremental_mean ?? 0) < 0 &&
+            increment.test_incremental_hac_t_value != null,
+        )
+        .sort(
+          (left, right) =>
+            (left.test_incremental_hac_t_value ?? Number.POSITIVE_INFINITY) -
+            (right.test_incremental_hac_t_value ?? Number.POSITIVE_INFINITY),
+        )[0],
+    [coreRules, result],
+  );
+
+  const strongestMarketDependence = useMemo(
+    () =>
+      (result?.style_exposures ?? [])
+        .map((exposure) => ({
+          ruleName: exposure.rule_name,
+          value: exposure.dimensions.find(
+            (dimension) => dimension.key === "market_regime",
+          )?.value,
+        }))
+        .filter(
+          (item): item is { ruleName: string; value: number } =>
+            item.value != null && Number.isFinite(item.value),
+        )
+        .sort((left, right) => Math.abs(right.value) - Math.abs(left.value))[0],
+    [result],
+  );
+
+  const styleAnalysis = useMemo(() => {
+    const exposures = result?.style_exposures ?? [];
+    const firstDimensions = exposures[0]?.dimensions ?? [];
+    const dimensions = firstDimensions
+      .map((dimension) => {
+        const values = exposures
+          .map(
+            (exposure) =>
+              exposure.dimensions.find((item) => item.key === dimension.key)
+                ?.value,
+          )
+          .filter((value): value is number => value != null && Number.isFinite(value));
+        return {
+          ...dimension,
+          averageAbs:
+            values.length > 0
+              ? values.reduce((sum, value) => sum + Math.abs(value), 0) /
+                values.length
+              : 0,
+          activeCount: values.filter((value) => Math.abs(value) >= 0.3).length,
+        };
+      })
+      .sort((left, right) => right.averageAbs - left.averageAbs);
+    return dimensions.length > 0
+      ? {
+          dimensions,
+          dominant: dimensions[0],
+          neutralCount: dimensions.filter((dimension) => dimension.averageAbs < 0.3)
+            .length,
+        }
+      : null;
+  }, [result]);
+
   const toggleRule = (ruleName: string) => {
     setResult(null);
-    setSelectedRules((current) => {
-      if (current.includes(ruleName))
-        return current.filter((name) => name !== ruleName);
-      if (current.length >= (defaults?.max_strategy_count ?? 20))
-        return current;
-      return [...current, ruleName];
-    });
+    if (selectedRules.includes(ruleName)) {
+      setSelectedRules((current) =>
+        current.filter((name) => name !== ruleName),
+      );
+      setCoreRules((current) => current.filter((name) => name !== ruleName));
+      return;
+    }
+    if (selectedRules.length >= (defaults?.max_strategy_count ?? 20)) return;
+    setSelectedRules((current) => [...current, ruleName]);
+    if (selectedRules.length === 0) setCoreRules([ruleName]);
   };
 
-  const moveRule = (index: number, direction: -1 | 1) => {
+  const toggleCoreRule = (ruleName: string) => {
     setResult(null);
-    setSelectedRules((current) => {
-      const target = index + direction;
-      if (target < 0 || target >= current.length) return current;
-      const next = [...current];
-      [next[index], next[target]] = [next[target], next[index]];
-      return next;
+    setCoreRules((current) => {
+      if (current.includes(ruleName))
+        return current.filter((name) => name !== ruleName);
+      return [...current, ruleName];
     });
   };
 
@@ -189,6 +301,10 @@ export default function StrategyDimensionResearchPage() {
     }
     if (selectedRules.length < 2) {
       setError("至少选择两个不同规则才能进行相关性研究。");
+      return;
+    }
+    if (coreRules.length === 0) {
+      setError("请至少选择一个核心策略作为比较基准。");
       return;
     }
     const sampleLimit = Number(nonlinearSampleLimit);
@@ -226,7 +342,12 @@ export default function StrategyDimensionResearchPage() {
           sourcePath,
           startDate: inputToCompactDate(startDate),
           endDate: inputToCompactDate(endDate),
-          ruleNames: selectedRules,
+          ruleNames: [
+            ...selectedRules.filter((ruleName) => coreRules.includes(ruleName)),
+            ...selectedRules.filter(
+              (ruleName) => !coreRules.includes(ruleName),
+            ),
+          ],
           nonlinearSampleLimit: sampleLimit,
           ridgeLambda: lambda,
           holdingPeriod: holdingDays,
@@ -353,16 +474,20 @@ export default function StrategyDimensionResearchPage() {
           <div className="dimension-research-selection">
             <div className="dimension-research-selection-head">
               <div>
-                <strong>正交解释顺序</strong>
+                <strong>核心策略选择</strong>
                 <small>
-                  已选 {selectedRules.length}/
+                  核心 {coreRules.length} · 已选 {selectedRules.length}/
                   {defaults?.max_strategy_count ?? 20}
+                </small>
+                <small className="dimension-research-order-note">
+                  可选择多个代表性核心策略。运行时核心组自动优先，其他规则用于判断相对核心组的重复程度和新增收益。
                 </small>
               </div>
               <button
                 type="button"
                 onClick={() => {
                   setSelectedRules([]);
+                  setCoreRules([]);
                   setResult(null);
                 }}
                 disabled={running || selectedRules.length === 0}
@@ -371,25 +496,21 @@ export default function StrategyDimensionResearchPage() {
               </button>
             </div>
             <ol>
-              {selectedRules.map((ruleName, index) => (
-                <li key={ruleName}>
-                  <span>{index + 1}</span>
+              {selectedRules.map((ruleName) => (
+                <li
+                  className={coreRules.includes(ruleName) ? "core" : ""}
+                  key={ruleName}
+                >
+                  <span>{coreRules.includes(ruleName) ? "核" : "比"}</span>
                   <strong title={ruleName}>{ruleName}</strong>
                   <button
+                    className="dimension-research-core-toggle"
                     type="button"
-                    aria-label={`上移 ${ruleName}`}
-                    onClick={() => moveRule(index, -1)}
-                    disabled={running || index === 0}
+                    aria-pressed={coreRules.includes(ruleName)}
+                    onClick={() => toggleCoreRule(ruleName)}
+                    disabled={running}
                   >
-                    ↑
-                  </button>
-                  <button
-                    type="button"
-                    aria-label={`下移 ${ruleName}`}
-                    onClick={() => moveRule(index, 1)}
-                    disabled={running || index === selectedRules.length - 1}
-                  >
-                    ↓
+                    {coreRules.includes(ruleName) ? "取消核心" : "设为核心"}
                   </button>
                   <button
                     type="button"
@@ -420,11 +541,11 @@ export default function StrategyDimensionResearchPage() {
             <button
               type="button"
               onClick={() => {
-                setSelectedRules(
-                  filteredRuleOptions
-                    .slice(0, defaults?.max_strategy_count ?? 20)
-                    .map((rule) => rule.rule_name),
-                );
+                const nextRules = filteredRuleOptions
+                  .slice(0, defaults?.max_strategy_count ?? 20)
+                  .map((rule) => rule.rule_name);
+                setSelectedRules(nextRules);
+                setCoreRules(nextRules.slice(0, 1));
                 setResult(null);
               }}
               disabled={
@@ -493,7 +614,7 @@ export default function StrategyDimensionResearchPage() {
             <article>
               <span>研究规则</span>
               <strong>{result.strategies.length}</strong>
-              <small>按当前正交解释顺序</small>
+              <small>核心策略组优先进入比较基准</small>
             </article>
             <article>
               <span>规则组合</span>
@@ -513,12 +634,17 @@ export default function StrategyDimensionResearchPage() {
           <section className="dimension-research-section">
             <div className="dimension-research-section-heading">
               <div>
-                <h3>数据结论</h3>
+                <h3>自动参考解读</h3>
+                <p className="dimension-research-section-note">
+                  这是按固定参考线生成的筛查提示：Jaccard ≥ 0.70 视为高重叠，
+                  |HAC t| ≥ 2 视为较强统计证据，|市场相关| ≥ 0.30
+                  视为明显状态依赖。它不包含手续费、滑点、冲击成本和容量约束。
+                </p>
               </div>
             </div>
             <div className="dimension-research-insight-grid">
               <article>
-                <span>触发重叠最高</span>
+                <span>相对核心组触发重叠最高</span>
                 <strong>
                   {strongestOverlapPair
                     ? `${strongestOverlapPair.left_rule_name} / ${strongestOverlapPair.right_rule_name}`
@@ -526,12 +652,12 @@ export default function StrategyDimensionResearchPage() {
                 </strong>
                 <p>
                   {strongestOverlapPair
-                    ? `Jaccard 为 ${formatNumber(strongestOverlapPair.jaccard)}，两规则触发集合的交集约占并集的 ${formatPercent(strongestOverlapPair.jaccard)}。它描述共同选中，不描述分数方向。`
+                    ? `Jaccard 为 ${formatNumber(strongestOverlapPair.jaccard)}，${(strongestOverlapPair.jaccard ?? 0) >= 0.7 ? "达到高重叠参考线，组合前应核对是否重复持仓。" : "未达到高重叠参考线。"} 它描述共同选中，不描述分数方向。`
                     : "没有可计算的共同触发数据。"}
                 </p>
               </article>
               <article>
-                <span>一般依赖最强</span>
+                <span>相对核心组一般依赖最强</span>
                 <strong>
                   {strongestDistancePair
                     ? `${strongestDistancePair.left_rule_name} / ${strongestDistancePair.right_rule_name}`
@@ -544,12 +670,63 @@ export default function StrategyDimensionResearchPage() {
                 </p>
               </article>
               <article>
-                <span>最易被前序规则解释</span>
+                <span>被已有基准解释最多</span>
                 <strong>{mostExplainedRule?.rule_name ?? "暂无"}</strong>
                 <p>
                   {mostExplainedRule
-                    ? `线性残差比例为 ${formatPercent(mostExplainedRule.residual_variance_ratio)}，属于“${residualLabel(mostExplainedRule.residual_variance_ratio)}”。该结论依赖当前规则顺序与岭系数。`
-                    : "首条规则没有前序基准；增加规则后才能形成解释关系。"}
+                    ? `线性残差比例为 ${formatPercent(mostExplainedRule.residual_variance_ratio)}，属于“${residualLabel(mostExplainedRule.residual_variance_ratio)}”。该结论依赖核心组和系统内部稳定顺序。`
+                    : "首个核心策略没有已有基准；增加规则后才能形成解释关系。"}
+                </p>
+              </article>
+              <article>
+                <span>全区间正收益证据最强</span>
+                <strong>
+                  {strongestFullPeriodReturn?.rule_name ?? "样本不足"}
+                </strong>
+                <p>
+                  {strongestFullPeriodReturn
+                    ? `日均残差收益 ${formatPctPoint(strongestFullPeriodReturn.avg_residual_return)}，HAC t 为 ${formatNumber(strongestFullPeriodReturn.hac_t_value, 2)}；${(strongestFullPeriodReturn.hac_t_value ?? 0) >= 2 ? "达到较强证据参考线。" : "尚未达到较强证据参考线。"} 全区间结果仍可能包含选择偏差。`
+                    : "没有足够的正收益有效日期。"}
+                </p>
+              </article>
+              <article>
+                <span>样本外正增量候选</span>
+                <strong>
+                  {strongestPositiveIncrement?.rule_name ?? "暂无"}
+                </strong>
+                <p>
+                  {strongestPositiveIncrement
+                    ? `扣除核心组和此前已比较规则后，检验期增量 ${formatPctPoint(strongestPositiveIncrement.test_incremental_mean)}，HAC t 为 ${formatNumber(strongestPositiveIncrement.test_incremental_hac_t_value, 2)}，正增量日期占 ${formatPercent(strongestPositiveIncrement.test_incremental_positive_ratio)}；${(strongestPositiveIncrement.test_incremental_hac_t_value ?? 0) >= 2 ? "达到较强证据参考线。" : "仅可视为正向线索。"}`
+                    : "非核心规则中没有可计算的正向样本外增量。"}
+                </p>
+              </article>
+              <article>
+                <span>样本外负增量警示</span>
+                <strong>
+                  {strongestNegativeIncrement?.rule_name ?? "暂无"}
+                </strong>
+                <p>
+                  {strongestNegativeIncrement
+                    ? `检验期增量 ${formatPctPoint(strongestNegativeIncrement.test_incremental_mean)}，HAC t 为 ${formatNumber(strongestNegativeIncrement.test_incremental_hac_t_value, 2)}；${(strongestNegativeIncrement.test_incremental_hac_t_value ?? 0) <= -2 ? "达到负向警示参考线，建议降权、移除或换序复核。" : "负向证据尚不充分。"}`
+                    : "非核心规则中没有可计算的负向样本外增量。"}
+                </p>
+              </article>
+              <article>
+                <span>市场状态依赖</span>
+                <strong>
+                  {strongestMarketDependence?.ruleName ?? "样本不足"}
+                </strong>
+                <p>
+                  {strongestMarketDependence
+                    ? `与 ${result.return_index_ts_code} 涨跌的覆盖率相关为 ${formatNumber(strongestMarketDependence.value)}；${Math.abs(strongestMarketDependence.value) >= 0.3 ? "达到明显状态依赖参考线，跨行情阶段使用时应分段复核。" : "最强者仍低于 0.30，当前规则整体未显示明显市场状态依赖。"}`
+                    : "没有可计算的市场状态暴露。"}
+                </p>
+              </article>
+              <article>
+                <span>核心组说明</span>
+                <strong>核心规则可以多选</strong>
+                <p>
+                  系统将核心策略组放在内部序列前面，非核心规则按稳定顺序继续计算。核心组内部仍是顺序正交，因此结果表示相对整组已有代表策略的边际贡献，不代表单条规则的绝对排名。
                 </p>
               </article>
             </div>
@@ -565,7 +742,7 @@ export default function StrategyDimensionResearchPage() {
               <table>
                 <thead>
                   <tr>
-                    <th>顺序</th>
+                    <th>角色</th>
                     <th>规则</th>
                     <th>触发数</th>
                     <th>覆盖率</th>
@@ -574,9 +751,13 @@ export default function StrategyDimensionResearchPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {result.strategies.map((strategy, index) => (
+                  {result.strategies.map((strategy) => (
                     <tr key={strategy.rule_name}>
-                      <td>{index + 1}</td>
+                      <td>
+                        {coreRules.includes(strategy.rule_name)
+                          ? "核心"
+                          : "比较"}
+                      </td>
                       <th>{strategy.rule_name}</th>
                       <td>{strategy.trigger_count.toLocaleString()}</td>
                       <td>{formatPercent(strategy.coverage)}</td>
@@ -655,18 +836,61 @@ export default function StrategyDimensionResearchPage() {
               <div>
                 <h3>八维策略风格暴露</h3>
                 <p className="dimension-research-section-note">
-                  数值统一在 -1 到 1：正方向依次表示偏近期上涨、接近 20 日突破、连续触发、
-                  60 日高位、波动放大、高流动性、随指数（{result.return_index_ts_code}）上涨日增加触发、正残差占优；负值表示相反风格。
+                  数值统一在 -1 到 1：正方向依次表示偏近期上涨、接近 20
+                  日突破、连续触发、 60 日高位、波动放大、高流动性、随指数（
+                  {result.return_index_ts_code}
+                  ）上涨日增加触发、正残差占优；负值表示相反风格。
                   量价维度使用每日横截面百分位，避免价格和成交额量纲直接混合。
                 </p>
               </div>
             </div>
+            {styleAnalysis && (
+              <div className="dimension-research-style-analysis">
+                <article className="dimension-research-style-verdict">
+                  <span>组合结论</span>
+                  <strong>
+                    {styleAnalysis.dominant.label}是当前主导维度
+                  </strong>
+                  <p>
+                    {styleAnalysis.dominant.averageAbs >= 0.6
+                      ? `平均绝对暴露 ${formatNumber(styleAnalysis.dominant.averageAbs)}，策略风格明显集中，不属于八维均衡组合。`
+                      : "各维度暴露较接近，暂未发现单一维度明显主导。"}
+                  </p>
+                </article>
+                <article>
+                  <span>主导维度</span>
+                  <strong>{styleAnalysis.dominant.label}</strong>
+                  <p>
+                    {styleAnalysis.dominant.activeCount} / {result.style_exposures.length} 条规则达到 ±0.30 风格暴露线。
+                  </p>
+                </article>
+                <article>
+                  <span>近似中性维度</span>
+                  <strong>{styleAnalysis.neutralCount} / 8</strong>
+                  <p>平均绝对暴露低于 0.30 的维度，表示当前规则没有明显偏向。</p>
+                </article>
+                <div className="dimension-research-style-bars">
+                  {styleAnalysis.dimensions.map((dimension) => (
+                    <div key={dimension.key}>
+                      <div>
+                        <span>{dimension.label}</span>
+                        <b>{formatNumber(dimension.averageAbs)}</b>
+                      </div>
+                      <i>
+                        <em style={{ width: `${Math.min(100, dimension.averageAbs * 100)}%` }} />
+                      </i>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
             <div className="dimension-research-table-wrap dimension-research-pair-table-wrap">
               <table>
                 <thead>
                   <tr>
                     <th>规则</th>
                     <th>有效触发样本</th>
+                    <th>主导风格</th>
                     {(result.style_exposures[0]?.dimensions ?? []).map(
                       (dimension) => (
                         <th key={dimension.key}>{dimension.label}</th>
@@ -679,8 +903,23 @@ export default function StrategyDimensionResearchPage() {
                     <tr key={exposure.rule_name}>
                       <th>{exposure.rule_name}</th>
                       <td>{exposure.sample_count.toLocaleString()}</td>
+                      <td>
+                        {[...exposure.dimensions]
+                          .filter(
+                            (dimension) =>
+                              dimension.value != null &&
+                              Number.isFinite(dimension.value),
+                          )
+                          .sort(
+                            (left, right) =>
+                              Math.abs(right.value ?? 0) -
+                              Math.abs(left.value ?? 0),
+                          )[0]?.label ?? "样本不足"}
+                      </td>
                       {exposure.dimensions.map((dimension) => (
-                        <td key={dimension.key}>{formatNumber(dimension.value)}</td>
+                        <td key={dimension.key}>
+                          {formatNumber(dimension.value)}
+                        </td>
                       ))}
                     </tr>
                   ))}
@@ -738,10 +977,10 @@ export default function StrategyDimensionResearchPage() {
           <section className="dimension-research-section">
             <div className="dimension-research-section-heading">
               <div>
-                <h3>顺序样本外收益增量</h3>
+                <h3>相对核心组的样本外收益增量</h3>
                 <p className="dimension-research-section-note">
                   前 {formatPercent(result.oos_train_ratio)}{" "}
-                  日期只用于拟合候选规则对前序规则的岭回归；
+                  日期只用于拟合收益关系；核心策略组优先作为已有基准，非核心规则按稳定顺序加入；
                   {result.oos_test_start_date
                     ? `从 ${result.oos_test_start_date} 起只做检验。`
                     : "当前有效日期不足以切分训练期和检验期。"}
@@ -757,7 +996,7 @@ export default function StrategyDimensionResearchPage() {
                     <th>检验期未解释收益</th>
                     <th>增量 HAC t值</th>
                     <th>增量为正比例</th>
-                    <th>训练期前序系数</th>
+                    <th>训练期已有基准系数</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -782,15 +1021,15 @@ export default function StrategyDimensionResearchPage() {
                       </td>
                       <td>
                         {index === 0
-                          ? "基准规则"
+                          ? "首个核心基准"
                           : increment.basis_coefficients.length > 0
-                          ? increment.basis_coefficients
-                              .map(
-                                (coefficient) =>
-                                  `${coefficient.rule_name} ${formatNumber(coefficient.coefficient)}`,
-                              )
-                              .join("；")
-                          : "训练样本不足或收益无方差"}
+                            ? increment.basis_coefficients
+                                .map(
+                                  (coefficient) =>
+                                    `${coefficient.rule_name} ${formatNumber(coefficient.coefficient)}`,
+                                )
+                                .join("；")
+                            : "训练样本不足或收益无方差"}
                       </td>
                     </tr>
                   ))}
@@ -802,14 +1041,19 @@ export default function StrategyDimensionResearchPage() {
           <section className="dimension-research-section">
             <div className="dimension-research-section-heading">
               <div>
-                <h3>按顺序剥离已有规则</h3>
+                <h3>相对核心组剥离重复信息</h3>
+                <p className="dimension-research-section-note">
+                  核心策略组排在内部序列前面，其余规则按稳定顺序逐步剥离已有解释力。
+                </p>
               </div>
             </div>
             <div className="dimension-research-orthogonal-results">
-              {result.orthogonal_diagnostics.map((diagnostic, index) => (
+              {result.orthogonal_diagnostics.map((diagnostic) => (
                 <article key={diagnostic.rule_name}>
                   <div>
-                    <span>{index + 1}</span>
+                    <span>
+                      {coreRules.includes(diagnostic.rule_name) ? "核" : "比"}
+                    </span>
                     <strong>{diagnostic.rule_name}</strong>
                     <em>{residualLabel(diagnostic.residual_variance_ratio)}</em>
                   </div>
@@ -836,10 +1080,10 @@ export default function StrategyDimensionResearchPage() {
                   </dl>
                   <p>
                     {diagnostic.basis_coefficients.length === 0 ? (
-                      "首条规则作为比较基准，残差为自身。"
+                      "首个核心策略作为比较基准，残差为自身。"
                     ) : (
                       <>
-                        前序系数：
+                        已有基准系数：
                         {diagnostic.basis_coefficients
                           .map(
                             (coefficient) =>

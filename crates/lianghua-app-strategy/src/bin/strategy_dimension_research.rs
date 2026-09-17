@@ -8,9 +8,9 @@ use lianghua_app_strategy::dimension_research::{
 
 fn main() {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
-    if arguments.is_empty() || arguments.len() > 6 {
+    if arguments.is_empty() || arguments.len() > 7 {
         eprintln!(
-            "用法: strategy_dimension_research <数据目录> [开始日期] [结束日期] [规则数] [非线性样本数] [持有交易日]"
+            "用法: strategy_dimension_research <数据目录> [开始日期] [结束日期] [规则数] [非线性样本数] [持有交易日] [顺序]"
         );
         process::exit(2);
     }
@@ -74,14 +74,24 @@ fn main() {
             .cmp(&left.trigger_count)
             .then_with(|| left.rule_name.cmp(&right.rule_name))
     });
+    let order = arguments.get(6).map(String::as_str).unwrap_or("frequency");
+    rule_options.truncate(rule_count);
+    match order {
+        "frequency" => {}
+        "alphabetical" => rule_options.sort_by(|left, right| left.rule_name.cmp(&right.rule_name)),
+        "reverse_frequency" => rule_options.reverse(),
+        _ => {
+            eprintln!("顺序必须是 frequency、alphabetical 或 reverse_frequency");
+            process::exit(2);
+        }
+    }
     let rule_names = rule_options
         .into_iter()
-        .take(rule_count)
         .map(|option| option.rule_name)
         .collect::<Vec<_>>();
 
     println!(
-        "开始研究:区间={start_date}..{end_date},规则数={},非线性样本上限={nonlinear_sample_limit},持有={holding_period}日",
+        "开始研究:区间={start_date}..{end_date},规则数={},非线性样本上限={nonlinear_sample_limit},持有={holding_period}日,顺序={order}",
         rule_names.len()
     );
     let started_at = Instant::now();
@@ -121,17 +131,35 @@ fn main() {
     println!("市场依赖 / 收益形态:");
     for exposure in &result.style_exposures {
         println!(
-            "  {}: market={:.4}, return_shape={:.4}",
+            "  {}: {}",
             exposure.rule_name,
-            exposure.dimensions[6].value.unwrap_or(f64::NAN),
-            exposure.dimensions[7].value.unwrap_or(f64::NAN)
+            exposure
+                .dimensions
+                .iter()
+                .map(|dimension| {
+                    format!(
+                        "{}={:.4}",
+                        dimension.key,
+                        dimension.value.unwrap_or(f64::NAN)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
         );
     }
     println!("样本外增量有效样本:");
     for increment in &result.return_increments {
         println!(
-            "  {}: train={}, test={}",
-            increment.rule_name, increment.train_sample_count, increment.test_sample_count
+            "  {}: train={}, test={}, mean={:.6}, HAC t={:.3}, positive={:.2}%",
+            increment.rule_name,
+            increment.train_sample_count,
+            increment.test_sample_count,
+            increment.test_incremental_mean.unwrap_or(f64::NAN),
+            increment.test_incremental_hac_t_value.unwrap_or(f64::NAN),
+            increment
+                .test_incremental_positive_ratio
+                .map(|value| value * 100.0)
+                .unwrap_or(f64::NAN)
         );
     }
 

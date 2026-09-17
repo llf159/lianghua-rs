@@ -444,19 +444,19 @@
 }
 
 .strategy-asset-diff-row.is-backup {
-  background: #fff1f2;
-}
-
-.strategy-asset-diff-row.is-backup code {
-  color: #991b1b;
-}
-
-.strategy-asset-diff-row.is-active {
   background: #ecfdf5;
 }
 
-.strategy-asset-diff-row.is-active code {
+.strategy-asset-diff-row.is-backup code {
   color: #166534;
+}
+
+.strategy-asset-diff-row.is-active {
+  background: #fff1f2;
+}
+
+.strategy-asset-diff-row.is-active code {
+  color: #991b1b;
 }
 
 .strategy-asset-diff-row.is-omitted {

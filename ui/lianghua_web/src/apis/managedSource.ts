@@ -741,6 +741,17 @@ export async function removeManagedSourceFile(
   if (await exists(targetRelativePath, { baseDir: BaseDirectory.AppData })) {
     await remove(targetRelativePath, { baseDir: BaseDirectory.AppData })
   }
+  if (
+    fileId === 'result-db' &&
+    (await exists(buildRelativePath(sourceDir, 'strategy_snapshots/rank_compute'), {
+      baseDir: BaseDirectory.AppData,
+    }))
+  ) {
+    await remove(buildRelativePath(sourceDir, 'strategy_snapshots/rank_compute'), {
+      baseDir: BaseDirectory.AppData,
+      recursive: true,
+    })
+  }
 
   return inspectManagedSourceStatus(sourceDir)
 }
