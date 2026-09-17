@@ -369,9 +369,6 @@ function buildPreparedDraft(
     if (pointsByHits.some((points) => !Number.isFinite(points))) {
       throw new Error('命中数得分包含非法数字')
     }
-    if (pointsByHits.every((points) => points === 0)) {
-      throw new Error('命中数得分不能全部为 0')
-    }
     nextDraft.when = ''
     nextDraft.points = 0
     nextDraft.dist_points = null

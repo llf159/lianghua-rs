@@ -9933,6 +9933,7 @@ explain = "test"
             avg_rule_score: Some(score),
             avg_residual_return: Some(excess),
             avg_excess_residual_return: Some(excess),
+            score_weighted_residual_return: Some(excess),
             top_bottom_spread: None,
             ic: None,
         }

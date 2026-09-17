@@ -458,11 +458,9 @@ fn validate_rule_definition(
                     rule.name
                 ));
             }
-            if points_by_hits.iter().any(|points| !points.is_finite())
-                || points_by_hits.iter().all(|points| *points == 0.0)
-            {
+            if points_by_hits.iter().any(|points| !points.is_finite()) {
                 return Err(format!(
-                    "组合策略 {} 的 points_by_hits 非法或全部为 0",
+                    "组合策略 {} 的 points_by_hits 包含非法分数",
                     rule.name
                 ));
             }

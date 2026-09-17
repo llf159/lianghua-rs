@@ -8,9 +8,9 @@ use lianghua_app_strategy::dimension_research::{
 
 fn main() {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
-    if arguments.is_empty() || arguments.len() > 7 {
+    if arguments.is_empty() || arguments.len() > 8 {
         eprintln!(
-            "用法: strategy_dimension_research <数据目录> [开始日期] [结束日期] [规则数] [非线性样本数] [持有交易日] [顺序]"
+            "用法: strategy_dimension_research <数据目录> [开始日期] [结束日期] [规则数] [非线性样本数] [持有交易日] [顺序] [规则列表]"
         );
         process::exit(2);
     }
@@ -67,31 +67,45 @@ fn main() {
         })
         .unwrap_or(defaults.default_holding_period);
 
-    let mut rule_options = defaults.rule_options;
-    rule_options.sort_by(|left, right| {
-        right
-            .trigger_count
-            .cmp(&left.trigger_count)
-            .then_with(|| left.rule_name.cmp(&right.rule_name))
-    });
     let order = arguments.get(6).map(String::as_str).unwrap_or("frequency");
-    rule_options.truncate(rule_count);
-    match order {
-        "frequency" => {}
-        "alphabetical" => rule_options.sort_by(|left, right| left.rule_name.cmp(&right.rule_name)),
-        "reverse_frequency" => rule_options.reverse(),
-        _ => {
-            eprintln!("顺序必须是 frequency、alphabetical 或 reverse_frequency");
-            process::exit(2);
+    let (rule_names, order_label) = if let Some(list) = arguments.get(7) {
+        let rule_names = list
+            .split(',')
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+            .collect::<Vec<_>>();
+        (rule_names, "explicit".to_string())
+    } else {
+        let mut rule_options = defaults.rule_options;
+        rule_options.sort_by(|left, right| {
+            right
+                .trigger_count
+                .cmp(&left.trigger_count)
+                .then_with(|| left.rule_name.cmp(&right.rule_name))
+        });
+        rule_options.truncate(rule_count);
+        match order {
+            "frequency" => {}
+            "alphabetical" => {
+                rule_options.sort_by(|left, right| left.rule_name.cmp(&right.rule_name))
+            }
+            "reverse_frequency" => rule_options.reverse(),
+            _ => {
+                eprintln!("顺序必须是 frequency、alphabetical 或 reverse_frequency");
+                process::exit(2);
+            }
         }
-    }
-    let rule_names = rule_options
-        .into_iter()
-        .map(|option| option.rule_name)
-        .collect::<Vec<_>>();
+        (
+            rule_options
+                .into_iter()
+                .map(|option| option.rule_name)
+                .collect::<Vec<_>>(),
+            order.to_string(),
+        )
+    };
 
     println!(
-        "开始研究:区间={start_date}..{end_date},规则数={},非线性样本上限={nonlinear_sample_limit},持有={holding_period}日,顺序={order}",
+        "开始研究:区间={start_date}..{end_date},规则数={},非线性样本上限={nonlinear_sample_limit},持有={holding_period}日,顺序={order_label}",
         rule_names.len()
     );
     let started_at = Instant::now();
@@ -110,6 +124,20 @@ fn main() {
             process::exit(1);
         }
     };
+    if let Ok(output_path) = env::var("LIANGHUA_DIM_RESEARCH_JSON") {
+        let payload = match serde_json::to_string(&result) {
+            Ok(payload) => payload,
+            Err(error) => {
+                eprintln!("序列化研究结果失败:{error}");
+                process::exit(1);
+            }
+        };
+        if let Err(error) = std::fs::write(&output_path, payload) {
+            eprintln!("写入研究结果失败:{output_path}:{error}");
+            process::exit(1);
+        }
+        eprintln!("已写出研究结果:{output_path}");
+    }
     println!(
         "完成:耗时={:.3}s,评分宇宙={},策略={},策略对={}",
         started_at.elapsed().as_secs_f64(),
@@ -118,7 +146,7 @@ fn main() {
         result.pair_metrics.len()
     );
     println!("收益基准指数:{}", result.return_index_ts_code);
-    println!("持仓收益有效日期:");
+    println!("分数加权持仓收益有效日期:");
     for summary in &result.return_summaries {
         println!(
             "  {}: days={}, mean={:.6}, HAC t={:.3}",

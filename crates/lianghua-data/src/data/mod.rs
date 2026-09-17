@@ -1239,11 +1239,6 @@ impl ScoreConfig {
                             "第{rule_index}条组合规则 points_by_hits 包含非法分数"
                         ));
                     }
-                    if points_by_hits.iter().all(|points| *points == 0.0) {
-                        return Err(format!(
-                            "第{rule_index}条组合规则 points_by_hits 不能全部为 0"
-                        ));
-                    }
 
                     let mut expression_names = HashSet::new();
                     for (index, condition) in rule.conditions.iter().enumerate() {

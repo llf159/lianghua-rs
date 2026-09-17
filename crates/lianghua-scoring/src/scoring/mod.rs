@@ -208,10 +208,10 @@ fn combination_score_parts(
     let hit_count = (0..combination.conditions.len())
         .filter(|index| condition_hit(*index))
         .count();
-    let base_score = combination.points_by_hits[hit_count];
-    if base_score == 0.0 {
+    if hit_count == 0 {
         return (0.0, 0.0, false);
     }
+    let base_score = combination.points_by_hits[hit_count];
 
     let bonus_score = combination
         .conditions
@@ -763,7 +763,7 @@ mod tests {
     }
 
     #[test]
-    fn combination_bonus_requires_nonzero_base_score() {
+    fn combination_bonus_applies_without_base_score() {
         let mut runtime = runtime_with_close_series(&[3.0, 11.0]);
         let rule = combination_rule(
             &["C > 1", "C > 10"],
@@ -776,8 +776,26 @@ mod tests {
         let (scores, triggered) =
             evaluate_cached_rule_scores(&rule, &mut runtime).expect("combination evaluates");
 
-        assert_eq!(scores, vec![0.0, 5.0]);
-        assert_eq!(triggered, vec![false, true]);
+        assert_eq!(scores, vec![2.0, 5.0]);
+        assert_eq!(triggered, vec![true, true]);
+    }
+
+    #[test]
+    fn combination_without_any_hit_does_not_trigger() {
+        let mut runtime = runtime_with_close_series(&[0.5, 0.5]);
+        let rule = combination_rule(
+            &["C > 1", "C > 10"],
+            vec![0.0, 0.0, 3.0],
+            &[-2.0, -4.0],
+            None,
+            None,
+        );
+
+        let (scores, triggered) =
+            evaluate_cached_rule_scores(&rule, &mut runtime).expect("combination evaluates");
+
+        assert_eq!(scores, vec![0.0, 0.0]);
+        assert_eq!(triggered, vec![false, false]);
     }
 
     #[test]

@@ -21,6 +21,10 @@ const DEFAULT_HOLDING_PERIOD: usize = 5;
 const MAX_HOLDING_PERIOD: usize = 60;
 const RETURN_MIN_SAMPLES_PER_DAY: usize = 5;
 const RETURN_MIN_LISTED_TRADE_DAYS: usize = 60;
+const RETURN_RIDGE_LAMBDA: f64 = 0.1;
+const RETURN_MIN_TRAIN_SAMPLES: usize = 30;
+const RETURN_MIN_TRAIN_SAMPLES_PER_PREDICTOR: usize = 5;
+const RETURN_MIN_TEST_SAMPLES: usize = 20;
 const OOS_TRAIN_RATIO: f64 = 0.7;
 const RETURN_STOCK_ADJ_TYPE: &str = "qfq";
 const RETURN_INDEX_TS_CODES: [&str; 2] = ["000300.SH", "399300.SZ"];
@@ -152,6 +156,10 @@ pub struct StrategyDimensionResearchData {
     pub holding_period: usize,
     pub return_min_samples_per_day: usize,
     pub return_min_listed_trade_days: usize,
+    pub return_ridge_lambda: f64,
+    pub return_min_train_samples: usize,
+    pub return_min_train_samples_per_predictor: usize,
+    pub return_min_test_samples: usize,
     pub return_stock_adj_type: String,
     pub return_index_ts_code: String,
     pub return_index_beta: f64,
@@ -312,7 +320,6 @@ pub fn run_strategy_dimension_research(
         &end_date,
         &rule_names,
         holding_period,
-        ridge_lambda,
     )?;
     let mut pair_metrics = Vec::with_capacity(rule_names.len() * (rule_names.len() - 1) / 2);
     let pair_cross_moments =
@@ -440,6 +447,10 @@ pub fn run_strategy_dimension_research(
         holding_period,
         return_min_samples_per_day: RETURN_MIN_SAMPLES_PER_DAY,
         return_min_listed_trade_days: RETURN_MIN_LISTED_TRADE_DAYS,
+        return_ridge_lambda: RETURN_RIDGE_LAMBDA,
+        return_min_train_samples: RETURN_MIN_TRAIN_SAMPLES,
+        return_min_train_samples_per_predictor: RETURN_MIN_TRAIN_SAMPLES_PER_PREDICTOR,
+        return_min_test_samples: RETURN_MIN_TEST_SAMPLES,
         return_stock_adj_type: RETURN_STOCK_ADJ_TYPE.to_string(),
         return_index_ts_code: return_layer.index_ts_code,
         return_index_beta: RETURN_INDEX_BETA,
@@ -470,7 +481,6 @@ fn load_return_layer(
     end_date: &str,
     rule_names: &[String],
     holding_period: usize,
-    ridge_lambda: f64,
 ) -> Result<ReturnLayerData, String> {
     let database_path = source_db_path(source_path);
     if !database_path.is_file() {
@@ -531,7 +541,7 @@ fn load_return_layer(
                 .into_iter()
                 .filter_map(|point| {
                     point
-                        .avg_residual_return
+                        .score_weighted_residual_return
                         .filter(|value| value.is_finite())
                         .map(|value| (point.trade_date, value))
                 })
@@ -649,8 +659,11 @@ fn load_return_layer(
 
         let mut raw_coefficients = Vec::new();
         let mut regression_available = target_index == 0;
+        let minimum_train_samples =
+            RETURN_MIN_TRAIN_SAMPLES.max(target_index * RETURN_MIN_TRAIN_SAMPLES_PER_PREDICTOR);
         if target_index > 0
-            && train_rows.len() >= 3
+            && train_rows.len() >= minimum_train_samples
+            && test_rows.len() >= RETURN_MIN_TEST_SAMPLES
             && standard_deviations[target_index] > VARIANCE_EPS
         {
             let mut correlation_matrix = vec![vec![0.0; column_count]; column_count];
@@ -668,9 +681,10 @@ fn load_return_layer(
                     correlation_matrix[column][row] = correlation;
                 }
             }
-            let diagnostic = calc_linear_orthogonal_diagnostics(&correlation_matrix, ridge_lambda)?
-                .pop()
-                .expect("非空相关矩阵必须返回目标诊断");
+            let diagnostic =
+                calc_linear_orthogonal_diagnostics(&correlation_matrix, RETURN_RIDGE_LAMBDA)?
+                    .pop()
+                    .expect("非空相关矩阵必须返回目标诊断");
             if diagnostic.residual_variance_ratio.is_some() {
                 regression_available = true;
                 raw_coefficients = diagnostic
@@ -835,14 +849,29 @@ fn load_style_layer(
                     2.0 * PERCENT_RANK() OVER (PARTITION BY trade_date ORDER BY liquidity_raw) - 1.0 AS liquidity_exposure
              FROM features
          )
-         SELECT details.rule_name, COUNT(*),
+         , daily_exposure AS (
+             SELECT details.rule_name, ranked.trade_date, COUNT(*) AS sample_count,
+                    SUM(details.rule_score * direction_exposure)
+                        / NULLIF(SUM(ABS(details.rule_score)), 0.0) AS direction_exposure,
+                    SUM(details.rule_score * entry_exposure)
+                        / NULLIF(SUM(ABS(details.rule_score)), 0.0) AS entry_exposure,
+                    SUM(details.rule_score * position_exposure)
+                        / NULLIF(SUM(ABS(details.rule_score)), 0.0) AS position_exposure,
+                    SUM(details.rule_score * volatility_exposure)
+                        / NULLIF(SUM(ABS(details.rule_score)), 0.0) AS volatility_exposure,
+                    SUM(details.rule_score * liquidity_exposure)
+                        / NULLIF(SUM(ABS(details.rule_score)), 0.0) AS liquidity_exposure
+             FROM ranked
+             INNER JOIN dimension_result.main.rule_details AS details
+               ON details.ts_code = ranked.ts_code AND details.trade_date = ranked.trade_date
+             WHERE details.rule_name IN ({placeholders})
+               AND isfinite(details.rule_score) AND ABS(details.rule_score) > {VARIANCE_EPS}
+             GROUP BY details.rule_name, ranked.trade_date
+         )
+         SELECT rule_name, SUM(sample_count),
                 AVG(direction_exposure), AVG(entry_exposure), AVG(position_exposure),
                 AVG(volatility_exposure), AVG(liquidity_exposure)
-         FROM ranked
-         INNER JOIN dimension_result.main.rule_details AS details
-           ON details.ts_code = ranked.ts_code AND details.trade_date = ranked.trade_date
-         WHERE details.rule_name IN ({placeholders})
-         GROUP BY details.rule_name"
+         FROM daily_exposure GROUP BY rule_name"
     );
     let mut feature_params = vec![
         warmup_start_date.to_string(),
@@ -895,19 +924,33 @@ fn load_style_layer(
              SELECT trade_date, DENSE_RANK() OVER (ORDER BY trade_date) AS date_index
              FROM (SELECT DISTINCT trade_date FROM dimension_result.main.score_summary
                    WHERE trade_date >= ? AND trade_date <= ?)
-         ), selected AS (
-             SELECT details.rule_name, details.ts_code, dates.date_index,
-                    LAG(dates.date_index) OVER (
-                        PARTITION BY details.rule_name, details.ts_code ORDER BY dates.date_index
-                    ) AS previous_index
-             FROM dimension_result.main.rule_details AS details
+         ), universe AS (
+             SELECT summary.ts_code, summary.trade_date, dates.date_index
+             FROM dimension_result.main.score_summary AS summary
              INNER JOIN dates USING (trade_date)
-             WHERE details.rule_name IN ({placeholders})
+         ), transitions AS (
+             SELECT current.ts_code, current.trade_date, previous.trade_date AS previous_date
+             FROM universe AS current
+             INNER JOIN universe AS previous
+               ON previous.ts_code = current.ts_code
+              AND previous.date_index = current.date_index - 1
+         ), selected_rules AS (
+             SELECT DISTINCT rule_name FROM dimension_result.main.rule_details
+             WHERE rule_name IN ({placeholders})
          )
-         SELECT rule_name,
-                2.0 * AVG(CASE WHEN previous_index IS NULL THEN NULL
-                               WHEN date_index = previous_index + 1 THEN 1.0 ELSE 0.0 END) - 1.0
-         FROM selected GROUP BY rule_name"
+         SELECT selected_rules.rule_name,
+                CORR(COALESCE(previous_score.rule_score, 0.0),
+                     COALESCE(current_score.rule_score, 0.0))
+         FROM selected_rules CROSS JOIN transitions
+         LEFT JOIN dimension_result.main.rule_details AS previous_score
+           ON previous_score.rule_name = selected_rules.rule_name
+          AND previous_score.ts_code = transitions.ts_code
+          AND previous_score.trade_date = transitions.previous_date
+         LEFT JOIN dimension_result.main.rule_details AS current_score
+           ON current_score.rule_name = selected_rules.rule_name
+          AND current_score.ts_code = transitions.ts_code
+          AND current_score.trade_date = transitions.trade_date
+         GROUP BY selected_rules.rule_name"
     );
     let mut persistence_params = vec![start_date.to_string(), end_date.to_string()];
     persistence_params.extend(rule_names.iter().cloned());
@@ -947,13 +990,13 @@ fn load_style_layer(
              SELECT DISTINCT rule_name FROM dimension_result.main.rule_details
              WHERE rule_name IN ({placeholders})
          ), daily_rule AS (
-             SELECT rule_name, trade_date, COUNT(*) AS trigger_count
+             SELECT rule_name, trade_date, SUM(rule_score) AS score_sum
              FROM dimension_result.main.rule_details
              WHERE rule_name IN ({placeholders}) AND trade_date >= ? AND trade_date <= ?
              GROUP BY rule_name, trade_date
          )
          SELECT selected_rules.rule_name,
-                CORR(COALESCE(daily_rule.trigger_count, 0)::DOUBLE / universe.universe_count,
+                CORR(COALESCE(daily_rule.score_sum, 0)::DOUBLE / universe.universe_count,
                      market.market_return)
          FROM selected_rules CROSS JOIN market
          INNER JOIN universe USING (trade_date)

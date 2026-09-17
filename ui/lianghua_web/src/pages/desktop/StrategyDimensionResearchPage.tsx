@@ -625,8 +625,8 @@ export default function StrategyDimensionResearchPage() {
               <span>持仓收益口径</span>
               <strong>{result.holding_period} 日</strong>
               <small>
-                次日开盘入场；每日触发至少 {result.return_min_samples_per_day}{" "}
-                只
+                次日开盘入场；每日有效分数至少 {result.return_min_samples_per_day}{" "}
+                只；按分数方向加权
               </small>
             </article>
           </section>
@@ -685,7 +685,7 @@ export default function StrategyDimensionResearchPage() {
                 </strong>
                 <p>
                   {strongestFullPeriodReturn
-                    ? `日均残差收益 ${formatPctPoint(strongestFullPeriodReturn.avg_residual_return)}，HAC t 为 ${formatNumber(strongestFullPeriodReturn.hac_t_value, 2)}；${(strongestFullPeriodReturn.hac_t_value ?? 0) >= 2 ? "达到较强证据参考线。" : "尚未达到较强证据参考线。"} 全区间结果仍可能包含选择偏差。`
+                    ? `日均分数加权残差收益 ${formatPctPoint(strongestFullPeriodReturn.avg_residual_return)}，HAC t 为 ${formatNumber(strongestFullPeriodReturn.hac_t_value, 2)}；${(strongestFullPeriodReturn.hac_t_value ?? 0) >= 2 ? "达到较强证据参考线。" : "尚未达到较强证据参考线。"} 全区间结果仍可能包含选择偏差。`
                     : "没有足够的正收益有效日期。"}
                 </p>
               </article>
@@ -829,11 +829,11 @@ export default function StrategyDimensionResearchPage() {
               <div>
                 <h3>八维策略风格暴露</h3>
                 <p className="dimension-research-section-note">
-                  数值统一在 -1 到 1：正方向依次表示偏近期上涨、接近 20
-                  日突破、连续触发、 60 日高位、波动放大、高流动性、随指数（
+                  数值统一在 -1 到 1，并保留规则分数的正负方向：正方向依次表示规则加分偏近期上涨、接近 20
+                  日突破、分数跨日延续、 60 日高位、波动放大、高流动性、随指数（
                   {result.return_index_ts_code}
-                  ）上涨日增加触发、正残差占优；负值表示相反风格。
-                  量价维度使用每日横截面百分位，避免价格和成交额量纲直接混合。
+                  ）上涨日整体加分、正残差占优；负值表示相反风格。
+                  量价维度先使用每日横截面百分位，再按分数绝对值归一加权并跨日等权。
                 </p>
               </div>
             </div>
@@ -882,7 +882,7 @@ export default function StrategyDimensionResearchPage() {
                 <thead>
                   <tr>
                     <th>规则</th>
-                    <th>有效触发样本</th>
+                    <th>有效评分样本</th>
                     <th>主导风格</th>
                     {(result.style_exposures[0]?.dimensions ?? []).map(
                       (dimension) => (
@@ -941,7 +941,7 @@ export default function StrategyDimensionResearchPage() {
                   <tr>
                     <th>规则</th>
                     <th>有效日期</th>
-                    <th>日均残差收益</th>
+                    <th>日均分数加权残差收益</th>
                     <th>HAC t值</th>
                     <th>训练期均值</th>
                     <th>检验期均值</th>
@@ -977,6 +977,10 @@ export default function StrategyDimensionResearchPage() {
                   {result.oos_test_start_date
                     ? `从 ${result.oos_test_start_date} 起只做检验。`
                     : "当前有效日期不足以切分训练期和检验期。"}
+                  岭正则为 {formatNumber(result.return_ridge_lambda)}；训练期至少需要
+                  {result.return_min_train_samples} 日且每个已有基准至少
+                  {result.return_min_train_samples_per_predictor} 日，检验期至少
+                  {result.return_min_test_samples} 日，否则不输出增量。
                 </p>
               </div>
             </div>

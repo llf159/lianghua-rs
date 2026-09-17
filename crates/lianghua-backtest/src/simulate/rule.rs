@@ -20,8 +20,8 @@ use crate::data::{
 use crate::scoring_model::{CompactRuleScore, ScoreDetails, ScoreSummary};
 
 use crate::simulate::fp_utils::{
-    EPS, ProfitLossSums, calc_newey_west_t_value, calc_profit_loss_sums, calc_top_bottom_spread,
-    mean, sample_std, spearman_corr,
+    EPS, ProfitLossSums, calc_newey_west_t_value, calc_profit_loss_sums,
+    calc_score_weighted_return, calc_top_bottom_spread, mean, sample_std, spearman_corr,
 };
 const PCT_CHG_BATCH_SIZE: usize = 512;
 const RESIDUAL_SERIES_TARGET_POINTS: usize = 256 * 1024;
@@ -120,6 +120,7 @@ pub struct RuleLayerPoint {
     pub avg_rule_score: Option<f64>,
     pub avg_residual_return: Option<f64>,
     pub avg_excess_residual_return: Option<f64>,
+    pub score_weighted_residual_return: Option<f64>,
     pub top_bottom_spread: Option<f64>,
     pub ic: Option<f64>,
 }
@@ -2031,6 +2032,8 @@ pub fn calc_rule_layer_metrics(
             let avg_rule_score = mean(&rule_scores);
             let avg_residual_return = mean(&residuals);
             let avg_excess_residual_return = avg_residual_return.map(|_| 0.0);
+            let score_weighted_residual_return =
+                calc_score_weighted_return(&rule_scores, &residuals);
             let profit_loss_sums = calc_profit_loss_sums(&residuals);
             let top_bottom_spread = calc_top_bottom_spread(&rule_scores, &residuals);
             let ic = spearman_corr(&rule_scores, &residuals);
@@ -2042,6 +2045,7 @@ pub fn calc_rule_layer_metrics(
                     avg_rule_score,
                     avg_residual_return,
                     avg_excess_residual_return,
+                    score_weighted_residual_return,
                     top_bottom_spread,
                     ic,
                 },
@@ -2311,6 +2315,8 @@ impl DayGroupsFoldAccum {
                 (Some(triggered_avg), Some(market_avg)) => Some(triggered_avg - market_avg),
                 _ => None,
             };
+            let score_weighted_residual_return =
+                calc_score_weighted_return(&rule_scores, &residuals);
             let day_profit_loss_sums = calc_profit_loss_sums(&triggered_residuals);
             let top_bottom_spread = calc_top_bottom_spread(&rule_scores, &residuals);
             let ic = spearman_corr(&rule_scores, &residuals);
@@ -2335,6 +2341,7 @@ impl DayGroupsFoldAccum {
                 avg_rule_score,
                 avg_residual_return,
                 avg_excess_residual_return,
+                score_weighted_residual_return,
                 top_bottom_spread,
                 ic,
             });

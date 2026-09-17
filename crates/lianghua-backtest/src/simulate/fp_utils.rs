@@ -88,6 +88,25 @@ pub(crate) fn calc_top_bottom_spread(rule_scores: &[f64], residuals: &[f64]) -> 
     Some(high_sum / half as f64 - low_sum / half as f64)
 }
 
+pub(crate) fn calc_score_weighted_return(rule_scores: &[f64], residuals: &[f64]) -> Option<f64> {
+    if rule_scores.len() != residuals.len() || rule_scores.is_empty() {
+        return None;
+    }
+
+    let absolute_score_sum = rule_scores.iter().map(|score| score.abs()).sum::<f64>();
+    if absolute_score_sum <= EPS {
+        return None;
+    }
+    Some(
+        rule_scores
+            .iter()
+            .zip(residuals)
+            .map(|(score, residual)| score * residual)
+            .sum::<f64>()
+            / absolute_score_sum,
+    )
+}
+
 pub fn mean(values: &[f64]) -> Option<f64> {
     if values.is_empty() {
         return None;
@@ -257,6 +276,13 @@ mod tests {
         let y = x.clone();
         let r = pearson_corr(&x, &y).expect("should compute");
         assert!(r >= 0.9999 && r <= 1.0, "r={r}");
+    }
+
+    #[test]
+    fn score_weighted_return_respects_signal_direction_and_strength() {
+        let scores = [2.0, -1.0, 0.0];
+        let residuals = [3.0, -3.0, 100.0];
+        assert_eq!(calc_score_weighted_return(&scores, &residuals), Some(3.0));
     }
 
     #[test]

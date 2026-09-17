@@ -102,6 +102,10 @@ export type StrategyDimensionResearchData = {
   holding_period: number
   return_min_samples_per_day: number
   return_min_listed_trade_days: number
+  return_ridge_lambda: number
+  return_min_train_samples: number
+  return_min_train_samples_per_predictor: number
+  return_min_test_samples: number
   return_stock_adj_type: string
   return_index_ts_code: string
   return_index_beta: number
