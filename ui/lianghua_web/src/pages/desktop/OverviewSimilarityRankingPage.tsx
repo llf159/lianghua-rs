@@ -110,7 +110,7 @@ export default function OverviewSimilarityRankingPage() {
         row.topMatches.map((match) => ({
           tsCode: match.tsCode,
           tradeDate: match.candidateEndTradeDate,
-          intervalStartTradeDate: match.candidateStartTradeDate,
+          intervalStartTradeDate: match.outcomeStartTradeDate,
           intervalEndTradeDate: match.outcomeEndTradeDate,
           sourcePath: sourcePath || undefined,
           name: match.name || match.tsCode,
@@ -421,11 +421,11 @@ export default function OverviewSimilarityRankingPage() {
                       className="trigger-sim-stock-link trigger-sim-history-link"
                       tsCode={match.tsCode}
                       tradeDate={match.candidateEndTradeDate}
-                      intervalStartTradeDate={match.candidateStartTradeDate}
+                      intervalStartTradeDate={match.outcomeStartTradeDate}
                       intervalEndTradeDate={match.outcomeEndTradeDate}
                       sourcePath={sourcePath}
                       navigationItems={historicalNavigationItems}
-                      title={`查看${label}${match.name || match.tsCode}的启动窗口及后验走势`}
+                      title={`查看${label}${match.name || match.tsCode}的后验走势`}
                     >
                       <strong>{label} {match.name || match.tsCode}</strong>
                       <span>{match.candidateEndTradeDate} · 超额 {formatPercent(match.forwardExcessReturnPct)}</span>

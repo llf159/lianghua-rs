@@ -168,7 +168,7 @@ export default function StrategyTriggerSimilarityPage() {
       (data?.items ?? []).map((row) => ({
         tsCode: row.tsCode,
         tradeDate: row.candidateEndTradeDate,
-        intervalStartTradeDate: row.candidateStartTradeDate,
+        intervalStartTradeDate: row.outcomeStartTradeDate,
         intervalEndTradeDate: row.outcomeEndTradeDate,
         sourcePath: sourcePath.trim() || undefined,
         name: displayStockName(row),
@@ -192,7 +192,7 @@ export default function StrategyTriggerSimilarityPage() {
         row.topMatches.map((match) => ({
           tsCode: match.tsCode,
           tradeDate: match.candidateEndTradeDate,
-          intervalStartTradeDate: match.candidateStartTradeDate,
+          intervalStartTradeDate: match.outcomeStartTradeDate,
           intervalEndTradeDate: match.outcomeEndTradeDate,
           sourcePath: sourcePath.trim() || undefined,
           name: match.name || match.tsCode,
@@ -660,11 +660,11 @@ export default function StrategyTriggerSimilarityPage() {
                             className="trigger-sim-stock-link trigger-sim-history-link"
                             tsCode={successMatch.tsCode}
                             tradeDate={successMatch.candidateEndTradeDate}
-                            intervalStartTradeDate={successMatch.candidateStartTradeDate}
+                            intervalStartTradeDate={successMatch.outcomeStartTradeDate}
                             intervalEndTradeDate={successMatch.outcomeEndTradeDate}
                             sourcePath={sourcePath}
                             navigationItems={rankingHistoricalNavigationItems}
-                            title={`查看成功模板${successMatch.name || successMatch.tsCode}的启动窗口及后验走势`}
+                            title={`查看成功模板${successMatch.name || successMatch.tsCode}的后验走势`}
                           >
                             <strong>{successMatch.name || successMatch.tsCode}</strong>
                             <span>{successMatch.candidateEndTradeDate} · 超额 {formatPercent(successMatch.forwardExcessReturnPct)}</span>
@@ -677,11 +677,11 @@ export default function StrategyTriggerSimilarityPage() {
                             className="trigger-sim-stock-link trigger-sim-history-link"
                             tsCode={failureMatch.tsCode}
                             tradeDate={failureMatch.candidateEndTradeDate}
-                            intervalStartTradeDate={failureMatch.candidateStartTradeDate}
+                            intervalStartTradeDate={failureMatch.outcomeStartTradeDate}
                             intervalEndTradeDate={failureMatch.outcomeEndTradeDate}
                             sourcePath={sourcePath}
                             navigationItems={rankingHistoricalNavigationItems}
-                            title={`查看失败模板${failureMatch.name || failureMatch.tsCode}的启动窗口及后验走势`}
+                            title={`查看失败模板${failureMatch.name || failureMatch.tsCode}的后验走势`}
                           >
                             <strong>{failureMatch.name || failureMatch.tsCode}</strong>
                             <span>{failureMatch.candidateEndTradeDate} · 超额 {formatPercent(failureMatch.forwardExcessReturnPct)}</span>
@@ -848,7 +848,7 @@ export default function StrategyTriggerSimilarityPage() {
                           className="trigger-sim-stock-link"
                           tsCode={row.tsCode}
                           tradeDate={row.candidateEndTradeDate}
-                          intervalStartTradeDate={row.candidateStartTradeDate}
+                          intervalStartTradeDate={row.outcomeStartTradeDate}
                           intervalEndTradeDate={row.outcomeEndTradeDate}
                           sourcePath={sourcePath}
                           navigationItems={detailNavigationItems}
