@@ -12,6 +12,7 @@ type DetailsLinkProps = DetailsRouteInput & {
   className?: string;
   title?: string;
   navigationItems?: DetailsNavigationItem[];
+  evidenceNavigationItems?: DetailsNavigationItem[];
   strategyCompareSnapshot?: DetailsStrategyCompareSnapshot | null;
 };
 
@@ -26,6 +27,7 @@ export default function DetailsLink({
   className,
   title,
   navigationItems,
+  evidenceNavigationItems,
   strategyCompareSnapshot,
 }: DetailsLinkProps) {
   const location = useLocation();
@@ -54,6 +56,7 @@ export default function DetailsLink({
         {
           backgroundLocation,
           navigationItems,
+          evidenceNavigationItems,
           strategyCompareSnapshot,
         } satisfies DetailsLinkLocationState
       }

@@ -722,13 +722,6 @@ export default function StrategyDimensionResearchPage() {
                     : "没有可计算的市场状态暴露。"}
                 </p>
               </article>
-              <article>
-                <span>核心组说明</span>
-                <strong>核心规则可以多选</strong>
-                <p>
-                  系统将核心策略组放在内部序列前面，非核心规则按稳定顺序继续计算。核心组内部仍是顺序正交，因此结果表示相对整组已有代表策略的边际贡献，不代表单条规则的绝对排名。
-                </p>
-              </article>
             </div>
           </section>
 

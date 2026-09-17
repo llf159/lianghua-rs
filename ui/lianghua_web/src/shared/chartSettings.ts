@@ -1,3 +1,5 @@
+import type { DetailsSimilarityNavMode } from './detailsLinkState'
+
 const CHART_MAIN_WIDTH_RATIO_STORAGE_KEY = 'lh_chart_main_width_ratio_v1'
 const CHART_INDICATOR_WIDTH_RATIO_STORAGE_KEY = 'lh_chart_indicator_width_ratio_v1'
 const CHART_MAIN_HEIGHT_MODE_STORAGE_KEY = 'lh_chart_main_height_mode_v1'
@@ -5,6 +7,7 @@ const CHART_MAIN_PERCENT_PIXELS_STORAGE_KEY = 'lh_chart_main_percent_pixels_v1'
 const CHART_MAIN_PERCENT_MIN_HEIGHT_STORAGE_KEY = 'lh_chart_main_percent_min_height_v1'
 const CHART_MAIN_PERCENT_MAX_HEIGHT_STORAGE_KEY = 'lh_chart_main_percent_max_height_v1'
 const DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_STORAGE_KEY = 'lh_details_nav_long_press_interval_seconds_v1'
+const DETAILS_SIMILARITY_NAV_MODE_STORAGE_KEY = 'lh_details_similarity_nav_mode_v1'
 const DETAIL_CYQ_MODEL_STORAGE_KEY = 'lh_detail_cyq_model_v1'
 const CHART_DEFAULT_VISIBLE_BARS_STORAGE_KEY = 'lh_chart_default_visible_bars_v1'
 
@@ -28,6 +31,7 @@ export const CHART_MAIN_PERCENT_HEIGHT_LIMIT_MAX = 1600
 export const DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_DEFAULT = 1
 export const DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_MIN = 0.2
 export const DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_MAX = 10
+export const DETAILS_SIMILARITY_NAV_MODE_DEFAULT: DetailsSimilarityNavMode = 'evidence'
 export const DETAIL_CYQ_MODEL_DEFAULT: DetailCyqModel = 'legacy'
 export const CHART_DEFAULT_VISIBLE_BARS_DEFAULT = 90
 export const CHART_DEFAULT_VISIBLE_BARS_MIN = 20
@@ -314,6 +318,35 @@ export function writeStoredDetailsNavLongPressIntervalSeconds(nextValue: number)
   window.localStorage.setItem(
     DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_STORAGE_KEY,
     normalizedValue.toString(),
+  )
+}
+
+export function normalizeDetailsSimilarityNavMode(
+  value: string | null | undefined,
+): DetailsSimilarityNavMode {
+  return value === 'list' ? 'list' : 'evidence'
+}
+
+export function readStoredDetailsSimilarityNavMode(): DetailsSimilarityNavMode {
+  if (typeof window === 'undefined') {
+    return DETAILS_SIMILARITY_NAV_MODE_DEFAULT
+  }
+
+  return normalizeDetailsSimilarityNavMode(
+    window.localStorage.getItem(DETAILS_SIMILARITY_NAV_MODE_STORAGE_KEY),
+  )
+}
+
+export function writeStoredDetailsSimilarityNavMode(
+  nextValue: DetailsSimilarityNavMode,
+) {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  window.localStorage.setItem(
+    DETAILS_SIMILARITY_NAV_MODE_STORAGE_KEY,
+    normalizeDetailsSimilarityNavMode(nextValue),
   )
 }
 

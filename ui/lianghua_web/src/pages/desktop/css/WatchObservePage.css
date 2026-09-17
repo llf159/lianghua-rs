@@ -418,4 +418,5 @@
 body .watch-observe-table-wrap {
   max-height: calc(100vh - 220px) !important;
   overflow: auto !important;
+  overscroll-behavior: contain;
 }

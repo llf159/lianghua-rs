@@ -7,6 +7,7 @@ import {
   type StrategyTriggerRankingPageData,
 } from '../../apis/strategyTriggerSimilarity'
 import DetailsLink from '../../shared/DetailsLink'
+import type { DetailsNavigationItem } from '../../shared/detailsLinkState'
 import {
   filterBoardItems,
   formatConceptText,
@@ -104,18 +105,39 @@ export default function OverviewSimilarityRankingPage() {
     [data, sourcePath],
   )
 
-  const historicalNavigationItems = useMemo(
+  const evidenceNavigationItems = useMemo<DetailsNavigationItem[]>(
     () =>
-      (data?.items ?? []).flatMap((row) =>
-        row.topMatches.map((match) => ({
-          tsCode: match.tsCode,
-          tradeDate: match.candidateEndTradeDate,
-          intervalStartTradeDate: match.outcomeStartTradeDate,
-          intervalEndTradeDate: match.outcomeEndTradeDate,
-          sourcePath: sourcePath || undefined,
-          name: match.name || match.tsCode,
-        })),
-      ),
+      (data?.items ?? []).flatMap((row) => {
+        const groupId = `${row.rank ?? row.tsCode}:${row.tsCode}`
+        const groupItems: DetailsNavigationItem[] = [
+          {
+            tsCode: row.tsCode,
+            tradeDate: data?.resolvedTradeDate,
+            sourcePath: sourcePath || undefined,
+            name: row.name || row.tsCode,
+            role: 'self',
+            groupId,
+          },
+        ]
+        const matches = [
+          { match: row.topMatches.find((match) => match.templateClass > 0), role: 'success' as const },
+          { match: row.topMatches.find((match) => match.templateClass < 0), role: 'failure' as const },
+        ]
+        for (const { match, role } of matches) {
+          if (!match) continue
+          groupItems.push({
+            tsCode: match.tsCode,
+            tradeDate: match.candidateEndTradeDate,
+            intervalStartTradeDate: match.outcomeStartTradeDate,
+            intervalEndTradeDate: match.outcomeEndTradeDate,
+            sourcePath: sourcePath || undefined,
+            name: match.name || match.tsCode,
+            role,
+            groupId,
+          })
+        }
+        return groupItems
+      }),
     [data, sourcePath],
   )
 
@@ -424,7 +446,8 @@ export default function OverviewSimilarityRankingPage() {
                       intervalStartTradeDate={match.outcomeStartTradeDate}
                       intervalEndTradeDate={match.outcomeEndTradeDate}
                       sourcePath={sourcePath}
-                      navigationItems={historicalNavigationItems}
+                      navigationItems={navigationItems}
+                      evidenceNavigationItems={evidenceNavigationItems}
                       title={`查看${label}${match.name || match.tsCode}的后验走势`}
                     >
                       <strong>{label} {match.name || match.tsCode}</strong>
@@ -443,6 +466,7 @@ export default function OverviewSimilarityRankingPage() {
                           tradeDate={data.resolvedTradeDate}
                           sourcePath={sourcePath}
                           navigationItems={navigationItems}
+                          evidenceNavigationItems={evidenceNavigationItems}
                         >
                           <strong>{row.name || row.tsCode}</strong>
                           <span>{row.tsCode}</span>

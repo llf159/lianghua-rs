@@ -415,6 +415,7 @@
 .strategy-asset-diff-body {
   max-height: 360px;
   overflow: auto;
+  overscroll-behavior: contain;
   border: 1px solid rgba(148, 163, 184, 0.34);
   border-radius: 0 0 8px 8px;
   background: #fff;

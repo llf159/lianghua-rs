@@ -79,6 +79,7 @@ import {
 } from "../../shared/conceptExclusions";
 import {
   readStoredDetailsNavLongPressIntervalSeconds,
+  readStoredDetailsSimilarityNavMode,
   readStoredChartDefaultVisibleBars,
   readStoredChartIndicatorWidthRatio,
   readStoredChartMainHeightMode,
@@ -87,6 +88,7 @@ import {
   readStoredChartMainPercentPixels,
   readStoredChartMainWidthRatio,
   readStoredDetailCyqModel,
+  writeStoredDetailsSimilarityNavMode,
   type ChartMainHeightMode,
   type DetailCyqModel,
 } from "../../shared/chartSettings";
@@ -97,7 +99,11 @@ import {
   type WatchObserveRow,
   upsertWatchObserveRow,
 } from "../../apis/watchObserve";
-import type { DetailsNavigationItem } from "../../shared/detailsLinkState";
+import type {
+  DetailsNavigationItem,
+  DetailsNavigationRole,
+  DetailsSimilarityNavMode,
+} from "../../shared/detailsLinkState";
 import type { DetailsStrategyCompareSnapshot } from "../../shared/detailsLinkState";
 import DetailsLink from "../../shared/DetailsLink";
 import {
@@ -314,6 +320,7 @@ type DetailsAutoNavDirection = "prev" | "next";
 export type DetailsPageProps = {
   variant?: DetailsPageVariant;
   navigationItems?: DetailsNavigationItem[] | null;
+  evidenceNavigationItems?: DetailsNavigationItem[] | null;
   strategyCompareSnapshot?: DetailsStrategyCompareSnapshot | null;
 };
 
@@ -812,13 +819,60 @@ function stopEventPropagation(event: { stopPropagation: () => void }) {
   event.stopPropagation();
 }
 
+function normalizeNavigationItems(
+  items: DetailsNavigationItem[] | null | undefined,
+): DetailsNavigationItem[] {
+  return (items ?? [])
+    .map((item) => {
+      const normalizedCode = sanitizeCodeInput(splitTsCode(item.tsCode));
+      if (normalizedCode === "") {
+        return null;
+      }
+
+      return {
+        tsCode: stdTsCode(normalizedCode),
+        tradeDate: item.tradeDate?.trim() || undefined,
+        intervalStartTradeDate:
+          item.intervalStartTradeDate?.trim() || undefined,
+        intervalEndTradeDate: item.intervalEndTradeDate?.trim() || undefined,
+        sourcePath: item.sourcePath?.trim() || undefined,
+        name: item.name?.trim() || undefined,
+        role: item.role ?? undefined,
+        groupId: item.groupId?.trim() || undefined,
+      } satisfies DetailsNavigationItem;
+    })
+    .filter((item): item is NonNullable<typeof item> => item !== null);
+}
+
 function findNavigationIndex(
   items: DetailsNavigationItem[],
   tsCode: string,
   tradeDate: string,
+  intervalStartTradeDate = "",
+  intervalEndTradeDate = "",
 ) {
   const normalizedCode = sanitizeCodeInput(splitTsCode(tsCode));
   const normalizedTradeDate = tradeDate.trim() === "--" ? "" : tradeDate.trim();
+  const normalizedIntervalStart = intervalStartTradeDate.trim();
+  const normalizedIntervalEnd = intervalEndTradeDate.trim();
+
+  if (normalizedIntervalStart && normalizedIntervalEnd) {
+    const intervalIndex = items.findIndex((item) => {
+      const itemCode = sanitizeCodeInput(splitTsCode(item.tsCode));
+      const itemTradeDate = item.tradeDate?.trim() ?? "";
+      const itemIntervalStart = item.intervalStartTradeDate?.trim() ?? "";
+      const itemIntervalEnd = item.intervalEndTradeDate?.trim() ?? "";
+      return (
+        itemCode === normalizedCode &&
+        itemTradeDate === normalizedTradeDate &&
+        itemIntervalStart === normalizedIntervalStart &&
+        itemIntervalEnd === normalizedIntervalEnd
+      );
+    });
+    if (intervalIndex >= 0) {
+      return intervalIndex;
+    }
+  }
 
   const exactIndex = items.findIndex((item) => {
     const itemCode = sanitizeCodeInput(splitTsCode(item.tsCode));
@@ -4287,6 +4341,7 @@ function SimilaritySection({
 export default function DetailsPage({
   variant = "default",
   navigationItems,
+  evidenceNavigationItems,
   strategyCompareSnapshot: externalStrategyCompareSnapshot = null,
 }: DetailsPageProps) {
   const [searchParams] = useSearchParams();
@@ -4371,6 +4426,8 @@ export default function DetailsPage({
     useState<DetailsAutoNavDirection | null>(null);
   const [detailsNavLongPressIntervalSeconds, setDetailsNavLongPressIntervalSeconds] =
     useState(() => readStoredDetailsNavLongPressIntervalSeconds());
+  const [detailsSimilarityNavMode, setDetailsSimilarityNavMode] =
+    useState<DetailsSimilarityNavMode>(() => readStoredDetailsSimilarityNavMode());
   const [chartLayoutWidth, setChartLayoutWidth] = useState(() =>
     typeof window === "undefined" ? CHART_VIEWBOX_WIDTH : window.innerWidth,
   );
@@ -4492,28 +4549,12 @@ export default function DetailsPage({
     lookupInput.trim() !== "" &&
     stockNameCandidates.length > 0;
   const linkedNavigationItems = useMemo(
-    () =>
-      (navigationItems ?? [])
-        .map((item) => {
-          const normalizedCode = sanitizeCodeInput(splitTsCode(item.tsCode));
-          if (normalizedCode === "") {
-            return null;
-          }
-
-          return {
-            tsCode: stdTsCode(normalizedCode),
-            tradeDate: item.tradeDate?.trim() || undefined,
-            intervalStartTradeDate:
-              item.intervalStartTradeDate?.trim() || undefined,
-            intervalEndTradeDate: item.intervalEndTradeDate?.trim() || undefined,
-            sourcePath: item.sourcePath?.trim() || undefined,
-            name: item.name?.trim() || undefined,
-          } satisfies DetailsNavigationItem;
-        })
-        .filter(
-          (item): item is NonNullable<typeof item> => item !== null,
-        ),
+    () => normalizeNavigationItems(navigationItems),
     [navigationItems],
+  );
+  const normalizedEvidenceNavigationItems = useMemo(
+    () => normalizeNavigationItems(evidenceNavigationItems),
+    [evidenceNavigationItems],
   );
 
   useEffect(() => {
@@ -5810,17 +5851,29 @@ export default function DetailsPage({
       ),
     [sourcePathTrimmed, topRows, tradeDateInput],
   );
-  const activeNavigationItems =
-    linkedNavigationItems.length > 0
+  const hasEvidenceNavigation = normalizedEvidenceNavigationItems.length > 0;
+  const isEvidenceNavActive =
+    hasEvidenceNavigation && detailsSimilarityNavMode === "evidence";
+  const activeNavigationItems = isEvidenceNavActive
+    ? normalizedEvidenceNavigationItems
+    : linkedNavigationItems.length > 0
       ? linkedNavigationItems
       : inlineNavigationItems && inlineNavigationItems.length > 0
         ? inlineNavigationItems
-      : defaultNavigationItems;
+        : defaultNavigationItems;
   const currentNavigationIndex = findNavigationIndex(
     activeNavigationItems,
     resolvedTsCode,
     resolvedTradeDate,
+    activeIntervalContext?.startTradeDate ?? "",
+    activeIntervalContext?.endTradeDate ?? "",
   );
+  const currentNavigationItem =
+    currentNavigationIndex >= 0
+      ? activeNavigationItems[currentNavigationIndex]
+      : null;
+  const currentNavigationRole = currentNavigationItem?.role ?? null;
+  const currentNavigationGroupId = currentNavigationItem?.groupId ?? null;
   const prevNavigationItem =
     currentNavigationIndex > 0
       ? activeNavigationItems[currentNavigationIndex - 1]
@@ -5830,6 +5883,23 @@ export default function DetailsPage({
     currentNavigationIndex < activeNavigationItems.length - 1
       ? activeNavigationItems[currentNavigationIndex + 1]
       : null;
+  const navigationRoleLabel = (role: DetailsNavigationRole | null | undefined) =>
+    role === "self" ? "本体" : role === "success" ? "成功历史" : role === "failure" ? "失败历史" : null;
+  const navigationButtonLabel = (
+    direction: DetailsAutoNavDirection,
+    target: DetailsNavigationItem | null,
+  ) => {
+    if (!isEvidenceNavActive || !target) {
+      return direction === "prev" ? "上一条" : "下一条";
+    }
+    if (target.groupId && currentNavigationGroupId && target.groupId !== currentNavigationGroupId) {
+      return direction === "prev" ? "上一条" : "下一条";
+    }
+    return navigationRoleLabel(target.role) ?? (direction === "prev" ? "上一条" : "下一条");
+  };
+  const prevNavigationLabel = navigationButtonLabel("prev", prevNavigationItem);
+  const nextNavigationLabel = navigationButtonLabel("next", nextNavigationItem);
+  const currentNavigationRoleLabel = navigationRoleLabel(currentNavigationRole);
   const isPrevAutoLocked = detailsNavAutoDirection === "prev";
   const isNextAutoLocked = detailsNavAutoDirection === "next";
   const chartRangeText =
@@ -7604,7 +7674,10 @@ export default function DetailsPage({
         target.intervalStartTradeDate ?? "",
         target.intervalEndTradeDate ?? "",
       );
-      const nextIntervalRestore = explicitIntervalRestore ?? activeIntervalContext;
+      const nextIntervalRestore =
+        target.role === "self"
+          ? null
+          : explicitIntervalRestore ?? activeIntervalContext;
 
       if (nextCode === "") {
         return;
@@ -7649,6 +7722,15 @@ export default function DetailsPage({
         current === direction ? null : direction,
       );
       detailsNavLongPressHandledRef.current = true;
+    },
+    [],
+  );
+
+  const onSelectSimilarityNavMode = useCallback(
+    (mode: DetailsSimilarityNavMode) => {
+      setDetailsNavAutoDirection(null);
+      setDetailsSimilarityNavMode(mode);
+      writeStoredDetailsSimilarityNavMode(mode);
     },
     [],
   );
@@ -8638,6 +8720,40 @@ export default function DetailsPage({
       ) : null}
 
       <div className="details-float-nav">
+        {hasEvidenceNavigation ? (
+          <div className="details-nav-mode-switch" role="group" aria-label="详情切换模式">
+            <button
+              className={[
+                "details-nav-mode-btn",
+                isEvidenceNavActive ? "is-active" : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
+              type="button"
+              onClick={() => onSelectSimilarityNavMode("evidence")}
+            >
+              证据链
+            </button>
+            <button
+              className={[
+                "details-nav-mode-btn",
+                !isEvidenceNavActive ? "is-active" : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
+              type="button"
+              onClick={() => onSelectSimilarityNavMode("list")}
+            >
+              名单
+            </button>
+          </div>
+        ) : null}
+        {isEvidenceNavActive && currentNavigationRoleLabel ? (
+          <div className="details-nav-role-chip">
+            当前：{currentNavigationRoleLabel}
+            {currentNavigationItem?.name ? ` · ${currentNavigationItem.name}` : ""}
+          </div>
+        ) : null}
         <button
           className={[
             "details-float-nav-btn",
@@ -8655,7 +8771,7 @@ export default function DetailsPage({
           onContextMenu={handleDetailsNavContextMenu}
           onClick={(event) => handleDetailsNavClick("prev", event)}
         >
-          {isPrevAutoLocked ? "自动中" : "上一条"}
+          {isPrevAutoLocked ? "自动中" : prevNavigationLabel}
         </button>
         <button
           className={[
@@ -8674,7 +8790,7 @@ export default function DetailsPage({
           onContextMenu={handleDetailsNavContextMenu}
           onClick={(event) => handleDetailsNavClick("next", event)}
         >
-          {isNextAutoLocked ? "自动中" : "下一条"}
+          {isNextAutoLocked ? "自动中" : nextNavigationLabel}
         </button>
       </div>
     </div>

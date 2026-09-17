@@ -1210,4 +1210,5 @@
 body .strategy-trigger-table-wrap-stocks {
   max-height: 100% !important;
   overflow: auto !important;
+  overscroll-behavior: contain;
 }

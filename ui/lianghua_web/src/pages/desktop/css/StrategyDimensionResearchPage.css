@@ -22,22 +22,25 @@
 }
 
 .dimension-research-hero {
-  padding: clamp(22px, 3vw, 36px);
-  border-radius: 16px;
+  padding: clamp(12px, 1.6vw, 18px) clamp(16px, 2vw, 24px);
+  border-radius: 12px;
+  border-color: transparent;
+  background: transparent;
 }
 
 .dimension-research-status {
   display: block;
-  margin-bottom: 10px;
+  margin-bottom: 6px;
   color: var(--theme-orange-800);
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 700;
 }
 
 .dimension-research-hero h2 {
   margin: 0;
-  font-size: clamp(28px, 3vw, 40px);
-  line-height: 1.15;
+  font-size: clamp(18px, 1.5vw, 22px);
+  font-weight: 600;
+  line-height: 1.3;
 }
 
 .dimension-research-workbench,
@@ -69,7 +72,7 @@
 .dimension-research-fields label > span,
 .dimension-research-rule-picker-head label > span {
   color: #344054;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 700;
 }
 
@@ -84,7 +87,7 @@
   background: #fff;
   color: var(--dimension-ink);
   font: inherit;
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .dimension-research-fields input:focus,
@@ -118,12 +121,12 @@
 }
 
 .dimension-research-selection-head strong {
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .dimension-research-selection-head small {
   color: var(--dimension-muted);
-  font-size: 11px;
+  font-size: 13px;
 }
 
 .dimension-research-selection-head .dimension-research-order-note {
@@ -141,7 +144,7 @@
   color: #475467;
   cursor: pointer;
   font: inherit;
-  font-size: 11px;
+  font-size: 13px;
 }
 
 .dimension-research-selection button:disabled,
@@ -186,13 +189,13 @@
   border-radius: 50%;
   background: var(--theme-orange-100);
   color: var(--theme-orange-800);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 800;
 }
 
 .dimension-research-selection li > strong {
   overflow: hidden;
-  font-size: 11px;
+  font-size: 13px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -209,7 +212,7 @@
   width: auto;
   padding: 0 7px;
   color: var(--theme-orange-800);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 700;
 }
 
@@ -253,7 +256,7 @@
 
 .dimension-research-rule-options label > span {
   overflow: hidden;
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 650;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -261,7 +264,7 @@
 
 .dimension-research-rule-options label > small {
   color: var(--dimension-muted);
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .dimension-research-error {
@@ -271,7 +274,7 @@
   border-radius: 8px;
   background: #fef2f2;
   color: #b42318;
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.6;
 }
 
@@ -290,7 +293,7 @@
   color: #fff;
   cursor: pointer;
   font: inherit;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 750;
 }
 
@@ -322,7 +325,7 @@
 .dimension-research-summary span,
 .dimension-research-insight-grid span {
   color: var(--theme-orange-700);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 800;
   letter-spacing: 0.07em;
 }
@@ -333,7 +336,7 @@
 
 .dimension-research-summary small {
   color: var(--dimension-muted);
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.5;
 }
 
@@ -354,14 +357,14 @@
   display: block;
   min-height: 44px;
   margin: 10px 0 8px;
-  font-size: 15px;
+  font-size: 16px;
   line-height: 1.45;
 }
 
 .dimension-research-insight-grid p {
   margin: 0;
   color: #6d4c35;
-  font-size: 11px;
+  font-size: 13px;
   line-height: 1.7;
 }
 
@@ -379,7 +382,7 @@
   width: 100%;
   border-collapse: collapse;
   background: #fff;
-  font-size: 11px;
+  font-size: 13px;
   white-space: nowrap;
 }
 
@@ -396,7 +399,7 @@
   top: 0;
   background: #f9fafb;
   color: #475467;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 800;
 }
 
@@ -420,6 +423,7 @@ body .dimension-research-pair-table-wrap,
 body .dimension-research-matrix-wrap {
   max-height: min(620px, calc(100vh - 180px)) !important;
   overflow: auto !important;
+  overscroll-behavior: contain;
 }
 
 .dimension-research-pair-table-wrap table,
@@ -434,7 +438,7 @@ body .dimension-research-matrix-wrap {
   border-radius: 999px;
   background: #f2f4f7;
   color: #475467;
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 750;
 }
 
@@ -467,20 +471,20 @@ body .dimension-research-matrix-wrap {
 
 .dimension-research-orthogonal-results article > div:first-child span {
   color: var(--theme-orange-700);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 800;
 }
 
 .dimension-research-orthogonal-results article > div:first-child strong {
   overflow: hidden;
-  font-size: 12px;
+  font-size: 13px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .dimension-research-orthogonal-results em {
   color: #667085;
-  font-size: 9px;
+  font-size: 11px;
   font-style: normal;
 }
 
@@ -514,19 +518,19 @@ body .dimension-research-matrix-wrap {
 
 .dimension-research-orthogonal-results dt {
   color: var(--dimension-muted);
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .dimension-research-orthogonal-results dd {
   margin: 4px 0 0;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 750;
 }
 
 .dimension-research-orthogonal-results p {
   margin: 11px 0 0;
   color: var(--dimension-muted);
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.6;
 }
 
@@ -551,13 +555,13 @@ body .dimension-research-matrix-wrap {
 }
 
 .dimension-research-pending strong {
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .dimension-research-pending ul {
   margin: 8px 0 0;
   padding-left: 18px;
-  font-size: 11px;
+  font-size: 13px;
   line-height: 1.7;
 }
 
@@ -579,7 +583,7 @@ body .dimension-research-matrix-wrap {
   max-width: 920px;
   margin: 8px 0 0;
   color: var(--dimension-muted);
-  font-size: 11px;
+  font-size: 13px;
   line-height: 1.65;
 }
 
@@ -605,20 +609,20 @@ body .dimension-research-matrix-wrap {
 
 .dimension-research-style-analysis span {
   color: var(--theme-orange-700);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 800;
 }
 
 .dimension-research-style-analysis strong {
   display: block;
   margin: 7px 0 5px;
-  font-size: 15px;
+  font-size: 16px;
 }
 
 .dimension-research-style-analysis p {
   margin: 0;
   color: var(--dimension-muted);
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.6;
 }
 
@@ -638,7 +642,7 @@ body .dimension-research-matrix-wrap {
   justify-content: space-between;
   gap: 8px;
   color: var(--dimension-muted);
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .dimension-research-style-bars b {
@@ -674,7 +678,7 @@ body .dimension-research-matrix-wrap {
   color: var(--theme-orange-800);
   cursor: pointer;
   font: inherit;
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 700;
 }
 
@@ -732,7 +736,7 @@ body .dimension-research-matrix-wrap {
   }
 
   .dimension-research-hero h2 {
-    font-size: 30px;
+    font-size: 18px;
   }
 
   .dimension-research-fields,

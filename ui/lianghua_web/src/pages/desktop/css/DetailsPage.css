@@ -714,6 +714,52 @@
   box-shadow: 0 12px 28px rgba(234, 88, 12, 0.24);
 }
 
+.details-nav-mode-switch {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid #d1d9e2;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.12);
+}
+
+.details-nav-mode-btn {
+  border: none;
+  border-radius: 7px;
+  padding: 6px 10px;
+  background: transparent;
+  color: #475569;
+  font-size: 13px;
+  line-height: 1.2;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.details-nav-mode-btn.is-active {
+  background: #1f2a37;
+  color: #fff;
+}
+
+.details-nav-role-chip {
+  max-width: 220px;
+  padding: 6px 10px;
+  border: 1px solid #d1d9e2;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.96);
+  color: #334155;
+  font-size: 12px;
+  line-height: 1.3;
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.12);
+}
+
 .details-error {
   margin-top: 10px;
   color: #b00020;
@@ -2734,9 +2780,11 @@ body .details-prev-rank-table-wrap {
 body .details-subcard .details-table-wrap {
   max-height: 420px !important;
   overflow: auto !important;
+  overscroll-behavior: contain;
 }
 
 body .details-scene-overview-table-wrap {
   max-height: calc(100vh - 300px) !important;
   overflow: auto !important;
+  overscroll-behavior: contain;
 }

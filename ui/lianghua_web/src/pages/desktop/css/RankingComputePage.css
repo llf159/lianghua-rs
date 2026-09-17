@@ -219,6 +219,7 @@
 .ranking-compute-strategy-diff-body {
   max-height: 560px;
   overflow: auto;
+  overscroll-behavior: contain;
 }
 
 .ranking-compute-strategy-diff-row {

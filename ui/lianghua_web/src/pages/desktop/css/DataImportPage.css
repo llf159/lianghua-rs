@@ -576,4 +576,5 @@
 body .settings-db-table-wrap {
   max-height: calc(100vh - 300px) !important;
   overflow: auto !important;
+  overscroll-behavior: contain;
 }

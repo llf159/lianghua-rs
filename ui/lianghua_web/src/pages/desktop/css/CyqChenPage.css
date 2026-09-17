@@ -562,4 +562,5 @@
 body .cyq-chen-bin-table-wrap {
   max-height: 280px !important;
   overflow: auto !important;
+  overscroll-behavior: contain;
 }
