@@ -10,3 +10,4 @@
 - 数据库规则回测由每个批内策略线程单独打开只读结果库并直接生成扁平评分列；禁止恢复 `规则 -> 股票 -> 日期 -> 分数` 的批量嵌套缓存，确保只加载当前正在计算的策略命中。
 - 残差股票批量以约 256K 行时序点为目标，在 128..512 股票间自适应；短区间减少 DuckDB 往返，长区间限制原始涨跌幅、ER 与残差同时常驻的峰值。
 - 只运行 `cargo test -p lianghua-backtest`，不要因此触发全 workspace 测试。
+- `simulate::rule` 拆为 `rule/{mod,cache,metrics,residual,test_support}`：类型与对外入口留在 `mod.rs`，缓存构建、指标计算、残差与行情序列各自成文件；测试写在被测文件末尾的 `#[cfg(test)] mod tests` 内，跨文件共用的夹具放 `test_support.rs`，禁止再恢复单一 `tests.rs`。
