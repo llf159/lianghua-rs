@@ -26,9 +26,11 @@ const DEFAULT_POOL_SEGMENTS: usize = 5;
 const DEFAULT_OUTCOME_TRADE_DAYS: usize = 5;
 const DEFAULT_LIMIT: usize = 30;
 const MAX_POOL_SEGMENTS: usize = 12;
-// 候选池优先覆盖近期事件，同时保留跨期分散样本；不再用只含触发摘要的代理分数
-// 预判包含量价、指标和市场环境的最终相似度。
-const RECENT_CANDIDATE_ANCHORS: usize = 40_000;
+// 参考日之前这段时间内的历史事件不进入候选样本，避免评级继续由最近一轮行情主导。
+const MIN_SAMPLE_GAP_TRADE_DAYS: usize = 90;
+// 候选池同时覆盖近期和跨期分散样本，让市场环境通道能命中的历史相似阶段不会被
+// 近期事件挤掉；不再用只含触发摘要的代理分数预判包含量价、指标和市场环境的最终相似度。
+const RECENT_CANDIDATE_ANCHORS: usize = 15_000;
 const HISTORY_DIVERSITY_ANCHORS: usize = (50_000) - RECENT_CANDIDATE_ANCHORS;
 // 评级样本独立于页面展示条数，并限制重叠事件对有效样本量的虚增。
 const RATING_SAMPLE_LIMIT: usize = 30;

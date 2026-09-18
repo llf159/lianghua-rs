@@ -19,9 +19,11 @@ use crate::data::{ind_toml_path, score_rule_path, stock_list_path};
 use crate::utils::utils::board_category;
 use lianghua_app_shared::build_total_mv_map;
 
-const ALGORITHM_VERSION: &str = "outcome-reverse-startup-ranking-v10";
+const ALGORITHM_VERSION: &str = "outcome-reverse-startup-ranking-v11";
 const SUCCESS_QUALITY_THRESHOLD: f64 = 0.80;
 const FAILURE_QUALITY_THRESHOLD: f64 = 0.20;
+// 历史分散锚点按时间等宽分桶，保证各市场阶段都有机会进入候选池。
+const MARKET_HISTORY_BUCKETS: usize = 8;
 const SEMANTIC_DEFINITION_SIGNATURE_PREFIX: &str = "definitions-v1|";
 
 #[derive(Debug, Clone)]
@@ -162,6 +164,7 @@ pub struct StrategyTriggerSimilarityActiveConfig {
     pub window_trade_days: usize,
     pub pool_segments: usize,
     pub outcome_trade_days: usize,
+    pub sample_gap_trade_days: usize,
     pub benchmark_index_code: String,
 }
 
@@ -415,22 +418,25 @@ fn config_key(
     window_trade_days: usize,
     pool_segments: usize,
     outcome_trade_days: usize,
+    sample_gap_trade_days: usize,
     benchmark_index_code: &str,
 ) -> String {
     (|algorithm_version: &str,
       window_trade_days: usize,
       pool_segments: usize,
       outcome_trade_days: usize,
+      sample_gap_trade_days: usize,
       benchmark_index_code: &str|
      -> String {
         format!(
-            "{algorithm_version}:w{window_trade_days}:p{pool_segments}:h{outcome_trade_days}:b{benchmark_index_code}"
+            "{algorithm_version}:w{window_trade_days}:p{pool_segments}:h{outcome_trade_days}:g{sample_gap_trade_days}:b{benchmark_index_code}"
         )
     })(
         ALGORITHM_VERSION,
         window_trade_days,
         pool_segments,
         outcome_trade_days,
+        sample_gap_trade_days,
         benchmark_index_code,
     )
 }
@@ -515,6 +521,7 @@ fn parse_active_config_key(
     let mut window = None;
     let mut pool = None;
     let mut outcome = None;
+    let mut sample_gap = None;
     let mut benchmark = None;
     for part in suffix.split(':') {
         if let Some(value) = part.strip_prefix('w') {
@@ -523,6 +530,8 @@ fn parse_active_config_key(
             pool = value.parse::<usize>().ok();
         } else if let Some(value) = part.strip_prefix('h') {
             outcome = value.parse::<usize>().ok();
+        } else if let Some(value) = part.strip_prefix('g') {
+            sample_gap = value.parse::<usize>().ok();
         } else if let Some(value) = part.strip_prefix('b') {
             benchmark = Some(value.to_string());
         }
@@ -533,6 +542,7 @@ fn parse_active_config_key(
             window_trade_days: window?,
             pool_segments: pool?,
             outcome_trade_days: outcome?,
+            sample_gap_trade_days: sample_gap.unwrap_or(MIN_SAMPLE_GAP_TRADE_DAYS),
             benchmark_index_code: benchmark?,
         },
         config_key: key.to_string(),
@@ -549,6 +559,7 @@ fn load_active_config_record(conn: &Connection) -> Result<Option<ActiveConfigRec
         "window_trade_days",
         "pool_segments",
         "outcome_trade_days",
+        "sample_gap_trade_days",
         "benchmark_index_code",
     ]
     .into_iter()
@@ -565,10 +576,11 @@ fn load_active_config_record(conn: &Connection) -> Result<Option<ActiveConfigRec
     });
     let query = if has_explicit_columns {
         "SELECT config_key, scope_trade_date, scope_signature, algorithm_version, \
-         window_trade_days, pool_segments, outcome_trade_days, benchmark_index_code \
+         window_trade_days, pool_segments, outcome_trade_days, sample_gap_trade_days, \
+         benchmark_index_code \
          FROM strategy_trigger_similarity_active_config WHERE id=1"
     } else {
-        "SELECT config_key, scope_trade_date, scope_signature, NULL, NULL, NULL, NULL, NULL \
+        "SELECT config_key, scope_trade_date, scope_signature, NULL, NULL, NULL, NULL, NULL, NULL \
          FROM strategy_trigger_similarity_active_config WHERE id=1"
     };
     let row = conn
@@ -581,7 +593,8 @@ fn load_active_config_record(conn: &Connection) -> Result<Option<ActiveConfigRec
                 row.get::<_, Option<i64>>(4)?,
                 row.get::<_, Option<i64>>(5)?,
                 row.get::<_, Option<i64>>(6)?,
-                row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<i64>>(7)?,
+                row.get::<_, Option<String>>(8)?,
             ))
         })
         .map(Some)
@@ -591,21 +604,27 @@ fn load_active_config_record(conn: &Connection) -> Result<Option<ActiveConfigRec
         })
         .map_err(|e| format!("读取走势相似生效配置失败: {e}"))?;
     Ok(row.and_then(
-        |(key, date, signature, algorithm, window, pool, outcome, benchmark)| {
-            let explicit = match (algorithm, window, pool, outcome, benchmark) {
-                (Some(algorithm), Some(window), Some(pool), Some(outcome), Some(benchmark)) => {
-                    Some(ActiveConfigRecord {
-                        config: StrategyTriggerSimilarityActiveConfig {
-                            algorithm_version: algorithm,
-                            window_trade_days: usize::try_from(window).ok()?,
-                            pool_segments: usize::try_from(pool).ok()?,
-                            outcome_trade_days: usize::try_from(outcome).ok()?,
-                            benchmark_index_code: benchmark,
-                        },
-                        config_key: key.clone(),
-                        scope_signature: signature.clone(),
-                    })
-                }
+        |(key, date, signature, algorithm, window, pool, outcome, sample_gap, benchmark)| {
+            let explicit = match (algorithm, window, pool, outcome, sample_gap, benchmark) {
+                (
+                    Some(algorithm),
+                    Some(window),
+                    Some(pool),
+                    Some(outcome),
+                    Some(sample_gap),
+                    Some(benchmark),
+                ) => Some(ActiveConfigRecord {
+                    config: StrategyTriggerSimilarityActiveConfig {
+                        algorithm_version: algorithm,
+                        window_trade_days: usize::try_from(window).ok()?,
+                        pool_segments: usize::try_from(pool).ok()?,
+                        outcome_trade_days: usize::try_from(outcome).ok()?,
+                        sample_gap_trade_days: usize::try_from(sample_gap).ok()?,
+                        benchmark_index_code: benchmark,
+                    },
+                    config_key: key.clone(),
+                    scope_signature: signature.clone(),
+                }),
                 _ => None,
             };
             explicit.or_else(|| parse_active_config_key(&key, date, signature))
@@ -780,6 +799,9 @@ fn load_outcome_selected_anchors(
     window_trade_days: usize,
     outcome_trade_days: usize,
     benchmark_rows: &HashMap<String, BenchmarkObservation>,
+    environment_fingerprints: &HashMap<String, Arc<ChannelFingerprint>>,
+    target_market: Option<&ChannelFingerprint>,
+    sample_gap_trade_days: usize,
 ) -> Result<(Vec<OutcomeSelectedAnchor>, usize), String> {
     let date_index = all_trade_dates
         .iter()
@@ -794,6 +816,11 @@ fn load_outcome_selected_anchors(
         .get(cutoff_date)
         .copied()
         .ok_or_else(|| format!("历史截止日不在评分交易日中: {cutoff_date}"))?;
+    let target_index = date_index
+        .get(target_date)
+        .copied()
+        .ok_or_else(|| format!("参考日不在评分交易日中: {target_date}"))?;
+    let sample_cutoff_index = cutoff_index.min(target_index.saturating_sub(sample_gap_trade_days));
 
     let mut scored_dates = HashMap::<String, Vec<bool>>::new();
     let mut score_stmt = conn
@@ -855,7 +882,7 @@ fn load_outcome_selected_anchors(
         };
         for anchor_position in 0..path.len().saturating_sub(outcome_trade_days) {
             let anchor = &path[anchor_position];
-            if anchor.date_index < earliest_index || anchor.date_index > cutoff_index {
+            if anchor.date_index < earliest_index || anchor.date_index > sample_cutoff_index {
                 continue;
             }
             if !stock_scored_dates[anchor.date_index] {
@@ -1090,6 +1117,24 @@ fn load_outcome_selected_anchors(
         }
         hash
     }
+    // 市场相似度只取决于锚点日期，按交易日预计算一次，避免排序比较器反复做高维点积。
+    let market_similarity_by_date = target_market.map(|target_market| {
+        let mut scores = vec![f64::NEG_INFINITY; all_trade_dates.len()];
+        let limit = (cutoff_index + 1).min(all_trade_dates.len());
+        for (index, score) in scores.iter_mut().enumerate().take(limit) {
+            *score = environment_fingerprints
+                .get(&all_trade_dates[index])
+                .and_then(|candidate| cached_channel_similarity(target_market, candidate))
+                .unwrap_or(f64::NEG_INFINITY);
+        }
+        scores
+    });
+    let market_similarity_of = |row: &SelectedLabel| -> f64 {
+        market_similarity_by_date
+            .as_ref()
+            .map(|scores| scores[row.date_index])
+            .unwrap_or(0.0)
+    };
     let mut chosen = Vec::<SelectedLabel>::new();
     for quality_class in [1_i8, -1_i8] {
         let mut class_rows = selected
@@ -1108,11 +1153,46 @@ fn load_outcome_selected_anchors(
         let diverse_limit = HISTORY_DIVERSITY_ANCHORS / 2;
         let remaining = class_rows.split_off(class_rows.len().min(recent_limit));
         chosen.extend(class_rows);
-        let mut diverse = remaining;
-        diverse.sort_unstable_by_key(|row| {
-            stable_label_hash(&stock_codes[row.stock_index], row.date_index)
-        });
-        chosen.extend(diverse.into_iter().take(diverse_limit));
+
+        // 历史分散样本按时间分桶，每段市场阶段内先按与目标市场的环境相似度排序，
+        // 再各桶轮流取，避免市场环境通道又只命中离当前最近的事件。
+        let bucket_span = (sample_cutoff_index + 1).max(1);
+        let mut buckets = vec![Vec::<SelectedLabel>::new(); MARKET_HISTORY_BUCKETS];
+        for row in remaining {
+            let bucket = (row.date_index * MARKET_HISTORY_BUCKETS / bucket_span)
+                .min(MARKET_HISTORY_BUCKETS - 1);
+            buckets[bucket].push(row);
+        }
+        for bucket in &mut buckets {
+            bucket.sort_unstable_by(|left, right| {
+                market_similarity_of(right)
+                    .total_cmp(&market_similarity_of(left))
+                    .then_with(|| {
+                        stable_label_hash(&stock_codes[left.stock_index], left.date_index).cmp(
+                            &stable_label_hash(&stock_codes[right.stock_index], right.date_index),
+                        )
+                    })
+            });
+        }
+        let mut cursors = vec![0_usize; buckets.len()];
+        let mut picked = 0_usize;
+        while picked < diverse_limit {
+            let mut progressed = false;
+            for (bucket_index, bucket) in buckets.iter().enumerate() {
+                if picked >= diverse_limit {
+                    break;
+                }
+                if let Some(row) = bucket.get(cursors[bucket_index]) {
+                    chosen.push(*row);
+                    cursors[bucket_index] += 1;
+                    picked += 1;
+                    progressed = true;
+                }
+            }
+            if !progressed {
+                break;
+            }
+        }
     }
 
     chosen.sort_unstable_by(|left, right| {
@@ -1188,6 +1268,7 @@ fn ensure_ranking_tables(conn: &Connection) -> Result<(), String> {
             window_trade_days BIGINT NOT NULL,
             pool_segments BIGINT NOT NULL,
             outcome_trade_days BIGINT NOT NULL,
+            sample_gap_trade_days BIGINT NOT NULL,
             benchmark_index_code VARCHAR NOT NULL,
             scope_trade_date VARCHAR NOT NULL,
             scope_signature VARCHAR NOT NULL,
@@ -1254,6 +1335,8 @@ fn ensure_ranking_tables(conn: &Connection) -> Result<(), String> {
         ALTER TABLE strategy_trigger_similarity_active_config
           ADD COLUMN IF NOT EXISTS outcome_trade_days BIGINT;
         ALTER TABLE strategy_trigger_similarity_active_config
+          ADD COLUMN IF NOT EXISTS sample_gap_trade_days BIGINT;
+        ALTER TABLE strategy_trigger_similarity_active_config
           ADD COLUMN IF NOT EXISTS benchmark_index_code VARCHAR;
         "#,
     )
@@ -1269,11 +1352,12 @@ fn table_exists(conn: &Connection, table_name: &str) -> Result<bool, String> {
     .map_err(|e| format!("检查相似排行榜表失败: {e}"))
 }
 
-fn parse_config_key(key: &str) -> Option<(usize, usize, usize, String)> {
+fn parse_config_key(key: &str) -> Option<(usize, usize, usize, usize, String)> {
     let suffix = key.strip_prefix(&format!("{ALGORITHM_VERSION}:"))?;
     let mut window = None;
     let mut pool = None;
     let mut outcome = None;
+    let mut sample_gap = None;
     let mut benchmark = None;
     for part in suffix.split(':') {
         if let Some(value) = part.strip_prefix('w') {
@@ -1282,11 +1366,19 @@ fn parse_config_key(key: &str) -> Option<(usize, usize, usize, String)> {
             pool = value.parse::<usize>().ok();
         } else if let Some(value) = part.strip_prefix('h') {
             outcome = value.parse::<usize>().ok();
+        } else if let Some(value) = part.strip_prefix('g') {
+            sample_gap = value.parse::<usize>().ok();
         } else if let Some(value) = part.strip_prefix('b') {
             benchmark = Some(value.to_string());
         }
     }
-    Some((window?, pool?, outcome?, benchmark?))
+    Some((
+        window?,
+        pool?,
+        outcome?,
+        sample_gap.unwrap_or(MIN_SAMPLE_GAP_TRADE_DAYS),
+        benchmark?,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1303,6 +1395,7 @@ pub fn get_strategy_trigger_similarity_ranking_page(
     total_mv_min: Option<f64>,
     total_mv_max: Option<f64>,
     ts_code: Option<String>,
+    sample_gap_trade_days: Option<u32>,
 ) -> Result<StrategyTriggerRankingPageData, String> {
     let source_path = source_path.trim().to_string();
     if source_path.is_empty() {
@@ -1321,6 +1414,7 @@ pub fn get_strategy_trigger_similarity_ranking_page(
                     config.window_trade_days,
                     config.pool_segments,
                     config.outcome_trade_days,
+                    config.sample_gap_trade_days,
                     config.benchmark_index_code,
                 )
             })
@@ -1372,10 +1466,14 @@ pub fn get_strategy_trigger_similarity_ranking_page(
         .map(|value| value.2)
         .or_else(|| outcome_trade_days.map(|v| v as usize).filter(|v| *v > 0))
         .unwrap_or(DEFAULT_OUTCOME_TRADE_DAYS);
+    let sample_gap_trade_days = sample_gap_trade_days
+        .map(|v| v as usize)
+        .or_else(|| latest_config.as_ref().map(|value| value.3))
+        .unwrap_or(MIN_SAMPLE_GAP_TRADE_DAYS);
     let benchmark_index_code = resolve_benchmark_index_code(
         latest_config
             .as_ref()
-            .map(|value| value.3.as_str())
+            .map(|value| value.4.as_str())
             .or(benchmark_index_code.as_deref()),
     )?;
     let limit = limit
@@ -1391,14 +1489,16 @@ pub fn get_strategy_trigger_similarity_ranking_page(
     let target_index = all_trade_dates
         .binary_search(&resolved_trade_date)
         .map_err(|_| format!("参考日不在评分交易日中: {resolved_trade_date}"))?;
-    if target_index < outcome_trade_days {
+    let candidate_gap_trade_days = outcome_trade_days.max(sample_gap_trade_days);
+    if target_index < candidate_gap_trade_days {
         return Err("参考日前没有足够历史区间".to_string());
     }
-    let historical_cutoff_date = all_trade_dates[target_index - outcome_trade_days].clone();
+    let historical_cutoff_date = all_trade_dates[target_index - candidate_gap_trade_days].clone();
     let key = config_key(
         window_trade_days,
         pool_segments,
         outcome_trade_days,
+        sample_gap_trade_days,
         &benchmark_index_code,
     );
     let current_signature = load_data_signature(&conn, &source_path, &resolved_trade_date)?;
@@ -1673,6 +1773,7 @@ pub fn run_strategy_trigger_similarity_ranking(
     exclude_st_board: Option<bool>,
     total_mv_min: Option<f64>,
     total_mv_max: Option<f64>,
+    sample_gap_trade_days: Option<u32>,
 ) -> Result<StrategyTriggerRankingPageData, String> {
     let _guard = RANKING_COMPUTE_LOCK
         .get_or_init(|| Mutex::new(()))
@@ -1716,6 +1817,14 @@ pub fn run_strategy_trigger_similarity_ranking(
                 .map(|config| config.outcome_trade_days)
         })
         .unwrap_or(DEFAULT_OUTCOME_TRADE_DAYS);
+    let sample_gap_trade_days = sample_gap_trade_days
+        .map(|v| v as usize)
+        .or_else(|| {
+            active_config
+                .as_ref()
+                .map(|config| config.sample_gap_trade_days)
+        })
+        .unwrap_or(MIN_SAMPLE_GAP_TRADE_DAYS);
     let benchmark_index_code =
         resolve_benchmark_index_code(benchmark_index_code.as_deref().or_else(|| {
             active_config
@@ -1730,12 +1839,15 @@ pub fn run_strategy_trigger_similarity_ranking(
     let target_index = all_trade_dates
         .binary_search(&resolved_trade_date)
         .map_err(|_| format!("参考日不在评分交易日中: {resolved_trade_date}"))?;
-    if target_index < outcome_trade_days {
-        return Err("参考日前没有足够历史区间".to_string());
+    let candidate_gap_trade_days = outcome_trade_days.max(sample_gap_trade_days);
+    if target_index < candidate_gap_trade_days {
+        return Err(format!(
+            "参考日前不足 {candidate_gap_trade_days} 个交易日，无法隔离最近样本"
+        ));
     }
     let target_start_index = (target_index + 1).saturating_sub(window_trade_days);
     let target_start_date = all_trade_dates[target_start_index].clone();
-    let historical_cutoff_date = all_trade_dates[target_index - outcome_trade_days].clone();
+    let historical_cutoff_date = all_trade_dates[target_index - candidate_gap_trade_days].clone();
     let earliest_candidate_date = all_trade_dates
         .get(window_trade_days.saturating_sub(1))
         .map(String::as_str)
@@ -1777,6 +1889,11 @@ pub fn run_strategy_trigger_similarity_ranking(
         window_trade_days,
         outcome_trade_days,
         &benchmark_rows,
+        &environment_fingerprints,
+        environment_fingerprints
+            .get(&resolved_trade_date)
+            .map(Arc::as_ref),
+        sample_gap_trade_days,
     )?;
     let selected_quality = selected_anchors
         .iter()
@@ -2628,6 +2745,7 @@ pub fn run_strategy_trigger_similarity_ranking(
         window_trade_days,
         pool_segments,
         outcome_trade_days,
+        sample_gap_trade_days,
         &benchmark_index_code,
     );
     (|source_path: &str,
@@ -2644,9 +2762,14 @@ pub fn run_strategy_trigger_similarity_ranking(
       total_elapsed_ms: u64,
       timings: &[StrategyTriggerRankingTiming]|
      -> Result<(), String> {
-        let (window_trade_days, pool_segments, outcome_trade_days, benchmark_index_code) =
-            parse_config_key(config_key)
-                .ok_or_else(|| format!("无法解析走势相似排行配置: {config_key}"))?;
+        let (
+            window_trade_days,
+            pool_segments,
+            outcome_trade_days,
+            sample_gap_trade_days,
+            benchmark_index_code,
+        ) = parse_config_key(config_key)
+            .ok_or_else(|| format!("无法解析走势相似排行配置: {config_key}"))?;
         let result_path = result_db_path(source_path);
         let mut conn = Connection::open(&result_path)
             .map_err(|e| format!("打开结果库写入相似排行榜失败: {e}"))?;
@@ -2783,9 +2906,9 @@ pub fn run_strategy_trigger_similarity_ranking(
             r#"
         INSERT INTO strategy_trigger_similarity_active_config (
             id, config_key, algorithm_version, window_trade_days, pool_segments,
-            outcome_trade_days, benchmark_index_code, scope_trade_date,
+            outcome_trade_days, sample_gap_trade_days, benchmark_index_code, scope_trade_date,
             scope_signature, updated_at_epoch_seconds
-        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
             params![
                 config_key,
@@ -2793,6 +2916,7 @@ pub fn run_strategy_trigger_similarity_ranking(
                 window_trade_days as i64,
                 pool_segments as i64,
                 outcome_trade_days as i64,
+                sample_gap_trade_days as i64,
                 benchmark_index_code,
                 trade_date,
                 scope_signature,
@@ -2835,6 +2959,7 @@ pub fn run_strategy_trigger_similarity_ranking(
         total_mv_min,
         total_mv_max,
         None,
+        Some(sample_gap_trade_days as u32),
     )?;
     set_ranking_progress("completed", "走势相似排行榜计算完成", 1, 1);
     Ok(page)
@@ -2878,9 +3003,9 @@ mod tests {
 
     use super::StrategyTriggerRankingRow;
     use super::{
-        ANCHOR_CHUNK_SIZE, RankingTargetScratch, assign_ranks, build_channel_fingerprint,
-        build_environment_fingerprint_map, build_ranking_samples_for_chunk,
-        cached_channel_similarity, ensure_ranking_tables,
+        ANCHOR_CHUNK_SIZE, MIN_SAMPLE_GAP_TRADE_DAYS, RankingTargetScratch, assign_ranks,
+        build_channel_fingerprint, build_environment_fingerprint_map,
+        build_ranking_samples_for_chunk, cached_channel_similarity, ensure_ranking_tables,
         get_strategy_trigger_similarity_active_config,
         get_strategy_trigger_similarity_ranking_page, load_all_trade_dates, load_benchmark_rows,
         load_market_environment, load_market_schema, load_outcome_selected_anchors,
@@ -3192,6 +3317,9 @@ mod tests {
             20,
             horizon,
             &benchmark_rows,
+            &HashMap::new(),
+            None,
+            MIN_SAMPLE_GAP_TRADE_DAYS,
         )
         .expect("scan real outcome labels");
         eprintln!(
@@ -3235,6 +3363,9 @@ mod tests {
             20,
             horizon,
             &benchmark_rows,
+            &environment_fingerprints,
+            environment_fingerprints.get(&target_date).map(Arc::as_ref),
+            MIN_SAMPLE_GAP_TRADE_DAYS,
         )
         .expect("load selected anchors");
         let anchors = selected
@@ -3295,6 +3426,7 @@ mod tests {
             Some(5),
             Some("000001.SH".to_string()),
             Some(100),
+            None,
             None,
             None,
             None,
@@ -3450,6 +3582,7 @@ mod tests {
             None,
             None,
             None,
+            Some(0),
         )
         .expect("compute first historical ranking snapshot");
         let market = Connection::open(source_dir.join("stock_data.db"))
@@ -3488,6 +3621,7 @@ mod tests {
             None,
             None,
             None,
+            Some(0),
         )
         .expect("compute ranking");
         assert!(computed.is_fresh);
@@ -3552,6 +3686,7 @@ mod tests {
             None,
             None,
             None,
+            Some(0),
         )
         .expect("read ranking");
         assert!(reread.is_fresh);
@@ -3570,6 +3705,7 @@ mod tests {
             None,
             None,
             Some("TARGET.SZ".to_string()),
+            Some(0),
         )
         .expect("filter ranking by stock code");
         assert_eq!(searched.items.len(), 1);
@@ -3597,6 +3733,7 @@ mod tests {
             None,
             None,
             None,
+            Some(0),
         )
         .expect("revalidate changed ranking");
         assert!(!stale.is_fresh);
@@ -3617,6 +3754,7 @@ mod tests {
             None,
             None,
             None,
+            Some(0),
         )
         .expect("recompute after strategy change");
         let result = Connection::open(source_dir.join("scoring_result.db"))
@@ -3656,6 +3794,7 @@ mod tests {
             None,
             None,
             None,
+            Some(0),
         )
         .expect("switch active pool configuration");
         let result = Connection::open(source_dir.join("scoring_result.db"))

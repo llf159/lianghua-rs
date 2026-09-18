@@ -15,6 +15,7 @@ export type StrategySimilarityActiveConfig = {
   windowTradeDays: number
   poolSegments: number
   outcomeTradeDays: number
+  sampleGapTradeDays: number
   benchmarkIndexCode: string
 }
 

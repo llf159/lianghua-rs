@@ -173,6 +173,7 @@ export type StrategyTriggerRankingQuery = {
   windowTradeDays?: number
   poolSegments?: number
   outcomeTradeDays?: number
+  sampleGapTradeDays?: number
   benchmarkIndexCode?: string
   limit?: number
   board?: string

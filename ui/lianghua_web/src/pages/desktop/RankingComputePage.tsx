@@ -82,6 +82,7 @@ type PendingConfirmState =
 const DEFAULT_SIMILARITY_WINDOW_TRADE_DAYS = 30
 const DEFAULT_SIMILARITY_POOL_SEGMENTS = 3
 const DEFAULT_SIMILARITY_OUTCOME_TRADE_DAYS = 5
+const DEFAULT_SIMILARITY_SAMPLE_GAP_TRADE_DAYS = 90
 const DEFAULT_SIMILARITY_BENCHMARK_INDEX_CODE = '000001.SH'
 const SIMILARITY_PHASES = [
   { key: 'prepare', label: '准备数据' },
@@ -321,6 +322,9 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
   const [similarityOutcomeDaysInput, setSimilarityOutcomeDaysInput] = useState(
     String(DEFAULT_SIMILARITY_OUTCOME_TRADE_DAYS),
   )
+  const [similaritySampleGapDaysInput, setSimilaritySampleGapDaysInput] = useState(
+    String(DEFAULT_SIMILARITY_SAMPLE_GAP_TRADE_DAYS),
+  )
   const [similarityBenchmarkCodes, setSimilarityBenchmarkCodes] = useState([
     DEFAULT_SIMILARITY_BENCHMARK_INDEX_CODE,
   ])
@@ -526,6 +530,9 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
     )
     setSimilarityOutcomeDaysInput(
       String(config?.outcomeTradeDays ?? DEFAULT_SIMILARITY_OUTCOME_TRADE_DAYS),
+    )
+    setSimilaritySampleGapDaysInput(
+      String(config?.sampleGapTradeDays ?? DEFAULT_SIMILARITY_SAMPLE_GAP_TRADE_DAYS),
     )
     setSimilarityBenchmarkCode(
       config?.benchmarkIndexCode ?? DEFAULT_SIMILARITY_BENCHMARK_INDEX_CODE,
@@ -1134,6 +1141,10 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
           similarityOutcomeDaysInput,
           DEFAULT_SIMILARITY_OUTCOME_TRADE_DAYS,
         ),
+        sampleGapTradeDays: normalizePositiveInt(
+          similaritySampleGapDaysInput,
+          DEFAULT_SIMILARITY_SAMPLE_GAP_TRADE_DAYS,
+        ),
         benchmarkIndexCode: similarityBenchmarkCode,
         limit: 1,
       })
@@ -1215,6 +1226,10 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
           outcomeTradeDays: normalizePositiveInt(
             similarityOutcomeDaysInput,
             DEFAULT_SIMILARITY_OUTCOME_TRADE_DAYS,
+          ),
+          sampleGapTradeDays: normalizePositiveInt(
+            similaritySampleGapDaysInput,
+            DEFAULT_SIMILARITY_SAMPLE_GAP_TRADE_DAYS,
           ),
           benchmarkIndexCode: similarityBenchmarkCode,
           limit: 1,
@@ -1686,6 +1701,7 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
 
           <label className="ranking-compute-field"><span>池化分段</span><input type="number" min={1} max={12} value={similarityPoolSegmentsInput} onChange={(event) => setSimilarityPoolSegmentsInput(event.target.value)} /></label>
           <label className="ranking-compute-field"><span>后验交易日</span><input type="number" min={1} value={similarityOutcomeDaysInput} onChange={(event) => setSimilarityOutcomeDaysInput(event.target.value)} /></label>
+          <label className="ranking-compute-field"><span>最小样本间隔</span><input type="number" min={1} value={similaritySampleGapDaysInput} onChange={(event) => setSimilaritySampleGapDaysInput(event.target.value)} /></label>
           <label className="ranking-compute-field"><span>基准指数</span><select value={similarityBenchmarkCode} onChange={(event) => setSimilarityBenchmarkCode(event.target.value)}>{similarityBenchmarkCodes.map((code) => <option key={code} value={code}>{SIMILARITY_BENCHMARK_INDEX_LABELS[code] ?? code}</option>)}</select></label>
 
           <div className="ranking-compute-actions">
