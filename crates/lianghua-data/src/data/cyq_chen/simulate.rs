@@ -6,7 +6,6 @@ use crate::data::cyq_chen::{
     ChenChipBar, ChipBucket, ChipDirection, ChipHolder, CompiledChipChangeConfig, EPS,
     PosteriorChipLot, SellEntry,
 };
-// 见父模块 mod.rs
 
 use crate::expr::eval::Runtime;
 use crate::expr::eval::Value;
@@ -57,7 +56,6 @@ pub(super) fn apply_posterior_for_day(
                 continue;
             }
             lot.age += 1;
-            // At each age first matching rule wins, so contradictory evidence cannot double count.
             if let Some(rule) = decisions.iter().find(|r| r.confirm_after == lot.age) {
                 let delta = match rule.holder {
                     ChipHolder::Main => lot.retail_chip * rule.bias,

@@ -1,5 +1,3 @@
-//! 验证与回测共用的股票元数据、板块标签和股票池过滤。
-
 use crate::data::load_stock_list;
 use crate::utils::utils::board_category;
 use lianghua_app_shared::{build_total_mv_map, filter_mv};
@@ -121,7 +119,6 @@ pub(in crate::statistics) fn split_board_tags(board_raw: &str) -> Vec<String> {
         .collect()
 }
 
-/// 缓存 `build_board_maps` 的解析结果，避免每次回测都读取并解析 stock_list.csv。
 pub(in crate::statistics) static BOARD_MAPS_CACHE: Mutex<
     Option<(String, Vec<String>, HashMap<String, Vec<String>>)>,
 > = Mutex::new(None);

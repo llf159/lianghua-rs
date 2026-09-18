@@ -2,7 +2,6 @@ use crate::data::cyq_chen::{
     ChenChipConfig, ChipChangeConfig, ChipDirection, CompiledChipCachedExpr,
     CompiledChipChangeConfig, CompiledChipChangeStrategy,
 };
-// 见父模块 mod.rs
 
 use crate::data::RuntimeKeyCollectOptions;
 use crate::data::chip_change_rule_path;
@@ -197,8 +196,6 @@ impl ChipChangeConfig {
                         "第{n}个后验规则必须 direction=buy，bias 为 [0,1] 的归属修正比例"
                     ));
                 }
-                // LAST reads the end of the loaded series; recursive indicators cannot be
-                // reproduced exactly from the finite continuation lookback.
                 let mut expressions = program
                     .item
                     .iter()

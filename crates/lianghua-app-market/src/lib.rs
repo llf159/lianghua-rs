@@ -1,5 +1,3 @@
-//! Live-market observation and market-data presentation workflows.
-
 use lianghua_core::{expr, utils};
 use lianghua_data::data;
 use lianghua_download::download;

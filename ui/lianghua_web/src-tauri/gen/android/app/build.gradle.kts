@@ -112,8 +112,6 @@ android {
         jvmTarget = "11"
     }
     lint {
-        // AGP 9 lint crashes while analyzing the legacy Kotlin Gradle scripts
-        // used by the current Tauri Android plugins.
         checkReleaseBuilds = false
     }
 }

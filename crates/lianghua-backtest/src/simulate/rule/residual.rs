@@ -1,19 +1,13 @@
-//! 残差与行情序列的流式计算、截面缓存与规则行读取。
-
 use crate::simulate::rule::{
     EFFICIENCY_RATIO_PERIOD, PCT_CHG_BATCH_SIZE, ResidualCacheInput, RuleBacktestOutcome,
 };
 
-#[cfg(test)]
-use crate::data::result_db_path;
-#[cfg(test)]
-use crate::simulate::rule::cache::ts_code_allowed;
-#[cfg(test)]
-use crate::simulate::rule::{RuleDbRow, RuleLayerFromDbInput};
 use crate::data::concept_performance_data::load_concept_trend_series_map;
 use crate::data::concept_performance_data::load_industry_trend_series_map;
 use crate::data::load_stock_list;
 use crate::data::load_ths_concepts_named_map;
+#[cfg(test)]
+use crate::data::result_db_path;
 use crate::simulate::BacktestSampleEligibility;
 use crate::simulate::DailyReturnPoint;
 use crate::simulate::ResidualFactorSeriesRefs;
@@ -22,6 +16,10 @@ use crate::simulate::build_backtest_sample_eligibility;
 use crate::simulate::calc_forward_residual_return;
 use crate::simulate::calc_stock_residual_returns_from_loaded_series;
 use crate::simulate::fp_utils::EPS;
+#[cfg(test)]
+use crate::simulate::rule::cache::ts_code_allowed;
+#[cfg(test)]
+use crate::simulate::rule::{RuleDbRow, RuleLayerFromDbInput};
 use crate::simulate::stock_data_has_open_close;
 use duckdb::Connection;
 use duckdb::params_from_iter;
@@ -96,9 +94,6 @@ where
     })(source_conn, "ER")?;
 
     for ts_code_batch in ts_codes.chunks(stock_batch_size.max(1)) {
-        // 只让当前残差计算批次的原始涨跌幅常驻，并把该批残差直接交给最终
-        // day_groups。禁止重新引入全量 residual_map_cache，否则会为每一行重复持有
-        // 交易日期字符串，导致单策略回测也可能在进入规则计算前耗尽内存。
         let mut stock_series_cache = load_pct_chg_series_cache_for_ts_codes(
             source_conn,
             ts_code_batch,

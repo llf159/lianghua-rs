@@ -3,8 +3,6 @@ use crate::trigger_similarity::{
     RuleCatalog, RuleEvent,
 };
 
-// 见父模块 mod.rs
-
 use crate::data::result_db_path;
 use crate::data::source_db_path;
 use crate::download::runner::INDEX_TS_CODES;
@@ -322,9 +320,6 @@ pub(super) fn load_future_rows(
     if anchors.is_empty() {
         return Ok(HashMap::new());
     }
-    // 先为批内每只股票的行情编号，再按锚点截取后续 N 行。
-    // ASOF 取锚点之前最后一个序号，兼容锚点当天无行情和停牌；无效行情仍占序号，
-    // 保持原先 ROW_NUMBER 截断后才过滤 NULL/非有限价格的口径。
     let mut stock_codes = HashSet::with_capacity(anchors.len());
     let has_repeated_stock = anchors
         .iter()
@@ -361,7 +356,6 @@ pub(super) fn load_future_rows(
             outcome_trade_days,
         )
     } else {
-        // 每股只有一个锚点时没有重复展开，沿用更轻的原查询。
         format!(
             r#"
         WITH anchors(anchor_id, ts_code, start_date, end_date) AS (VALUES {}),

@@ -1,8 +1,3 @@
-//! 策略统计、市场分析、表达式验证与分层回测的对外入口。
-//!
-//! 子模块按功能划分，本文件只做模块声明与公共 API 汇总导出，
-//! 保证 `strategy::statistics::*` 的既有调用路径不变。
-
 mod backtest;
 mod common;
 mod detail_cache;
@@ -42,7 +37,7 @@ pub use validation::{
     RuleValidationSampleGroups, RuleValidationSampleRow, RuleValidationSampleStats,
     RuleValidationSimilarityRow, RuleValidationTriggerCountStats, RuleValidationUnknownConfig,
     RuleValidationUnknownValue, RuleValidationWalkForwardData, RuleValidationWalkForwardFold,
-    run_rule_expression_validation,
+    ValidationCoreRuleOption, get_validation_core_rule_options, run_rule_expression_validation,
 };
 
 #[cfg(test)]

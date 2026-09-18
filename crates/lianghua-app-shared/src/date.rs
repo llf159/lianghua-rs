@@ -1,5 +1,3 @@
-//! Trade-date normalization and score-result date resolution.
-
 use duckdb::Connection;
 
 pub fn normalize_trade_date(raw: &str) -> Option<String> {

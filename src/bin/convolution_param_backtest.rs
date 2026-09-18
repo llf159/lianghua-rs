@@ -584,7 +584,6 @@ fn main() -> Result<(), String> {
         let mut train_delta = summarize(&train_delta_points, holding_days);
         let mut validation_delta = summarize(&validation_delta_points, holding_days);
         if candidate.window == 1 {
-            // 原始榜是增量为零的可选基线；常数差值序列没有可定义的 t 值。
             train_delta.hac_t = Some(0.0);
             validation_delta.hac_t = Some(0.0);
         }

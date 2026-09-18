@@ -1,5 +1,3 @@
-//! 共享测试夹具：数值断言辅助与临时数据目录准备。
-
 use crate::data::{result_db_path, source_db_path};
 use duckdb::{Connection, params};
 use std::fs::{create_dir_all, write};

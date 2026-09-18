@@ -23,8 +23,6 @@ subprojects {
     plugins.withId("com.android.library") {
         afterEvaluate {
             extensions.configure<LibraryExtension> {
-                // Some published Tauri plugins declare consumer-rules.pro without
-                // packaging the file. AGP 9 rejects those missing files in release builds.
                 defaultConfig.consumerProguardFiles.removeAll { !it.exists() }
             }
         }
@@ -36,6 +34,5 @@ tasks.register("clean").configure {
 }
 
 tasks.named<UpdateDaemonJvm>("updateDaemonJvm") {
-    // Only record the criteria. Developers and CI provide a local JDK 21.
     toolchainPlatforms.empty()
 }

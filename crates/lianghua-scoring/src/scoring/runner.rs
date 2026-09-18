@@ -35,7 +35,6 @@ use crate::scoring::{
     },
 };
 
-// Bound input and output retained by each worker while keeping batched reads.
 const SCORING_MEMORY_GROUP_SIZE: usize = 32;
 
 #[derive(Debug, Clone, Copy)]

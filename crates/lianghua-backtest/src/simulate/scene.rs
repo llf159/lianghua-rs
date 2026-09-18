@@ -381,9 +381,6 @@ pub fn calc_all_scene_layer_metrics_from_rows(
         },
     )?;
 
-    // Consume the compact scoring result here. Only trade_date, stage and
-    // residual_return are retained by the metrics, so unused scoring fields
-    // never expand back into the former full SceneDetails representation.
     let mut samples_by_scene: HashMap<Arc<str>, Vec<SceneSample>> = HashMap::new();
     for row in scene_detail_rows {
         if !scene_name_set.contains(row.scene_name.as_ref())
@@ -715,7 +712,6 @@ fn build_residual_map_cache(
         })
         .collect();
 
-    // 中间缓存数据已完成使命，显式释放以降低内存峰值
     drop(stock_series_cache);
     drop(concept_series_cache);
     drop(industry_series_cache);

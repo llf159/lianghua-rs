@@ -1,4 +1,3 @@
-//! 规则分层回测明细的磁盘缓存读写。
 use std::hash::{Hash, Hasher};
 
 use crate::statistics::validation::RuleValidationComboResult;

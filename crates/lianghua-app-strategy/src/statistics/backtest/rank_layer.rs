@@ -1,5 +1,3 @@
-//! 排名层回测的样例分组与市值汇总。
-
 use crate::scoring_model::ScoreSummary;
 use crate::simulate::rank::RankLayerFromDbInput;
 use crate::simulate::rank::RankLayerMethod;

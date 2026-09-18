@@ -1,5 +1,3 @@
-//! 分层指标计算：从触发分数或运行时缓存得到各层 metrics。
-
 use crate::simulate::rule::cache::build_rule_layer_runtime_cache;
 use crate::simulate::rule::{
     RuleDayGroup, RuleLayerCollectOptions, RuleLayerComputation, RuleLayerConfig,
@@ -434,8 +432,6 @@ pub(super) fn compute_rule_layer_from_runtime_cache(
         });
     }
 
-    // 使用 fold+reduce 消除中间 day_results Vec，避免全部交易日的
-    // all_samples / triggered_samples 同时占据内存。
     let identity = || DayGroupsFoldAccum::default();
     let accum = runtime_cache
         .day_groups
@@ -491,7 +487,6 @@ pub(super) fn compute_rule_layer_from_runtime_cache(
     })
 }
 
-/// 线程本地累加器，用于 fold+reduce 模式逐个交易日处理而不物化中间 Vec。
 #[derive(Debug, Default)]
 pub(super) struct DayGroupsFoldAccum {
     points: Vec<RuleLayerPoint>,

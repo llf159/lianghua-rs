@@ -1,5 +1,3 @@
-//! 市场分析与贡献：市场快照、板块资金流与贡献排名。
-
 use crate::data::concept_performance_db_path;
 use crate::data::load_stock_list;
 use crate::data::load_ths_concepts_list;
@@ -188,8 +186,6 @@ pub(in crate::statistics) fn estimate_net_money_flow_yuan(
         return None;
     }
 
-    // Tushare 日线 amount 的单位为千元，vol / net_mf_vol 的单位均为手。
-    // 用成交额 / 成交量得到当日均价后折算净流入金额，结果统一为元。
     let value = net_mf_vol / vol * amount * 1_000.0;
     value.is_finite().then_some(value)
 }

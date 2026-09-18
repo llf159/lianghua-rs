@@ -1,5 +1,3 @@
-//! 验证样本的抽样、分组与样本统计。
-
 use crate::statistics::universe::{ValidationSampleRawRow, ValidationSampleStockMeta};
 use crate::statistics::validation::similarity::{ValidationSimilarityCache, validation_pair_key};
 use crate::statistics::validation::{

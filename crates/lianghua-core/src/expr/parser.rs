@@ -1,12 +1,11 @@
 use crate::expr::lexer::{Lexer, Token, TokenKind};
 
-//循环解析表达式字符到数组
 pub fn lex_all(expr: &str) -> Vec<Token> {
     let mut lx = Lexer::new(expr);
     let mut out = Vec::with_capacity(256);
     loop {
         let tok = lx.next_token();
-        let is_eof = tok.kind == TokenKind::Eof; // 在tok被消耗之前获取kind
+        let is_eof = tok.kind == TokenKind::Eof;
         out.push(tok);
         if is_eof {
             break;
@@ -21,7 +20,6 @@ pub struct ParseErr {
     pub idx: usize,
 }
 
-// 类型枚举
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Number(f64),
@@ -29,21 +27,21 @@ pub enum Expr {
     Call {
         name: String,
         args: Vec<Expr>,
-    }, // 函数 {函数名, 参数},参数也有可能是表达式,再次嵌套
+    },
     Unary {
         op: UnaryOp,
         rhs: Box<Expr>,
-    }, // 一元运算符 {运算符, 表达式}
+    },
     Binary {
         op: BinaryOp,
         lhs: Box<Expr>,
         rhs: Box<Expr>,
-    }, // 二元运算符, 表达式不定长度,用指针装
+    },
 }
 #[derive(Debug, Clone, PartialEq)]
 pub enum UnaryOp {
-    Neg, // 负号
-    Not, // 逻辑非
+    Neg,
+    Not,
 }
 #[derive(Debug, Clone, PartialEq)]
 pub enum BinaryOp {
@@ -61,21 +59,18 @@ pub enum BinaryOp {
     Or,
 }
 
-// 储存表达式的结构体
 #[derive(Debug, Clone)]
 pub struct Parser {
     token: Vec<Token>,
     idx: usize,
 }
 
-// 语句和赋值的枚举
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
-    Expr(Expr), // 名叫Expr的枚举分支,包含一个Expr类型的值
+    Expr(Expr),
     Assign { name: String, value: Expr },
 }
 
-// 储存语句的结构体
 #[derive(Debug, Clone)]
 pub struct Stmts {
     pub item: Vec<Stmt>,
@@ -152,10 +147,8 @@ impl Parser {
     }
 
     fn parse_expr(&mut self, min_bp: u8) -> Result<Expr, ParseErr> {
-        // 吃掉左操作数
         let mut lhs = self.parse_primary()?;
 
-        // 匹配优先级
         loop {
             if let Some((l_bp, _r_bp)) = (|kind: &TokenKind| -> Option<(u8, u8)> {
                 match kind {
@@ -173,9 +166,7 @@ impl Parser {
                 continue;
             }
 
-            // 初始化比较表
             let Some((l_bp, r_bp, op)) = (|kind: &TokenKind| -> Option<(u8, u8, BinaryOp)> {
-                // 先套运算,再套比较,最后套逻辑,优先级高的先套括号
                 match kind {
                     TokenKind::Ge => Some((30, 31, BinaryOp::Ge)),
                     TokenKind::Gt => Some((30, 31, BinaryOp::Gt)),
@@ -197,14 +188,11 @@ impl Parser {
             })(self.peek_kind()) else {
                 break;
             };
-            // 如果优先级比较低,比如先遇到乘法后遇到加法,则把获取到的lhs给乘法
             if l_bp < min_bp {
                 break;
             }
 
-            // 通过优先级检查,拼装二元表达式
             self.pop_token();
-            // 右边的再次解析,用较大的r_bp,避免同级之间争抢中间操作数,应归属于前者所有
             let rhs = self.parse_expr(r_bp)?;
             lhs = Expr::Binary {
                 op,
@@ -293,13 +281,11 @@ impl Parser {
 
     fn parse_primary(&mut self) -> Result<Expr, ParseErr> {
         match self.peek_kind() {
-            // 字符串分支 先判断是不是内置函数
             TokenKind::Ident(_) => {
                 let name = match self.pop_token() {
                     TokenKind::Ident(name) => name,
                     other => return Err(self.err_here(format!("变量名解析失败，当前位置是 {}", Self::token_brief(&other)))),
                 };
-                // 用左括号检查是否是函数
                 if !matches!(self.peek_kind(), TokenKind::LParen) {
                     return Ok(Expr::Ident(name));
                 }
@@ -313,7 +299,6 @@ impl Parser {
                     }
                 }
 
-                // 函数参数解析
                 let mut args = Vec::new();
 
                 if matches!(self.peek_kind(), TokenKind::RParen) {
@@ -343,7 +328,6 @@ impl Parser {
                 Ok(Expr::Call { name, args })
             }
 
-            // 数字分支
             TokenKind::Number(_) => match self.pop_token() {
                 TokenKind::Number(num) => Ok(Expr::Number(num)),
                 other => Err(self.err_here(format!(
@@ -351,7 +335,6 @@ impl Parser {
                     Self::token_brief(&other)
                 ))),
             },
-            // 左括号分支
             TokenKind::LParen => {
                 self.pop_token();
                 let inner = self.parse_expr(0)?;
@@ -366,7 +349,6 @@ impl Parser {
                     ))),
                 }
             }
-            // 负号分支
             TokenKind::Minus => {
                 self.pop_token();
                 let rhs = self.parse_primary()?;
@@ -375,7 +357,6 @@ impl Parser {
                     rhs: Box::new(rhs),
                 })
             }
-            // 感叹号分支
             TokenKind::Not => {
                 self.pop_token();
                 let rhs = self.parse_primary()?;
@@ -392,10 +373,8 @@ impl Parser {
         }
     }
 
-    // 等号右边表达式判断
     fn parse_stmt(&mut self) -> Result<Stmt, ParseErr> {
         if matches!(self.peek_kind(), TokenKind::Ident(_)) {
-            // 检查是否为赋值分支
             if matches!(self.peek_next_token(), TokenKind::ColonEq) {
                 let name = match self.pop_token() {
                     TokenKind::Ident(x) => x,
@@ -416,7 +395,6 @@ impl Parser {
                 return Ok(Stmt::Assign { name, value });
             }
         }
-        // 否则走正常表达式分支
         let expr = self.parse_expr(0)?;
         Ok(Stmt::Expr(expr))
     }

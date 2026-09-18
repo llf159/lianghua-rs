@@ -5,7 +5,6 @@ use crate::data::cyq_chen_data::{
     CYQ_CHEN_BIN_TABLE, CYQ_CHEN_FLUSH_BATCH_SIZE, CYQ_CHEN_SNAPSHOT_TABLE, ComputedCyqChenStock,
     CyqChenInitialState, CyqChenWriteBatch, CyqChenWriteMessage, DEFAULT_ADJ_TYPE,
 };
-// 见父模块 mod.rs
 
 use crate::data::DataReader;
 use crate::data::RowData;
@@ -855,8 +854,6 @@ pub(super) fn float64_array(values: Vec<f64>) -> ArrayRef {
     Arc::new(Float64Array::from(values))
 }
 
-// A failed writer closes the channel. Report its cause before the secondary
-// send error; on an explicit abort the writer already includes the compute error.
 pub(super) fn finish_cyq_chen_write(
     compute_result: Result<(), String>,
     writer_result: Result<(usize, usize), String>,
@@ -866,8 +863,6 @@ pub(super) fn finish_cyq_chen_write(
     Ok(rows)
 }
 
-// Only writes a fresh staging database. Completed batches can be committed;
-// the caller publishes this file only after the entire rebuild succeeds.
 pub(super) fn write_cyq_chen_batches_from_channel(
     db_path: &str,
     rx: Receiver<CyqChenWriteMessage>,
@@ -1049,7 +1044,6 @@ mod tests {
         let source_dir = unique_temp_source_dir();
         fs::create_dir_all(&source_dir).unwrap();
         let (tx, rx) = sync_channel(1);
-        // Opening a directory as a database deterministically fails before receive.
         let writer_result = write_cyq_chen_batches_from_channel(
             source_dir.to_str().unwrap(),
             rx,

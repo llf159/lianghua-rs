@@ -103,7 +103,6 @@ fn load_optional_inds(source_dir: &str) -> Result<Option<Vec<crate::data::IndDat
 }
 
 pub fn cache_ind_build(source_dir: &str) -> Result<Vec<IndsCache>, String> {
-    // 包含读取ind文件,编译缓存
     let Some(inds) = load_optional_inds(source_dir)? else {
         return Ok(Vec::new());
     };

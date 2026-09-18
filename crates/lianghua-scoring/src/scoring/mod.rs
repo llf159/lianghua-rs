@@ -266,7 +266,6 @@ fn scoring_rule_cache(
                         condition_hits[condition][index]
                     }),
                     ScopeWay::Any => {
-                        // ANY 取窗口内条件命中数最多的一天；并列时取更近的一天。
                         let best_day = (start..=index)
                             .max_by_key(|day| {
                                 (
@@ -345,7 +344,6 @@ fn scoring_rule_cache(
         let hit = hit_scopeway(rule.scope_way, rule.scope_windows, &bs, i);
         triggered.push(scope_hit_triggered(&hit));
         let s = (|scopeway: ScopeHit, dps: Option<&[DistPoint]>, points: f64| -> f64 {
-            // scopeway分发到得分
             match scopeway {
                 ScopeHit::Bool(ok) => {
                     if ok {

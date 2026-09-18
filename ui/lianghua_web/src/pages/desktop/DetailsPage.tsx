@@ -4767,8 +4767,6 @@ export default function DetailsPage({
         })();
         setDetailIndicatorsLoading(true);
         void (async () => {
-          // Let React commit and paint the base candles before starting indicator
-          // configuration reads and expression execution.
           await waitForNextPaint();
           if (detailRequestIdRef.current !== requestId) {
             return;

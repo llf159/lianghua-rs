@@ -1,5 +1,3 @@
-//! 共享测试夹具：样例配置、行情与数值断言。
-
 use crate::data::RowData;
 use crate::data::cyq_chen::ChipChangeConfig;
 use std::collections::HashMap;

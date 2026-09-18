@@ -78,7 +78,6 @@ pub fn calc_signal_pair_metrics(moments: SignalPairMoments) -> SignalPairMetrics
     }
 }
 
-/// 样本距离相关。零值只表示当前样本没有检测到一般依赖，不能替代独立性检验。
 pub fn calc_distance_correlation(left: &[f64], right: &[f64]) -> Option<f64> {
     if left.len() != right.len() || left.len() < 3 {
         return None;
@@ -136,7 +135,6 @@ pub fn calc_distance_correlation(left: &[f64], right: &[f64]) -> Option<f64> {
     )
 }
 
-/// 按输入顺序逐个用之前的策略解释当前策略，并返回标准化岭回归的残差方差比例。
 pub fn calc_linear_orthogonal_diagnostics(
     correlation_matrix: &[Vec<f64>],
     ridge_lambda: f64,

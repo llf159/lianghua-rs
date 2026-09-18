@@ -1,7 +1,5 @@
 use crate::trigger_similarity::*;
 
-// 见父模块 mod.rs
-
 use super::*;
 use crate::trigger_similarity::channel::build_channel_fingerprint;
 use crate::trigger_similarity::channel::build_indicator_channels;
@@ -47,7 +45,6 @@ pub(in crate::trigger_similarity) fn build_ranking_samples_for_chunk(
         set_ranking_progress(phase, "正在读取本批股票的策略触发窗口", completed, total);
     }
     let rules_by_anchor = load_rule_rows(conn, &anchors, rule_catalog)?;
-    // 历史模板不使用原始评分和排名，只有当日目标需要展示这两个字段。
     let summaries = if include_outcome {
         HashMap::new()
     } else {
@@ -478,7 +475,6 @@ pub(in crate::trigger_similarity) fn load_outcome_selected_anchors(
         }
         hash
     }
-    // 市场相似度只取决于锚点日期，按交易日预计算一次，避免排序比较器反复做高维点积。
     let market_similarity_by_date = target_market.map(|target_market| {
         let mut scores = vec![f64::NEG_INFINITY; all_trade_dates.len()];
         let limit = (cutoff_index + 1).min(all_trade_dates.len());
@@ -515,8 +511,6 @@ pub(in crate::trigger_similarity) fn load_outcome_selected_anchors(
         let remaining = class_rows.split_off(class_rows.len().min(recent_limit));
         chosen.extend(class_rows);
 
-        // 历史分散样本按时间分桶，每段市场阶段内先按与目标市场的环境相似度排序，
-        // 再各桶轮流取，避免市场环境通道又只命中离当前最近的事件。
         let bucket_span = (sample_cutoff_index + 1).max(1);
         let mut buckets = vec![Vec::<SelectedLabel>::new(); MARKET_HISTORY_BUCKETS];
         for row in remaining {
@@ -695,7 +689,6 @@ mod tests {
         let names = HashMap::new();
         let market_caps = HashMap::new();
         let mut catalog = crate::trigger_similarity::RuleCatalog::default();
-        // 不创建 score_summary：历史模板若仍查询摘要，这里会直接失败。
         let historical = build_ranking_samples_for_chunk(
             &conn,
             vec![anchor.clone()],

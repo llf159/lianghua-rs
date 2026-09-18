@@ -16,7 +16,6 @@ pub struct StockDataRuntimeField {
     pub value_from_row: fn(&ProBarRow) -> Option<f64>,
 }
 
-// 行情数据从下载、落库、历史读取到指标运行时只维护这一份字段定义。
 pub const STOCK_DATA_RUNTIME_FIELDS: [StockDataRuntimeField; 19] = [
     StockDataRuntimeField {
         db_column: "open",

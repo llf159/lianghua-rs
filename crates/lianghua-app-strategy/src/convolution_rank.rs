@@ -30,11 +30,9 @@ pub struct ConvolutionRankItem {
     pub database_rank: Option<i64>,
     pub raw_rank: usize,
     pub convolution_rank: usize,
-    /// 正数表示经过卷积后名次上升，负数表示下降。
     pub rank_change: isize,
     pub raw_score: f64,
     pub convolution_score: f64,
-    /// 从旧到新，与 `history_trade_dates` 一一对应。
     pub score_history: Vec<f64>,
 }
 
@@ -43,11 +41,8 @@ pub struct ConvolutionRankPageData {
     pub rows: Vec<ConvolutionRankItem>,
     pub resolved_trade_date: String,
     pub kernel_name: String,
-    /// 从当前交易日向过去排列。
     pub kernel: Vec<f64>,
-    /// 从旧到新排列。
     pub history_trade_dates: Vec<String>,
-    /// 具备完整窗口、参与全局排名的股票数，先于页面筛选计算。
     pub universe_size: usize,
 }
 
@@ -172,11 +167,6 @@ fn load_recent_score_rows(
     Ok((trade_dates, score_rows))
 }
 
-/// 为默认 H30-L50 构建等价但更窄的窗口计算。
-///
-/// 默认核从第 4 个权重起都是相同的三十日慢核权重，因此可将 30 个
-/// LAG 列化简成当前/前两日三个分数列和一个 30 日滚动和。自定义核仍
-/// 使用通用逐 lag 路径，避免改变其语义。
 fn optimized_h30_l50_sql(kernel: &[f64]) -> Option<(String, String)> {
     let default_kernel = default_convolution_kernel();
     if kernel.len() != default_kernel.len()
@@ -426,9 +416,6 @@ pub fn run_convolution_rank_compute(
     })
 }
 
-/// 返回回测选定的 H30-L50 卷积排行榜。
-///
-/// 排名先在完整 30 日窗口股票池中全局计算，再应用页面筛选和条数限制。
 pub fn get_convolution_rank_page(
     source_path: String,
     trade_date: Option<String>,
@@ -620,8 +607,6 @@ pub fn get_convolution_rank_page(
         })(&conn, &history_trade_dates, &mut selected_ranking)
         .is_err()
     {
-        // score_summary 更新时正常会同步清理对应卷积日期。若遇到旧库或
-        // 外部修改造成的残留记录，退回即时全量计算以维持页面正确性。
         let score_rows = load_score_rows_for_dates(&conn, &history_trade_dates, None)?;
         let fallback_ranking =
             calc_convolution_ranking(&score_rows, &effective_trade_date, &kernel)?;

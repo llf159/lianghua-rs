@@ -14,7 +14,6 @@ use crate::data::cyq_chen_data::{
     CYQ_CHEN_BIN_TABLE, CYQ_CHEN_FLUSH_BATCH_SIZE, CYQ_CHEN_GROUP_SIZE, CYQ_CHEN_QUEUE_BOUND,
     CYQ_CHEN_SNAPSHOT_TABLE, CyqChenRebuildSummary, CyqChenWriteMessage, DEFAULT_ADJ_TYPE,
 };
-// 见父模块 mod.rs
 
 use crate::data::DataReader;
 use crate::data::cyq_chen::ChenChipConfig;

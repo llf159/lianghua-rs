@@ -1,9 +1,3 @@
-//! Shared static checks and metadata calculation for expression programs.
-//!
-//! Keep parsing error presentation at the caller (where labels such as
-//! "买点方程" are known), but keep AST traversal and warmup semantics here so
-//! every expression entry point accepts the same functions and assignments.
-
 use std::collections::HashMap;
 
 use super::{
@@ -12,15 +6,10 @@ use super::{
 };
 use crate::utils::utils::{eval_binary_for_warmup, impl_expr_warmup};
 
-/// Parse a complete, possibly multi-statement, expression program.
 pub fn parse_expression_program(expression: &str) -> Result<Stmts, ParseErr> {
     Parser::new(lex_all(expression)).parse_main()
 }
 
-/// Reject function calls that the evaluator cannot execute.
-///
-/// The parser deliberately accepts arbitrary call names, so this check must be
-/// part of every compile/validation path rather than being deferred to runtime.
 pub fn validate_expression_functions(stmts: &Stmts) -> Result<(), String> {
     if let Some(name) = first_unsupported_expression_function(stmts) {
         return Err(format!("表达式引用未知函数: {name}"));
@@ -28,7 +17,6 @@ pub fn validate_expression_functions(stmts: &Stmts) -> Result<(), String> {
     Ok(())
 }
 
-/// Return the first function call that the evaluator cannot execute.
 pub fn first_unsupported_expression_function(stmts: &Stmts) -> Option<&str> {
     for stmt in &stmts.item {
         let unsupported = match stmt {
@@ -63,7 +51,6 @@ fn first_unsupported_expr_function(expr: &Expr) -> Option<&str> {
     }
 }
 
-/// Estimate how many rows before the output range an expression needs.
 pub fn estimate_expression_warmup(stmts: &Stmts) -> Result<usize, String> {
     let mut locals = HashMap::new();
     let mut consts: HashMap<String, usize> = HashMap::new();

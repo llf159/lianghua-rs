@@ -16,11 +16,11 @@
 }
 
 .menu-item {
-  display: block;            /* 让链接整行可点 */
+  display: block;
   padding: 8px 10px;
   border-radius: 8px;
   color: #222;
-  text-decoration: none;     /* 文字是否有下划线 */
+  text-decoration: none;
 }
 
 .menu-group-toggle {
@@ -67,7 +67,6 @@
   min-height: 0;
 }
 
-/* 主布局 */
 .desktop-shell {
   position: relative;
   display: grid;
@@ -75,7 +74,7 @@
   height: 100vh;
   padding-top: env(safe-area-inset-top, 0px);
   min-width: 0;
-  transition: grid-template-columns 0.2s ease;    /* 平滑过渡  0.2秒 速度曲线选择 */
+  transition: grid-template-columns 0.2s ease;
 }
 
 .desktop-shell.collapsed {
@@ -97,17 +96,16 @@
   border-right-color: transparent;
 }
 
-/* 折叠按钮绝对定位 */
 .sidebar-toggle {
-  position: absolute;       /* 相对 最近的上一个容器定位 */
+  position: absolute;
   top: calc(env(safe-area-inset-top, 0px) + 10px);
   left: 180px;
-  z-index: 10;              /* z轴层级,避免遮挡 */
+  z-index: 10;
   width: 32px;
   height: 32px;
   border: 1px solid #d0d7de;
-  background: #fff;                          /* 填充 */
-  border-radius: 8px;                          /* 圆角 */
+  background: #fff;
+  border-radius: 8px;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
   cursor: pointer;
 }

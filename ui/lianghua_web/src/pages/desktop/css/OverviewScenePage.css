@@ -333,8 +333,6 @@
   box-shadow: inset 0 1px 0 #f8fafc;
 }
 
-/* Keep scene-ranking horizontal scrolling inside the card. This class avoids
-   App.css's generic page-scroll override for classes containing "table-wrap". */
 .overview-table-scroll {
   width: 100%;
   max-width: 100%;

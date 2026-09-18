@@ -1205,8 +1205,6 @@
   }
 }
 
-/* This table sits in a portal, outside .strategy-trigger-page. Restore its
-   bounded two-axis scroller after App.css expands generic table wrappers. */
 body .strategy-trigger-table-wrap-stocks {
   max-height: 100% !important;
   overflow: auto !important;

@@ -1,5 +1,3 @@
-//! 共享测试夹具：相似度行构造。
-
 use crate::trigger_similarity::StrategyTriggerSimilarityRow;
 
 pub(in crate::trigger_similarity) fn similarity_row(

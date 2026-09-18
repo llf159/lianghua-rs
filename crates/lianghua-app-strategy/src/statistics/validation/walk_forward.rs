@@ -1,5 +1,3 @@
-//! walk-forward fold 划分与增量回归。
-
 use crate::simulate::dimension::calc_linear_orthogonal_diagnostics;
 use crate::simulate::fp_utils::calc_newey_west_t_value;
 use crate::simulate::fp_utils::pearson_corr;
@@ -11,7 +9,6 @@ use crate::statistics::validation::{
     RuleValidationWalkForwardFold,
 };
 use std::collections::HashMap;
-/// 样本外 fold 划分：`train_end_index + 1 ..= test_start_index - 1` 为 purge 区间。
 #[derive(Debug, Clone, Copy)]
 pub(in crate::statistics) struct ValidationFoldPlan {
     pub(in crate::statistics) train_end_index: usize,
@@ -27,9 +24,7 @@ pub(in crate::statistics) fn build_validation_fold_plan(
     if axis_len == 0 {
         return Vec::new();
     }
-    // 固定上限 8：再多的 fold 只会让每个测试窗口短到无法支撑 IC 统计。
     let fold_count = fold_count.clamp(1, 8);
-    // 首个训练窗口至少占 1/4 长度且不少于 20 个交易日，保证训练期统计不退化。
     let initial_train = (axis_len / 4).max(20).min(axis_len.saturating_sub(1));
     if initial_train == 0 {
         return Vec::new();
@@ -46,9 +41,6 @@ pub(in crate::statistics) fn build_validation_fold_plan(
         } else {
             (test_start_index + block - 1).min(axis_len - 1)
         };
-        // purge：训练区间末尾与样本外起点之间隔开 holding_period 个交易日，
-        // 保证训练样本的前向收益窗口（含 holding_period 当天）不落进 test 区间；
-        // HAC 只修正相关性，不能替代隔离。
         let Some(train_end_index) = test_start_index.checked_sub(1 + purge_days) else {
             continue;
         };
@@ -61,7 +53,6 @@ pub(in crate::statistics) fn build_validation_fold_plan(
     folds
 }
 
-/// 分层统计走 fold+reduce 合并，`points` 顺序不保证有序，按交易日排序后再做 fold 划分。
 pub(in crate::statistics) fn sort_validation_points(
     points: &[RuleLayerPoint],
 ) -> Vec<&RuleLayerPoint> {
@@ -70,7 +61,6 @@ pub(in crate::statistics) fn sort_validation_points(
     axis
 }
 
-/// 表达式方向：整体触发分为负时按负向解读，与衰减验证保持同一口径。
 pub(in crate::statistics) fn validation_axis_direction_sign(axis: &[&RuleLayerPoint]) -> f64 {
     let score_sum = axis
         .iter()
@@ -87,8 +77,6 @@ pub(in crate::statistics) fn build_validation_walk_forward(
     points_by_date: &HashMap<&str, &RuleLayerPoint>,
     day_trigger_counts: &HashMap<String, usize>,
 ) -> RuleValidationWalkForwardData {
-    // purge 取 holding period：train 标签的收益实现日不能落在 test 区间内。
-    // HAC lag 仍按 holding period - 1 修正重叠窗口带来的序列相关。
     let purge_days = backtest_period;
     let hac_lag = backtest_period.saturating_sub(1);
     let mut rows = Vec::with_capacity(folds.len());
@@ -99,12 +87,7 @@ pub(in crate::statistics) fn build_validation_walk_forward(
             .map(|trade_date| points_by_date.get(trade_date.as_str()).copied())
             .collect::<Vec<_>>();
         let valid_days = daily.iter().filter(|point| point.is_some()).count();
-        // 与增量研究共用同一门槛：有效日不足 20 的 fold 只标记 insufficient，
-        // 不参与正窗口统计；fold 日期对所有参数组合完全一致，不按组合重新切分。
         let sufficient = valid_days >= 20;
-        // IC 由“分数与残差”的秩相关给出，Spread 由高分半区减低分半区给出：
-        // 两者都已经通过分数符号携带方向（负向规则工作时期望为正），再乘方向符号会把它们翻反。
-        // 只有方向盲的残差均值需要按表达式方向翻转。
         let ic_values = daily
             .iter()
             .filter_map(|point| *point)
@@ -177,12 +160,6 @@ pub(in crate::statistics) fn build_validation_walk_forward(
     }
 }
 
-/// 增量研究：每个 fold 只用 train 做标准化 ridge 回归，再在 test 上用原始尺度系数算增量。
-///
-/// 标准化后 `(R + λI) β_z = r_xy`，换算回原始尺度得到 `beta_i = β_z_i * std_y / std_x_i`；
-/// 样本外增量定义为 `incremental = y_test - Σ beta_i * x_i_test`（不减 train intercept），
-/// 均值即控制核心策略后的样本外增量 alpha。均值、标准差与系数全部只来自 train，
-/// 岭项让共线核心策略仍然可解。
 pub(in crate::statistics) fn build_validation_incremental(
     calendar: &[String],
     folds: &[ValidationFoldPlan],
@@ -256,8 +233,6 @@ pub(in crate::statistics) fn build_validation_incremental(
         };
 
         let column_count = core_series.len();
-        // 训练行至少 max(30, predictors × 5)，样本外至少 20 个共同有效日：
-        // 与相关性与正交研究的增量门槛保持一致，样本不足时该 fold 不进入正窗口统计。
         let minimum_train_rows = (column_count * 5).max(30);
         if train_rows.len() >= minimum_train_rows && test_rows.len() >= 20 {
             let train_mean_y = train_targets.iter().sum::<f64>() / train_targets.len() as f64;
@@ -292,7 +267,6 @@ pub(in crate::statistics) fn build_validation_incremental(
                 }
             };
 
-            // 标准化相关矩阵：[predictors..., target]，岭系数只作用在 predictor 对角线上。
             let mut matrix = vec![vec![0.0_f64; column_count + 1]; column_count + 1];
             for row in 0..=column_count {
                 let left_values = if row < column_count {
@@ -321,7 +295,6 @@ pub(in crate::statistics) fn build_validation_incremental(
                 }
             }
 
-            // λ = 0.1 与相关性与正交研究的增量回归保持一致，只作用于标准化 predictor。
             let fitted = if train_std_y > RULE_BACKTEST_EPS {
                 calc_linear_orthogonal_diagnostics(&matrix, 0.1)
                     .ok()
@@ -349,8 +322,6 @@ pub(in crate::statistics) fn build_validation_incremental(
                     .iter()
                     .zip(&test_targets)
                     .map(|(row, target_value)| {
-                        // 样本外只按原始尺度系数扣除核心策略贡献，不减 train intercept，
-                        // 因此增量均值就是控制核心策略后的 OOS 增量 alpha。
                         let prediction = beta
                             .iter()
                             .zip(row)
@@ -446,8 +417,6 @@ mod tests {
 
     #[test]
     fn validation_fold_plan_excludes_test_first_day_labels_with_single_day_holding() {
-        // holding period = 1 时 train 末日的收益实现日正好是 test 首日，
-        // 因此 purge 至少要排除 1 个交易日，train 不能使用 test 首日行情。
         let points = validation_fold_test_axis(100);
         let axis = sort_validation_points(&points);
         let holding_period = 1;
@@ -477,7 +446,6 @@ mod tests {
                 .iter()
                 .position(|trade_date| *trade_date == fold.test_start_date)
                 .expect("test start index");
-            // train 末日的下一日恰好是被 purge 掉的那一天，其标签收益实现日就是 test 首日。
             assert_eq!(train_end_index + 2, test_start_index);
             assert!(fold.train_end_date < calendar[test_start_index - 1]);
         }
@@ -485,8 +453,6 @@ mod tests {
 
     #[test]
     fn validation_walk_forward_does_not_flip_raw_ic_and_spread_for_negative_rule() {
-        // 负向规则（points < 0）工作时的原始 IC/Spread 已经为正：分数符号进入秩相关与
-        // 高低分半区，再乘方向符号会把它们翻反。只有方向盲的残差均值需要翻转。
         let points = (0..200)
             .map(|index| RuleLayerPoint {
                 trade_date: format!("{index:08}"),
@@ -539,8 +505,6 @@ mod tests {
 
     #[test]
     fn validation_walk_forward_shares_one_calendar_across_combos() {
-        // 两个组合的触发密度不同，但 train/test 日期必须完全来自同一套 calendar；
-        // 触发稀疏的组合只在对应 fold 标记 insufficient，不重新切日期。
         let points = validation_fold_test_axis(200);
         let axis = sort_validation_points(&points);
         let calendar = validation_calendar_of(&points);
@@ -549,7 +513,6 @@ mod tests {
             .iter()
             .map(|point| (point.trade_date.clone(), 5usize))
             .collect::<HashMap<_, _>>();
-        // 稀疏组合每 10 个交易日只有一个有效日，每个 fold 窗口都不足 20 个有效日。
         let sparse_counts = axis
             .iter()
             .enumerate()
@@ -598,9 +561,6 @@ mod tests {
 
     #[test]
     fn validation_incremental_mean_recovers_constant_alpha() {
-        // candidate = core + 5 在 train/test 都成立：样本外增量应回到 constant_alpha，
-        // 而不是被 train intercept 吸收成 0。core 在窗口内正负均衡（均值 0），
-        // 因此只剩标准化 ridge 的收缩项 0.0909 × x，其窗口均值同样为 0。
         let constant_alpha = 5.0;
         let points = validation_fold_test_axis(120);
         let axis = sort_validation_points(&points);
@@ -684,10 +644,6 @@ mod tests {
             &[("核心策略".to_string(), &core_daily)],
         );
 
-        // train 期 y = 2x（斜率 2、均值 2/1），test 期把 x 抬到 100 而 y 保持 2，
-        // 因此只有用 train 拟合出的斜率（≈2）外推才会得到明显负增量：
-        // 正确预测 ≈ 2 + 2 * (100 - 1) = 200 → 增量 ≈ -198。
-        // 若把 test 混入拟合，斜率会被拉到 ≈0，残差接近 0，测试会立刻失败。
         let fold = &incremental.folds[0];
         assert_eq!(fold.status, "ok");
         assert_eq!(fold.train_day_count, 30);
@@ -702,8 +658,6 @@ mod tests {
 
     #[test]
     fn validation_incremental_marks_insufficient_folds_without_counting_windows() {
-        // 场景一：候选只在最前面 25 个交易日有效，所有 fold 都达不到
-        // max(30, predictors × 5) 的训练行或 20 个共同有效日。
         let points = validation_fold_test_axis(80);
         let axis = sort_validation_points(&points);
         let calendar = validation_calendar_of(&points);
@@ -745,8 +699,6 @@ mod tests {
         );
         assert_eq!(incremental.positive_folds, 0);
 
-        // 场景二：训练行足够，但核心策略在样本外只有 15 个共同有效日（< 20），
-        // 该 fold 同样标记 insufficient。
         let points = validation_fold_test_axis(120);
         let axis = sort_validation_points(&points);
         let calendar = validation_calendar_of(&points);
@@ -796,7 +748,6 @@ mod tests {
             .map(|(index, point)| (point.trade_date.clone(), 1.0 + (index % 7) as f64))
             .collect::<HashMap<_, _>>();
 
-        // 两个完全相同的 predictor 会让普通最小二乘的正规方程退化，标准化 ridge 必须仍然可解。
         let incremental = build_validation_incremental(
             &calendar,
             &folds,

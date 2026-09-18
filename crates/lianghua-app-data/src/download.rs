@@ -1534,10 +1534,6 @@ pub fn run_prepared_data_download(
                     };
                     let repaired_stock_count = if repair_summary.is_some() && merge_repair_progress
                     {
-                        // These are the successfully recovered market-data stocks passed into the
-                        // chip repair. Use the stable task count instead of deriving it from callback
-                        // timing, otherwise the following incremental phase can briefly report 1/14
-                        // for a 15-stock combined job.
                         recovered_stock_codes.len()
                     } else {
                         0

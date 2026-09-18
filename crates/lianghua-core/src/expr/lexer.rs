@@ -32,23 +32,21 @@ pub struct Token {
     pub kind: TokenKind,
     pub start: usize,
     pub end: usize,
-} // 读表达式到枚举
+}
 
 #[derive(Debug)]
 pub struct Lexer<'a> {
     input: &'a str,
     pos: usize,
-} // 读表达式的标记工具
+}
 
 impl<'a> Lexer<'a> {
     pub fn new(input: &'a str) -> Self {
         Self { input, pos: 0 }
     }
-    // 读字符
     fn peek_char(&self) -> Option<char> {
         self.input.get(self.pos..)?.chars().next()
     }
-    // 删字符
     fn pop_char(&mut self) -> Option<char> {
         let ch = self.peek_char()?;
         self.pos += ch.len_utf8();
@@ -62,7 +60,6 @@ impl<'a> Lexer<'a> {
     fn is_ident_continues(ch: char) -> bool {
         ch == '_' || ch.is_ascii_alphanumeric()
     }
-    // 读字母组合
     fn read_ident(&mut self) -> String {
         let start = self.pos;
         while matches!(self.peek_char(), Some(ch) if Self::is_ident_continues(ch)) {
@@ -70,7 +67,6 @@ impl<'a> Lexer<'a> {
         }
         self.input[start..self.pos].to_string()
     }
-    // 读数字
     fn read_num(&mut self) -> f64 {
         let start = self.pos;
         let mut seen_dot = false;
@@ -104,7 +100,6 @@ impl<'a> Lexer<'a> {
         self.input[start..self.pos].parse().unwrap()
     }
 
-    // 读多字符符号
     fn seek_next_char(&self) -> Option<char> {
         let mut it = self.input.get(self.pos..)?.chars();
         it.next()?;
@@ -128,7 +123,6 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    // 具体字符分支
     pub fn next_token(&mut self) -> Token {
         self.skip_ws();
         let start = self.pos;

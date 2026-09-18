@@ -793,7 +793,6 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
 
   useEffect(() => {
     void loadPage()
-    // loadPage intentionally runs only on first mount; later refreshes call it directly.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 

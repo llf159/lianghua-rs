@@ -1,10 +1,3 @@
-//! 全市场触发近邻精排：类型、进度、存储、候选与运行入口。
-//!
-//! - `store`：配置签名与结果表维护
-//! - `samples`：候选样本与锚点加载
-//! - `page`：榜单分页查询
-//! - `run`：精排主流程
-
 mod page;
 mod run;
 pub(crate) mod samples;
@@ -34,7 +27,6 @@ use std::time::UNIX_EPOCH;
 pub(super) const ALGORITHM_VERSION: &str = "outcome-reverse-startup-ranking-v11";
 pub(super) const SUCCESS_QUALITY_THRESHOLD: f64 = 0.80;
 pub(super) const FAILURE_QUALITY_THRESHOLD: f64 = 0.20;
-// 历史分散锚点按时间等宽分桶，保证各市场阶段都有机会进入候选池。
 pub(super) const MARKET_HISTORY_BUCKETS: usize = 8;
 pub(super) const SEMANTIC_DEFINITION_SIGNATURE_PREFIX: &str = "definitions-v1|";
 
@@ -397,7 +389,6 @@ pub(super) fn push_top_candidate(
 }
 
 pub(super) fn can_prune_exact_candidate(upper_bound: f64, cutoff: Option<f64>) -> bool {
-    // Strict comparison preserves the existing score/index tie-breaking semantics.
     cutoff.is_some_and(|minimum| upper_bound + EPS < minimum)
 }
 

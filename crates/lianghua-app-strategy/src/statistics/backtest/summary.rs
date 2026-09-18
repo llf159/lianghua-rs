@@ -1,5 +1,3 @@
-//! 规则贡献均值、分层汇总指标与衰减验证。
-
 use crate::scoring_model::CompactRuleScore;
 use crate::scoring_model::ScoreBatch;
 #[cfg(test)]

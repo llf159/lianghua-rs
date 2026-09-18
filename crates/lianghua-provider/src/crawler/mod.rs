@@ -6,16 +6,16 @@ use rayon::prelude::*;
 use serde::Serialize;
 
 pub const DEFAULT_REALTIME_INDEX_TS_CODES: [&str; 10] = [
-    "000001.SH", // 上证指数
-    "399001.SZ", // 深证成指
-    "399006.SZ", // 创业板指
-    "899050.BJ", // 北证50
-    "000300.SH", // 沪深300
-    "000905.SH", // 中证500
-    "000852.SH", // 中证1000
-    "000510.SH", // 中证A500
-    "000688.SH", // 科创50
-    "399673.SZ", // 创业板50
+    "000001.SH",
+    "399001.SZ",
+    "399006.SZ",
+    "899050.BJ",
+    "000300.SH",
+    "000905.SH",
+    "000852.SH",
+    "000510.SH",
+    "000688.SH",
+    "399673.SZ",
 ];
 
 #[derive(Debug, Clone, Serialize)]
@@ -301,7 +301,6 @@ fn parse_sina_quote_text(raw: &str) -> Result<Vec<SinaQuote>, String> {
             let price = parse_f64_field(&fields, 3, "price")?;
             let high = parse_f64_field(&fields, 4, "high")?;
             let low = parse_f64_field(&fields, 5, "low")?;
-            // 新浪 level-1 返回的是成交股数；库里的 stock_data.vol 使用“手”，这里统一 /100。
             let vol = parse_f64_field(&fields, 8, "volume")? / 100.0;
             let amount = parse_f64_field(&fields, 9, "amount")?;
             let date = fields[30].to_string();

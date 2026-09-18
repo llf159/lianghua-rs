@@ -508,6 +508,12 @@ export type RuleExpressionValidationData = {
   combo_results: RuleValidationComboResult[]
 }
 
+export type ValidationCoreRuleOption = {
+  name: string
+  trigger_count: number
+  valid_trigger_count: number
+}
+
 export type MarketRankItem = {
   name: string
   value: number
@@ -795,6 +801,10 @@ export async function runTransientRankLayerBacktest(query: RankLayerBacktestQuer
 
 export async function runRuleExpressionValidation(query: RuleExpressionValidationQuery) {
   return invoke<RuleExpressionValidationData>('run_rule_expression_validation', query)
+}
+
+export async function getValidationCoreRuleOptions(sourcePath: string) {
+  return invoke<ValidationCoreRuleOption[]>('get_validation_core_rule_options', { sourcePath })
 }
 
 export async function getMarketAnalysis(query: {

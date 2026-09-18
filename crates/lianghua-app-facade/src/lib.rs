@@ -1,5 +1,3 @@
-//! Page-level use cases that compose multiple application capabilities.
-
 use lianghua_core::utils;
 use lianghua_data::data;
 use lianghua_download::download;

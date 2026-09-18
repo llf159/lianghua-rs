@@ -1,7 +1,5 @@
 use std::{fs, path::Path};
 
-// Keep this file in place: unlinking a held lock would let another process lock
-// a different inode while the current rebuild is still using its staging files.
 pub(super) fn lock_rebuild_directory(source_dir: &Path) -> Result<Option<fs::File>, String> {
     let lock_path = source_dir.join(".cyq_chen.rebuild.lock");
     let file = fs::OpenOptions::new()
@@ -17,8 +15,6 @@ pub(super) fn lock_rebuild_directory(source_dir: &Path) -> Result<Option<fs::Fil
     let result = {
         use std::os::fd::AsRawFd;
 
-        // std::fs::File::try_lock is unsupported on Android in Rust 1.94.
-        // SAFETY: file owns this valid descriptor for the entire flock call.
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
             Ok(())
         } else {
@@ -40,7 +36,6 @@ pub(super) fn lock_rebuild_directory(source_dir: &Path) -> Result<Option<fs::Fil
     }
 }
 
-// The caller must hold the directory lock throughout cleanup and any rebuild.
 pub(super) fn remove_stale_rebuilds(source_dir: &Path) -> Result<usize, String> {
     let mut removed = 0;
     for entry in fs::read_dir(source_dir).map_err(|e| format!("读取新筹码临时目录失败:{e}"))?

@@ -1,5 +1,3 @@
-//! 共享测试夹具：临时数据目录与验证用源库准备。
-
 use crate::data::source_db_path;
 use crate::simulate::rule::RuleLayerPoint;
 use duckdb::{Connection, params};

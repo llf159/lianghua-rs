@@ -176,9 +176,6 @@ export function formatUnknownValuesForCombo(item: RuleValidationComboResult) {
     : "默认参数";
 }
 
-/**
- * 表达式方向：整体触发分为负时按负向解读，与后端 `validation_axis_direction_sign` 同一口径。
- */
 export function resolveResidualDirection(
   contributionScore?: number | null,
   fallbackDirection?: ValidationDirection,
@@ -194,10 +191,6 @@ export function resolveResidualDirection(
   return fallbackDirection ?? null;
 }
 
-/**
- * 后端 `avg_excess_residual_mean` 是方向盲的均值，而 walk-forward 的残差已按方向调整，
- * 前端统一把主摘要的残差收益换算成方向残差，避免两处口径看起来互相矛盾。
- */
 export function directionAdjustedResidual(
   value?: number | null,
   direction?: ValidationDirection | null,
@@ -218,10 +211,6 @@ export function metricHighlightClass(
     : undefined;
 }
 
-/**
- * 分母固定为全部 fold：样本不足的窗口按“不是正窗口”计入，避免只评估 1/1 个窗口
- * 的参数在鲁棒性表里看起来最好。
- */
 export function formatValidationWindowRatio(
   combo: RuleValidationComboResult,
   kind: "ic" | "residual" | "incremental",

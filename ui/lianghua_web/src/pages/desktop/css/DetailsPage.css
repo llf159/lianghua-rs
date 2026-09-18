@@ -2154,9 +2154,6 @@
   height: 100%;
 }
 
-/* App.css intentionally expands generic table wrappers with !important.
-   These two cards are height-constrained on desktop, so their tables must
-   remain the vertical scroll owners instead of growing the page. */
 body .details-prev-rank-table-wrap {
   max-height: 100% !important;
   overflow: auto !important;
@@ -2775,8 +2772,6 @@ body .details-prev-rank-table-wrap {
   }
 }
 
-/* Keep wide strategy/detail tables within their card while preserving the
-   rank-card's full-height layout used elsewhere on Details pages. */
 body .details-subcard .details-table-wrap {
   max-height: 420px !important;
   overflow: auto !important;

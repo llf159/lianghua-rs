@@ -13,8 +13,6 @@ use crate::trigger_similarity::{
     StrategyTriggerSimilarityOutcomeSummary, StrategyTriggerSimilarityRow,
 };
 
-// 见父模块 mod.rs
-
 use duckdb::Connection;
 use duckdb::params;
 use rayon::prelude::*;

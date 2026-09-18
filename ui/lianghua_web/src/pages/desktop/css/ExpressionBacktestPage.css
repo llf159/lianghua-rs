@@ -246,6 +246,17 @@
   white-space: nowrap;
 }
 
+.expression-backtest-core-option-disabled {
+  color: #94a3b8;
+  cursor: not-allowed;
+}
+
+.expression-backtest-core-option-meta {
+  flex: none;
+  color: #8593a5;
+  font-size: 11px;
+}
+
 .expression-backtest-core-empty {
   color: #8593a5;
   font-size: 12px;

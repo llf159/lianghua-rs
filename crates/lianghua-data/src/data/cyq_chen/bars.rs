@@ -1,5 +1,4 @@
 use crate::data::cyq_chen::{ChenChipBar, ChipBucket, EPS};
-// 见父模块 mod.rs
 
 use crate::data::RowData;
 use std::sync::Arc;

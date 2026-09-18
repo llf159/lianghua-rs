@@ -106,7 +106,6 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
                        out_dir / f"{idx:02d}-{order}.json", args.holding, args.nonlinear)
         record(f"{idx:02d}-{order}", order, None, data)
 
-    # 随机顺序: 用 frequency 结果的规则集, 去掉历史过短的规则, 固定种子打乱。
     max_days = max(s["valid_day_count"] for s in freq["return_summaries"])
     stable_rules = [s["rule_name"] for s in freq["return_summaries"]
                     if s["valid_day_count"] >= SHORT_HISTORY_RATIO * max_days]
@@ -284,7 +283,6 @@ def main() -> int:
 
     args = parser.parse_args()
     if args.command == "compare" and args.after is None:
-        # 默认与上一个快照对比
         root = Path(args.out)
         tags = sorted(p.name for p in root.iterdir() if (p / "manifest.json").is_file()) if root.is_dir() else []
         if len(tags) < 2:

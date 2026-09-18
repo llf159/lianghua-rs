@@ -192,8 +192,6 @@ pub fn load_ths_concepts_named_map(
     Ok(out)
 }
 
-// ============================================ 原数据部分 ================================================
-
 #[derive(Debug, Clone)]
 pub struct RowData {
     pub trade_dates: Vec<String>,
@@ -355,7 +353,7 @@ pub struct DataReader {
     pub conn: Connection,
     pub query_sql: String,
     pub query_tail_rows_sql: String,
-    pub cols_table: Vec<(String, String)>, // 数据库列名, runtime规范列名
+    pub cols_table: Vec<(String, String)>,
     pub runtime_index_cols: Vec<RuntimeIndexCol>,
 }
 
@@ -884,9 +882,6 @@ fn runtime_key_required(required_runtime_keys: &HashSet<String>, runtime_key: &s
     required_runtime_keys.contains(runtime_key)
 }
 
-// ============================================ 策略部分 ================================================
-
-// 设计的时候字段要完全适配文本,用Deserialize映射key
 impl<'de> Deserialize<'de> for ScopeWay {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -1400,8 +1395,6 @@ impl ScoreRule {
             .unwrap_or(0.0)
     }
 }
-
-// ============================================ 指标部分 ================================================
 
 #[derive(Deserialize)]
 pub struct IndsData {

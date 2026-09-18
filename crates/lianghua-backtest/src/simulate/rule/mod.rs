@@ -1,9 +1,3 @@
-//! 规则分层回测：类型、对外入口与子模块装配。
-//!
-//! - `cache`：运行时缓存构建与输入准备
-//! - `metrics`：分层指标计算
-//! - `residual`：残差与行情序列的流式计算
-
 mod cache;
 mod metrics;
 mod residual;
@@ -260,8 +254,6 @@ pub(super) struct RuleLayerComputation {
 
 pub(super) type TriggeredScoreMap = HashMap<String, HashMap<String, f64>>;
 
-/// 规则触发分数按运行时样本顺序连续存放。`valid` 必须与 `values` 分离，
-/// 因为分数为 0 的记录仍然表示“已触发”，不能用 0 或 NaN 充当缺失哨兵。
 #[derive(Debug, Clone)]
 pub(super) struct TriggeredScoreColumn {
     values: Vec<f64>,
@@ -638,9 +630,6 @@ where
         layer_config,
         allowed_ts_codes,
     )?;
-    // 每条规则都会物化一份全市场样本和触发分数。两者都按小批次加载、计算、
-    // 释放；否则 parallel_batch_size=1 只限制计算并发，全部规则的触发明细仍会
-    // 在计算前同时常驻，峰值内存不会随该参数下降。
     let mut grouped_results = Vec::with_capacity(rule_names.len());
     for rule_batch in rule_names.chunks(parallel_batch_size.max(1)) {
         let mut batch_results: Vec<Result<T, String>> = rule_batch
@@ -916,7 +905,6 @@ where
         end_date,
     );
 
-    // 与数据库路径一致：固定小批次并行，限制同时存活的全市场样本 Vec 数量。
     let mut grouped_results = Vec::with_capacity(rule_names.len());
     for rule_batch in rule_names.chunks(parallel_batch_size.max(1)) {
         let mut batch_results: Vec<Result<T, String>> = rule_batch
@@ -1028,8 +1016,6 @@ where
     Ok(out)
 }
 
-/// 消费评分明细并立即压缩为运行时下标。用于临时策略回测，避免在原始
-/// `ScoreDetails` 之外再为全部规则复制一份三层字符串 HashMap。
 pub fn calc_all_rule_layer_metrics_with_validation_from_owned_rows_map<T, F>(
     source_conn: &Connection,
     source_dir: &str,
@@ -1174,8 +1160,6 @@ where
     Ok(out)
 }
 
-/// 直接消费评分阶段生成的紧凑触发行；触发行只含两个 `u32` 下标和分数，
-/// 不再构造全市场 `ScoreDetails` 字符串对象。
 pub fn calc_all_rule_layer_metrics_with_validation_from_compact_rows_map<T, F>(
     source_conn: &Connection,
     source_dir: &str,
@@ -1493,9 +1477,6 @@ mod tests {
         assert_eq!(encoded.get(3), None);
     }
 
-    /// 真实库比较基准。运行示例：
-    /// `LIANGHUA_BENCH_DATA_DIR=/path/to/source cargo test --release
-    /// benchmark_encoded_triggered_score_lookup_real_data -- --ignored --nocapture`
     #[test]
     #[ignore = "需要本机真实行情与评分数据库"]
     fn benchmark_encoded_triggered_score_lookup_real_data() {

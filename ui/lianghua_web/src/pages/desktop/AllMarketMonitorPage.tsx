@@ -747,7 +747,6 @@ export default function AllMarketMonitorPage() {
     setShowParams(false);
   }, [normalizeParamTexts]);
 
-  // 浏览器缓存参数配置
   useEffect(() => {
     try {
       localStorage.setItem(LS_KEY_SPEED_PERIOD, String(speedPeriod));
@@ -876,7 +875,6 @@ export default function AllMarketMonitorPage() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [closeParams, showParams]);
 
-  // 点击浮窗外部区域时关闭浮窗（模板触发浮窗 / 涨速命中浮窗）
   useEffect(() => {
     if (openTemplateTsCode === null && openHitTsCode === null) return;
 

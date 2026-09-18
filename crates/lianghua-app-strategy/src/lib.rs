@@ -1,5 +1,3 @@
-//! Strategy authoring, ranking, validation, and analysis workflows.
-
 use lianghua_backtest::simulate;
 use lianghua_core::{expr, utils};
 use lianghua_data::data;

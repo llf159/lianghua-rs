@@ -1,4 +1,3 @@
-//! 表达式组合与既有策略的相似度、重复性与正交指标。
 use std::hash::{Hash, Hasher};
 
 use crate::data::result_db_path;
@@ -8,6 +7,7 @@ use crate::simulate::rule::RuleLayerSamplePoint;
 use crate::statistics::backtest::RULE_BACKTEST_EPS;
 use crate::statistics::common::open_result_conn;
 use crate::statistics::validation::RuleValidationSimilarityRow;
+use crate::statistics::validation::VALIDATION_EPS;
 use crate::statistics::validation::samples::compare_option_f64_desc;
 use duckdb::{Connection, params};
 use std::collections::HashMap;
@@ -288,9 +288,6 @@ pub(in crate::statistics) fn build_validation_similarity_rows_from_overlap(
     out
 }
 
-/// 表达式验证的完整 eligible universe：与回测同口径的全部 `(ts_code, trade_date)` 样本。
-///
-/// 未触发样本的分数按 0 参与统计，保证 Score Pearson 等横截面相关性使用完整范围。
 pub(in crate::statistics) struct ValidationUniverseIndex {
     pub(in crate::statistics) residual_returns: Vec<f64>,
     pub(in crate::statistics) day_indices: Vec<u32>,
@@ -349,8 +346,6 @@ pub(in crate::statistics) struct ValidationRuleHit {
     pub(in crate::statistics) score: f64,
 }
 
-/// 结果库里已有策略在 eligible universe 内的紧凑触发索引，按 `pair_hash` 升序排列，
-/// 使每个表达式组合都能用一次二分定位同日同股的已有策略分数。
 #[derive(Debug, Default)]
 pub(in crate::statistics) struct ValidationExistingRuleScoreIndex {
     pub(in crate::statistics) rule_names: Vec<String>,
@@ -358,6 +353,8 @@ pub(in crate::statistics) struct ValidationExistingRuleScoreIndex {
     pub(in crate::statistics) score_sums: Vec<f64>,
     pub(in crate::statistics) score_square_sums: Vec<f64>,
     pub(in crate::statistics) hits: Vec<ValidationRuleHit>,
+    pub(in crate::statistics) range_trigger_counts: HashMap<String, usize>,
+    pub(in crate::statistics) universe_trigger_counts: HashMap<String, usize>,
 }
 
 pub(in crate::statistics) fn load_validation_existing_rule_score_index(
@@ -372,7 +369,6 @@ pub(in crate::statistics) fn load_validation_existing_rule_score_index(
     let Ok(result_conn) = open_result_conn(source_path) else {
         return ValidationExistingRuleScoreIndex::default();
     };
-    // 与原有相似度缓存一致：结果库不可用时只放弃重复性研究，不阻断表达式验证。
     (|result_conn: &Connection| -> Result<ValidationExistingRuleScoreIndex, String> {
         let mut stmt = result_conn
             .prepare(
@@ -386,7 +382,6 @@ pub(in crate::statistics) fn load_validation_existing_rule_score_index(
                 WHERE trade_date >= ?
                   AND trade_date <= ?
                   AND TRY_CAST(rule_score AS DOUBLE) IS NOT NULL
-                  AND ABS(TRY_CAST(rule_score AS DOUBLE)) > 1e-12
                 "#,
             )
             .map_err(|error| format!("预编译已有策略分数查询失败: {error}"))?;
@@ -404,10 +399,21 @@ pub(in crate::statistics) fn load_validation_existing_rule_score_index(
             let ts_code: String = row.get(1).map_err(|e| format!("读取代码失败: {e}"))?;
             let trade_date: String = row.get(2).map_err(|e| format!("读取交易日失败: {e}"))?;
             let score: f64 = row.get(3).map_err(|e| format!("读取规则分失败: {e}"))?;
+            *index
+                .range_trigger_counts
+                .entry(rule_name.clone())
+                .or_default() += 1;
             let pair_hash = validation_pair_hash(&ts_code, &trade_date);
             let Some(&universe_index) = universe.index_by_pair.get(&pair_hash) else {
                 continue;
             };
+            *index
+                .universe_trigger_counts
+                .entry(rule_name.clone())
+                .or_default() += 1;
+            if score.abs() <= VALIDATION_EPS {
+                continue;
+            }
             let rule_index = if let Some(existing) = rule_index_by_name.get(&rule_name) {
                 *existing
             } else {
@@ -437,8 +443,6 @@ pub(in crate::statistics) fn load_validation_existing_rule_score_index(
     .unwrap_or_default()
 }
 
-/// 已有策略的日度收益，口径与相关性与正交研究一致：`Σ(score × residual) / Σ|score|`，
-/// 分母只在 eligible universe 内累计，未触发样本的分数按 0 处理。
 #[derive(Clone, Copy)]
 pub(in crate::statistics) struct ValidationRuleDailyAgg {
     pub(in crate::statistics) score_residual_sum: f64,
@@ -492,9 +496,6 @@ pub(in crate::statistics) fn build_validation_existing_rule_daily_returns(
         .collect()
 }
 
-/// 表达式组合与已有策略的重复性：Jaccard、Phi、完整 universe 的 Score Pearson
-/// 以及日度收益 Pearson（收益口径统一为 `Σ(score × residual) / Σ|score|`）。
-/// 只做描述性统计，不产出任何评分或推荐。
 pub(in crate::statistics) fn build_validation_expression_similarity_rows(
     universe: &ValidationUniverseIndex,
     index: &ValidationExistingRuleScoreIndex,
@@ -595,22 +596,27 @@ pub(in crate::statistics) fn build_validation_expression_similarity_rows(
 
 #[cfg(test)]
 mod tests {
+    use crate::data::result_db_path;
     use crate::simulate::rule::RuleLayerSamplePoint;
     use crate::statistics::test_support::*;
     use crate::statistics::validation::similarity::CompactRuleSimilarityCache;
     use crate::statistics::validation::similarity::ValidationExistingRuleScoreIndex;
     use crate::statistics::validation::similarity::ValidationRuleHit;
     use crate::statistics::validation::similarity::ValidationSimilarityCache;
+    use crate::statistics::validation::similarity::ValidationUniverseIndex;
     use crate::statistics::validation::similarity::build_compact_rule_similarity_rows;
     use crate::statistics::validation::similarity::build_validation_expression_similarity_rows;
     use crate::statistics::validation::similarity::build_validation_similarity_rows;
     use crate::statistics::validation::similarity::build_validation_universe_index;
+    use crate::statistics::validation::similarity::load_validation_existing_rule_score_index;
     use crate::statistics::validation::similarity::validation_pair_hash;
     use crate::statistics::validation::similarity::validation_pair_key;
     use crate::statistics::validation::walk_forward::build_validation_fold_plan;
     use crate::statistics::validation::walk_forward::build_validation_incremental;
     use crate::statistics::validation::walk_forward::sort_validation_points;
+    use duckdb::Connection;
     use std::collections::HashMap;
+    use std::fs::create_dir_all;
 
     #[test]
     fn validation_similarity_rows_use_pair_index_cache() {
@@ -697,6 +703,54 @@ mod tests {
     }
 
     #[test]
+    fn existing_rule_score_index_separates_zero_score_from_out_of_universe() {
+        let source_dir = temp_source_dir();
+        let source_dir_str = source_dir.to_str().expect("utf8 source dir");
+        create_dir_all(source_dir_str).expect("create source dir");
+        let result_conn = Connection::open(result_db_path(source_dir_str)).expect("open result db");
+        result_conn
+            .execute_batch(
+                r#"
+                CREATE TABLE rule_details (
+                    ts_code VARCHAR,
+                    trade_date VARCHAR,
+                    rule_name VARCHAR,
+                    rule_score DOUBLE
+                );
+                INSERT INTO rule_details VALUES
+                    ('000001.SZ', '20240103', '零分策略', 0.0),
+                    ('000001.SZ', '20240104', '零分策略', 0.0),
+                    ('000002.SZ', '20240103', '池外策略', 2.0),
+                    ('000001.SZ', '20240103', '有效策略', 1.5);
+                "#,
+            )
+            .expect("prepare rule_details");
+        drop(result_conn);
+
+        let universe = ValidationUniverseIndex {
+            residual_returns: vec![0.1, 0.2],
+            day_indices: vec![0, 1],
+            trade_dates: vec!["20240103".to_string(), "20240104".to_string()],
+            index_by_pair: HashMap::from([
+                (validation_pair_hash("000001.SZ", "20240103"), 0),
+                (validation_pair_hash("000001.SZ", "20240104"), 1),
+            ]),
+        };
+        let index = load_validation_existing_rule_score_index(
+            source_dir_str,
+            "20240102",
+            "20240104",
+            &universe,
+        );
+
+        assert_eq!(index.rule_names, vec!["有效策略".to_string()]);
+        assert_eq!(index.universe_trigger_counts.get("零分策略"), Some(&2));
+        assert_eq!(index.range_trigger_counts.get("池外策略"), Some(&1));
+        assert_eq!(index.universe_trigger_counts.get("池外策略"), None);
+        let _ = std::fs::remove_dir_all(&source_dir);
+    }
+
+    #[test]
     fn validation_score_pearson_uses_zero_filled_universe() {
         let samples = ["000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ"]
             .into_iter()
@@ -740,7 +794,6 @@ mod tests {
             &HashMap::new(),
         );
 
-        // 没有共同触发时，只有把未触发样本按 0 计入完整 universe 才能得到有限相关性。
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].overlap_samples, 0);
         assert_eq!(rows[0].jaccard, Some(0.0));
@@ -819,7 +872,6 @@ mod tests {
             &[("核心策略".to_string(), &core_daily)],
         );
 
-        // 与已有策略高度重合，样本外窗口仍然保留正增量，两者互不推导。
         assert_eq!(incremental.positive_folds, 1);
         assert_eq!(incremental.folds[0].status, "ok");
         assert!(
@@ -900,7 +952,6 @@ mod tests {
             &[("核心策略".to_string(), &core_daily)],
         );
 
-        // 低相关只说明比较独立，没有观察到稳定新增收益时不能据此判好。
         assert_eq!(incremental.positive_folds, 0);
         assert!(
             incremental.folds[0]

@@ -1,9 +1,3 @@
-//! 筹码分布（陈氏）快照库：建库、增量维护、重建与修复。
-//!
-//! - `store`：库结构、索引与元数据
-//! - `compute`：批量计算与写入通道
-//! - `maintain`：增量维护、全量重建与单股修复
-
 mod compute;
 mod maintain;
 mod store;

@@ -20,6 +20,5 @@
     "**/dist": true,
     "**/node_modules": true,
     "**/target": true
-  },
-  // "rust-analyzer.checkOnSave.command": "check"
+  }
 }

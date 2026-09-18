@@ -1,5 +1,3 @@
-//! 策略与场景统计页面：日度行、热力图、图表与触发个股明细。
-
 use crate::data::{ScoreRule, ScoreScene};
 use crate::statistics::common::{RuleDayAgg, RuleMeta, load_rule_meta, open_result_conn};
 use duckdb::{Connection, params};

@@ -7,8 +7,6 @@ use crate::trigger_similarity::ranking::store::{
 };
 use crate::trigger_similarity::*;
 
-// 见父模块 mod.rs
-
 use super::*;
 use crate::data::ind_toml_path;
 use crate::data::result_db_path;
@@ -381,8 +379,6 @@ pub fn run_strategy_trigger_similarity_ranking(
                     && Arc::ptr_eq(&other.fingerprint.market, &target.fingerprint.market)
             }));
 
-            // 市场指纹只由交易日决定。同一批目标共用参考日，因此每个候选交易日只需
-            // 计算一次市场相似度，再展开成候选下标数组供精排直接索引。
             let mut similarity_by_date = HashMap::<&str, Option<f64>>::new();
             for candidate in candidates {
                 similarity_by_date
@@ -439,8 +435,6 @@ pub fn run_strategy_trigger_similarity_ranking(
                         let target_rule_weight_sum =
                             trigger_rule_weight_sum(&target.fingerprint.trigger, rule_weights);
                         let per_class_limit = (256) / 2;
-                        // 线程内复用候选标记、规则交集权重和精排堆。代数标记让每个目标只写入
-                        // 实际命中的候选，不再全量清零 candidates.len() 个浮点数。
                         scratch.prepare(candidates.len(), per_class_limit);
                         for (rule_name, target_hits) in &target.fingerprint.trigger.by_rule {
                             let Some(indices) = candidate_by_rule.get(*rule_name) else {
@@ -458,9 +452,6 @@ pub fn run_strategy_trigger_similarity_ranking(
                             }
                         }
 
-                        // 触发时序的单规则上界不会超过 min(m,n)/max(m,n)。再合入已经
-                        // 缓存的真实市场分作为最终分上界，并把成功、失败模板分桶，尽早
-                        // 分别填满两个 Top-K 堆，不改变最终的精确结果。
                         for position in 0..scratch.candidate_indices.len() {
                             let candidate_index = scratch.candidate_indices[position];
                             let candidate = &candidates[candidate_index];
@@ -548,8 +539,6 @@ pub fn run_strategy_trigger_similarity_ranking(
                         for candidate_position in 0..scratch.candidate_indices.len() {
                             let candidate_index = scratch.candidate_indices[candidate_position];
                             let candidate = &candidates[candidate_index];
-                            // Leave-one-stock-out：同一股票的滚动窗口会共享真实 K 线、触发和静态
-                            // 特征，不能作为自己的历史近邻，否则会形成股票身份与窗口重叠泄漏。
                             let price_available = target.fingerprint.price_volume.has_vectors
                                 && candidate.fingerprint.price_volume.has_vectors;
                             let indicator_available = target.fingerprint.indicators.has_vectors
@@ -599,9 +588,6 @@ pub fn run_strategy_trigger_similarity_ranking(
                                 scratch.candidate_aggregate_similarities[candidate_index];
                             let trigger_upper_bound =
                                 scratch.candidate_trigger_upper_bounds[candidate_index];
-                            // 市场分已按候选日期缓存，先用它收紧上界，避免为市场环境
-                            // 不匹配且不可能入堆的候选计算量价和指标点积。没有共同有效
-                            // 市场向量时仍保留原来的宽松上界，不把缺失市场分视为零分。
                             let market_similarity = market_available
                                 .then(|| candidate_market_similarities[candidate_index])
                                 .flatten();
@@ -620,8 +606,6 @@ pub fn run_strategy_trigger_similarity_ranking(
                                 scratch.prune_stats.market_pruned += 1;
                                 continue;
                             }
-                            // 先计算线性点积通道，再由真实通道分反推时序项必须达到的最低分。
-                            // 只有仍可能进入堆的候选才执行昂贵的触发序列 DP。
                             let mut channel_weighted_score = 0.0;
                             let mut remaining_weight = total_weight - TRIGGER_SIMILARITY_WEIGHT;
 
@@ -638,7 +622,6 @@ pub fn run_strategy_trigger_similarity_ranking(
                                 channel_weighted_score += score * PRICE_VOLUME_SIMILARITY_WEIGHT;
                                 remaining_weight -= PRICE_VOLUME_SIMILARITY_WEIGHT;
                             }
-                            // 保持量价、市场、指标的浮点累加顺序，与原评分结果一致。
                             if let Some(score) = market_similarity {
                                 channel_weighted_score += score * MARKET_SIMILARITY_WEIGHT;
                                 remaining_weight -= MARKET_SIMILARITY_WEIGHT;
@@ -1066,8 +1049,6 @@ pub fn run_strategy_trigger_similarity_ranking(
             .transaction()
             .map_err(|e| format!("创建相似排行榜事务失败: {e}"))?;
         let previous_active = load_active_config_record(&tx)?;
-        // 配置、策略或指标定义变化会改变汇总口径；每天重算复权行情、指标值或评分结果
-        // 不改变口径，因此保留历史快照。
         if let Some(previous) = previous_active.as_ref() {
             let semantics_changed = previous.config_key != config_key
                 || (previous
@@ -1089,7 +1070,6 @@ pub fn run_strategy_trigger_similarity_ranking(
                     .map_err(|e| format!("相似榜口径变化后清理历史汇总失败: {e}"))?;
             }
         }
-        // 生产库只允许存在当前生效配置；配置切换本身触发旧配置清理。
         tx.execute(
             "DELETE FROM strategy_trigger_similarity_rank WHERE config_key<>?",
             params![config_key],

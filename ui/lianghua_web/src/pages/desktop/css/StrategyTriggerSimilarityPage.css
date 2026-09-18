@@ -303,9 +303,6 @@
   border-radius: 8px;
 }
 
-/* Keep wide ranking tables out of the page's horizontal scroll chain. This
-   class intentionally does not contain "table-wrap", which App.css reserves
-   for page-level scrolling. */
 .trigger-sim-ranking-scroll {
   max-width: 100%;
   overflow-x: auto;
@@ -391,8 +388,6 @@
   border-radius: 6px;
 }
 
-/* Pin identification columns while the large ranking/result tables slide.
-   Explicit colors are required for the pinned layers to stay opaque. */
 .trigger-sim-ranking-table th:nth-child(1),
 .trigger-sim-ranking-table td:nth-child(1) {
   position: sticky;

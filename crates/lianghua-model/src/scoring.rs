@@ -41,8 +41,6 @@ pub struct ScoreDetails {
     pub rule_score: f64,
 }
 
-/// 规则回测专用的紧凑触发行。通过总榜行下标复用股票与日期，并通过规则
-/// 下标复用规则名，避免为每次触发各分配三段字符串。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CompactRuleScore {
     pub summary_index: u32,

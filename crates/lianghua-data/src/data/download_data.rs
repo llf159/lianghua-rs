@@ -215,7 +215,6 @@ fn append_rows_to_table(
 }
 
 pub fn init_stock_data_db(db_path: &str) -> Result<(), String> {
-    // stock_market_data
     let source_path = Path::new(db_path);
     if let Some(source_parent) = source_path.parent() {
         if !source_parent.as_os_str().is_empty() {

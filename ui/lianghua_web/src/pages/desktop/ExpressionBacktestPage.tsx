@@ -2,9 +2,11 @@ import { useEffect, useMemo, useState } from "react";
 import { ensureManagedSourcePath } from "../../apis/managedSource";
 import { getStrategyManagePage, type StrategyManageRuleItem } from "../../apis/strategyManage";
 import {
+  getValidationCoreRuleOptions,
   getRuleLayerBacktestDefaults,
   runRuleExpressionValidation,
   type RuleExpressionValidationData,
+  type ValidationCoreRuleOption,
 } from "../../apis/strategyTrigger";
 import {
   buildBoardFilterOptions,
@@ -48,6 +50,7 @@ export default function ExpressionBacktestPage() {
   const storedCommonParams = useMemo(() => readStoredBacktestCommonParams(), []);
   const [sourcePath, setSourcePath] = useState(() => readStoredSourcePath());
   const [strategyOptions, setStrategyOptions] = useState<StrategyManageRuleItem[]>([]);
+  const [coreRuleOptions, setCoreRuleOptions] = useState<ValidationCoreRuleOption[]>([]);
   const [form, setForm] = useState<ExpressionBacktestFormValues>(() => ({
     importRuleName: "",
     direction: "positive",
@@ -132,6 +135,16 @@ export default function ExpressionBacktestPage() {
         } catch (strategyError) {
           if (!cancelled) {
             setError(`读取策略列表失败: ${String(strategyError)}`);
+          }
+        }
+        try {
+          const options = await getValidationCoreRuleOptions(resolved);
+          if (!cancelled) {
+            setCoreRuleOptions(options);
+          }
+        } catch (coreRuleError) {
+          if (!cancelled) {
+            setError(`读取核心策略可用性失败: ${String(coreRuleError)}`);
           }
         }
       } catch (initError) {
@@ -403,6 +416,7 @@ export default function ExpressionBacktestPage() {
       <ExpressionBacktestForm
         values={form}
         strategyOptions={strategyOptions}
+        coreRuleOptions={coreRuleOptions}
         boardOptions={backtestBoardOptions}
         loading={loading}
         disabled={initializing}

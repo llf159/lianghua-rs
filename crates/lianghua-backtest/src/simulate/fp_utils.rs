@@ -144,10 +144,6 @@ pub(crate) fn calc_t_value(
     }
 }
 
-/// Newey-West/HAC t 值，用于前瞻持有期重叠的日度序列。
-///
-/// `max_lag` 通常取 `holding_period - 1`。相比把每天视为独立样本的普通
-/// t 值，这会把相邻重叠收益的自相关计入标准误，避免显著性被系统性高估。
 pub fn calc_newey_west_standard_error(values: &[f64], max_lag: usize) -> Option<f64> {
     let finite = values
         .iter()
@@ -205,9 +201,6 @@ pub fn spearman_corr(x: &[f64], y: &[f64]) -> Option<f64> {
     pearson_corr(&xr, &yr)
 }
 
-/// 计算平均排名。
-///
-/// 稳定排序（等值按原索引），差值小于 EPS 的值分配平均排名。
 pub(crate) fn average_ranks(values: &[f64]) -> Vec<f64> {
     let mut indexed: Vec<(usize, f64)> = values.iter().copied().enumerate().collect();
 
@@ -235,9 +228,6 @@ pub(crate) fn average_ranks(values: &[f64]) -> Vec<f64> {
     ranks
 }
 
-/// Pearson 相关系数。
-///
-/// 结果会 clamp 到 [-1.0, 1.0] 以防止浮点舍入越界。
 pub fn pearson_corr(x: &[f64], y: &[f64]) -> Option<f64> {
     if x.len() != y.len() || x.len() < 2 {
         return None;
@@ -271,7 +261,6 @@ mod tests {
 
     #[test]
     fn pearson_corr_clamps_to_one() {
-        // 完全正相关的两组 rank 值
         let x: Vec<f64> = (0..100).map(|i| i as f64).collect();
         let y = x.clone();
         let r = pearson_corr(&x, &y).expect("should compute");
@@ -295,7 +284,6 @@ mod tests {
 
     #[test]
     fn average_ranks_tie_break_deterministic() {
-        // 两个相等值，应分配到相同的平均排名
         let values = vec![1.0, 1.0, 3.0];
         let ranks = average_ranks(&values);
         assert!((ranks[0] - 1.5).abs() < 1e-9, "rank0={}", ranks[0]);
@@ -362,7 +350,6 @@ mod tests {
 
     #[test]
     fn top_bottom_spread_near_constant_score() {
-        // 分差小于 EPS 时返回 None
         let scores = vec![0.5, 0.50000000000001, 0.50000000000002];
         let residuals = vec![0.1, 0.2, 0.3];
         assert_eq!(calc_top_bottom_spread(&scores, &residuals), None);

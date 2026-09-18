@@ -7,11 +7,6 @@ use super::{
 
 const TENCENT_INTRADAY_URL: &str = "https://web.ifzq.gtimg.cn/appstock/app/minute/query";
 
-/// 腾讯当日分时接口的一分钟数据。
-///
-/// 腾讯返回的成交量和成交额是开盘以来的累计值。这里同时提供由相邻记录
-/// 计算出的单分钟增量。腾讯在不同市场返回的成交量单位可能是“手”或“股”，
-/// 因此成交均价会根据首个有效分时点自动判断单位。
 #[derive(Debug, Clone, Serialize)]
 pub struct TencentIntradayPoint {
     pub time: String,

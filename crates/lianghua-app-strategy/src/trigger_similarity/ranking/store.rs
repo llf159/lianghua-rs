@@ -3,8 +3,6 @@ use crate::trigger_similarity::ranking::{
 };
 use crate::trigger_similarity::*;
 
-// 见父模块 mod.rs
-
 use crate::data::source_db_path;
 use crate::data::stock_list_path;
 use duckdb::Connection;
@@ -238,8 +236,6 @@ pub fn get_strategy_trigger_similarity_active_config(
     if let Some(record) = load_active_config_record(conn)? {
         return Ok(Some(record.config));
     }
-    // 兼容升级前已经生成过当前算法版本结果的数据库；只作为读取默认值，
-    // 首次新写入时仍会补齐 active_config 和清理策略。
     if !table_exists(conn, "strategy_trigger_similarity_rank_meta")? {
         return Ok(None);
     }

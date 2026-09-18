@@ -497,9 +497,6 @@
   grid-template-columns: minmax(0, 1fr);
 }
 
-/* The generic sticky-table helper removes wrapper heights. Restore this
-   realtime table's viewport-sized scroller: it keeps the wide table inside
-   its column while preserving horizontal and vertical scrolling. */
 .all-market-monitor-grid .all-market-table-wrap {
   max-height: calc(100vh - 300px) !important;
   overflow: auto !important;
@@ -909,8 +906,6 @@
   background: #fff8f0;
 }
 
-/* Lock the stock identifier while wide realtime data slides sideways.
-   Explicit row-state colors prevent lower cells from showing through. */
 .all-market-table th.all-market-name-col,
 .all-market-table td.all-market-name-cell {
   position: sticky;

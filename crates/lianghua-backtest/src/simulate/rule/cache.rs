@@ -1,5 +1,3 @@
-//! 运行时缓存的构建与输入准备（规则行、触发明细、股票池过滤）。
-
 use crate::simulate::rule::residual::{
     load_most_related_concept_map, load_stock_industry_map, stream_residual_maps,
 };

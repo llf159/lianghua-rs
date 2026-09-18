@@ -193,6 +193,7 @@ use {
         get_strategy_statistics_detail as core_get_strategy_statistics_detail,
         get_strategy_statistics_page as core_get_strategy_statistics_page,
         get_strategy_triggered_stocks as core_get_strategy_triggered_stocks,
+        get_validation_core_rule_options as core_get_validation_core_rule_options,
         run_rank_layer_backtest as core_run_rank_layer_backtest,
         run_rule_expression_validation as core_run_rule_expression_validation,
         run_rule_layer_backtest as core_run_rule_layer_backtest,
@@ -205,6 +206,7 @@ use {
         RuleLayerBacktestData, RuleLayerBacktestDefaultsData, RuleValidationUnknownConfig,
         SceneLayerBacktestData, SceneLayerBacktestDefaultsData, SceneStatisticsPageData,
         StrategyStatisticsDetailData, StrategyStatisticsPageData, TriggeredStockRow,
+        ValidationCoreRuleOption,
     },
     strategy::stock_pick::{
         get_stock_pick_options as core_get_stock_pick_options, StockPickOptionsData,
@@ -344,9 +346,6 @@ fn emit_ranking_compute_progress_event(
 
 #[cfg(target_os = "linux")]
 fn trim_process_heap() {
-    // SAFETY: `malloc_trim(0)` is a libc allocator maintenance call. It does
-    // not take ownership of any Rust pointer and does not dereference caller
-    // memory; it only asks glibc to release free heap pages back to the OS.
     unsafe {
         libc::malloc_trim(0);
     }
@@ -358,11 +357,6 @@ fn trim_process_heap() {
 
     type MalloptFn = unsafe extern "C" fn(c_int, c_int) -> c_int;
 
-    // SAFETY: Android's bionic does not expose `malloc_trim`. We resolve
-    // `mallopt` dynamically so old devices without the symbol simply skip the
-    // purge. The function pointer comes from the already-loaded libc image and
-    // is used immediately; no Rust pointer is passed to C and no pointer from C
-    // is retained, so this does not create a UAF path.
     unsafe {
         let symbol = libc::dlsym(libc::RTLD_DEFAULT, b"mallopt\0".as_ptr().cast());
         if symbol.is_null() {
@@ -1598,6 +1592,13 @@ async fn run_transient_rank_layer_backtest(
 }
 
 #[tauri::command]
+fn get_validation_core_rule_options(
+    source_path: String,
+) -> Result<Vec<ValidationCoreRuleOption>, String> {
+    core_get_validation_core_rule_options(&source_path)
+}
+
+#[tauri::command]
 async fn run_rule_expression_validation(
     source_path: String,
     import_rule_name: String,
@@ -2171,7 +2172,6 @@ async fn import_cyq_chen_strategy_backup(
             return Err("导入文件为空".to_string());
         }
         let file_path = FilePath::from_str(source_file).map_err(|error| error.to_string())?;
-        // URI 解码只用于备份标签，读取时保留选择器返回的 URI。
         let source_label = match &file_path {
             FilePath::Url(url) => decode_percent_encoded_path(url.path()),
             FilePath::Path(path) => path.to_string_lossy().into_owned(),
@@ -2702,6 +2702,7 @@ pub fn run() {
             run_transient_scene_layer_backtest,
             run_transient_rule_layer_backtest,
             run_rule_expression_validation,
+            get_validation_core_rule_options,
             get_ranking_compute_status,
             preview_ranking_score_calculation_warnings,
             run_ranking_score_calculation,

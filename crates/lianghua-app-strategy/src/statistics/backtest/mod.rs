@@ -1,5 +1,3 @@
-//! 分层回测的默认参数与对外运行入口（场景/规则/排名层）。
-
 pub(super) mod rank_layer;
 pub(super) mod summary;
 
@@ -583,7 +581,6 @@ pub fn run_scene_layer_backtest(
         allowed_ts_codes,
     };
 
-    // 当前入口固定全量；后续如需恢复单场景，仅需传入 Some(scene_name)。
     (|source_conn: &Connection,
       source_path: &str,
       scene_name: Option<&str>,
@@ -790,7 +787,6 @@ pub fn run_rule_layer_backtest(
         allowed_ts_codes,
     };
 
-    // 当前入口固定全量；后续如需恢复单策略，仅需传入 Some(rule_name)。
     (|source_conn: &Connection,
       source_path: &str,
       rule_name: Option<&str>,

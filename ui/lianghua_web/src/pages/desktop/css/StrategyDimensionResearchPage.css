@@ -416,8 +416,6 @@
   font-weight: 500;
 }
 
-/* App.css expands generic table wrappers; these result tables keep their own
-   larger scroll area so the page height stays usable on tablets. */
 body .dimension-research-profile-table-wrap,
 body .dimension-research-pair-table-wrap,
 body .dimension-research-matrix-wrap {

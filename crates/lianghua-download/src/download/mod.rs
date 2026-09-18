@@ -78,7 +78,6 @@ struct TradeCalParams<'a> {
 }
 
 pub struct TushareClient {
-    // 主要连接
     pub base_url: String,
     pub token: String,
     pub http: reqwest::blocking::Client,
@@ -258,7 +257,6 @@ impl TushareClient {
     }
 
     pub fn fetch_stock_basic_table(
-        // 基础信息列, 一次调用basic
         &self,
         exchange: &str,
         list_status: &str,
@@ -546,8 +544,6 @@ impl TushareClient {
         adj_type: AdjType,
         with_factors: bool,
     ) -> Result<Vec<ProBarRow>, String> {
-        //单股下载总函数
-
         let bar_table = self.fetch_base_bar_table(ts_code, start_date, end_date, freq)?;
         let bar_rows = parse_bar_rows(&bar_table)?;
 

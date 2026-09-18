@@ -16,11 +16,6 @@ const DEFAULT_TOP_KS: [usize; 4] = [1, 5, 20, 100];
 
 pub const DEFAULT_CONVOLUTION_KERNEL_NAME: &str = "H30-L50";
 pub const DEFAULT_CONVOLUTION_WINDOW: usize = 30;
-/// 卷积分数在该精度内视为并列，再用股票代码稳定排序。
-///
-/// SQL 的滚动和与 Rust 的逐项乘加可能仅因浮点加法顺序产生约 1e-14
-/// 的差异。统一量化排序键可让即时计算与落盘计算得到相同名次，同时
-/// 保留完整精度的 `convolved_score` 用于展示和审计。
 pub const CONVOLUTION_RANK_SCORE_DECIMALS: u32 = 10;
 
 #[inline]
@@ -29,10 +24,6 @@ fn convolution_rank_sort_key(score: f64) -> f64 {
     (score * scale).round()
 }
 
-/// 回测后选定的双尺度默认卷积核。
-///
-/// 50% 权重分配给三日快核 `[1.0, 0.7, 0.49]`，另外 50% 分配给
-/// 三十日等权均值。返回顺序为“当前交易日 -> 更早交易日”。
 pub fn default_convolution_kernel() -> Vec<f64> {
     let short_weights = [1.0, 0.7, 0.49];
     let short_sum = short_weights.iter().sum::<f64>();
@@ -43,10 +34,6 @@ pub fn default_convolution_kernel() -> Vec<f64> {
     weights
 }
 
-/// 一只股票在目标交易日的原始分数与时间卷积分数排名对比。
-///
-/// `score_history` 按从旧到新的顺序保存；卷积核则约定 `kernel[0]`
-/// 作用于目标交易日，后续权重依次作用于更早的交易日。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConvolutionRankRow {
     pub ts_code: String,
@@ -56,17 +43,10 @@ pub struct ConvolutionRankRow {
     pub convolved_score: f64,
     pub raw_rank: usize,
     pub convolution_rank: usize,
-    /// 正数表示卷积后名次上升，负数表示下降。
     pub rank_change: isize,
     pub score_history: Vec<f64>,
 }
 
-/// 对每只股票的 `total_score` 做因果加权卷积，然后在目标日重新排名。
-///
-/// - `kernel` 按“当前、前一日、前二日……”排列；
-/// - 权重会自动归一化，因此 `[5, 3, 2]` 与 `[0.5, 0.3, 0.2]` 等价；
-/// - 只保留窗口内每个交易日都有有效分数的股票；
-/// - 原始排名也在这批完整窗口股票中重算，保证名次变化可直接比较。
 pub fn calc_convolution_ranking(
     score_summary_rows: &[ScoreSummary],
     target_date: &str,
@@ -605,8 +585,6 @@ fn calc_rank_layer_metrics_with_lookup(
                     return None;
                 }
 
-                // Top-K 与分层指标共享同一份按日样本，并随每日分层任务一起并行计算。
-                // 两者的排序规则不同，因此仍各自排序，避免改变数据库排名优先的语义。
                 let top_k_daily_points = (|trade_date: &str,
                                            day_samples: &[&RuleLayerSamplePoint],
                                            rank_lookup: Option<&RankLayerLookup>|
@@ -643,8 +621,6 @@ fn calc_rank_layer_metrics_with_lookup(
                             }
                         };
 
-                    // 指标最多只读取 Top100。股票数更大时先线性选择前 100，再只排序
-                    // 这个小切片，避免为几千只股票执行不必要的完整 O(n log n) 排序。
                     let retained_count = DEFAULT_TOP_KS
                         .last()
                         .copied()
@@ -695,8 +671,6 @@ fn calc_rank_layer_metrics_with_lookup(
                             if config.layer_method != RankLayerMethod::SampleCount {
                                 return std::cmp::Ordering::Equal;
                             }
-                            // 数据库 rank=1 表示最高排名。总分从低到高分层时，同分股票按
-                            // 数据库排名从低到高排列，因此较大的 rank 先进入低层。
                             let left_rank =
                                 sample_database_rank(trade_date, day_samples[left.0], rank_lookup);
                             let right_rank =
@@ -1287,7 +1261,6 @@ mod tests {
                 });
             }
         }
-        // 缺少第一天的股票不能进入完整窗口排行榜。
         for (trade_date, score) in [("20240103", 90.0), ("20240104", 90.0)] {
             rows.push(ScoreSummary {
                 ts_code: "000004.SZ".to_string(),
@@ -1730,7 +1703,6 @@ mod tests {
             .expect("Top 1 summary");
         assert_eq!(top_one.point_count, 2);
         assert_eq!(top_one.sample_count, 2);
-        // Top-K 应遵循数据库排名，而不是再次按分数排序；这里最低分股票 rank=1。
         assert_opt_close(top_one.avg_daily_residual_return, Some(0.0));
         assert_opt_close(top_one.median_daily_residual_return, Some(0.0));
         assert_opt_close(top_one.positive_day_ratio, Some(0.5));

@@ -150,7 +150,6 @@ export default function DragonTigerMarketPanel({
       setViewDate(requestedDate);
     }
     void loadDragonTiger(requestedDate);
-    // referenceTradeDate changes only after the main analysis resolves.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sourcePath, referenceTradeDate]);
 

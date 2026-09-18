@@ -5,8 +5,6 @@ use crate::trigger_similarity::{
     TriggerFingerprint,
 };
 
-// 见父模块 mod.rs
-
 use duckdb::Connection;
 use duckdb::params;
 use std::borrow::Cow;
@@ -106,8 +104,6 @@ pub(super) fn kernel_responses(values: &[Option<f64>]) -> Vec<f64> {
             }))
         })
     })(values.len());
-    // 固定按窗口位置切成 [0, 1/3)、[1/3, 2/3)、[2/3, 1] 三段，
-    // 分别保留前中、中后和前后的水平变化，不再压缩成单一前后趋势。
     let stage_levels = pool_series(values, 3);
     let front_to_middle = stage_levels[1] - stage_levels[0];
     let middle_to_back = stage_levels[2] - stage_levels[1];
@@ -163,7 +159,6 @@ pub(super) fn temporal_signature(
     };
     let mut signature = pool_series(&transformed, segments);
     signature.extend(kernel_responses(&transformed));
-    // 固定偏置使余弦距离同时感知响应幅度；否则成比例的高/低波动窗口会完全同向。
     signature.push(1.0);
     Some(signature)
 }
@@ -347,8 +342,6 @@ pub(super) fn trigger_time_decay_scores() -> &'static [f64] {
 }
 
 thread_local! {
-    // 精排在线程池内会调用数百万次。复用单行 DP，避免每个规则配对都创建、排序
-    // left.len() * right.len() 个候选及两组占用标记。
     static TRIGGER_MATCH_DP: RefCell<Vec<f64>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -426,8 +419,6 @@ pub(super) fn weighted_rule_timing_similarity_with_masses(
             time_score * intensity_score
         };
         let mut weighted_sum = 0.0;
-        // 剩余规则最多匹配 min(m,n) 次，不能再把次数悬殊的规则当作满分。
-        // 无门槛的单股查询不计算剪枝上界，保留完整评分。
         for (name, target_hits) in &target.by_rule {
             let Some(candidate_hits) = candidate.by_rule.get(name) else {
                 continue;
@@ -442,9 +433,6 @@ pub(super) fn weighted_rule_timing_similarity_with_masses(
             let count_upper_weight = weight * count_upper;
             let remaining_after_rule = (remaining_upper_weight - count_upper_weight).max(0.0);
             let date_upper = if minimum_similarity.is_finite() {
-                // 放宽一对一和顺序约束，让每个触发独立选择另一侧时间上最近的触发。
-                // 放宽问题的得分必不低于真实 DP；两个方向各给出一个上界，取较小值
-                // 仍是安全上界。触发按日期有序，双指针可在线性时间完成最近点查找。
                 let directional_upper = |left: &[RuleTriggerHit], right: &[RuleTriggerHit]| {
                     let mut right_index = 0;
                     let mut sum = 0.0;
@@ -484,7 +472,6 @@ pub(super) fn weighted_rule_timing_similarity_with_masses(
                         && left.score.is_finite()
                         && left.score == right.score
                 }) {
-                // 对角线上的每次匹配均为满分，已达到一对一匹配的理论上限。
                 1.0
             } else if target_hits.len() == 1 {
                 candidate_hits
@@ -499,8 +486,6 @@ pub(super) fn weighted_rule_timing_similarity_with_masses(
                     .fold(0.0, f64::max)
                     / target_hits.len() as f64
             } else {
-                // 加权序列匹配：每个触发仍然只匹配一次，并保持时间先后关系。复杂度从
-                // O(m*n*log(m*n)) 降到 O(m*n)，且不在热循环中反复分配内存。
                 dp.resize(candidate_hits.len() + 1, 0.0);
                 dp.fill(0.0);
                 for (left_index, left_hit) in target_hits.iter().enumerate() {
@@ -512,8 +497,6 @@ pub(super) fn weighted_rule_timing_similarity_with_masses(
                         dp[column] = dp[column].max(dp[column - 1]).max(matched);
                         diagonal = previous_row;
                     }
-                    // 已处理行的最优值加上剩余行全部满分，仍达不到精排门槛时
-                    // 可以提前退出，避免低相似长序列一直算到最后一行。
                     let timing_upper = (dp[candidate_hits.len()]
                         + (target_hits.len() - left_index - 1) as f64)
                         .min(target_hits.len().min(candidate_hits.len()) as f64)
@@ -786,7 +769,6 @@ mod tests {
                 }
             }
         }
-        // 次数上界已不达标时，不进入 DP，也不扩展线程缓冲。
         let dense = build_trigger_fingerprint(
             &dates
                 .iter()

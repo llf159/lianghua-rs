@@ -1,4 +1,3 @@
-//! 验证用触发分数计算、分数分层与收益分布。
 use rayon::prelude::*;
 
 use crate::data::DataReader;
@@ -363,8 +362,6 @@ pub(in crate::statistics) fn build_validation_triggered_scores_for_combos(
                         .collect::<Vec<_>>();
                     let mut combo_hits = Vec::new();
 
-                    // All combos originate from the same formula template with different constants,
-                    // so one runtime load can be reused as long as any overwritten base columns are restored.
                     for (combo_index, combo) in combos.iter().enumerate() {
                         if !restore_values[combo_index].is_empty() {
                             restore_runtime_values(&mut runtime, &restore_values[combo_index]);

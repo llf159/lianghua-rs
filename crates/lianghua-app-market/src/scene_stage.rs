@@ -1,5 +1,3 @@
-//! Shared ordering and threshold parsing for live scene stages.
-
 pub(super) fn level(raw: Option<&str>) -> i32 {
     match raw
         .map(|value| value.trim().to_ascii_lowercase())

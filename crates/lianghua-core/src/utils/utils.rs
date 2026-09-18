@@ -7,17 +7,10 @@ use crate::expr::{
 
 const EPS: f64 = 1e-12;
 
-/// Round an f64 to a fixed decimal scale with Rust formatting semantics.
-///
-/// Scales 0–8 use allocation-free exact binary arithmetic. Larger scales
-/// safely fall back to formatting, which avoids integer overflow and preserves
-/// the requested precision. Signed zero is preserved for generic callers.
 pub fn round_f64_to_scale(value: f64, scale: u32) -> f64 {
     if !value.is_finite() || value == 0.0 {
         return value;
     }
-    // Every finite f64 has a terminating decimal representation within 1074
-    // fractional digits, so rounding beyond this point is always a no-op.
     if scale >= 1074 {
         return value;
     }

@@ -292,12 +292,6 @@ impl Runtime {
         let len = Value::len_of(&v);
         let vs = Value::as_num_series(&v, len)?;
         let mut out = Vec::with_capacity(len);
-        // for i in 0..len {
-        //     match vs[i] {
-        //         Some(a) => out.push(Some(a.abs())),
-        //         None => out.push(None),
-        //     }
-        // }
         for x in vs.iter().take(len) {
             out.push(x.map(|x| x.abs()));
         }
@@ -892,15 +886,6 @@ impl Runtime {
 
         out.push(false);
         for i in 1..len {
-            // if l_series[i] > r_series[i]{
-            //     if l_series[i - 1] <= r_series[i - 1] {
-            //         out.push(true);
-            //     } else {
-            //         out.push(false)
-            //     }
-            // } else {
-            //     out.push(false);
-            // }
             let hit = match (l_series[i], r_series[i], l_series[i - 1], r_series[i - 1]) {
                 (Some(a), Some(b), Some(pa), Some(pb)) => a > b && pa <= pb,
                 _ => false,
@@ -1172,7 +1157,6 @@ impl Runtime {
     }
 
     fn impl_grank(&mut self, args: &[Expr]) -> Result<Value, EvalErr> {
-        // 大数字排在前面
         if args.len() != 2 {
             return Err(EvalErr {
                 msg: "RANK需要两个参数".to_string(),
@@ -1228,7 +1212,6 @@ impl Runtime {
         greater_first: bool,
         fn_name: &str,
     ) -> Result<Value, EvalErr> {
-        // 在第一个参数的排名中, 取满足第二个参数的k线,第三个参数的周期内取第一个参数的第四个参数个数的top
         if args.len() != 4 {
             return Err(EvalErr {
                 msg: format!("{fn_name}需要四个参数"),
@@ -1271,7 +1254,7 @@ impl Runtime {
                         break;
                     }
                 }
-            } // v是需要rank的值,cond_s是是否满足条件, j留着tiebreak
+            }
 
             if has_none {
                 out.push(None);
@@ -1392,7 +1375,6 @@ impl Runtime {
     }
 
     fn impl_lrank(&mut self, args: &[Expr]) -> Result<Value, EvalErr> {
-        // 小数字排在前面
         if args.len() != 2 {
             return Err(EvalErr {
                 msg: "RANK需要两个参数".to_string(),
@@ -1877,7 +1859,6 @@ impl Runtime {
     }
 
     fn eval_stmt(&mut self, stmt: &Stmt) -> Result<Value, EvalErr> {
-        // 赋值分支和语句分支的选择处理
         match stmt {
             Stmt::Expr(e) => self.eval_expr(e),
             Stmt::Assign { name, value } => self.eval_assign(name, value),
@@ -2169,7 +2150,7 @@ impl Value {
                         .map(|n| match n {
                             Some(n) => *n != 0.0,
                             None => false,
-                        }) // 在map中match处理Some(n),可用map_or(Some分支, None分支)
+                        })
                         .collect())
                 } else {
                     Err(EvalErr {
@@ -2209,10 +2190,6 @@ impl Value {
 fn call_test() {
     use crate::expr::parser::{Parser, lex_all};
 
-    // let expr = "C > MA(C, 3);";
-    // let expr = "C > HHV(REF(C, 1), 3);";
-    // let expr = "SUM(C, 3);";
-    // let expr = "NOT(CROSS(C, MA(C, 3)));";
     let expr = "BARSLAST(C > 2);";
     let toks = lex_all(expr);
     let mut p = Parser::new(toks);

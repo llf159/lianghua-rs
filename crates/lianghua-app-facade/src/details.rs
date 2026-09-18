@@ -1294,8 +1294,6 @@ pub fn get_stock_detail_page(
     } else {
         query_latest_kline_trade_date(&source_conn, &normalized_ts_code)?
     };
-    // The first response deliberately contains only OHLCV data. Overview metadata
-    // and chart indicators are loaded after the base candles have painted.
     let kline = query_kline_base(
         &source_conn,
         &normalized_ts_code,
@@ -2454,9 +2452,6 @@ pub fn build_stock_detail_realtime_from_quote_map(
         .get(&normalized_ts_code)
         .ok_or_else(|| format!("未获取到 {} 的实时行情", normalized_ts_code))?;
     let watermark_name = Some(quote.name.clone()).filter(|value| !value.trim().is_empty());
-    // Load dependencies and panel metadata once, but defer expression execution
-    // until after the realtime row has been merged. This avoids calculating every
-    // indicator twice on each refresh.
     let (kline, compiled) = query_kline_with_compiled(
         &source_conn,
         &source_path,

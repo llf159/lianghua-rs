@@ -1,7 +1,3 @@
-//! 走势相似度：行情加载、触发指纹、通道相似度、样本构建与页面入口。
-//!
-//! 子模块按流水线阶段划分，公共 API 从本文件汇总导出。
-
 pub mod ranking;
 
 mod channel;
@@ -23,20 +19,14 @@ pub(super) const DEFAULT_POOL_SEGMENTS: usize = 5;
 pub(super) const DEFAULT_OUTCOME_TRADE_DAYS: usize = 5;
 pub(super) const DEFAULT_LIMIT: usize = 30;
 pub(super) const MAX_POOL_SEGMENTS: usize = 12;
-// 参考日之前这段时间内的历史事件不进入候选样本，避免评级继续由最近一轮行情主导。
 pub(super) const MIN_SAMPLE_GAP_TRADE_DAYS: usize = 90;
-// 候选池同时覆盖近期和跨期分散样本，让市场环境通道能命中的历史相似阶段不会被
-// 近期事件挤掉；不再用只含触发摘要的代理分数预判包含量价、指标和市场环境的最终相似度。
 pub(super) const RECENT_CANDIDATE_ANCHORS: usize = 15_000;
 pub(super) const HISTORY_DIVERSITY_ANCHORS: usize = (50_000) - RECENT_CANDIDATE_ANCHORS;
-// 评级样本独立于页面展示条数，并限制重叠事件对有效样本量的虚增。
 pub(super) const RATING_SAMPLE_LIMIT: usize = 30;
 pub(super) const RATING_MAX_PER_OUTCOME_WINDOW: usize = 3;
-// 大块读取减少 DuckDB 对 rule_details/stock_data 的重复扫描；池化后每块内存仍可控。
 pub(super) const ANCHOR_CHUNK_SIZE: usize = 8_192;
 pub(super) const SHRINKAGE_STRENGTH: f64 = 8.0;
 pub(super) const EPS: f64 = 1e-12;
-// 两阶段候选池上进行跨期样本外复核后的精排权重；四项之和必须为 1。
 pub(super) const TRIGGER_SIMILARITY_WEIGHT: f64 = 0.40;
 pub(super) const PRICE_VOLUME_SIMILARITY_WEIGHT: f64 = 0.20;
 pub(super) const INDICATOR_SIMILARITY_WEIGHT: f64 = 0.15;
@@ -142,7 +132,6 @@ pub(super) struct Anchor {
     end_trade_date: String,
 }
 
-// 一次计算共用同一份字典；编号只用于内存计算，不写入结果库。
 #[derive(Default)]
 pub(super) struct RuleCatalog {
     ids: HashMap<String, usize>,

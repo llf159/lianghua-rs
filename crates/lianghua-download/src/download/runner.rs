@@ -798,14 +798,12 @@ pub fn init_stock_basic_data(
     config: &DownloadRuntimeConfig,
     progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<String, String> {
-    // 初始化基础数据,返回当前有效交易日
     let source_dir = config.source_dir.as_str();
     let client = TushareClient::new(config.token.clone(), config.limit_calls_per_min)?;
 
     let now = Local::now();
     let trade_calendar_end = format!("{:04}1231", now.year());
 
-    // 2. 先检查是否需要刷新交易日历
     if trade_calendar_needs_refresh(source_dir, trade_calendar_end.as_str())? {
         emit_progress(
             progress_cb,
@@ -839,13 +837,10 @@ pub fn init_stock_basic_data(
         );
     }
 
-    // 3. 读取交易日历
     let trade_dates = crate::data::load_trade_date_list(source_dir)?;
 
-    // 4. 16:00 后还会探测 Tushare daily 是否已经有今日行情，避免供应端延迟时误进今日增量。
     let effective_trade_date = resolve_effective_trade_date(&client, &trade_dates, progress_cb)?;
 
-    // 5. 再检查是否需要刷新股票列表
     if (|source_dir: &str, effective_trade_date: &str| -> Result<bool, String> {
         let path = stock_list_path(source_dir);
         if !path.exists() {
@@ -1738,8 +1733,6 @@ pub fn download_indices_after_basic_data(
         ),
     }
 }
-
-// 增量部分
 
 pub fn download_pending_all_market(
     config: &DownloadRuntimeConfig,

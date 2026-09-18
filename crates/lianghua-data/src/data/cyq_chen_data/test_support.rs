@@ -1,5 +1,3 @@
-//! 共享测试夹具：临时源库准备与结果比对。
-
 use crate::data::chip_change_rule_path;
 use crate::data::stock_list_path;
 use crate::data::trade_calendar_path;

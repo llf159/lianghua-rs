@@ -347,8 +347,6 @@ fn normalize_quote_trade_date(raw: &str) -> Option<String> {
     }
 }
 
-/// 将 Runtime 中所有 NumSeries 替换为 SharedNumSeries，
-/// 后续 clone 时只需增加 Arc 引用计数，不再深拷贝序列数据。
 fn freeze_runtime_series(rt: &mut Runtime) {
     for value in rt.vars.values_mut() {
         if let Value::NumSeries(series) = value {
@@ -1373,7 +1371,6 @@ pub fn get_all_market_monitor_snapshot(
 
             let mut warning_messages = entry.warning_messages.clone();
 
-            // Step 1: build Runtime for every row in parallel
             struct RowEvalCtx {
                 row_index: usize,
                 ts_code: String,
@@ -1412,7 +1409,6 @@ pub fn get_all_market_monitor_snapshot(
                 }
             }
 
-            // Step 2: evaluate every (row, template) pair in a single flat parallel pass
             let tpl_count = entry.template_order.len();
             let total = valid.len().checked_mul(tpl_count).unwrap_or(0);
 

@@ -2,7 +2,6 @@ use crate::data::cyq_chen_data::{
     CYQ_CHEN_META_TABLE, CYQ_CHEN_SCHEMA_VERSION, CYQ_CHEN_SNAPSHOT_TABLE,
     CyqChenStrategyMaintenanceStatus,
 };
-// 见父模块 mod.rs
 
 use crate::data::chip_change_rule_path;
 use crate::data::cyq_chen::ChenChipConfig;
@@ -437,7 +436,6 @@ mod tests {
     fn maintenance_status_does_not_initialize_or_clean_rebuild_files() {
         let source_dir = unique_temp_source_dir();
         fs::create_dir_all(&source_dir).unwrap();
-        // An unusable lock path must not prevent a metadata query.
         fs::create_dir(source_dir.join(".cyq_chen.rebuild.lock")).unwrap();
         let stale = source_dir.join(".cyq_chen.db.rebuild-123-456.tmp");
         fs::write(&stale, "keep").unwrap();

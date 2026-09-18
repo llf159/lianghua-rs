@@ -1,5 +1,3 @@
-//! Shared application-layer primitives without page ownership.
-
 use lianghua_data::data;
 
 mod date;

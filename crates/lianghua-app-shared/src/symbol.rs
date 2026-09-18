@@ -1,5 +1,3 @@
-//! Stock-symbol normalization shared by application workflows.
-
 pub fn normalize_ts_code(raw: &str) -> Option<String> {
     let trimmed = raw.trim().to_ascii_uppercase();
     if trimmed.is_empty() {

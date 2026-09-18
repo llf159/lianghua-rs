@@ -1,5 +1,3 @@
-//! 结果库连接、规则元数据与 scope way 解析：统计页面、表达式验证与分层回测共用。
-
 use crate::data::{RuleKind, ScopeWay, ScoreRule, result_db_path};
 use duckdb::Connection;
 use std::collections::HashMap;

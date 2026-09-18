@@ -1,10 +1,3 @@
-//! 陈氏筹码分布（chip change）算法：配置编译、日线桶推进与快照生成。
-//!
-//! - `bars`：行情校验与桶速率序列
-//! - `config`：策略表达式编译与校验
-//! - `simulate`：买卖事件与运行时注入
-//! - `buckets`：筹码桶操作与快照构造
-
 mod bars;
 mod buckets;
 mod config;
@@ -50,7 +43,6 @@ pub struct ChipChangeStrategy {
     pub direction: ChipDirection,
     pub when: String,
     pub bias: f64,
-    /// Zero is an ordinary rule; otherwise confirm a surviving purchase cohort this many bars later.
     #[serde(default)]
     pub confirm_after: usize,
 }
@@ -216,7 +208,6 @@ pub(super) struct ChenChipBar {
     turnover_rate: f64,
 }
 
-/// Remaining holdings from one day's purchase, tracked by holder inside a cost bucket.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PosteriorChipLot {
     pub trade_date: String,

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { StrategyManageRuleItem } from "../../../../apis/strategyManage";
+import type { ValidationCoreRuleOption } from "../../../../apis/strategyTrigger";
 import { INDEX_OPTIONS } from "../../../../shared/backtestCommonParams";
 import {
   VALIDATION_MAX_SAMPLE_LIMIT,
@@ -45,6 +46,7 @@ export type ExpressionBacktestFormValues = {
 export function ExpressionBacktestForm({
   values,
   strategyOptions,
+  coreRuleOptions,
   boardOptions,
   loading,
   disabled,
@@ -55,6 +57,7 @@ export function ExpressionBacktestForm({
 }: {
   values: ExpressionBacktestFormValues;
   strategyOptions: StrategyManageRuleItem[];
+  coreRuleOptions: ValidationCoreRuleOption[];
   boardOptions: string[];
   loading: boolean;
   disabled: boolean;
@@ -65,9 +68,20 @@ export function ExpressionBacktestForm({
 }) {
   const [coreRuleKeyword, setCoreRuleKeyword] = useState("");
   const coreRuleKeywordText = coreRuleKeyword.trim().toLowerCase();
+  const coreRuleOptionByName = new Map(coreRuleOptions.map((item) => [item.name, item]));
   const visibleCoreRules = coreRuleKeywordText
     ? strategyOptions.filter((item) => item.name.toLowerCase().includes(coreRuleKeywordText))
     : strategyOptions;
+  const coreRuleUnavailableReason = (ruleName: string) => {
+    const option = coreRuleOptionByName.get(ruleName);
+    if (!option) {
+      return "结果库没有该策略的触发记录，需先执行排名计算";
+    }
+    if (option.valid_trigger_count === 0) {
+      return `结果库中 ${option.trigger_count} 次触发的分数全部为 0，需重跑排名计算`;
+    }
+    return `结果库触发 ${option.trigger_count} 次，其中 ${option.valid_trigger_count} 次为非零分数`;
+  };
 
   function toggleCoreRule(ruleName: string, checked: boolean) {
     if (checked) {
@@ -431,6 +445,9 @@ export function ExpressionBacktestForm({
         <div className="expression-backtest-core-picker-head">
           <strong>核心策略（用于增量验证）</strong>
           <span>最多 {CORE_RULE_LIMIT} 个，作为样本外增量回归的 predictors</span>
+          <span>
+            只有结果库里存在非零分数的策略才能作为 predictor；灰掉的策略需要先重跑排名计算。
+          </span>
         </div>
         <input
           className="expression-backtest-core-search"
@@ -442,17 +459,30 @@ export function ExpressionBacktestForm({
           {visibleCoreRules.length > 0 ? (
             visibleCoreRules.map((item) => {
               const checked = values.coreRuleNames.includes(item.name);
+              const option = coreRuleOptionByName.get(item.name);
+              const unusable = !option || option.valid_trigger_count === 0;
               return (
-                <label key={`core-rule-${item.name}`} className="expression-backtest-core-option">
+                <label
+                  key={`core-rule-${item.name}`}
+                  className={`expression-backtest-core-option${unusable ? " expression-backtest-core-option-disabled" : ""}`}
+                  title={coreRuleUnavailableReason(item.name)}
+                >
                   <input
                     type="checkbox"
                     checked={checked}
                     disabled={
-                      !checked && values.coreRuleNames.length >= CORE_RULE_LIMIT
+                      !checked && (unusable || values.coreRuleNames.length >= CORE_RULE_LIMIT)
                     }
                     onChange={(event) => toggleCoreRule(item.name, event.target.checked)}
                   />
                   <span>{item.name}</span>
+                  <span className="expression-backtest-core-option-meta">
+                    {unusable
+                      ? option
+                        ? `分数 0 / ${option.trigger_count}`
+                        : "结果库无记录"
+                      : `触发 ${option.trigger_count}`}
+                  </span>
                 </label>
               );
             })

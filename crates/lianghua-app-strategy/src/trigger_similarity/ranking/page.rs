@@ -7,8 +7,6 @@ use crate::trigger_similarity::ranking::{
 };
 use crate::trigger_similarity::*;
 
-// 见父模块 mod.rs
-
 use crate::trigger_similarity::load::load_all_trade_dates;
 use crate::trigger_similarity::load::open_result_conn;
 use crate::trigger_similarity::load::resolve_benchmark_index_code;

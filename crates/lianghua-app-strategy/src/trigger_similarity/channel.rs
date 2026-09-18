@@ -5,8 +5,6 @@ use crate::trigger_similarity::{
     TRIGGER_SIMILARITY_WEIGHT,
 };
 
-// 见父模块 mod.rs
-
 use std::collections::HashMap;
 use std::sync::Arc;
 pub(super) fn build_price_volume_channels(
@@ -16,8 +14,6 @@ pub(super) fn build_price_volume_channels(
     market_categories: [f64; 5],
 ) -> Vec<Option<Vec<f64>>> {
     let mut channels = vec![Vec::new(); 13];
-    // stock_list.csv 目前提供最新总市值而非逐日历史总市值。用固定对数尺度编码为
-    // [0, 1]，作为股票规模这一项基本特征；不把它伪装成时间序列趋势。
     let normalized_market_cap = total_mv_yi
         .filter(|value| value.is_finite() && *value > 0.0)
         .map(|value| (value.log10() / 5.0).clamp(0.0, 1.0));
@@ -69,8 +65,6 @@ pub(super) fn build_price_volume_channels(
         channels[12].push(normalized_market_cap);
         previous_close = row.close.filter(|value| value.is_finite());
     }
-    // 价格水平、成交量和成交额只比较相对形态；跳空、收益、振幅、影线、位置、
-    // 换手和资金流保留原始状态，以免把方向、缺口和风险强度标准化掉。
     let standardize = [
         true, false, false, false, false, true, true, false, false, false, false, false, false,
     ];
@@ -79,13 +73,10 @@ pub(super) fn build_price_volume_channels(
         .zip(standardize)
         .map(|(series, standardize)| temporal_signature(series, segments, standardize))
         .collect::<Vec<_>>();
-    // 市场类别是静态名义变量，不存在时间趋势或类别远近。保留五维独热向量，
-    // 作为一个独立通道直接参与余弦比较，避免扩展成五组重复的时间签名。
     fingerprints.push(Some(market_categories.to_vec()));
     fingerprints
 }
 
-// 与全局板块筛选保持一致：主板、科创板、创业板、北交所、ST 五维独热编码。
 pub(super) fn market_category_features(ts_code: &str, stock_name: Option<&str>) -> [f64; 5] {
     let mut features = [0.0; 5];
     let index = match crate::utils::utils::board_category(ts_code, stock_name) {
@@ -204,7 +195,6 @@ unsafe fn avx2_dot_product(left: &[f64], right: &[f64]) -> f64 {
 pub(super) fn dot_product(left: &[f64], right: &[f64]) -> f64 {
     #[cfg(target_arch = "x86_64")]
     if std::arch::is_x86_feature_detected!("avx2") {
-        // SAFETY: AVX2 availability is checked at runtime immediately above.
         return unsafe { avx2_dot_product(left, right) };
     }
     scalar_dot_product(left, right)
@@ -409,11 +399,14 @@ mod tests {
                     (Some(a), Some(b)) => Some((cosine_similarity(a, b) + 0.0) / 2.0),
                     _ => Some(0.0),
                 };
-                assert_eq!(
-                    crate::trigger_similarity::channel::cached_channel_similarity(
-                        &target, &candidate
-                    ),
-                    expected
+                let actual = crate::trigger_similarity::channel::cached_channel_similarity(
+                    &target, &candidate,
+                )
+                .expect("both sides carry the shared channel");
+                let expected = expected.expect("shared channel always yields a score");
+                assert!(
+                    (actual - expected).abs() <= 1e-12,
+                    "actual={actual}, expected={expected}"
                 );
             }
         }

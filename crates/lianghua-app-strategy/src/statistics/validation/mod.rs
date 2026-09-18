@@ -1,5 +1,3 @@
-//! 表达式验证的入口与对外数据结构。
-
 pub(super) mod samples;
 pub(super) mod scores;
 pub(super) mod similarity;
@@ -11,6 +9,7 @@ use crate::data::RuleStage;
 use crate::data::RuleTag;
 use crate::data::ScopeWay;
 use crate::data::ScoreRule;
+use crate::data::result_db_path;
 use crate::data::source_db_path;
 use crate::expr::lexer::TokenKind;
 use crate::expr::parser::lex_all;
@@ -26,7 +25,7 @@ use crate::simulate::rule::build_rule_layer_runtime_cache_from_stock_data_with_t
 use crate::simulate::rule::calc_rule_layer_metrics_with_samples_from_cache;
 use crate::simulate::rule::visit_triggered_rule_samples_from_cache;
 use crate::statistics::backtest::{RuleLayerBacktestData, RuleLayerBacktestRunParams};
-use crate::statistics::common::{parse_scope_way_input, scope_way_label};
+use crate::statistics::common::{open_result_conn, parse_scope_way_input, scope_way_label};
 use crate::statistics::universe::{
     ValidationSampleStockMeta, build_backtest_stock_filter, load_validation_sample_stock_meta_map,
     ts_code_allowed_by_filter,
@@ -160,8 +159,69 @@ pub struct RuleExpressionValidationData {
     pub combo_results: Vec<RuleValidationComboResult>,
 }
 
-/// 单个 walk-forward fold 的样本外指标。所有指标都按表达式方向调整符号，
-/// 因而“正窗口”表示样本外仍与表达式方向一致。
+#[derive(Debug, Serialize)]
+pub struct ValidationCoreRuleOption {
+    pub name: String,
+    pub trigger_count: usize,
+    pub valid_trigger_count: usize,
+}
+
+pub fn get_validation_core_rule_options(
+    source_path: &str,
+) -> Result<Vec<ValidationCoreRuleOption>, String> {
+    if !result_db_path(source_path).exists() {
+        return Ok(Vec::new());
+    }
+    let mut options = Vec::new();
+    let Ok(conn) = open_result_conn(source_path) else {
+        return Ok(options);
+    };
+    let query_result = (|conn: &duckdb::Connection| -> Result<(), String> {
+        let mut stmt = conn
+            .prepare(
+                r#"
+                SELECT
+                    rule_name,
+                    COUNT(*),
+                    SUM(
+                        CASE
+                            WHEN ABS(TRY_CAST(rule_score AS DOUBLE)) > ? THEN 1
+                            ELSE 0
+                        END
+                    )
+                FROM rule_details
+                WHERE rule_name IS NOT NULL AND TRIM(rule_name) <> ''
+                GROUP BY rule_name
+                ORDER BY rule_name
+                "#,
+            )
+            .map_err(|error| format!("预编译核心策略可用性查询失败: {error}"))?;
+        let mut rows = stmt
+            .query(duckdb::params![VALIDATION_EPS])
+            .map_err(|error| format!("查询核心策略可用性失败: {error}"))?;
+        while let Some(row) = rows
+            .next()
+            .map_err(|error| format!("读取核心策略可用性失败: {error}"))?
+        {
+            let name: String = row.get(0).map_err(|e| format!("读取规则名失败: {e}"))?;
+            let trigger_count: i64 = row.get(1).map_err(|e| format!("读取触发数失败: {e}"))?;
+            let valid_trigger_count: i64 =
+                row.get(2).map_err(|e| format!("读取有效触发数失败: {e}"))?;
+            options.push(ValidationCoreRuleOption {
+                name,
+                trigger_count: trigger_count.max(0) as usize,
+                valid_trigger_count: valid_trigger_count.max(0) as usize,
+            });
+        }
+        Ok(())
+    })(&conn);
+    if let Err(error) = query_result {
+        eprintln!("读取核心策略可用性失败: {error}");
+        return Ok(Vec::new());
+    }
+    Ok(options)
+}
+
 #[derive(Debug, Serialize)]
 pub struct RuleValidationWalkForwardFold {
     pub fold_index: usize,
@@ -170,7 +230,6 @@ pub struct RuleValidationWalkForwardFold {
     pub train_end_date: String,
     pub test_start_date: String,
     pub test_end_date: String,
-    /// 该组合在 fold 窗口内的有效指标日数（窗口日期对所有组合一致）。
     pub test_day_count: usize,
     pub test_sample_count: usize,
     pub ic_mean: Option<f64>,
@@ -212,7 +271,6 @@ pub struct RuleValidationIncrementalData {
     pub positive_folds: usize,
 }
 
-/// 日度指标序列（按表达式方向调整符号），用于页面直接展示事实曲线。
 #[derive(Debug, Serialize)]
 pub struct RuleValidationDailyMetric {
     pub trade_date: String,
@@ -808,7 +866,6 @@ pub fn run_rule_expression_validation(
         .map(|rule| (rule.name.clone(), rule.explain.clone()))
         .collect::<HashMap<_, _>>();
     let stock_meta_map = load_validation_sample_stock_meta_map(&source_path)?;
-    // 完整 eligible universe：与回测同口径的全部样本，未触发样本分数按 0 参与相关性统计。
     let universe_index = build_validation_universe_index(
         &calc_rule_layer_metrics_with_samples_from_cache(
             runtime_cache.as_ref(),
@@ -829,8 +886,6 @@ pub fn run_rule_expression_validation(
         params.min_samples_per_day,
     );
     let requested_core_rule_names = core_rule_names.unwrap_or_default();
-    // 核心策略作为增量回归的 predictors：数量过多会让共同有效日被样本外门槛挤空，
-    // 也让共线性显著上升，因此与相关性与正交研究保持同样的 8 个上限。
     if requested_core_rule_names
         .iter()
         .filter(|name| !name.trim().is_empty())
@@ -852,8 +907,6 @@ pub fn run_rule_expression_validation(
             (rule_name.clone(), &existing_rule_daily_returns[rule_index])
         })
         .collect::<Vec<_>>();
-    // 核心策略是增量研究的 predictors，缺一个就会在用户不知情的情况下改变回归含义，
-    // 因此这里直接报错，不做静默丢弃。
     let missing_core_rule_names = requested_core_rule_names
         .iter()
         .map(|name| name.trim())
@@ -866,19 +919,39 @@ pub fn run_rule_expression_validation(
         })
         .collect::<Vec<_>>();
     if !missing_core_rule_names.is_empty() {
-        let hint = if existing_rule_score_index.rule_names.is_empty() {
+        let describe = |name: &str| -> String {
+            if let Some(count) = existing_rule_score_index.universe_trigger_counts.get(name) {
+                format!("{name}（本次样本内触发 {count} 次，但分数全部为 0）")
+            } else if let Some(count) = existing_rule_score_index.range_trigger_counts.get(name) {
+                format!("{name}（区间内触发 {count} 次，但都不在本次股票池样本内）")
+            } else {
+                format!("{name}（结果库区间内没有触发记录）")
+            }
+        };
+        let zero_scored = missing_core_rule_names.iter().any(|name| {
+            existing_rule_score_index
+                .universe_trigger_counts
+                .contains_key(*name)
+        });
+        let hint = if zero_scored {
+            "核心策略在结果库里分数被归零或未重算（排名计算用的策略版本与当前策略文件可能不一致），请重算该区间评分，或改选其他核心策略"
+        } else if existing_rule_score_index.rule_names.is_empty()
+            && existing_rule_score_index.range_trigger_counts.is_empty()
+        {
             "结果库中没有可用的策略评分，请先执行排名计算（Ranking Compute）"
         } else {
             "请先在排名计算中生成这些策略的评分，或改选其他核心策略"
         };
         return Err(format!(
-            "核心策略在结果库中不存在或区间内无有效触发: {}；{hint}",
-            missing_core_rule_names.join(", ")
+            "核心策略在结果库中不可用作增量 predictor: {}；{hint}",
+            missing_core_rule_names
+                .iter()
+                .map(|name| describe(name))
+                .collect::<Vec<_>>()
+                .join("；")
         ));
     }
     let resolved_walk_forward_folds = walk_forward_folds.unwrap_or(4).clamp(1, 8);
-    // 统一 walk-forward calendar：一次请求只切一套 train/test 日期，所有 UNKNOWN 参数组合共用；
-    // 触发稀疏的组合只在对应 fold 标记 insufficient，不按自己的有效日期重新切分。
     let mut validation_calendar = runtime_cache
         .trade_dates()
         .map(str::to_string)
@@ -968,7 +1041,6 @@ pub fn run_rule_expression_validation(
                         .iter()
                         .map(|point| (point.trade_date.as_str(), *point))
                         .collect::<HashMap<_, _>>();
-                    // 收益口径与相关性与正交研究一致：Σ(score × residual) / Σ|score|。
                     let candidate_daily_returns = axis
                         .iter()
                         .filter_map(|point| {
@@ -1021,8 +1093,6 @@ pub fn run_rule_expression_validation(
                         .iter()
                         .map(|point| RuleValidationDailyMetric {
                             trade_date: point.trade_date.clone(),
-                            // IC 由分数秩相关给出，负向规则工作时期望已为正，不再额外翻转；
-                            // 残差均值是方向盲的，按表达式方向调整。
                             ic: point.ic,
                             avg_residual_return: point
                                 .avg_excess_residual_return
@@ -1236,7 +1306,6 @@ mod tests {
         )
         .expect("rule expression validation");
 
-        // 未知数两个取值都返回，顺序等于枚举顺序，没有任何性能排序或最佳组合标记。
         assert_eq!(data.combo_results.len(), 2);
         assert_eq!(data.core_rule_names, Vec::<String>::new());
         for (index, combo) in data.combo_results.iter().enumerate() {
@@ -1245,7 +1314,6 @@ mod tests {
             assert!(combo.incremental.folds.is_empty());
         }
 
-        // 核心策略缺失时必须报错，不能静默忽略 predictors。
         let missing_core_error = super::run_rule_expression_validation(
             source_dir_str.to_string(),
             String::new(),
@@ -1275,7 +1343,7 @@ mod tests {
         .expect_err("missing core strategy should fail");
         assert!(
             missing_core_error.contains("不存在的核心策略")
-                && missing_core_error.contains("核心策略在结果库中不存在"),
+                && missing_core_error.contains("结果库区间内没有触发记录"),
             "{missing_core_error}"
         );
         let _ = std::fs::remove_dir_all(&source_dir);

@@ -20,8 +20,6 @@ use crate::trigger_similarity::{
     StrategyTriggerSimilarityRow, StrategyTriggerSimilarityTarget,
 };
 
-// 见父模块 mod.rs
-
 use duckdb::Connection;
 use duckdb::params;
 use lianghua_app_shared::build_concepts_map;
@@ -311,8 +309,6 @@ pub fn get_strategy_trigger_similarity_page(
             build_samples_for_chunk(&conn, chunk, &candidate_context, &mut rule_catalog, None)?;
         evaluated_anchor_count += samples.len();
         for sample in samples {
-            // 单股查询与全市场排名保持 leave-one-stock-out 口径，避免目标股票
-            // 的历史滚动窗口因共享走势与静态特征而主导近邻结果。
             if sample.anchor.ts_code == resolved_ts_code {
                 continue;
             }
@@ -350,7 +346,6 @@ pub fn get_strategy_trigger_similarity_page(
             let Some(outcome) = sample.outcome else {
                 continue;
             };
-            // 计算只携带规则编号，生成展示行时才还原匹配规则名。
             let mut matched_rule_names = sample
                 .fingerprint
                 .trigger

@@ -3,7 +3,6 @@ use crate::data::cyq_chen::{
     ChenChipBar, ChenChipBin, ChenChipPercentRange, ChenChipSnapshot, ChipBucket, ChipHolder, EPS,
     SellEntry,
 };
-// 见父模块 mod.rs
 
 pub(super) fn holder_chip_entries(buckets: &[ChipBucket], holder: ChipHolder) -> Vec<SellEntry> {
     buckets
