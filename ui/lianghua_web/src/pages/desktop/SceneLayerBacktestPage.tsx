@@ -28,6 +28,10 @@ import {
   type SceneLayerBacktestData,
 } from "../../apis/strategyTrigger";
 import {
+  getRuleOverlapDiagnostics,
+  type RuleOverlapData,
+} from "../../apis/ruleOverlap";
+import {
   TableSortButton,
   getAriaSort,
   useTableSort,
@@ -49,6 +53,8 @@ import {
   type SceneLayerValidationReturnState,
 } from "./ExpressionValidationSamplesPage";
 import "./css/SceneLayerBacktestPage.css";
+
+export type StrategyBacktestMode = "overall" | "single";
 
 type RuleSummarySortKey =
   | "rule_name"
@@ -664,7 +670,11 @@ const RANK_LAYER_METHOD_OPTIONS: Array<{ value: RankLayerMethod; label: string }
   { value: "rank", label: "按排名分层" },
 ];
 
-export default function SceneLayerBacktestPage() {
+export default function SceneLayerBacktestPage({
+  mode = "overall",
+}: {
+  mode?: StrategyBacktestMode;
+}) {
   const { excludeStBoard } = useConceptExclusions();
   const location = useLocation();
   const navigate = useNavigate();
@@ -710,6 +720,9 @@ export default function SceneLayerBacktestPage() {
   const [ruleTransientLoading, setRuleTransientLoading] = useState(false);
   const [ruleError, setRuleError] = useState("");
   const [ruleResult, setRuleResult] = useState<RuleLayerBacktestData | null>(null);
+  const [overlapLoading, setOverlapLoading] = useState(false);
+  const [overlapError, setOverlapError] = useState("");
+  const [overlapResult, setOverlapResult] = useState<RuleOverlapData | null>(null);
   const [strategyRuleOptions, setStrategyRuleOptions] = useState<StrategyManageRuleItem[]>([]);
   const [validationImportRuleName, setValidationImportRuleName] = useState("");
   const [validationExpression, setValidationExpression] = useState("");
@@ -745,6 +758,7 @@ export default function SceneLayerBacktestPage() {
     rankTransientLoading ||
     ruleLoading ||
     ruleTransientLoading ||
+    overlapLoading ||
     validationLoading ||
     validationCalibrationLoading;
   const backtestBoardOptions = useMemo(
@@ -1506,6 +1520,7 @@ export default function SceneLayerBacktestPage() {
       });
       const compacted = compactRuleLayerBacktestPayload(data);
       setRuleResult(compacted);
+      void onRunRuleOverlap();
     } catch (runError) {
       setRuleResult(null);
       setRuleError(`执行策略回测失败: ${String(runError)}`);
@@ -1562,11 +1577,46 @@ export default function SceneLayerBacktestPage() {
       });
       const compacted = compactRuleLayerBacktestPayload(data);
       setRuleResult(compacted);
+      void onRunRuleOverlap();
     } catch (runError) {
       setRuleResult(null);
       setRuleError(`执行变更策略回测验证失败: ${String(runError)}`);
     } finally {
       setRuleTransientLoading(false);
+    }
+  }
+
+  async function onRunRuleOverlap() {
+    const normalizedStart = normalizeDateInput(startDateInput);
+    const normalizedEnd = normalizeDateInput(endDateInput);
+
+    if (!sourcePath.trim()) {
+      setOverlapError("当前数据目录为空，请先在数据管理页确认目录。");
+      return;
+    }
+    if (!normalizedStart || !normalizedEnd) {
+      setOverlapError("请填写开始和结束日期。");
+      return;
+    }
+    if (normalizedStart > normalizedEnd) {
+      setOverlapError("开始日期不能晚于结束日期。");
+      return;
+    }
+
+    setOverlapLoading(true);
+    setOverlapError("");
+    try {
+      const data = await getRuleOverlapDiagnostics({
+        sourcePath,
+        startDate: normalizedStart,
+        endDate: normalizedEnd,
+      });
+      setOverlapResult(data);
+    } catch (runError) {
+      setOverlapResult(null);
+      setOverlapError(`计算策略重叠失败: ${String(runError)}`);
+    } finally {
+      setOverlapLoading(false);
     }
   }
 
@@ -2249,6 +2299,8 @@ export default function SceneLayerBacktestPage() {
         </div>
       </section>
 
+      {mode === "overall" ? (
+        <>
       <section className="scene-layer-card">
         <h2 className="scene-layer-title">排名整体回测</h2>
         <p className="scene-layer-caption">
@@ -2617,7 +2669,11 @@ export default function SceneLayerBacktestPage() {
           ) : null}
         </section>
       ) : null}
+        </>
+      ) : null}
 
+      {mode === "single" ? (
+        <>
       <section className="scene-layer-card">
         <h2 className="scene-layer-title">策略回测</h2>
         <p className="scene-layer-caption">
@@ -2787,6 +2843,70 @@ export default function SceneLayerBacktestPage() {
 
         </section>
       ) : null}
+
+      <section className="scene-layer-card">
+        <h2 className="scene-layer-title">策略重叠（冗余）诊断</h2>
+        <p className="scene-layer-caption">
+          统计所选区间两两触发交集的 Jaccard，用于识别实际重复的策略；Jaccard ≥ 0.70 视为高重叠，可优先考虑合并或降权。
+        </p>
+        <div className="scene-layer-actions">
+          <button
+            type="button"
+            className="scene-layer-primary-btn"
+            onClick={() => void onRunRuleOverlap()}
+            disabled={overlapLoading || initializing}
+          >
+            {overlapLoading ? "计算中..." : "计算策略重叠"}
+          </button>
+        </div>
+        {overlapError ? <div className="scene-layer-error">{overlapError}</div> : null}
+        {overlapResult ? (
+          <div className="scene-layer-layer-summary">
+            <h3>
+              重叠最高的策略对（Jaccard 降序，区间 {formatDateLabel(overlapResult.start_date)} ~{" "}
+              {formatDateLabel(overlapResult.end_date)}）
+            </h3>
+            <div className="scene-layer-contrib-table-wrap">
+              <table className="scene-layer-contrib-table">
+                <thead>
+                  <tr>
+                    <th>策略 A</th>
+                    <th>策略 B</th>
+                    <th>共同触发</th>
+                    <th>并集</th>
+                    <th>Jaccard</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {overlapResult.pairs.length > 0 ? (
+                    overlapResult.pairs.slice(0, 20).map((pair) => (
+                      <tr key={`${pair.left_rule_name}-${pair.right_rule_name}`}>
+                        <td>{pair.left_rule_name}</td>
+                        <td>{pair.right_rule_name}</td>
+                        <td>{pair.joint_trigger_count}</td>
+                        <td>{pair.union_trigger_count}</td>
+                        <td
+                          className={
+                            pair.jaccard !== null && pair.jaccard >= 0.7
+                              ? "scene-layer-metric-hit"
+                              : undefined
+                          }
+                        >
+                          {formatNumber(pair.jaccard, 3)}
+                        </td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan={5}>当前区间没有可计算的策略重叠。</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        ) : null}
+      </section>
 
       <section className="scene-layer-card">
         <h2 className="scene-layer-title">表达式验证</h2>
@@ -3265,6 +3385,8 @@ export default function SceneLayerBacktestPage() {
           ) : null}
 
         </section>
+      ) : null}
+        </>
       ) : null}
     </div>
   );

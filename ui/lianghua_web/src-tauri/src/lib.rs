@@ -137,9 +137,7 @@ use {
         ConvolutionRankComputeResult, ConvolutionRankPageData,
     },
     strategy::dimension_research::{
-        get_strategy_dimension_research_defaults as core_get_strategy_dimension_research_defaults,
-        run_strategy_dimension_research as core_run_strategy_dimension_research,
-        StrategyDimensionResearchData, StrategyDimensionResearchDefaultsData,
+        get_rule_overlap_diagnostics as core_get_rule_overlap_diagnostics, RuleOverlapData,
     },
     strategy::manage::{
         check_strategy_manage_rule_draft as core_check_strategy_manage_rule_draft,
@@ -1183,36 +1181,14 @@ async fn get_strategy_triggered_stocks(
 }
 
 #[tauri::command]
-async fn get_strategy_dimension_research_defaults(
-    source_path: String,
-) -> Result<StrategyDimensionResearchDefaultsData, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        core_get_strategy_dimension_research_defaults(source_path)
-    })
-    .await
-    .map_err(|error| error.to_string())?
-}
-
-#[tauri::command]
-async fn run_strategy_dimension_research(
+async fn get_rule_overlap_diagnostics(
     source_path: String,
     start_date: String,
     end_date: String,
     rule_names: Vec<String>,
-    nonlinear_sample_limit: Option<usize>,
-    ridge_lambda: Option<f64>,
-    holding_period: Option<usize>,
-) -> Result<StrategyDimensionResearchData, String> {
+) -> Result<RuleOverlapData, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        core_run_strategy_dimension_research(
-            source_path,
-            start_date,
-            end_date,
-            rule_names,
-            nonlinear_sample_limit,
-            ridge_lambda,
-            holding_period,
-        )
+        core_get_rule_overlap_diagnostics(source_path, start_date, end_date, rule_names)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -2691,8 +2667,7 @@ pub fn run() {
             get_scene_statistics_page,
             get_strategy_statistics_detail,
             get_strategy_triggered_stocks,
-            get_strategy_dimension_research_defaults,
-            run_strategy_dimension_research,
+            get_rule_overlap_diagnostics,
             get_scene_layer_backtest_defaults,
             get_rule_layer_backtest_defaults,
             get_cached_rule_layer_backtest_detail,

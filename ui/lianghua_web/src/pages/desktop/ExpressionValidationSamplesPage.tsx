@@ -10,7 +10,7 @@ import type { DetailsNavigationItem } from "../../shared/detailsLinkState";
 import { readStoredSourcePath } from "../../shared/storage";
 import "./css/ExpressionValidationSamplesPage.css";
 
-export const EXPRESSION_VALIDATION_SAMPLES_ROUTE_PATH = "scene-layer/expression-validation-samples";
+export const EXPRESSION_VALIDATION_SAMPLES_ROUTE_PATH = "single-strategy/expression-validation-samples";
 export const EXPRESSION_VALIDATION_SAMPLES_ROUTE = `/backtest/${EXPRESSION_VALIDATION_SAMPLES_ROUTE_PATH}`;
 
 export type SceneLayerValidationReturnState = {
@@ -420,7 +420,7 @@ export default function ExpressionValidationSamplesPage() {
 
   function handleBack() {
     if (locationState?.sceneLayerReturnState) {
-      navigate("/backtest/scene-layer", {
+      navigate("/backtest/single-strategy", {
         state: {
           validationReturnState: locationState.sceneLayerReturnState,
         },
@@ -428,7 +428,7 @@ export default function ExpressionValidationSamplesPage() {
       return;
     }
 
-    navigate("/backtest/scene-layer");
+    navigate("/backtest/single-strategy");
   }
 
   if (!locationState) {

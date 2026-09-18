@@ -35,14 +35,14 @@ const pages = {
     () => import("./pages/desktop/OverviewSimilarityRankingPage"),
   ),
   RankingOverview: lazy(() => import("./pages/desktop/RankingOverviewPage")),
-  SceneLayerBacktest: lazy(
-    () => import("./pages/desktop/SceneLayerBacktestPage"),
+  StrategyOverallBacktest: lazy(
+    () => import("./pages/desktop/StrategyOverallBacktestPage"),
+  ),
+  SingleStrategyBacktest: lazy(
+    () => import("./pages/desktop/SingleStrategyBacktestPage"),
   ),
   Settings: lazy(() => import("./pages/desktop/SettingsPage")),
   StockPick: lazy(() => import("./pages/desktop/StockPickPage")),
-  StrategyDimensionResearch: lazy(
-    () => import("./pages/desktop/StrategyDimensionResearchPage"),
-  ),
   StrategyManage: lazy(() => import("./pages/desktop/StrategyManagePage")),
   StrategyPaperValidation: lazy(
     () => import("./pages/desktop/StrategyPaperValidationPage"),
@@ -189,16 +189,24 @@ function AppRoutes() {
                 element={<pages.StrategyPaperValidation />}
               />
               <Route
+                path="overall"
+                element={<pages.StrategyOverallBacktest />}
+              />
+              <Route
+                path="single-strategy"
+                element={<pages.SingleStrategyBacktest />}
+              />
+              <Route
+                path="single-strategy/expression-validation-samples"
+                element={<pages.ExpressionValidationSamples />}
+              />
+              <Route
                 path="scene-layer"
-                element={<pages.SceneLayerBacktest />}
+                element={<Navigate to="/backtest/overall" replace />}
               />
               <Route
                 path="correlation-orthogonality"
-                element={<pages.StrategyDimensionResearch />}
-              />
-              <Route
-                path="scene-layer/expression-validation-samples"
-                element={<pages.ExpressionValidationSamples />}
+                element={<Navigate to="/backtest/single-strategy" replace />}
               />
               <Route
                 path="market-analysis"

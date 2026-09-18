@@ -25,10 +25,10 @@ const strategySubRoutes = [
 ];
 
 const backtestSubRoutes = [
+  { path: "/backtest/overall", label: "策略整体回测" },
+  { path: "/backtest/single-strategy", label: "单策略回测" },
   { path: "/backtest/strategy-trigger", label: "策略触发统计" },
   { path: "/backtest/strategy-paper-validation", label: "策略模拟盘验证" },
-  { path: "/backtest/scene-layer", label: "策略回测" },
-  { path: "/backtest/correlation-orthogonality", label: "相关性与正交研究" },
 ];
 
 const stockPickSubRoutes = [

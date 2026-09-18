@@ -1350,6 +1350,179 @@ fn read_usize(value: Result<i64, duckdb::Error>, label: &str) -> Result<usize, S
     usize::try_from(value).map_err(|_| format!("{label}超出有效范围:{value}"))
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct RuleOverlapPair {
+    pub left_rule_name: String,
+    pub right_rule_name: String,
+    pub joint_trigger_count: usize,
+    pub union_trigger_count: usize,
+    pub jaccard: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RuleOverlapRule {
+    pub rule_name: String,
+    pub trigger_count: usize,
+    pub coverage: Option<f64>,
+    pub top_overlap_rule: Option<String>,
+    pub top_overlap_jaccard: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RuleOverlapData {
+    pub start_date: String,
+    pub end_date: String,
+    pub universe_sample_count: usize,
+    pub rules: Vec<RuleOverlapRule>,
+    pub pairs: Vec<RuleOverlapPair>,
+}
+
+/// 策略重叠诊断：只计算两两触发交集与 Jaccard，用于识别重复策略。
+/// 复用相关性研究的规则统计与批量交集查询，整轮只做两次聚合。
+pub fn get_rule_overlap_diagnostics(
+    source_path: String,
+    start_date: String,
+    end_date: String,
+    rule_names: Vec<String>,
+) -> Result<RuleOverlapData, String> {
+    validate_date_range(&start_date, &end_date)?;
+    let connection = open_result_database(&source_path)?;
+    let universe_sample_count = read_usize(
+        connection.query_row(
+            "SELECT COUNT(*) FROM score_summary WHERE trade_date >= ? AND trade_date <= ?",
+            params![&start_date, &end_date],
+            |row| row.get::<_, i64>(0),
+        ),
+        "结果库评分样本数",
+    )?;
+    if universe_sample_count < 2 {
+        return Err("所选日期区间的结果库评分样本不足2条".to_string());
+    }
+
+    let rule_names = if rule_names.iter().all(|name| name.trim().is_empty()) {
+        let mut statement = connection
+            .prepare(
+                "SELECT DISTINCT rule_name FROM rule_details
+                 WHERE trade_date >= ? AND trade_date <= ?
+                   AND rule_name IS NOT NULL AND TRIM(rule_name) <> '' AND isfinite(rule_score)
+                 ORDER BY rule_name",
+            )
+            .map_err(|error| format!("准备规则列表查询失败:{error}"))?;
+        let mut rows = statement
+            .query(params![&start_date, &end_date])
+            .map_err(|error| format!("查询规则列表失败:{error}"))?;
+        let mut names = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .map_err(|error| format!("读取规则列表失败:{error}"))?
+        {
+            names.push(
+                row.get::<_, String>(0)
+                    .map_err(|error| format!("读取规则名称失败:{error}"))?,
+            );
+        }
+        names
+    } else {
+        normalize_rule_names(rule_names)?
+    };
+    if rule_names.len() < 2 {
+        return Err("策略重叠诊断至少需要2个规则".to_string());
+    }
+
+    let moments_by_rule = load_rule_moments(&connection, &start_date, &end_date, &rule_names)?;
+    let missing_rules = rule_names
+        .iter()
+        .filter(|rule_name| !moments_by_rule.contains_key(*rule_name))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !missing_rules.is_empty() {
+        return Err(format!(
+            "所选区间没有以下规则的有效触发分数:{}",
+            missing_rules.join("、")
+        ));
+    }
+
+    let pair_cross_moments =
+        load_pair_cross_moments(&connection, &start_date, &end_date, &rule_names)?;
+    let mut pairs = Vec::with_capacity(rule_names.len() * (rule_names.len() - 1) / 2);
+    let mut best_overlap: HashMap<String, (String, f64)> = HashMap::new();
+    for left in 0..rule_names.len() {
+        for right in (left + 1)..rule_names.len() {
+            let left_name = &rule_names[left];
+            let right_name = &rule_names[right];
+            let pair_key = if left_name < right_name {
+                (left_name.clone(), right_name.clone())
+            } else {
+                (right_name.clone(), left_name.clone())
+            };
+            let (joint_trigger_count, _) = pair_cross_moments
+                .get(&pair_key)
+                .copied()
+                .unwrap_or((0, 0.0));
+            let left_moments = moments_by_rule[left_name];
+            let right_moments = moments_by_rule[right_name];
+            let metrics = calc_signal_pair_metrics(SignalPairMoments {
+                universe_count: universe_sample_count,
+                left_trigger_count: left_moments.trigger_count,
+                right_trigger_count: right_moments.trigger_count,
+                joint_trigger_count,
+                left_sum: left_moments.score_sum,
+                right_sum: right_moments.score_sum,
+                left_square_sum: left_moments.score_square_sum,
+                right_square_sum: right_moments.score_square_sum,
+                cross_sum: 0.0,
+            });
+            let Some(jaccard) = metrics.jaccard else {
+                continue;
+            };
+            pairs.push(RuleOverlapPair {
+                left_rule_name: left_name.clone(),
+                right_rule_name: right_name.clone(),
+                joint_trigger_count,
+                union_trigger_count: metrics.union_trigger_count,
+                jaccard: Some(jaccard),
+            });
+            for (name, other) in [(left_name, right_name), (right_name, left_name)] {
+                let is_better = best_overlap
+                    .get(name)
+                    .is_none_or(|(_, current)| jaccard > *current);
+                if is_better {
+                    best_overlap.insert(name.clone(), (other.clone(), jaccard));
+                }
+            }
+        }
+    }
+    pairs.sort_by(|left, right| {
+        right
+            .jaccard
+            .unwrap_or(f64::NEG_INFINITY)
+            .total_cmp(&left.jaccard.unwrap_or(f64::NEG_INFINITY))
+    });
+
+    let rules = rule_names
+        .iter()
+        .map(|rule_name| {
+            let moments = moments_by_rule[rule_name];
+            let best = best_overlap.get(rule_name);
+            RuleOverlapRule {
+                rule_name: rule_name.clone(),
+                trigger_count: moments.trigger_count,
+                coverage: Some(moments.trigger_count as f64 / universe_sample_count as f64),
+                top_overlap_rule: best.map(|(other, _)| other.clone()),
+                top_overlap_jaccard: best.map(|(_, value)| *value),
+            }
+        })
+        .collect();
+
+    Ok(RuleOverlapData {
+        start_date,
+        end_date,
+        universe_sample_count,
+        rules,
+        pairs,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
