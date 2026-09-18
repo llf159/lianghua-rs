@@ -7,7 +7,7 @@ use std::{
     io::{BufReader, BufWriter, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use duckdb::{Connection, params, params_from_iter};
@@ -46,8 +46,12 @@ use crate::{
     scoring_model::{CompactRuleScore, SceneBacktestRow, ScoreBatch, ScoreSummary},
     simulate::{
         DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS, build_backtest_sample_eligibility,
+        dimension::{
+            SignalPairMoments, calc_linear_orthogonal_diagnostics, calc_signal_pair_metrics,
+        },
         fp_utils::{
             calc_newey_west_standard_error, calc_newey_west_t_value, calc_profit_loss_sums,
+            pearson_corr,
         },
         rank::{
             RankLayerConfig, RankLayerFromDbInput, RankLayerMethod,
@@ -56,11 +60,11 @@ use crate::{
         rule::{
             DEFAULT_RULE_WITH_SAMPLES_PARALLEL_BATCH_SIZE, RuleLayerConfig,
             RuleLayerDailyScoreLayers, RuleLayerFromDbInput, RuleLayerMetricsWithValidation,
-            RuleLayerRuntimeCache, RuleLayerSamplePointRef,
+            RuleLayerPoint, RuleLayerRuntimeCache, RuleLayerSamplePoint, RuleLayerSamplePointRef,
             build_rule_layer_runtime_cache_from_stock_data_with_ts_filter,
             calc_all_rule_layer_metrics_with_validation_from_compact_rows_map,
             calc_all_rule_layer_metrics_with_validation_from_db_map_with_ts_filter,
-            calc_rule_layer_metrics_from_cache, calc_rule_layer_metrics_from_db_with_ts_filter,
+            calc_rule_layer_metrics_from_db_with_ts_filter,
             calc_rule_layer_metrics_with_samples_from_cache,
             visit_triggered_rule_samples_from_cache,
         },
@@ -464,7 +468,6 @@ pub struct RankLayerMarketValueSummary {
 const VALIDATION_EPS: f64 = 1e-12;
 const RULE_BACKTEST_EPS: f64 = 1e-12;
 const VALIDATION_MAX_COMBINATIONS: usize = 256;
-const VALIDATION_CONTINUATION_TTL: Duration = Duration::from_secs(30 * 60);
 const RANK_BACKTEST_LAYER_SAMPLE_LIMIT_PER_GROUP: usize = 5;
 
 struct ActiveRuleBacktestDetailCache {
@@ -601,6 +604,11 @@ pub struct RuleValidationSimilarityRow {
     pub overlap_rate_vs_validation: Option<f64>,
     pub overlap_rate_vs_existing: Option<f64>,
     pub overlap_lift: Option<f64>,
+    pub jaccard: Option<f64>,
+    pub phi: Option<f64>,
+    pub score_pearson: Option<f64>,
+    pub return_pearson: Option<f64>,
+    pub shared_return_days: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -660,6 +668,9 @@ pub struct RuleValidationComboResult {
     pub sample_groups: RuleValidationSampleGroups,
     pub return_distribution: Vec<RuleValidationReturnDistributionBucket>,
     pub backtest: RuleLayerBacktestData,
+    pub daily_metrics: Vec<RuleValidationDailyMetric>,
+    pub walk_forward: RuleValidationWalkForwardData,
+    pub incremental: RuleValidationIncrementalData,
     pub similarity_rows: Vec<RuleValidationSimilarityRow>,
 }
 
@@ -670,71 +681,69 @@ pub struct RuleExpressionValidationData {
     pub scope_way: String,
     pub scope_windows: usize,
     pub sample_limit_per_group: usize,
+    pub walk_forward_folds: usize,
+    pub core_rule_names: Vec<String>,
     pub combo_results: Vec<RuleValidationComboResult>,
-    pub best_combo_key: Option<String>,
-    pub continuation_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct RuleExpressionCalibrationBucket {
-    pub score_multiplier: f64,
-    pub sample_count: usize,
-    pub avg_residual_return: Option<f64>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct RuleExpressionCalibrationDistancePoint {
-    pub min: usize,
-    pub max: usize,
-    pub points: f64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct RuleExpressionCalibrationCandidate {
-    pub candidate_key: String,
-    pub scope_way: String,
-    pub scope_label: String,
-    pub scope_windows: usize,
-    pub is_current: bool,
-    pub trigger_samples: usize,
-    pub triggered_days: usize,
-    pub avg_daily_trigger: f64,
-    pub avg_residual_mean: Option<f64>,
-    pub avg_excess_residual_mean: Option<f64>,
-    pub daily_std: Option<f64>,
-    pub standard_error: Option<f64>,
-    pub conservative_edge: Option<f64>,
-    pub early_excess_residual_mean: Option<f64>,
-    pub late_excess_residual_mean: Option<f64>,
+/// 单个 walk-forward fold 的样本外指标。所有指标都按表达式方向调整符号，
+/// 因而“正窗口”表示样本外仍与表达式方向一致。
+#[derive(Debug, Serialize)]
+pub struct RuleValidationWalkForwardFold {
+    pub fold_index: usize,
+    pub status: String,
+    pub train_start_date: String,
+    pub train_end_date: String,
+    pub test_start_date: String,
+    pub test_end_date: String,
+    /// 该组合在 fold 窗口内的有效指标日数（窗口日期对所有组合一致）。
+    pub test_day_count: usize,
+    pub test_sample_count: usize,
     pub ic_mean: Option<f64>,
     pub ic_t_value: Option<f64>,
-    pub score_monotonicity: Option<f64>,
-    pub avg_score_multiplier: Option<f64>,
-    pub suggested_points: f64,
-    pub suggested_total_points: f64,
-    pub calibration_score: f64,
-    pub status: String,
-    pub status_label: String,
-    pub score_buckets: Vec<RuleExpressionCalibrationBucket>,
-    pub suggested_dist_points: Vec<RuleExpressionCalibrationDistancePoint>,
-    #[serde(skip)]
-    training_eligible: bool,
-    #[serde(skip)]
-    validation_trigger_samples: usize,
-    #[serde(skip)]
-    validation_triggered_days: usize,
+    pub avg_residual_return: Option<f64>,
+    pub spread_mean: Option<f64>,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct RuleValidationWalkForwardData {
+    pub fold_count: usize,
+    pub purge_days: usize,
+    pub folds: Vec<RuleValidationWalkForwardFold>,
+    pub ic_positive_folds: usize,
+    pub residual_positive_folds: usize,
+    pub spread_positive_folds: usize,
 }
 
 #[derive(Debug, Serialize)]
-pub struct RuleExpressionCalibrationData {
-    pub continuation_id: String,
-    pub combo_key: String,
-    pub combo_label: String,
-    pub direction: String,
-    pub candidate_count: usize,
-    pub point_scale_description: String,
-    pub recommended_candidate_key: Option<String>,
-    pub candidates: Vec<RuleExpressionCalibrationCandidate>,
+pub struct RuleValidationIncrementalFold {
+    pub fold_index: usize,
+    pub status: String,
+    pub train_start_date: String,
+    pub train_end_date: String,
+    pub test_start_date: String,
+    pub test_end_date: String,
+    pub train_day_count: usize,
+    pub test_day_count: usize,
+    pub incremental_mean: Option<f64>,
+    pub incremental_hac_t: Option<f64>,
+    pub positive_day_ratio: Option<f64>,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct RuleValidationIncrementalData {
+    pub core_rule_names: Vec<String>,
+    pub purge_days: usize,
+    pub folds: Vec<RuleValidationIncrementalFold>,
+    pub positive_folds: usize,
+}
+
+/// 日度指标序列（按表达式方向调整符号），用于页面直接展示事实曲线。
+#[derive(Debug, Serialize)]
+pub struct RuleValidationDailyMetric {
+    pub trade_date: String,
+    pub ic: Option<f64>,
+    pub avg_residual_return: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -790,33 +799,6 @@ struct ValidationSeedRule {
     dist_points: Option<Vec<crate::data::DistPoint>>,
     tag: RuleTag,
     exclude_rule_name: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-struct ValidationContinuationCombo {
-    combo_key: String,
-    combo_label: String,
-    formula: String,
-}
-
-#[derive(Debug)]
-struct ValidationContinuationSession {
-    created_at: Instant,
-    source_path: String,
-    params: RuleLayerBacktestRunParams,
-    runtime_cache: Arc<RuleLayerRuntimeCache>,
-    seed_rule: ValidationSeedRule,
-    validation_ts_codes: Vec<String>,
-    combos: HashMap<String, ValidationContinuationCombo>,
-}
-
-static VALIDATION_CONTINUATION_CACHE: OnceLock<
-    Mutex<HashMap<String, Arc<ValidationContinuationSession>>>,
-> = OnceLock::new();
-
-fn validation_continuation_cache()
--> &'static Mutex<HashMap<String, Arc<ValidationContinuationSession>>> {
-    VALIDATION_CONTINUATION_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 #[derive(Debug, Serialize)]
@@ -2275,6 +2257,19 @@ fn mean_f64(values: &[f64]) -> Option<f64> {
     Some(values.iter().sum::<f64>() / values.len() as f64)
 }
 
+fn sample_std_f64(values: &[f64]) -> Option<f64> {
+    if values.len() < 2 {
+        return None;
+    }
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    let variance = values
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f64>()
+        / (values.len() - 1) as f64;
+    variance.is_finite().then_some(variance.sqrt())
+}
+
 fn build_validation_score_layer_details(
     samples: &[crate::simulate::rule::RuleLayerSamplePoint],
     min_samples_per_day: usize,
@@ -2712,6 +2707,11 @@ fn build_compact_rule_similarity_rows(
                 overlap_lift: (cache.total_samples > 0.0 && existing_count > 0.0).then_some(
                     overlap_samples as f64 * cache.total_samples / (trigger_count * existing_count),
                 ),
+                jaccard: None,
+                phi: None,
+                score_pearson: None,
+                return_pearson: None,
+                shared_return_days: 0,
             })
         })
         .collect::<Vec<_>>();
@@ -2731,96 +2731,6 @@ fn empty_validation_similarity_cache() -> ValidationSimilarityCache {
         rule_names: Vec::new(),
         rule_hit_counts: Vec::new(),
         pair_to_rule_indices: HashMap::new(),
-    }
-}
-
-fn load_validation_similarity_cache_optional(
-    source_path: &str,
-    start_date: &str,
-    end_date: &str,
-) -> Result<ValidationSimilarityCache, String> {
-    let result_db = result_db_path(source_path);
-    if !result_db.exists() {
-        return Ok(empty_validation_similarity_cache());
-    }
-
-    let result_conn = open_result_conn(source_path)?;
-    match (|result_conn: &Connection,
-            start_date: &str,
-            end_date: &str|
-     -> Result<ValidationSimilarityCache, String> {
-        let total_samples = result_conn
-            .query_row(
-                r#"
-            SELECT COUNT(*)
-            FROM score_summary
-            WHERE trade_date >= ?
-              AND trade_date <= ?
-            "#,
-                params![start_date, end_date],
-                |row| row.get::<_, i64>(0),
-            )
-            .map_err(|e| format!("读取验证样本总数失败: {e}"))?
-            .max(0) as f64;
-
-        let mut stmt = result_conn
-            .prepare(
-                r#"
-            SELECT
-                rule_name,
-                ts_code,
-                trade_date
-            FROM rule_details
-            WHERE trade_date >= ?
-              AND trade_date <= ?
-              AND TRY_CAST(rule_score AS DOUBLE) IS NOT NULL
-              AND ABS(TRY_CAST(rule_score AS DOUBLE)) > 1e-12
-            "#,
-            )
-            .map_err(|e| format!("预编译触发相似度查询失败: {e}"))?;
-        let mut rows = stmt
-            .query(params![start_date, end_date])
-            .map_err(|e| format!("查询触发相似度失败: {e}"))?;
-
-        let mut rule_names = Vec::new();
-        let mut rule_name_to_index = HashMap::<String, usize>::new();
-        let mut rule_hit_counts = Vec::new();
-        let mut pair_to_rule_indices = HashMap::<String, Vec<usize>>::new();
-
-        while let Some(row) = rows
-            .next()
-            .map_err(|e| format!("读取触发相似度失败: {e}"))?
-        {
-            let rule_name: String = row.get(0).map_err(|e| format!("读取规则名失败: {e}"))?;
-            let ts_code: String = row.get(1).map_err(|e| format!("读取代码失败: {e}"))?;
-            let trade_date: String = row.get(2).map_err(|e| format!("读取交易日失败: {e}"))?;
-            let rule_index = if let Some(index) = rule_name_to_index.get(&rule_name) {
-                *index
-            } else {
-                let index = rule_names.len();
-                rule_name_to_index.insert(rule_name.clone(), index);
-                rule_names.push(rule_name);
-                rule_hit_counts.push(0);
-                index
-            };
-
-            rule_hit_counts[rule_index] += 1;
-            pair_to_rule_indices
-                .entry(validation_pair_key(&ts_code, &trade_date))
-                .or_default()
-                .push(rule_index);
-        }
-
-        Ok(ValidationSimilarityCache {
-            total_samples,
-            rule_names,
-            rule_hit_counts,
-            pair_to_rule_indices,
-        })
-    })(&result_conn, start_date, end_date)
-    {
-        Ok(cache) => Ok(cache),
-        Err(_) => Ok(empty_validation_similarity_cache()),
     }
 }
 
@@ -2910,6 +2820,11 @@ fn build_validation_similarity_rows_from_overlap(
                 overlap_rate_vs_validation,
                 overlap_rate_vs_existing,
                 overlap_lift,
+                jaccard: None,
+                phi: None,
+                score_pearson: None,
+                return_pearson: None,
+                shared_return_days: 0,
             })
         })
         .collect::<Vec<_>>();
@@ -2952,7 +2867,7 @@ struct ValidationSampleStockMeta {
 struct ValidationSampleAccumulator<'a> {
     sample_limit_per_group: usize,
     stock_meta_map: &'a HashMap<String, ValidationSampleStockMeta>,
-    similarity_cache: &'a ValidationSimilarityCache,
+    similarity_cache: Option<&'a ValidationSimilarityCache>,
     is_each: bool,
     trigger_unit_points: f64,
     has_dist_points: bool,
@@ -2966,7 +2881,7 @@ impl<'a> ValidationSampleAccumulator<'a> {
     fn new(
         sample_limit_per_group: usize,
         stock_meta_map: &'a HashMap<String, ValidationSampleStockMeta>,
-        similarity_cache: &'a ValidationSimilarityCache,
+        similarity_cache: Option<&'a ValidationSimilarityCache>,
         is_each: bool,
         trigger_unit_points: f64,
         has_dist_points: bool,
@@ -3039,8 +2954,10 @@ impl<'a> ValidationSampleAccumulator<'a> {
     }
 
     fn update_similarity_overlap(&mut self, ts_code: &str, trade_date: &str) {
-        let Some(rule_indices) = self
-            .similarity_cache
+        let Some(similarity_cache) = self.similarity_cache else {
+            return;
+        };
+        let Some(rule_indices) = similarity_cache
             .pair_to_rule_indices
             .get(&validation_pair_key(ts_code, trade_date))
         else {
@@ -3408,6 +3325,674 @@ fn build_validation_sample_groups(
     (stats, groups)
 }
 
+/// 样本外 fold 划分：`train_end_index + 1 ..= test_start_index - 1` 为 purge 区间。
+#[derive(Debug, Clone, Copy)]
+struct ValidationFoldPlan {
+    train_end_index: usize,
+    test_start_index: usize,
+    test_end_index: usize,
+}
+
+fn build_validation_fold_plan(
+    axis_len: usize,
+    fold_count: usize,
+    purge_days: usize,
+) -> Vec<ValidationFoldPlan> {
+    if axis_len == 0 {
+        return Vec::new();
+    }
+    // 固定上限 8：再多的 fold 只会让每个测试窗口短到无法支撑 IC 统计。
+    let fold_count = fold_count.clamp(1, 8);
+    // 首个训练窗口至少占 1/4 长度且不少于 20 个交易日，保证训练期统计不退化。
+    let initial_train = (axis_len / 4).max(20).min(axis_len.saturating_sub(1));
+    if initial_train == 0 {
+        return Vec::new();
+    }
+    let block = ((axis_len - initial_train) / fold_count).max(1);
+    let mut folds = Vec::new();
+    for fold_index in 0..fold_count {
+        let test_start_index = initial_train + fold_index * block;
+        if test_start_index >= axis_len {
+            break;
+        }
+        let test_end_index = if fold_index + 1 == fold_count {
+            axis_len - 1
+        } else {
+            (test_start_index + block - 1).min(axis_len - 1)
+        };
+        // purge：训练区间末尾与样本外起点之间隔开 holding_period 个交易日，
+        // 保证训练样本的前向收益窗口（含 holding_period 当天）不落进 test 区间；
+        // HAC 只修正相关性，不能替代隔离。
+        let Some(train_end_index) = test_start_index.checked_sub(1 + purge_days) else {
+            continue;
+        };
+        folds.push(ValidationFoldPlan {
+            train_end_index,
+            test_start_index,
+            test_end_index,
+        });
+    }
+    folds
+}
+
+/// 分层统计走 fold+reduce 合并，`points` 顺序不保证有序，按交易日排序后再做 fold 划分。
+fn sort_validation_points(points: &[RuleLayerPoint]) -> Vec<&RuleLayerPoint> {
+    let mut axis = points.iter().collect::<Vec<_>>();
+    axis.sort_by(|left, right| left.trade_date.cmp(&right.trade_date));
+    axis
+}
+
+/// 表达式方向：整体触发分为负时按负向解读，与衰减验证保持同一口径。
+fn validation_axis_direction_sign(axis: &[&RuleLayerPoint]) -> f64 {
+    let score_sum = axis
+        .iter()
+        .filter_map(|point| point.avg_rule_score.filter(|value| value.is_finite()))
+        .sum::<f64>();
+    if score_sum < 0.0 { -1.0 } else { 1.0 }
+}
+
+fn build_validation_walk_forward(
+    calendar: &[String],
+    folds: &[ValidationFoldPlan],
+    backtest_period: usize,
+    direction_sign: f64,
+    points_by_date: &HashMap<&str, &RuleLayerPoint>,
+    day_trigger_counts: &HashMap<String, usize>,
+) -> RuleValidationWalkForwardData {
+    // purge 取 holding period：train 标签的收益实现日不能落在 test 区间内。
+    // HAC lag 仍按 holding period - 1 修正重叠窗口带来的序列相关。
+    let purge_days = backtest_period;
+    let hac_lag = backtest_period.saturating_sub(1);
+    let mut rows = Vec::with_capacity(folds.len());
+    for (fold_index, plan) in folds.iter().enumerate() {
+        let window = &calendar[plan.test_start_index..=plan.test_end_index];
+        let daily = window
+            .iter()
+            .map(|trade_date| points_by_date.get(trade_date.as_str()).copied())
+            .collect::<Vec<_>>();
+        let valid_days = daily.iter().filter(|point| point.is_some()).count();
+        // 与增量研究共用同一门槛：有效日不足 20 的 fold 只标记 insufficient，
+        // 不参与正窗口统计；fold 日期对所有参数组合完全一致，不按组合重新切分。
+        let sufficient = valid_days >= 20;
+        // IC 由“分数与残差”的秩相关给出，Spread 由高分半区减低分半区给出：
+        // 两者都已经通过分数符号携带方向（负向规则工作时期望为正），再乘方向符号会把它们翻反。
+        // 只有方向盲的残差均值需要按表达式方向翻转。
+        let ic_values = daily
+            .iter()
+            .filter_map(|point| *point)
+            .filter_map(|point| point.ic.filter(|value| value.is_finite()))
+            .collect::<Vec<_>>();
+        let spread_values = daily
+            .iter()
+            .filter_map(|point| *point)
+            .filter_map(|point| point.top_bottom_spread.filter(|value| value.is_finite()))
+            .collect::<Vec<_>>();
+        let residual_values = daily
+            .iter()
+            .filter_map(|point| *point)
+            .filter_map(|point| {
+                point
+                    .avg_excess_residual_return
+                    .filter(|value| value.is_finite())
+            })
+            .map(|value| value * direction_sign)
+            .collect::<Vec<_>>();
+        let (ic_mean, ic_t_value, avg_residual_return, spread_mean) = if sufficient {
+            (
+                mean_f64(&ic_values),
+                calc_newey_west_t_value(&ic_values, hac_lag),
+                mean_f64(&residual_values),
+                mean_f64(&spread_values),
+            )
+        } else {
+            (None, None, None, None)
+        };
+        rows.push(RuleValidationWalkForwardFold {
+            fold_index,
+            status: if sufficient {
+                "ok".to_string()
+            } else {
+                "insufficient".to_string()
+            },
+            train_start_date: calendar[0].clone(),
+            train_end_date: calendar[plan.train_end_index].clone(),
+            test_start_date: calendar[plan.test_start_index].clone(),
+            test_end_date: calendar[plan.test_end_index].clone(),
+            test_day_count: valid_days,
+            test_sample_count: window
+                .iter()
+                .map(|trade_date| day_trigger_counts.get(trade_date).copied().unwrap_or(0))
+                .sum(),
+            ic_mean,
+            ic_t_value,
+            avg_residual_return,
+            spread_mean,
+        });
+    }
+
+    RuleValidationWalkForwardData {
+        fold_count: rows.len(),
+        purge_days,
+        ic_positive_folds: rows
+            .iter()
+            .filter(|row| row.ic_mean.is_some_and(|value| value > 0.0))
+            .count(),
+        residual_positive_folds: rows
+            .iter()
+            .filter(|row| row.avg_residual_return.is_some_and(|value| value > 0.0))
+            .count(),
+        spread_positive_folds: rows
+            .iter()
+            .filter(|row| row.spread_mean.is_some_and(|value| value > 0.0))
+            .count(),
+        folds: rows,
+    }
+}
+
+/// 表达式验证的完整 eligible universe：与回测同口径的全部 `(ts_code, trade_date)` 样本。
+///
+/// 未触发样本的分数按 0 参与统计，保证 Score Pearson 等横截面相关性使用完整范围。
+struct ValidationUniverseIndex {
+    residual_returns: Vec<f64>,
+    day_indices: Vec<u32>,
+    trade_dates: Vec<String>,
+    index_by_pair: HashMap<u64, u32>,
+}
+
+impl ValidationUniverseIndex {
+    fn len(&self) -> usize {
+        self.residual_returns.len()
+    }
+}
+
+fn build_validation_universe_index(samples: &[RuleLayerSamplePoint]) -> ValidationUniverseIndex {
+    let mut trade_dates = Vec::<String>::new();
+    let mut day_index_by_name = HashMap::<String, u32>::new();
+    let mut residual_returns = Vec::with_capacity(samples.len());
+    let mut day_indices = Vec::with_capacity(samples.len());
+    let mut index_by_pair = HashMap::with_capacity(samples.len());
+
+    for sample in samples {
+        let day_index = if let Some(index) = day_index_by_name.get(&sample.trade_date) {
+            *index
+        } else {
+            let index = trade_dates.len() as u32;
+            trade_dates.push(sample.trade_date.clone());
+            day_index_by_name.insert(sample.trade_date.clone(), index);
+            index
+        };
+        let Ok(universe_index) = u32::try_from(residual_returns.len()) else {
+            break;
+        };
+        residual_returns.push(sample.residual_return);
+        day_indices.push(day_index);
+        index_by_pair.insert(
+            validation_pair_hash(&sample.ts_code, &sample.trade_date),
+            universe_index,
+        );
+    }
+
+    ValidationUniverseIndex {
+        residual_returns,
+        day_indices,
+        trade_dates,
+        index_by_pair,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ValidationRuleHit {
+    pair_hash: u64,
+    universe_index: u32,
+    rule_index: u32,
+    score: f64,
+}
+
+/// 结果库里已有策略在 eligible universe 内的紧凑触发索引，按 `pair_hash` 升序排列，
+/// 使每个表达式组合都能用一次二分定位同日同股的已有策略分数。
+#[derive(Debug, Default)]
+struct ValidationExistingRuleScoreIndex {
+    rule_names: Vec<String>,
+    hit_counts: Vec<usize>,
+    score_sums: Vec<f64>,
+    score_square_sums: Vec<f64>,
+    hits: Vec<ValidationRuleHit>,
+}
+
+fn load_validation_existing_rule_score_index(
+    source_path: &str,
+    start_date: &str,
+    end_date: &str,
+    universe: &ValidationUniverseIndex,
+) -> ValidationExistingRuleScoreIndex {
+    if !result_db_path(source_path).exists() {
+        return ValidationExistingRuleScoreIndex::default();
+    }
+    let Ok(result_conn) = open_result_conn(source_path) else {
+        return ValidationExistingRuleScoreIndex::default();
+    };
+    // 与原有相似度缓存一致：结果库不可用时只放弃重复性研究，不阻断表达式验证。
+    (|result_conn: &Connection| -> Result<ValidationExistingRuleScoreIndex, String> {
+        let mut stmt = result_conn
+            .prepare(
+                r#"
+                SELECT
+                    rule_name,
+                    ts_code,
+                    trade_date,
+                    TRY_CAST(rule_score AS DOUBLE)
+                FROM rule_details
+                WHERE trade_date >= ?
+                  AND trade_date <= ?
+                  AND TRY_CAST(rule_score AS DOUBLE) IS NOT NULL
+                  AND ABS(TRY_CAST(rule_score AS DOUBLE)) > 1e-12
+                "#,
+            )
+            .map_err(|error| format!("预编译已有策略分数查询失败: {error}"))?;
+        let mut rows = stmt
+            .query(params![start_date, end_date])
+            .map_err(|error| format!("查询已有策略分数失败: {error}"))?;
+
+        let mut index = ValidationExistingRuleScoreIndex::default();
+        let mut rule_index_by_name = HashMap::<String, u32>::new();
+        while let Some(row) = rows
+            .next()
+            .map_err(|error| format!("读取已有策略分数失败: {error}"))?
+        {
+            let rule_name: String = row.get(0).map_err(|e| format!("读取规则名失败: {e}"))?;
+            let ts_code: String = row.get(1).map_err(|e| format!("读取代码失败: {e}"))?;
+            let trade_date: String = row.get(2).map_err(|e| format!("读取交易日失败: {e}"))?;
+            let score: f64 = row.get(3).map_err(|e| format!("读取规则分失败: {e}"))?;
+            let pair_hash = validation_pair_hash(&ts_code, &trade_date);
+            let Some(&universe_index) = universe.index_by_pair.get(&pair_hash) else {
+                continue;
+            };
+            let rule_index = if let Some(existing) = rule_index_by_name.get(&rule_name) {
+                *existing
+            } else {
+                let created = index.rule_names.len() as u32;
+                rule_index_by_name.insert(rule_name.clone(), created);
+                index.rule_names.push(rule_name);
+                index.hit_counts.push(0);
+                index.score_sums.push(0.0);
+                index.score_square_sums.push(0.0);
+                created
+            };
+            index.hit_counts[rule_index as usize] += 1;
+            index.score_sums[rule_index as usize] += score;
+            index.score_square_sums[rule_index as usize] += score * score;
+            index.hits.push(ValidationRuleHit {
+                pair_hash,
+                universe_index,
+                rule_index,
+                score,
+            });
+        }
+        index
+            .hits
+            .sort_unstable_by_key(|hit| (hit.pair_hash, hit.rule_index));
+        Ok(index)
+    })(&result_conn)
+    .unwrap_or_default()
+}
+
+/// 已有策略的日度收益，口径与相关性与正交研究一致：`Σ(score × residual) / Σ|score|`，
+/// 分母只在 eligible universe 内累计，未触发样本的分数按 0 处理。
+#[derive(Clone, Copy)]
+struct ValidationRuleDailyAgg {
+    score_residual_sum: f64,
+    absolute_score_sum: f64,
+    sample_count: usize,
+}
+
+fn build_validation_existing_rule_daily_returns(
+    universe: &ValidationUniverseIndex,
+    index: &ValidationExistingRuleScoreIndex,
+    min_samples_per_day: usize,
+) -> Vec<HashMap<String, f64>> {
+    let mut daily = vec![HashMap::<u32, ValidationRuleDailyAgg>::new(); index.rule_names.len()];
+    for hit in &index.hits {
+        let residual = universe.residual_returns[hit.universe_index as usize];
+        if !residual.is_finite() {
+            continue;
+        }
+        let day_index = universe.day_indices[hit.universe_index as usize];
+        let entry =
+            daily[hit.rule_index as usize]
+                .entry(day_index)
+                .or_insert(ValidationRuleDailyAgg {
+                    score_residual_sum: 0.0,
+                    absolute_score_sum: 0.0,
+                    sample_count: 0,
+                });
+        entry.score_residual_sum += hit.score * residual;
+        entry.absolute_score_sum += hit.score.abs();
+        entry.sample_count += 1;
+    }
+
+    daily
+        .into_iter()
+        .map(|days| {
+            days.into_iter()
+                .filter_map(|(day_index, aggregate)| {
+                    if aggregate.sample_count < min_samples_per_day
+                        || aggregate.absolute_score_sum <= RULE_BACKTEST_EPS
+                    {
+                        return None;
+                    }
+                    let trade_date = universe.trade_dates.get(day_index as usize)?;
+                    Some((
+                        trade_date.clone(),
+                        aggregate.score_residual_sum / aggregate.absolute_score_sum,
+                    ))
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// 表达式组合与已有策略的重复性：Jaccard、Phi、完整 universe 的 Score Pearson
+/// 以及日度收益 Pearson（收益口径统一为 `Σ(score × residual) / Σ|score|`）。
+/// 只做描述性统计，不产出任何评分或推荐。
+fn build_validation_expression_similarity_rows(
+    universe: &ValidationUniverseIndex,
+    index: &ValidationExistingRuleScoreIndex,
+    rule_daily_returns: &[HashMap<String, f64>],
+    candidate_scores: &HashMap<u64, f64>,
+    candidate_daily_returns: &HashMap<String, f64>,
+    exclude_rule_name: Option<&str>,
+    explain_map: &HashMap<String, String>,
+) -> Vec<RuleValidationSimilarityRow> {
+    if candidate_scores.is_empty() || index.rule_names.is_empty() {
+        return Vec::new();
+    }
+
+    let left_trigger_count = candidate_scores.len();
+    let left_sum = candidate_scores.values().sum::<f64>();
+    let left_square_sum = candidate_scores
+        .values()
+        .map(|value| value * value)
+        .sum::<f64>();
+    let mut joint_counts = vec![0usize; index.rule_names.len()];
+    let mut cross_sums = vec![0.0_f64; index.rule_names.len()];
+    for (pair_hash, score) in candidate_scores {
+        let start = index.hits.partition_point(|hit| hit.pair_hash < *pair_hash);
+        for hit in index.hits[start..]
+            .iter()
+            .take_while(|hit| hit.pair_hash == *pair_hash)
+        {
+            joint_counts[hit.rule_index as usize] += 1;
+            cross_sums[hit.rule_index as usize] += score * hit.score;
+        }
+    }
+
+    let excluded_rule_name = exclude_rule_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let universe_count = universe.len();
+    let mut rows = index
+        .rule_names
+        .iter()
+        .enumerate()
+        .filter_map(|(rule_index, rule_name)| {
+            if excluded_rule_name.is_some_and(|excluded| rule_name == excluded) {
+                return None;
+            }
+            let right_trigger_count = index.hit_counts[rule_index];
+            let joint_trigger_count = joint_counts[rule_index];
+            let metrics = calc_signal_pair_metrics(SignalPairMoments {
+                universe_count,
+                left_trigger_count,
+                right_trigger_count,
+                joint_trigger_count,
+                left_sum,
+                right_sum: index.score_sums[rule_index],
+                left_square_sum,
+                right_square_sum: index.score_square_sums[rule_index],
+                cross_sum: cross_sums[rule_index],
+            });
+
+            let mut left_values = Vec::new();
+            let mut right_values = Vec::new();
+            if let Some(rule_daily) = rule_daily_returns.get(rule_index) {
+                for (trade_date, left_value) in candidate_daily_returns {
+                    if let Some(right_value) = rule_daily.get(trade_date) {
+                        left_values.push(*left_value);
+                        right_values.push(*right_value);
+                    }
+                }
+            }
+
+            Some(RuleValidationSimilarityRow {
+                rule_name: rule_name.clone(),
+                explain: explain_map.get(rule_name).cloned(),
+                overlap_samples: joint_trigger_count,
+                overlap_rate_vs_validation: (left_trigger_count > 0)
+                    .then_some(joint_trigger_count as f64 / left_trigger_count as f64),
+                overlap_rate_vs_existing: (right_trigger_count > 0)
+                    .then_some(joint_trigger_count as f64 / right_trigger_count as f64),
+                overlap_lift: (left_trigger_count > 0 && right_trigger_count > 0).then_some(
+                    joint_trigger_count as f64 * universe_count as f64
+                        / (left_trigger_count as f64 * right_trigger_count as f64),
+                ),
+                jaccard: metrics.jaccard,
+                phi: metrics.phi,
+                score_pearson: metrics.score_pearson,
+                return_pearson: pearson_corr(&left_values, &right_values),
+                shared_return_days: left_values.len(),
+            })
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        compare_option_f64_desc(left.jaccard, right.jaccard)
+            .then_with(|| right.overlap_samples.cmp(&left.overlap_samples))
+            .then_with(|| left.rule_name.cmp(&right.rule_name))
+    });
+    rows.truncate(20);
+    rows
+}
+
+/// 增量研究：每个 fold 只用 train 做标准化 ridge 回归，再在 test 上用原始尺度系数算增量。
+///
+/// 标准化后 `(R + λI) β_z = r_xy`，换算回原始尺度得到 `beta_i = β_z_i * std_y / std_x_i`；
+/// 样本外增量定义为 `incremental = y_test - Σ beta_i * x_i_test`（不减 train intercept），
+/// 均值即控制核心策略后的样本外增量 alpha。均值、标准差与系数全部只来自 train，
+/// 岭项让共线核心策略仍然可解。
+fn build_validation_incremental(
+    calendar: &[String],
+    folds: &[ValidationFoldPlan],
+    purge_days: usize,
+    hac_lag: usize,
+    candidate_daily_returns: &HashMap<String, f64>,
+    core_series: &[(String, &HashMap<String, f64>)],
+) -> RuleValidationIncrementalData {
+    let mut incremental = RuleValidationIncrementalData {
+        core_rule_names: core_series
+            .iter()
+            .map(|(rule_name, _)| rule_name.clone())
+            .collect(),
+        purge_days,
+        folds: Vec::with_capacity(folds.len()),
+        positive_folds: 0,
+    };
+    if core_series.is_empty() || calendar.is_empty() {
+        return incremental;
+    }
+
+    let target = calendar
+        .iter()
+        .map(|trade_date| candidate_daily_returns.get(trade_date).copied())
+        .collect::<Vec<_>>();
+    let predictors = core_series
+        .iter()
+        .map(|(_, series)| {
+            calendar
+                .iter()
+                .map(|trade_date| series.get(trade_date).copied())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    for (fold_index, plan) in folds.iter().enumerate() {
+        let collect_rows = |from: usize, to: usize| {
+            let mut rows = Vec::<Vec<f64>>::new();
+            let mut targets = Vec::<f64>::new();
+            for index in from..=to {
+                let Some(target_value) = target[index] else {
+                    continue;
+                };
+                let Some(row) = predictors
+                    .iter()
+                    .map(|column| column[index])
+                    .collect::<Option<Vec<f64>>>()
+                else {
+                    continue;
+                };
+                rows.push(row);
+                targets.push(target_value);
+            }
+            (rows, targets)
+        };
+        let (train_rows, train_targets) = collect_rows(0, plan.train_end_index);
+        let (test_rows, test_targets) = collect_rows(plan.test_start_index, plan.test_end_index);
+
+        let mut fold = RuleValidationIncrementalFold {
+            fold_index,
+            status: "insufficient".to_string(),
+            train_start_date: calendar[0].clone(),
+            train_end_date: calendar[plan.train_end_index].clone(),
+            test_start_date: calendar[plan.test_start_index].clone(),
+            test_end_date: calendar[plan.test_end_index].clone(),
+            train_day_count: train_rows.len(),
+            test_day_count: test_rows.len(),
+            incremental_mean: None,
+            incremental_hac_t: None,
+            positive_day_ratio: None,
+        };
+
+        let column_count = core_series.len();
+        // 训练行至少 max(30, predictors × 5)，样本外至少 20 个共同有效日：
+        // 与相关性与正交研究的增量门槛保持一致，样本不足时该 fold 不进入正窗口统计。
+        let minimum_train_rows = (column_count * 5).max(30);
+        if train_rows.len() >= minimum_train_rows && test_rows.len() >= 20 {
+            let train_mean_y = train_targets.iter().sum::<f64>() / train_targets.len() as f64;
+            let train_mean_x = (0..column_count)
+                .map(|column| {
+                    train_rows.iter().map(|row| row[column]).sum::<f64>() / train_rows.len() as f64
+                })
+                .collect::<Vec<_>>();
+            let train_std = |column: usize| -> f64 {
+                let mean = train_mean_x[column];
+                let variance = train_rows
+                    .iter()
+                    .map(|row| (row[column] - mean) * (row[column] - mean))
+                    .sum::<f64>()
+                    / (train_rows.len() - 1) as f64;
+                if variance > RULE_BACKTEST_EPS {
+                    variance.sqrt()
+                } else {
+                    0.0
+                }
+            };
+            let train_std_y = {
+                let variance = train_targets
+                    .iter()
+                    .map(|value| (value - train_mean_y) * (value - train_mean_y))
+                    .sum::<f64>()
+                    / (train_targets.len() - 1) as f64;
+                if variance > RULE_BACKTEST_EPS {
+                    variance.sqrt()
+                } else {
+                    0.0
+                }
+            };
+
+            // 标准化相关矩阵：[predictors..., target]，岭系数只作用在 predictor 对角线上。
+            let mut matrix = vec![vec![0.0_f64; column_count + 1]; column_count + 1];
+            for row in 0..=column_count {
+                let left_values = if row < column_count {
+                    train_rows.iter().map(|item| item[row]).collect::<Vec<_>>()
+                } else {
+                    train_targets.clone()
+                };
+                let left_std = if row < column_count {
+                    train_std(row)
+                } else {
+                    train_std_y
+                };
+                matrix[row][row] = (left_std > RULE_BACKTEST_EPS) as u8 as f64;
+                for column in (row + 1)..=column_count {
+                    let right_values = if column < column_count {
+                        train_rows
+                            .iter()
+                            .map(|item| item[column])
+                            .collect::<Vec<_>>()
+                    } else {
+                        train_targets.clone()
+                    };
+                    let correlation = pearson_corr(&left_values, &right_values).unwrap_or(0.0);
+                    matrix[row][column] = correlation;
+                    matrix[column][row] = correlation;
+                }
+            }
+
+            // λ = 0.1 与相关性与正交研究的增量回归保持一致，只作用于标准化 predictor。
+            let fitted = if train_std_y > RULE_BACKTEST_EPS {
+                calc_linear_orthogonal_diagnostics(&matrix, 0.1)
+                    .ok()
+                    .and_then(|mut diagnostics| diagnostics.pop())
+                    .filter(|diagnostic| diagnostic.residual_variance_ratio.is_some())
+            } else {
+                None
+            };
+
+            if let Some(diagnostic) = fitted {
+                let beta = diagnostic
+                    .basis_coefficients
+                    .into_iter()
+                    .enumerate()
+                    .map(|(column, coefficient)| {
+                        let std = train_std(column);
+                        if std > RULE_BACKTEST_EPS {
+                            coefficient * train_std_y / std
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let residuals = test_rows
+                    .iter()
+                    .zip(&test_targets)
+                    .map(|(row, target_value)| {
+                        // 样本外只按原始尺度系数扣除核心策略贡献，不减 train intercept，
+                        // 因此增量均值就是控制核心策略后的 OOS 增量 alpha。
+                        let prediction = beta
+                            .iter()
+                            .zip(row)
+                            .map(|(coefficient, value)| coefficient * value)
+                            .sum::<f64>();
+                        target_value - prediction
+                    })
+                    .collect::<Vec<_>>();
+                fold.status = "ok".to_string();
+                fold.test_day_count = residuals.len();
+                fold.incremental_mean = mean_f64(&residuals);
+                fold.incremental_hac_t = calc_newey_west_t_value(&residuals, hac_lag);
+                fold.positive_day_ratio = (!residuals.is_empty()).then(|| {
+                    residuals.iter().filter(|value| **value > 0.0).count() as f64
+                        / residuals.len() as f64
+                });
+                if fold.incremental_mean.is_some_and(|value| value > 0.0) {
+                    incremental.positive_folds += 1;
+                }
+            }
+        }
+        incremental.folds.push(fold);
+    }
+
+    incremental
+}
+
 pub fn run_rule_expression_validation(
     source_path: String,
     import_rule_name: String,
@@ -3431,6 +4016,8 @@ pub fn run_rule_expression_validation(
     exclude_st_board: Option<bool>,
     total_mv_min: Option<f64>,
     total_mv_max: Option<f64>,
+    walk_forward_folds: Option<usize>,
+    core_rule_names: Option<Vec<String>>,
 ) -> Result<RuleExpressionValidationData, String> {
     let source_path = source_path.trim().to_string();
     if source_path.is_empty() {
@@ -3933,11 +4520,90 @@ pub fn run_rule_expression_validation(
         .map(|rule| (rule.name.clone(), rule.explain.clone()))
         .collect::<HashMap<_, _>>();
     let stock_meta_map = load_validation_sample_stock_meta_map(&source_path)?;
-    let similarity_cache = load_validation_similarity_cache_optional(
+    // 完整 eligible universe：与回测同口径的全部样本，未触发样本分数按 0 参与相关性统计。
+    let universe_index = build_validation_universe_index(
+        &calc_rule_layer_metrics_with_samples_from_cache(
+            runtime_cache.as_ref(),
+            &ValidationTriggeredScoreMap::new(),
+            &layer_config,
+        )?
+        .samples,
+    );
+    let existing_rule_score_index = load_validation_existing_rule_score_index(
         &source_path,
         &params.start_date,
         &params.end_date,
-    )?;
+        &universe_index,
+    );
+    let existing_rule_daily_returns = build_validation_existing_rule_daily_returns(
+        &universe_index,
+        &existing_rule_score_index,
+        params.min_samples_per_day,
+    );
+    let requested_core_rule_names = core_rule_names.unwrap_or_default();
+    // 核心策略作为增量回归的 predictors：数量过多会让共同有效日被样本外门槛挤空，
+    // 也让共线性显著上升，因此与相关性与正交研究保持同样的 8 个上限。
+    if requested_core_rule_names
+        .iter()
+        .filter(|name| !name.trim().is_empty())
+        .count()
+        > 8
+    {
+        return Err("核心策略最多选择 8 个".to_string());
+    }
+    let core_series = existing_rule_score_index
+        .rule_names
+        .iter()
+        .enumerate()
+        .filter(|(_, rule_name)| {
+            requested_core_rule_names
+                .iter()
+                .any(|name| name.trim() == rule_name.as_str())
+        })
+        .map(|(rule_index, rule_name)| {
+            (rule_name.clone(), &existing_rule_daily_returns[rule_index])
+        })
+        .collect::<Vec<_>>();
+    // 核心策略是增量研究的 predictors，缺一个就会在用户不知情的情况下改变回归含义，
+    // 因此这里直接报错，不做静默丢弃。
+    let missing_core_rule_names = requested_core_rule_names
+        .iter()
+        .map(|name| name.trim())
+        .filter(|name| !name.is_empty())
+        .filter(|name| {
+            !existing_rule_score_index
+                .rule_names
+                .iter()
+                .any(|rule_name| rule_name.as_str() == *name)
+        })
+        .collect::<Vec<_>>();
+    if !missing_core_rule_names.is_empty() {
+        let hint = if existing_rule_score_index.rule_names.is_empty() {
+            "结果库中没有可用的策略评分，请先执行排名计算（Ranking Compute）"
+        } else {
+            "请先在排名计算中生成这些策略的评分，或改选其他核心策略"
+        };
+        return Err(format!(
+            "核心策略在结果库中不存在或区间内无有效触发: {}；{hint}",
+            missing_core_rule_names.join(", ")
+        ));
+    }
+    let resolved_walk_forward_folds = walk_forward_folds.unwrap_or(4).clamp(1, 8);
+    // 统一 walk-forward calendar：一次请求只切一套 train/test 日期，所有 UNKNOWN 参数组合共用；
+    // 触发稀疏的组合只在对应 fold 标记 insufficient，不按自己的有效日期重新切分。
+    let mut validation_calendar = runtime_cache
+        .trade_dates()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    validation_calendar.sort_unstable();
+    validation_calendar.dedup();
+    let validation_purge_days = params.backtest_period;
+    let validation_hac_lag = params.backtest_period.saturating_sub(1);
+    let validation_fold_plan = build_validation_fold_plan(
+        validation_calendar.len(),
+        resolved_walk_forward_folds,
+        validation_purge_days,
+    );
     let mut combo_results = Vec::with_capacity(execution_plan.combos.len());
     for combo_chunk in execution_plan.combos.chunks(16) {
         let combo_triggered_maps = build_validation_triggered_scores_for_combos(
@@ -3961,7 +4627,14 @@ pub fn run_rule_expression_validation(
                   triggered_score_map: ValidationTriggeredScoreMap,
                   runtime_cache: &RuleLayerRuntimeCache,
                   layer_config: &RuleLayerConfig,
-                  similarity_cache: &ValidationSimilarityCache,
+                  universe_index: &ValidationUniverseIndex,
+                  existing_rule_score_index: &ValidationExistingRuleScoreIndex,
+                  existing_rule_daily_returns: &[HashMap<String, f64>],
+                  core_series: &[(String, &HashMap<String, f64>)],
+                  calendar: &[String],
+                  fold_plan: &[ValidationFoldPlan],
+                  purge_days: usize,
+                  hac_lag: usize,
                   explain_map: &HashMap<String, String>,
                   stock_meta_map: &HashMap<String, ValidationSampleStockMeta>,
                   sample_limit_per_group: usize|
@@ -3980,7 +4653,7 @@ pub fn run_rule_expression_validation(
                     let mut sample_accumulator = ValidationSampleAccumulator::new(
                         sample_limit_per_group,
                         stock_meta_map,
-                        similarity_cache,
+                        None,
                         matches!(seed_rule.scope_way, ScopeWay::Each),
                         seed_rule.points,
                         seed_rule.dist_points.is_some(),
@@ -3999,20 +4672,80 @@ pub fn run_rule_expression_validation(
                         sample_stats,
                         trigger_count_stats,
                         sample_groups,
-                        overlap_hit_count,
+                        _,
                     ) = sample_accumulator.into_parts();
+                    let axis = sort_validation_points(&metrics_with_samples.metrics.points);
+                    let direction_sign = validation_axis_direction_sign(&axis);
+                    let points_by_date = axis
+                        .iter()
+                        .map(|point| (point.trade_date.as_str(), *point))
+                        .collect::<HashMap<_, _>>();
+                    // 收益口径与相关性与正交研究一致：Σ(score × residual) / Σ|score|。
+                    let candidate_daily_returns = axis
+                        .iter()
+                        .filter_map(|point| {
+                            point
+                                .score_weighted_residual_return
+                                .filter(|value| value.is_finite())
+                                .map(|value| (point.trade_date.clone(), value))
+                        })
+                        .collect::<HashMap<_, _>>();
+                    let mut candidate_scores = HashMap::<u64, f64>::new();
+                    let mut day_trigger_counts = HashMap::<String, usize>::new();
+                    for (ts_code, scores_by_date) in &triggered_score_map {
+                        for (trade_date, score) in scores_by_date {
+                            if !score.is_finite() {
+                                continue;
+                            }
+                            let pair_hash = validation_pair_hash(ts_code, trade_date);
+                            if universe_index.index_by_pair.contains_key(&pair_hash) {
+                                candidate_scores.insert(pair_hash, *score);
+                                *day_trigger_counts.entry(trade_date.clone()).or_default() += 1;
+                            }
+                        }
+                    }
+                    let similarity_rows = build_validation_expression_similarity_rows(
+                        universe_index,
+                        existing_rule_score_index,
+                        existing_rule_daily_returns,
+                        &candidate_scores,
+                        &candidate_daily_returns,
+                        seed_rule.exclude_rule_name.as_deref(),
+                        explain_map,
+                    );
+                    let walk_forward = build_validation_walk_forward(
+                        calendar,
+                        fold_plan,
+                        params.backtest_period,
+                        direction_sign,
+                        &points_by_date,
+                        &day_trigger_counts,
+                    );
+                    let incremental = build_validation_incremental(
+                        calendar,
+                        fold_plan,
+                        purge_days,
+                        hac_lag,
+                        &candidate_daily_returns,
+                        core_series,
+                    );
+                    let daily_metrics = axis
+                        .iter()
+                        .map(|point| RuleValidationDailyMetric {
+                            trade_date: point.trade_date.clone(),
+                            // IC 由分数秩相关给出，负向规则工作时期望已为正，不再额外翻转；
+                            // 残差均值是方向盲的，按表达式方向调整。
+                            ic: point.ic,
+                            avg_residual_return: point
+                                .avg_excess_residual_return
+                                .map(|value| value * direction_sign),
+                        })
+                        .collect();
                     let backtest = build_rule_backtest_payload(
                         &combo.variant.combo_key,
                         params,
                         metrics_with_samples.metrics,
                         Some(validation_layer_details),
-                    );
-                    let similarity_rows = build_validation_similarity_rows_from_overlap(
-                        similarity_cache,
-                        trigger_samples,
-                        overlap_hit_count,
-                        seed_rule.exclude_rule_name.as_deref(),
-                        explain_map,
                     );
 
                     Ok(RuleValidationComboResult {
@@ -4032,6 +4765,9 @@ pub fn run_rule_expression_validation(
                         sample_groups,
                         return_distribution,
                         backtest,
+                        daily_metrics,
+                        walk_forward,
+                        incremental,
                         similarity_rows,
                     })
                 })(
@@ -4041,7 +4777,14 @@ pub fn run_rule_expression_validation(
                     triggered_score_map,
                     runtime_cache.as_ref(),
                     &layer_config,
-                    &similarity_cache,
+                    &universe_index,
+                    &existing_rule_score_index,
+                    &existing_rule_daily_returns,
+                    &core_series,
+                    &validation_calendar,
+                    &validation_fold_plan,
+                    validation_purge_days,
+                    validation_hac_lag,
                     &explain_map,
                     &stock_meta_map,
                     sample_limit_per_group,
@@ -4050,642 +4793,18 @@ pub fn run_rule_expression_validation(
         }
     }
 
-    combo_results.sort_by(|left, right| {
-        compare_option_f64_desc(left.backtest.spread_mean, right.backtest.spread_mean)
-            .then_with(|| compare_option_f64_desc(left.backtest.icir, right.backtest.icir))
-            .then_with(|| right.trigger_samples.cmp(&left.trigger_samples))
-            .then_with(|| left.combo_key.cmp(&right.combo_key))
-    });
-
-    let best_combo_key = combo_results.first().map(|item| item.combo_key.clone());
-    let continuation_combos = execution_plan
-        .combos
-        .iter()
-        .map(|combo| {
-            (
-                combo.variant.combo_key.clone(),
-                ValidationContinuationCombo {
-                    combo_key: combo.variant.combo_key.clone(),
-                    combo_label: combo.variant.combo_label.clone(),
-                    formula: combo.variant.formula.clone(),
-                },
-            )
-        })
-        .collect::<HashMap<_, _>>();
-    let continuation_id = (|session: ValidationContinuationSession| -> Result<String, String> {
-        let mut cache = validation_continuation_cache()
-            .lock()
-            .map_err(|_| "保存表达式继续验证基础数据失败:缓存锁已损坏".to_string())?;
-        cache.retain(|_, item| item.created_at.elapsed() <= VALIDATION_CONTINUATION_TTL);
-        while cache.len() >= (1) {
-            let Some(oldest_key) = cache
-                .iter()
-                .max_by_key(|(_, item)| item.created_at.elapsed())
-                .map(|(key, _)| key.clone())
-            else {
-                break;
-            };
-            cache.remove(&oldest_key);
-        }
-
-        let continuation_id = loop {
-            let candidate = format!(
-                "expr-calibration-{:016x}{:016x}",
-                random::<u64>(),
-                random::<u64>()
-            );
-            if !cache.contains_key(&candidate) {
-                break candidate;
-            }
-        };
-        cache.insert(continuation_id.clone(), Arc::new(session));
-        Ok(continuation_id)
-    })(ValidationContinuationSession {
-        created_at: Instant::now(),
-        source_path: source_path.clone(),
-        params: params.clone(),
-        runtime_cache: Arc::clone(&runtime_cache),
-        seed_rule: seed_rule.clone(),
-        validation_ts_codes,
-        combos: continuation_combos,
-    })
-    .ok();
-
     Ok(RuleExpressionValidationData {
         import_rule_name: seed_rule.rule_name,
         import_rule_explain: seed_rule.rule_explain,
         scope_way: scope_way_label(seed_rule.scope_way),
         scope_windows: seed_rule.scope_windows,
         sample_limit_per_group,
+        walk_forward_folds: resolved_walk_forward_folds,
+        core_rule_names: core_series
+            .iter()
+            .map(|(rule_name, _)| rule_name.clone())
+            .collect(),
         combo_results,
-        best_combo_key,
-        continuation_id,
-    })
-}
-
-#[derive(Debug, Clone)]
-struct ValidationCalibrationSpec {
-    candidate_key: String,
-    scope_way: ScopeWay,
-    scope_windows: usize,
-    scope_label: String,
-    dist_points: Option<Vec<crate::data::DistPoint>>,
-    is_current: bool,
-}
-
-#[derive(Debug, Default)]
-struct ValidationCalibrationBucketAgg {
-    score_multiplier: f64,
-    sample_count: usize,
-    residual_sum: f64,
-}
-
-fn scope_way_config_label(scope_way: ScopeWay) -> String {
-    match scope_way {
-        ScopeWay::Any => "ANY".to_string(),
-        ScopeWay::Last => "LAST".to_string(),
-        ScopeWay::Each => "EACH".to_string(),
-        ScopeWay::Recent => "RECENT".to_string(),
-        ScopeWay::Consec(threshold) => format!("CONSEC>={threshold}"),
-    }
-}
-
-fn build_recent_decay_dist_points(
-    scope_windows: usize,
-    direction_sign: f64,
-) -> Vec<crate::data::DistPoint> {
-    let half_life = ((scope_windows.max(2) - 1) as f64 / 2.0).max(1.0);
-    (0..scope_windows)
-        .map(|offset| crate::data::DistPoint {
-            min: offset,
-            max: offset,
-            points: direction_sign * 0.5_f64.powf(offset as f64 / half_life),
-        })
-        .collect()
-}
-
-fn build_validation_calibration_specs(
-    seed_rule: &ValidationSeedRule,
-) -> Vec<ValidationCalibrationSpec> {
-    let direction_sign = if seed_rule.points < 0.0 { -1.0 } else { 1.0 };
-    let current_scope_label = scope_way_config_label(seed_rule.scope_way);
-    let mut specs = vec![ValidationCalibrationSpec {
-        candidate_key: "current".to_string(),
-        scope_way: seed_rule.scope_way,
-        scope_windows: seed_rule.scope_windows,
-        scope_label: format!("{}（当前）", current_scope_label),
-        dist_points: (|items: Option<Vec<crate::data::DistPoint>>,
-                       direction_sign: f64|
-         -> Option<Vec<crate::data::DistPoint>> {
-            let items = items?;
-            let max_abs = items
-                .iter()
-                .map(|item| item.points.abs())
-                .fold(0.0_f64, f64::max);
-            if max_abs <= VALIDATION_EPS {
-                return None;
-            }
-            Some(
-                items
-                    .into_iter()
-                    .map(|item| crate::data::DistPoint {
-                        min: item.min,
-                        max: item.max,
-                        points: direction_sign * item.points.abs() / max_abs,
-                    })
-                    .collect(),
-            )
-        })(seed_rule.dist_points.clone(), direction_sign),
-        is_current: true,
-    }];
-    let mut seen = HashSet::from([format!(
-        "{}:{}",
-        current_scope_label, seed_rule.scope_windows
-    )]);
-
-    let mut push_plain = |scope_way: ScopeWay, scope_windows: usize| {
-        let label = scope_way_config_label(scope_way);
-        let dedupe_key = format!("{label}:{scope_windows}");
-        if !seen.insert(dedupe_key) {
-            return;
-        }
-        specs.push(ValidationCalibrationSpec {
-            candidate_key: format!(
-                "{}-{}",
-                label.to_ascii_lowercase().replace(">=", "-"),
-                scope_windows
-            ),
-            scope_way,
-            scope_windows,
-            scope_label: label,
-            dist_points: None,
-            is_current: false,
-        });
-    };
-
-    push_plain(ScopeWay::Last, 1);
-    for window in [3, 5, 10] {
-        push_plain(ScopeWay::Any, window);
-    }
-    for window in [3, 5, 10] {
-        push_plain(ScopeWay::Each, window);
-    }
-    for (threshold, windows) in [(2, [3, 5, 10]), (3, [3, 5, 10])] {
-        for window in windows {
-            if window >= threshold {
-                push_plain(ScopeWay::Consec(threshold), window);
-            }
-        }
-    }
-    drop(push_plain);
-
-    for window in [3, 5, 10] {
-        specs.push(ValidationCalibrationSpec {
-            candidate_key: format!("recent-decay-{window}"),
-            scope_way: ScopeWay::Recent,
-            scope_windows: window,
-            scope_label: "RECENT（自动衰减）".to_string(),
-            dist_points: Some(build_recent_decay_dist_points(window, direction_sign)),
-            is_current: false,
-        });
-    }
-    specs
-}
-
-fn sample_std_f64(values: &[f64]) -> Option<f64> {
-    if values.len() < 2 {
-        return None;
-    }
-    let mean = values.iter().sum::<f64>() / values.len() as f64;
-    let variance = values
-        .iter()
-        .map(|value| (value - mean).powi(2))
-        .sum::<f64>()
-        / (values.len() - 1) as f64;
-    variance.is_finite().then_some(variance.sqrt())
-}
-
-fn round_to_half(value: f64) -> f64 {
-    (value * 2.0).round() / 2.0
-}
-
-fn calibration_status_rank(status: &str) -> usize {
-    match status {
-        "reliable" => 0,
-        "validation_failed" | "validation_insufficient" => 1,
-        "not_selected" => 2,
-        "no_edge" => 3,
-        _ => 4,
-    }
-}
-
-pub fn run_rule_expression_calibration(
-    continuation_id: String,
-    combo_key: String,
-) -> Result<RuleExpressionCalibrationData, String> {
-    let continuation_id = continuation_id.trim().to_string();
-    let combo_key = combo_key.trim().to_string();
-    if continuation_id.is_empty() || combo_key.is_empty() {
-        return Err("继续验证标识和参数组合不能为空".to_string());
-    }
-    let session = (|continuation_id: &str| -> Result<Arc<ValidationContinuationSession>, String> {
-        let mut cache = validation_continuation_cache()
-            .lock()
-            .map_err(|_| "读取表达式继续验证基础数据失败:缓存锁已损坏".to_string())?;
-        cache.retain(|_, item| item.created_at.elapsed() <= VALIDATION_CONTINUATION_TTL);
-        cache
-            .get(continuation_id.trim())
-            .cloned()
-            .ok_or_else(|| "表达式基础验证缓存已失效，请重新执行一次表达式验证".to_string())
-    })(&continuation_id)?;
-    let combo = session
-        .combos
-        .get(&combo_key)
-        .cloned()
-        .ok_or_else(|| format!("继续验证基础数据中不存在参数组合:{combo_key}"))?;
-    let direction_sign = if session.seed_rule.points < 0.0 {
-        -1.0
-    } else {
-        1.0
-    };
-    let specs = build_validation_calibration_specs(&session.seed_rule);
-    let runtime_trade_dates = session.runtime_cache.trade_dates().collect::<Vec<_>>();
-    let validation_start_date = runtime_trade_dates
-        .get(runtime_trade_dates.len() / 2)
-        .copied();
-    let mut prepared = Vec::with_capacity(specs.len());
-    for spec in &specs {
-        let cached_rule = build_validation_cached_rule(
-            format!("calibration__{}", spec.candidate_key),
-            spec.scope_way,
-            spec.scope_windows,
-            direction_sign,
-            spec.dist_points.clone(),
-            session.seed_rule.tag,
-            &combo.formula,
-        )?;
-        prepared.push(PreparedValidationCombo {
-            variant: ValidationVariant {
-                combo_key: spec.candidate_key.clone(),
-                combo_label: spec.scope_label.clone(),
-                formula: combo.formula.clone(),
-                unknown_values: Vec::new(),
-            },
-            assigned_names: collect_validation_assigned_names(&cached_rule.when_ast),
-            cached_rule,
-        });
-    }
-
-    let max_warmup_need = prepared.iter().try_fold(0usize, |current, item| {
-        estimate_rule_warmup(
-            &item.cached_rule.when_ast,
-            item.cached_rule.scope_way,
-            item.cached_rule.scope_windows,
-        )
-        .map(|need| current.max(need))
-    })?;
-    let need_rows = calc_query_need_rows(
-        &session.source_path,
-        max_warmup_need,
-        &session.params.start_date,
-        &session.params.end_date,
-    )?;
-    let query_start_date = calc_query_start_date(
-        &session.source_path,
-        max_warmup_need,
-        &session.params.start_date,
-    )?;
-    let st_list = load_st_list(&session.source_path)?;
-    let triggered_maps = build_validation_triggered_scores_for_combos(
-        &session.source_path,
-        &session.params.stock_adj_type,
-        &query_start_date,
-        &session.params.start_date,
-        &session.params.end_date,
-        need_rows,
-        &session.validation_ts_codes,
-        &st_list,
-        &prepared,
-    )?;
-    let layer_config = RuleLayerConfig {
-        min_samples_per_day: session.params.min_samples_per_day,
-        backtest_period: session.params.backtest_period,
-        min_listed_trade_days: session.params.min_listed_trade_days,
-    };
-    let mut candidates = Vec::with_capacity(specs.len());
-    for (spec, triggered_score_map) in specs.iter().zip(triggered_maps.iter()) {
-        let metrics = calc_rule_layer_metrics_from_cache(
-            session.runtime_cache.as_ref(),
-            triggered_score_map,
-            &layer_config,
-        )?;
-        candidates.push((|spec: &ValidationCalibrationSpec,
-                          direction_sign: f64,
-                          metrics: crate::simulate::rule::RuleLayerMetrics,
-                          runtime_cache: &RuleLayerRuntimeCache,
-                          triggered_score_map: &ValidationTriggeredScoreMap|
-         -> Result<
-            RuleExpressionCalibrationCandidate,
-            String,
-        > {
-            let mut daily_excess = metrics
-                .points
-                .iter()
-                .filter_map(|point| {
-                    point
-                        .avg_excess_residual_return
-                        .filter(|value| value.is_finite())
-                        .map(|value| (point.trade_date.clone(), value))
-                })
-                .collect::<Vec<_>>();
-            daily_excess.sort_by(|left, right| left.0.cmp(&right.0));
-            let early_values = daily_excess
-                .iter()
-                .filter(|(trade_date, _)| {
-                    validation_start_date.is_none_or(|start_date| trade_date.as_str() < start_date)
-                })
-                .map(|(_, value)| *value)
-                .collect::<Vec<_>>();
-            let late_values = daily_excess
-                .iter()
-                .filter(|(trade_date, _)| {
-                    validation_start_date
-                        .is_some_and(|start_date| trade_date.as_str() >= start_date)
-                })
-                .map(|(_, value)| *value)
-                .collect::<Vec<_>>();
-            let early_mean = mean_f64(&early_values);
-            let late_mean = mean_f64(&late_values);
-            let daily_mean = early_mean;
-            let daily_std = sample_std_f64(&early_values);
-            let standard_error = calc_newey_west_standard_error(
-                &early_values,
-                session.params.backtest_period.saturating_sub(1),
-            );
-            let conservative_edge = daily_mean.zip(standard_error).map(|(mean, se)| {
-                let oriented_lcb = mean * direction_sign - (1.28) * se;
-                direction_sign * oriented_lcb
-            });
-            let training_ic_values = metrics
-                .points
-                .iter()
-                .filter(|point| {
-                    validation_start_date
-                        .is_none_or(|start_date| point.trade_date.as_str() < start_date)
-                })
-                .filter_map(|point| point.ic.filter(|value| value.is_finite()))
-                .collect::<Vec<_>>();
-            let training_ic_mean = mean_f64(&training_ic_values);
-            let training_ic_t_value = calc_newey_west_t_value(
-                &training_ic_values,
-                session.params.backtest_period.saturating_sub(1),
-            );
-
-            let mut trigger_samples = 0usize;
-            let mut triggered_days = HashSet::new();
-            let mut training_trigger_samples = 0usize;
-            let mut training_triggered_days = HashSet::new();
-            let mut validation_trigger_samples = 0usize;
-            let mut validation_triggered_days = HashSet::new();
-            let mut training_multiplier_sum = 0.0;
-            let mut bucket_map = HashMap::<u64, ValidationCalibrationBucketAgg>::new();
-            visit_triggered_rule_samples_from_cache(
-                runtime_cache,
-                triggered_score_map,
-                |sample| {
-                    let score_multiplier = sample.rule_score.abs();
-                    if !score_multiplier.is_finite() || score_multiplier <= VALIDATION_EPS {
-                        return Ok(());
-                    }
-                    trigger_samples += 1;
-                    triggered_days.insert(sample.trade_date.to_string());
-                    let is_training = validation_start_date
-                        .is_none_or(|start_date| sample.trade_date < start_date);
-                    if !is_training {
-                        validation_trigger_samples += 1;
-                        validation_triggered_days.insert(sample.trade_date.to_string());
-                        return Ok(());
-                    }
-                    training_trigger_samples += 1;
-                    training_triggered_days.insert(sample.trade_date.to_string());
-                    training_multiplier_sum += score_multiplier;
-                    let entry = bucket_map
-                        .entry(score_multiplier.to_bits())
-                        .or_insert_with(|| ValidationCalibrationBucketAgg {
-                            score_multiplier,
-                            ..ValidationCalibrationBucketAgg::default()
-                        });
-                    entry.sample_count += 1;
-                    entry.residual_sum += sample.residual_return;
-                    Ok(())
-                },
-            )?;
-            let triggered_day_count = triggered_days.len();
-            let avg_score_multiplier = if training_trigger_samples > 0 {
-                Some(training_multiplier_sum / training_trigger_samples as f64)
-            } else {
-                None
-            };
-
-            let mut score_buckets = bucket_map
-                .into_values()
-                .map(|bucket| RuleExpressionCalibrationBucket {
-                    score_multiplier: bucket.score_multiplier,
-                    sample_count: bucket.sample_count,
-                    avg_residual_return: (bucket.sample_count > 0)
-                        .then_some(bucket.residual_sum / bucket.sample_count as f64),
-                })
-                .collect::<Vec<_>>();
-            score_buckets.sort_by(|left, right| {
-                left.score_multiplier
-                    .partial_cmp(&right.score_multiplier)
-                    .unwrap_or(Ordering::Equal)
-            });
-            let monotonic_buckets = score_buckets
-                .iter()
-                .filter(|bucket| bucket.sample_count >= 30)
-                .filter_map(|bucket| {
-                    bucket
-                        .avg_residual_return
-                        .map(|value| value * direction_sign)
-                })
-                .collect::<Vec<_>>();
-            let score_monotonicity = if monotonic_buckets.len() >= 2 {
-                let monotonic_pairs = monotonic_buckets
-                    .windows(2)
-                    .filter(|window| window[1] + VALIDATION_EPS >= window[0])
-                    .count();
-                Some(monotonic_pairs as f64 / (monotonic_buckets.len() - 1) as f64)
-            } else {
-                None
-            };
-
-            let enough_samples =
-                training_trigger_samples >= 50 && training_triggered_days.len() >= 10;
-            let oriented_lcb = conservative_edge.map(|value| value * direction_sign);
-            let (status, status_label) = if !enough_samples {
-                ("insufficient", "训练样本不足")
-            } else if oriented_lcb.is_none_or(|value| value <= 0.0) {
-                ("no_edge", "训练边际不足")
-            } else {
-                ("training_candidate", "训练候选")
-            };
-
-            let normalized_edge = match (oriented_lcb, daily_std) {
-                (Some(edge), Some(std)) if edge > 0.0 && std > VALIDATION_EPS => edge / std,
-                _ => 0.0,
-            };
-            let structure_factor = (|scope_way: ScopeWay, monotonicity: Option<f64>| -> f64 {
-                match scope_way {
-                    ScopeWay::Each => monotonicity.unwrap_or(0.25).clamp(0.25, 1.0),
-                    ScopeWay::Recent => (0.5 + monotonicity.unwrap_or(0.5) * 0.5).clamp(0.5, 1.0),
-                    _ => 1.0,
-                }
-            })(spec.scope_way, score_monotonicity);
-            let ic_support = training_ic_t_value
-                .filter(|value| value.is_finite() && *value > 0.0)
-                .map(|value| value / (training_ic_values.len().max(1) as f64).sqrt())
-                .unwrap_or(0.0);
-            let calibration_score = if enough_samples {
-                (normalized_edge + ic_support * 0.15) * structure_factor
-            } else {
-                0.0
-            };
-            let desired_total_points = if enough_samples && normalized_edge > 0.0 {
-                round_to_half(((40.0) * normalized_edge * structure_factor).clamp(0.0, 10.0))
-            } else {
-                0.0
-            };
-            let unit_points_abs = avg_score_multiplier
-                .filter(|value| *value > VALIDATION_EPS)
-                .map(|value| round_to_half((desired_total_points / value).clamp(0.0, 10.0)))
-                .unwrap_or(0.0);
-            let suggested_points = direction_sign * unit_points_abs;
-            let suggested_total_points = direction_sign * desired_total_points;
-            let suggested_dist_points = spec
-                .dist_points
-                .as_ref()
-                .map(|items| {
-                    items
-                        .iter()
-                        .map(|item| RuleExpressionCalibrationDistancePoint {
-                            min: item.min,
-                            max: item.max,
-                            points: suggested_points * item.points.abs(),
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-
-            Ok(RuleExpressionCalibrationCandidate {
-                candidate_key: spec.candidate_key.clone(),
-                scope_way: scope_way_config_label(spec.scope_way),
-                scope_label: spec.scope_label.clone(),
-                scope_windows: spec.scope_windows,
-                is_current: spec.is_current,
-                trigger_samples,
-                triggered_days: triggered_day_count,
-                avg_daily_trigger: if triggered_day_count > 0 {
-                    trigger_samples as f64 / triggered_day_count as f64
-                } else {
-                    0.0
-                },
-                avg_residual_mean: metrics.avg_residual_mean,
-                avg_excess_residual_mean: daily_mean,
-                daily_std,
-                standard_error,
-                conservative_edge,
-                early_excess_residual_mean: early_mean,
-                late_excess_residual_mean: late_mean,
-                ic_mean: training_ic_mean,
-                ic_t_value: training_ic_t_value,
-                score_monotonicity,
-                avg_score_multiplier,
-                suggested_points,
-                suggested_total_points,
-                calibration_score,
-                status: status.to_string(),
-                status_label: status_label.to_string(),
-                score_buckets,
-                suggested_dist_points,
-                training_eligible: enough_samples && oriented_lcb.is_some_and(|value| value > 0.0),
-                validation_trigger_samples,
-                validation_triggered_days: validation_triggered_days.len(),
-            })
-        })(
-            spec,
-            direction_sign,
-            metrics,
-            session.runtime_cache.as_ref(),
-            triggered_score_map,
-        )?);
-    }
-
-    let frozen_candidate_key = candidates
-        .iter()
-        .filter(|item| item.training_eligible)
-        .max_by(|left, right| {
-            left.calibration_score
-                .partial_cmp(&right.calibration_score)
-                .unwrap_or(Ordering::Equal)
-        })
-        .map(|item| item.candidate_key.clone());
-    for candidate in &mut candidates {
-        if !candidate.training_eligible {
-            continue;
-        }
-        if frozen_candidate_key.as_deref() != Some(candidate.candidate_key.as_str()) {
-            candidate.status = "not_selected".to_string();
-            candidate.status_label = "训练期未入选".to_string();
-            continue;
-        }
-        if candidate.validation_trigger_samples < 50 || candidate.validation_triggered_days < 10 {
-            candidate.status = "validation_insufficient".to_string();
-            candidate.status_label = "样本外不足".to_string();
-        } else if candidate
-            .late_excess_residual_mean
-            .is_some_and(|value| value * direction_sign > 0.0)
-        {
-            candidate.status = "reliable".to_string();
-            candidate.status_label = "样本外方向通过".to_string();
-        } else {
-            candidate.status = "validation_failed".to_string();
-            candidate.status_label = "样本外未通过".to_string();
-        }
-    }
-    let recommended_candidate_key = frozen_candidate_key.filter(|candidate_key| {
-        candidates.iter().any(|candidate| {
-            candidate.candidate_key == *candidate_key && candidate.status == "reliable"
-        })
-    });
-    candidates.sort_by(|left, right| {
-        calibration_status_rank(left.status.as_str())
-            .cmp(&calibration_status_rank(right.status.as_str()))
-            .then_with(|| {
-                right
-                    .calibration_score
-                    .partial_cmp(&left.calibration_score)
-                    .unwrap_or(Ordering::Equal)
-            })
-            .then_with(|| left.scope_label.cmp(&right.scope_label))
-            .then_with(|| left.scope_windows.cmp(&right.scope_windows))
-    });
-
-    Ok(RuleExpressionCalibrationData {
-        continuation_id,
-        combo_key: combo.combo_key,
-        combo_label: combo.combo_label,
-        direction: if direction_sign < 0.0 {
-            "negative".to_string()
-        } else {
-            "positive".to_string()
-        },
-        candidate_count: candidates.len(),
-        point_scale_description:
-            "建议分使用按交易日超额残差的90%保守边际；4分约对应0.1个日度标准差，EACH/RECENT同时折算为单次基础分"
-                .to_string(),
-        recommended_candidate_key,
-        candidates,
     })
 }
 
@@ -7228,7 +7347,7 @@ fn build_one_rule_backtest_summary_and_detail(
             let mut sample_accumulator = ValidationSampleAccumulator::new(
                 5,
                 stock_meta_map,
-                similarity_cache,
+                Some(similarity_cache),
                 rule_meta.is_each,
                 rule_meta.points,
                 false,
@@ -7253,6 +7372,44 @@ fn build_one_rule_backtest_summary_and_detail(
                 sample_groups,
                 overlap_hit_count,
             ) = sample_accumulator.into_parts();
+            let walk_forward_axis = sort_validation_points(&metrics.points);
+            let walk_forward_calendar = walk_forward_axis
+                .iter()
+                .map(|point| point.trade_date.clone())
+                .collect::<Vec<_>>();
+            let walk_forward_folds =
+                build_validation_fold_plan(walk_forward_calendar.len(), 4, params.backtest_period);
+            let mut day_trigger_counts = HashMap::<String, usize>::new();
+            for sample in &triggered_samples {
+                if sample.rule_score.abs() > RULE_BACKTEST_EPS {
+                    *day_trigger_counts
+                        .entry(sample.trade_date.clone())
+                        .or_default() += 1;
+                }
+            }
+            let direction_sign = validation_axis_direction_sign(&walk_forward_axis);
+            let points_by_date = walk_forward_axis
+                .iter()
+                .map(|point| (point.trade_date.as_str(), *point))
+                .collect::<HashMap<_, _>>();
+            let walk_forward = build_validation_walk_forward(
+                &walk_forward_calendar,
+                &walk_forward_folds,
+                params.backtest_period,
+                direction_sign,
+                &points_by_date,
+                &day_trigger_counts,
+            );
+            let daily_metrics = walk_forward_axis
+                .iter()
+                .map(|point| RuleValidationDailyMetric {
+                    trade_date: point.trade_date.clone(),
+                    ic: point.ic,
+                    avg_residual_return: point
+                        .avg_excess_residual_return
+                        .map(|value| value * direction_sign),
+                })
+                .collect();
             let backtest = build_rule_backtest_payload(
                 rule_name,
                 params,
@@ -7284,6 +7441,9 @@ fn build_one_rule_backtest_summary_and_detail(
                 sample_groups,
                 return_distribution,
                 backtest,
+                daily_metrics,
+                walk_forward,
+                incremental: RuleValidationIncrementalData::default(),
                 similarity_rows,
             }
         })(
@@ -8757,22 +8917,24 @@ mod tests {
 
     use super::{
         CompactRuleSimilarityCache, PreparedValidationCombo, RuleLayerRuleSummary,
-        RulePortfolioDailyValue, VALIDATION_EPS, ValidationSampleRawRow, ValidationSampleStockMeta,
-        ValidationSeedRule, ValidationSimilarityCache, ValidationVariant,
-        aggregate_all_rule_summary_metrics, build_compact_rule_similarity_rows,
-        build_industry_maps_from_rows, build_one_rule_contribution_average,
-        build_rank_layer_sample_groups, build_recent_decay_dist_points,
+        RulePortfolioDailyValue, VALIDATION_EPS, ValidationExistingRuleScoreIndex,
+        ValidationRuleHit, ValidationSampleRawRow, ValidationSampleStockMeta,
+        ValidationSimilarityCache, ValidationVariant, aggregate_all_rule_summary_metrics,
+        build_compact_rule_similarity_rows, build_industry_maps_from_rows,
+        build_one_rule_contribution_average, build_rank_layer_sample_groups,
         build_rule_basket_decay_from_daily_groups, build_rule_contribution_averages,
         build_rule_contribution_averages_from_rows, build_rule_decay_validations,
-        build_validation_cached_rule, build_validation_calibration_specs,
+        build_validation_cached_rule, build_validation_expression_similarity_rows,
+        build_validation_fold_plan, build_validation_incremental,
         build_validation_return_distribution, build_validation_return_distribution_from_counts,
         build_validation_sample_groups, build_validation_score_layer_details,
         build_validation_score_layer_details_from_daily_layers, build_validation_similarity_rows,
         build_validation_triggered_scores, build_validation_triggered_scores_for_combos,
+        build_validation_universe_index, build_validation_walk_forward,
         collect_rule_validation_runtime_keys, collect_validation_assigned_names,
         derive_validation_volatility_group, estimate_net_money_flow_yuan, load_daily_max_rank,
         money_flow_rank_items, money_outflow_rank_items, resolve_validation_sample_board_label,
-        resolve_validation_trigger_count, scope_way_config_label, trailing_period_gain,
+        resolve_validation_trigger_count, sort_validation_points, trailing_period_gain,
         validation_pair_hash, validation_pair_key,
     };
     use crate::data::ScopeWay;
@@ -9056,6 +9218,8 @@ explain = "test"
             Some("主板".to_string()),
             Some(false),
             None,
+            None,
+            Some(4),
             None,
         )
         .expect_err("bad expression should fail before stock filtering");
@@ -9832,55 +9996,6 @@ explain = "test"
     }
 
     #[test]
-    fn validation_calibration_candidates_cover_trigger_modes_without_plain_duplicate() {
-        let seed_rule = ValidationSeedRule {
-            rule_name: "测试策略".to_string(),
-            rule_explain: String::new(),
-            scope_way: ScopeWay::Last,
-            scope_windows: 1,
-            formula: "C > O".to_string(),
-            points: 1.0,
-            dist_points: None,
-            tag: RuleTag::Normal,
-            exclude_rule_name: None,
-        };
-
-        let specs = build_validation_calibration_specs(&seed_rule);
-
-        assert_eq!(
-            specs
-                .iter()
-                .filter(|item| {
-                    scope_way_config_label(item.scope_way) == "LAST" && item.scope_windows == 1
-                })
-                .count(),
-            1
-        );
-        for scope_label in ["ANY", "EACH", "CONSEC>=2", "CONSEC>=3", "RECENT"] {
-            assert!(
-                specs
-                    .iter()
-                    .any(|item| scope_way_config_label(item.scope_way) == scope_label),
-                "missing {scope_label}"
-            );
-        }
-    }
-
-    #[test]
-    fn validation_recent_decay_weights_keep_direction_and_decay() {
-        let positive = build_recent_decay_dist_points(3, 1.0);
-        let negative = build_recent_decay_dist_points(3, -1.0);
-
-        assert_eq!(positive.len(), 3);
-        assert!((positive[0].points - 1.0).abs() < VALIDATION_EPS);
-        assert!((positive[1].points - 0.5).abs() < VALIDATION_EPS);
-        assert!((positive[2].points - 0.25).abs() < VALIDATION_EPS);
-        assert!((negative[0].points + 1.0).abs() < VALIDATION_EPS);
-        assert!((negative[1].points + 0.5).abs() < VALIDATION_EPS);
-        assert!((negative[2].points + 0.25).abs() < VALIDATION_EPS);
-    }
-
-    #[test]
     fn all_rule_summary_recomputes_metrics_from_daily_portfolio() {
         let make_summary =
             |rule_name: &str, residuals: [f64; 3], ics: [f64; 3]| RuleLayerRuleSummary {
@@ -10061,5 +10176,828 @@ explain = "test"
                 .is_some_and(|value| value < -0.18)
         );
         assert!(recent_20.decay_change.is_some_and(|value| value < -0.49));
+    }
+
+    fn validation_fold_test_point(index: usize, excess: f64) -> RuleLayerPoint {
+        RuleLayerPoint {
+            trade_date: format!("{index:08}"),
+            sample_count: 10,
+            avg_rule_score: Some(1.0),
+            avg_residual_return: Some(excess),
+            avg_excess_residual_return: Some(excess),
+            score_weighted_residual_return: Some(excess),
+            top_bottom_spread: Some(excess),
+            ic: Some(excess),
+        }
+    }
+
+    fn validation_fold_test_axis(len: usize) -> Vec<RuleLayerPoint> {
+        (0..len)
+            .map(|index| validation_fold_test_point(index, 0.0))
+            .collect()
+    }
+
+    fn validation_calendar_of(points: &[RuleLayerPoint]) -> Vec<String> {
+        points
+            .iter()
+            .map(|point| point.trade_date.clone())
+            .collect::<Vec<_>>()
+    }
+
+    fn validation_points_by_date<'a>(
+        axis: &[&'a RuleLayerPoint],
+    ) -> HashMap<&'a str, &'a RuleLayerPoint> {
+        axis.iter()
+            .map(|point| (point.trade_date.as_str(), *point))
+            .collect::<HashMap<_, _>>()
+    }
+
+    #[test]
+    fn validation_fold_plan_purges_holding_period_before_test() {
+        let folds = build_validation_fold_plan(100, 4, 2);
+
+        assert_eq!(folds.len(), 4);
+        for fold in &folds {
+            assert_eq!(fold.train_end_index + 1 + 2, fold.test_start_index);
+            assert!(fold.train_end_index < fold.test_start_index);
+            assert!(fold.test_start_index <= fold.test_end_index);
+        }
+        for pair in folds.windows(2) {
+            assert!(
+                pair[1].test_start_index > pair[0].test_end_index,
+                "测试窗口不能重叠"
+            );
+            assert!(
+                pair[1].train_end_index > pair[0].train_end_index,
+                "训练窗口必须随 fold 展开"
+            );
+        }
+    }
+
+    #[test]
+    fn validation_walk_forward_folds_keep_train_dates_disjoint_from_test() {
+        let points = validation_fold_test_axis(200);
+        let axis = sort_validation_points(&points);
+        let holding_period = 2;
+        let calendar = validation_calendar_of(&points);
+        let folds = build_validation_fold_plan(calendar.len(), 4, holding_period);
+        let day_trigger_counts = axis
+            .iter()
+            .map(|point| (point.trade_date.clone(), 3usize))
+            .collect::<HashMap<_, _>>();
+        let walk_forward = build_validation_walk_forward(
+            &calendar,
+            &folds,
+            holding_period,
+            1.0,
+            &validation_points_by_date(&axis),
+            &day_trigger_counts,
+        );
+
+        assert_eq!(walk_forward.purge_days, holding_period);
+        assert_eq!(walk_forward.folds.len(), 4);
+        for fold in &walk_forward.folds {
+            assert_eq!(fold.status, "ok");
+            assert!(fold.train_end_date < fold.test_start_date);
+            assert!(fold.test_start_date <= fold.test_end_date);
+            assert!(fold.test_day_count > 0);
+            assert_eq!(fold.test_sample_count, fold.test_day_count * 3);
+        }
+        for pair in walk_forward.folds.windows(2) {
+            assert!(pair[1].test_start_date > pair[0].test_end_date);
+        }
+    }
+
+    #[test]
+    fn validation_fold_plan_excludes_test_first_day_labels_with_single_day_holding() {
+        // holding period = 1 时 train 末日的收益实现日正好是 test 首日，
+        // 因此 purge 至少要排除 1 个交易日，train 不能使用 test 首日行情。
+        let points = validation_fold_test_axis(100);
+        let axis = sort_validation_points(&points);
+        let holding_period = 1;
+        let calendar = validation_calendar_of(&points);
+        let folds = build_validation_fold_plan(calendar.len(), 4, holding_period);
+        let day_trigger_counts = axis
+            .iter()
+            .map(|point| (point.trade_date.clone(), 1usize))
+            .collect::<HashMap<_, _>>();
+        let walk_forward = build_validation_walk_forward(
+            &calendar,
+            &folds,
+            holding_period,
+            1.0,
+            &validation_points_by_date(&axis),
+            &day_trigger_counts,
+        );
+
+        assert_eq!(walk_forward.purge_days, 1);
+        assert!(!walk_forward.folds.is_empty());
+        for fold in &walk_forward.folds {
+            let train_end_index = calendar
+                .iter()
+                .position(|trade_date| *trade_date == fold.train_end_date)
+                .expect("train end index");
+            let test_start_index = calendar
+                .iter()
+                .position(|trade_date| *trade_date == fold.test_start_date)
+                .expect("test start index");
+            // train 末日的下一日恰好是被 purge 掉的那一天，其标签收益实现日就是 test 首日。
+            assert_eq!(train_end_index + 2, test_start_index);
+            assert!(fold.train_end_date < calendar[test_start_index - 1]);
+        }
+    }
+
+    #[test]
+    fn validation_walk_forward_does_not_flip_raw_ic_and_spread_for_negative_rule() {
+        // 负向规则（points < 0）工作时的原始 IC/Spread 已经为正：分数符号进入秩相关与
+        // 高低分半区，再乘方向符号会把它们翻反。只有方向盲的残差均值需要翻转。
+        let points = (0..200)
+            .map(|index| RuleLayerPoint {
+                trade_date: format!("{index:08}"),
+                sample_count: 10,
+                avg_rule_score: Some(-1.0),
+                avg_residual_return: Some(-0.01),
+                avg_excess_residual_return: Some(-0.01),
+                score_weighted_residual_return: Some(0.02),
+                top_bottom_spread: Some(0.02),
+                ic: Some(0.05),
+            })
+            .collect::<Vec<_>>();
+        let axis = sort_validation_points(&points);
+        let calendar = validation_calendar_of(&points);
+        let folds = build_validation_fold_plan(calendar.len(), 4, 1);
+        let day_trigger_counts = axis
+            .iter()
+            .map(|point| (point.trade_date.clone(), 3usize))
+            .collect::<HashMap<_, _>>();
+
+        let walk_forward = build_validation_walk_forward(
+            &calendar,
+            &folds,
+            1,
+            -1.0,
+            &validation_points_by_date(&axis),
+            &day_trigger_counts,
+        );
+
+        assert_eq!(walk_forward.folds.len(), 4);
+        for fold in &walk_forward.folds {
+            assert_eq!(fold.status, "ok");
+            assert!(
+                fold.ic_mean
+                    .is_some_and(|value| (value - 0.05).abs() < 1e-12)
+            );
+            assert!(
+                fold.spread_mean
+                    .is_some_and(|value| (value - 0.02).abs() < 1e-12)
+            );
+            assert!(
+                fold.avg_residual_return
+                    .is_some_and(|value| (value - 0.01).abs() < 1e-12)
+            );
+        }
+        assert_eq!(walk_forward.ic_positive_folds, 4);
+        assert_eq!(walk_forward.residual_positive_folds, 4);
+        assert_eq!(walk_forward.spread_positive_folds, 4);
+    }
+
+    #[test]
+    fn validation_walk_forward_shares_one_calendar_across_combos() {
+        // 两个组合的触发密度不同，但 train/test 日期必须完全来自同一套 calendar；
+        // 触发稀疏的组合只在对应 fold 标记 insufficient，不重新切日期。
+        let points = validation_fold_test_axis(200);
+        let axis = sort_validation_points(&points);
+        let calendar = validation_calendar_of(&points);
+        let folds = build_validation_fold_plan(calendar.len(), 4, 1);
+        let dense_counts = axis
+            .iter()
+            .map(|point| (point.trade_date.clone(), 5usize))
+            .collect::<HashMap<_, _>>();
+        // 稀疏组合每 10 个交易日只有一个有效日，每个 fold 窗口都不足 20 个有效日。
+        let sparse_counts = axis
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| index % 10 == 0)
+            .map(|(_, point)| (point.trade_date.clone(), 1usize))
+            .collect::<HashMap<_, _>>();
+        let sparse_points = axis
+            .iter()
+            .filter(|point| sparse_counts.contains_key(&point.trade_date))
+            .copied()
+            .collect::<Vec<_>>();
+
+        let dense = build_validation_walk_forward(
+            &calendar,
+            &folds,
+            1,
+            1.0,
+            &validation_points_by_date(&axis),
+            &dense_counts,
+        );
+        let sparse = build_validation_walk_forward(
+            &calendar,
+            &folds,
+            1,
+            1.0,
+            &validation_points_by_date(&sparse_points),
+            &sparse_counts,
+        );
+
+        assert_eq!(dense.folds.len(), sparse.folds.len());
+        for (dense_fold, sparse_fold) in dense.folds.iter().zip(&sparse.folds) {
+            assert_eq!(dense_fold.train_start_date, sparse_fold.train_start_date);
+            assert_eq!(dense_fold.train_end_date, sparse_fold.train_end_date);
+            assert_eq!(dense_fold.test_start_date, sparse_fold.test_start_date);
+            assert_eq!(dense_fold.test_end_date, sparse_fold.test_end_date);
+            assert_eq!(dense_fold.status, "ok");
+            assert_eq!(sparse_fold.status, "insufficient");
+            assert!(sparse_fold.test_day_count < 20);
+            assert!(sparse_fold.ic_mean.is_none());
+            assert!(sparse_fold.avg_residual_return.is_none());
+        }
+        assert_eq!(sparse.ic_positive_folds, 0);
+        assert_eq!(sparse.residual_positive_folds, 0);
+        assert_eq!(sparse.spread_positive_folds, 0);
+    }
+
+    #[test]
+    fn validation_score_pearson_uses_zero_filled_universe() {
+        let samples = ["000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ"]
+            .into_iter()
+            .map(|ts_code| RuleLayerSamplePoint {
+                ts_code: ts_code.to_string(),
+                trade_date: "20240102".to_string(),
+                rule_score: 0.0,
+                residual_return: 0.01,
+                er_change: f64::INFINITY,
+            })
+            .collect::<Vec<_>>();
+        let universe = build_validation_universe_index(&samples);
+        let mut rule_index = ValidationExistingRuleScoreIndex::default();
+        rule_index.rule_names.push("核心策略".to_string());
+        rule_index.hit_counts.push(2);
+        rule_index.score_sums.push(2.0);
+        rule_index.score_square_sums.push(2.0);
+        for ts_code in ["000003.SZ", "000004.SZ"] {
+            rule_index.hits.push(ValidationRuleHit {
+                pair_hash: validation_pair_hash(ts_code, "20240102"),
+                universe_index: 0,
+                rule_index: 0,
+                score: 1.0,
+            });
+        }
+        rule_index
+            .hits
+            .sort_unstable_by_key(|hit| (hit.pair_hash, hit.rule_index));
+        let candidate_scores = ["000001.SZ", "000002.SZ"]
+            .into_iter()
+            .map(|ts_code| (validation_pair_hash(ts_code, "20240102"), 1.0))
+            .collect::<HashMap<_, _>>();
+
+        let rows = build_validation_expression_similarity_rows(
+            &universe,
+            &rule_index,
+            &[],
+            &candidate_scores,
+            &HashMap::new(),
+            None,
+            &HashMap::new(),
+        );
+
+        // 没有共同触发时，只有把未触发样本按 0 计入完整 universe 才能得到有限相关性。
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].overlap_samples, 0);
+        assert_eq!(rows[0].jaccard, Some(0.0));
+        assert_eq!(rows[0].phi, Some(-1.0));
+        assert_eq!(rows[0].score_pearson, Some(-1.0));
+    }
+
+    #[test]
+    fn validation_incremental_mean_recovers_constant_alpha() {
+        // candidate = core + 5 在 train/test 都成立：样本外增量应回到 constant_alpha，
+        // 而不是被 train intercept 吸收成 0。core 在窗口内正负均衡（均值 0），
+        // 因此只剩标准化 ridge 的收缩项 0.0909 × x，其窗口均值同样为 0。
+        let constant_alpha = 5.0;
+        let points = validation_fold_test_axis(120);
+        let axis = sort_validation_points(&points);
+        let calendar = validation_calendar_of(&points);
+        let folds = build_validation_fold_plan(calendar.len(), 1, 0);
+        let core_daily = axis
+            .iter()
+            .enumerate()
+            .map(|(index, point)| {
+                let core = if index % 2 == 0 { 1.0 } else { -1.0 };
+                (point.trade_date.clone(), core)
+            })
+            .collect::<HashMap<_, _>>();
+        let candidate_daily = axis
+            .iter()
+            .enumerate()
+            .map(|(index, point)| {
+                let core = if index % 2 == 0 { 1.0 } else { -1.0 };
+                (point.trade_date.clone(), core + constant_alpha)
+            })
+            .collect::<HashMap<_, _>>();
+
+        let incremental = build_validation_incremental(
+            &calendar,
+            &folds,
+            0,
+            0,
+            &candidate_daily,
+            &[("核心策略".to_string(), &core_daily)],
+        );
+
+        let fold = &incremental.folds[0];
+        assert_eq!(fold.status, "ok");
+        assert!(
+            fold.incremental_mean
+                .is_some_and(|value| (value - constant_alpha).abs() < 1e-6),
+            "{:?}",
+            fold.incremental_mean
+        );
+        assert!(fold.incremental_mean.is_some_and(|value| value > 0.0));
+        assert_eq!(incremental.positive_folds, 1);
+    }
+
+    #[test]
+    fn validation_incremental_prediction_uses_train_fit_only() {
+        let points = validation_fold_test_axis(120);
+        let axis = sort_validation_points(&points);
+        let calendar = validation_calendar_of(&points);
+        let folds = build_validation_fold_plan(calendar.len(), 1, 0);
+        let candidate_daily = axis
+            .iter()
+            .enumerate()
+            .map(|(index, point)| {
+                let candidate = if index >= 30 {
+                    2.0
+                } else {
+                    2.0 * (1.0 + index as f64)
+                };
+                (point.trade_date.clone(), candidate)
+            })
+            .collect::<HashMap<_, _>>();
+        let core_daily = axis
+            .iter()
+            .enumerate()
+            .map(|(index, point)| {
+                let core = if index >= 30 {
+                    100.0
+                } else {
+                    1.0 + index as f64
+                };
+                (point.trade_date.clone(), core)
+            })
+            .collect::<HashMap<_, _>>();
+
+        let incremental = build_validation_incremental(
+            &calendar,
+            &folds,
+            0,
+            0,
+            &candidate_daily,
+            &[("核心策略".to_string(), &core_daily)],
+        );
+
+        // train 期 y = 2x（斜率 2、均值 2/1），test 期把 x 抬到 100 而 y 保持 2，
+        // 因此只有用 train 拟合出的斜率（≈2）外推才会得到明显负增量：
+        // 正确预测 ≈ 2 + 2 * (100 - 1) = 200 → 增量 ≈ -198。
+        // 若把 test 混入拟合，斜率会被拉到 ≈0，残差接近 0，测试会立刻失败。
+        let fold = &incremental.folds[0];
+        assert_eq!(fold.status, "ok");
+        assert_eq!(fold.train_day_count, 30);
+        assert_eq!(fold.test_day_count, 90);
+        assert!(
+            fold.incremental_mean.is_some_and(|value| value < -150.0),
+            "{:?}",
+            fold.incremental_mean
+        );
+        assert_eq!(incremental.positive_folds, 0);
+    }
+
+    #[test]
+    fn validation_incremental_marks_insufficient_folds_without_counting_windows() {
+        // 场景一：候选只在最前面 25 个交易日有效，所有 fold 都达不到
+        // max(30, predictors × 5) 的训练行或 20 个共同有效日。
+        let points = validation_fold_test_axis(80);
+        let axis = sort_validation_points(&points);
+        let calendar = validation_calendar_of(&points);
+        let folds = build_validation_fold_plan(calendar.len(), 3, 0);
+        let candidate_daily = axis
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index < 25)
+            .map(|(index, point)| (point.trade_date.clone(), 1.0 + index as f64))
+            .collect::<HashMap<_, _>>();
+        let core_daily = axis
+            .iter()
+            .enumerate()
+            .map(|(index, point)| (point.trade_date.clone(), 1.0 + index as f64))
+            .collect::<HashMap<_, _>>();
+
+        let incremental = build_validation_incremental(
+            &calendar,
+            &folds,
+            1,
+            0,
+            &candidate_daily,
+            &[("核心策略".to_string(), &core_daily)],
+        );
+
+        assert!(!incremental.folds.is_empty());
+        for fold in &incremental.folds {
+            assert!(fold.train_day_count < 30, "{}", fold.train_day_count);
+            assert_eq!(fold.status, "insufficient");
+            assert!(fold.incremental_mean.is_none());
+            assert!(fold.incremental_hac_t.is_none());
+            assert!(fold.positive_day_ratio.is_none());
+        }
+        assert!(
+            incremental
+                .folds
+                .iter()
+                .any(|fold| fold.test_day_count < 20)
+        );
+        assert_eq!(incremental.positive_folds, 0);
+
+        // 场景二：训练行足够，但核心策略在样本外只有 15 个共同有效日（< 20），
+        // 该 fold 同样标记 insufficient。
+        let points = validation_fold_test_axis(120);
+        let axis = sort_validation_points(&points);
+        let calendar = validation_calendar_of(&points);
+        let folds = build_validation_fold_plan(calendar.len(), 1, 0);
+        let candidate_daily = axis
+            .iter()
+            .enumerate()
+            .map(|(index, point)| (point.trade_date.clone(), 1.0 + index as f64))
+            .collect::<HashMap<_, _>>();
+        let short_core_daily = axis
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index < 45)
+            .map(|(index, point)| (point.trade_date.clone(), 1.0 + index as f64))
+            .collect::<HashMap<_, _>>();
+        let incremental = build_validation_incremental(
+            &calendar,
+            &folds,
+            0,
+            0,
+            &candidate_daily,
+            &[("核心策略".to_string(), &short_core_daily)],
+        );
+
+        let fold = &incremental.folds[0];
+        assert_eq!(fold.train_day_count, 30);
+        assert_eq!(fold.test_day_count, 15);
+        assert_eq!(fold.status, "insufficient");
+        assert!(fold.incremental_mean.is_none());
+        assert_eq!(incremental.positive_folds, 0);
+    }
+
+    #[test]
+    fn validation_incremental_ridge_handles_collinear_core_strategies() {
+        let points = validation_fold_test_axis(120);
+        let axis = sort_validation_points(&points);
+        let calendar = validation_calendar_of(&points);
+        let folds = build_validation_fold_plan(calendar.len(), 1, 0);
+        let candidate_daily = axis
+            .iter()
+            .enumerate()
+            .map(|(index, point)| (point.trade_date.clone(), 1.0 + (index % 7) as f64))
+            .collect::<HashMap<_, _>>();
+        let collinear = axis
+            .iter()
+            .enumerate()
+            .map(|(index, point)| (point.trade_date.clone(), 1.0 + (index % 7) as f64))
+            .collect::<HashMap<_, _>>();
+
+        // 两个完全相同的 predictor 会让普通最小二乘的正规方程退化，标准化 ridge 必须仍然可解。
+        let incremental = build_validation_incremental(
+            &calendar,
+            &folds,
+            0,
+            0,
+            &candidate_daily,
+            &[
+                ("核心策略A".to_string(), &collinear),
+                ("核心策略B".to_string(), &collinear),
+            ],
+        );
+
+        let fold = &incremental.folds[0];
+        assert_eq!(fold.status, "ok");
+        assert!(fold.incremental_mean.is_some_and(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn validation_high_similarity_and_positive_increment_can_coexist() {
+        let samples = ["000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ"]
+            .into_iter()
+            .map(|ts_code| RuleLayerSamplePoint {
+                ts_code: ts_code.to_string(),
+                trade_date: "20240102".to_string(),
+                rule_score: 0.0,
+                residual_return: 0.01,
+                er_change: f64::INFINITY,
+            })
+            .collect::<Vec<_>>();
+        let universe = build_validation_universe_index(&samples);
+        let mut rule_index = ValidationExistingRuleScoreIndex::default();
+        rule_index.rule_names.push("核心策略".to_string());
+        rule_index.hit_counts.push(3);
+        rule_index.score_sums.push(3.0);
+        rule_index.score_square_sums.push(3.0);
+        for ts_code in ["000001.SZ", "000002.SZ", "000003.SZ"] {
+            rule_index.hits.push(ValidationRuleHit {
+                pair_hash: validation_pair_hash(ts_code, "20240102"),
+                universe_index: 0,
+                rule_index: 0,
+                score: 1.0,
+            });
+        }
+        rule_index
+            .hits
+            .sort_unstable_by_key(|hit| (hit.pair_hash, hit.rule_index));
+        let candidate_scores = ["000001.SZ", "000002.SZ", "000003.SZ"]
+            .into_iter()
+            .map(|ts_code| (validation_pair_hash(ts_code, "20240102"), 1.0))
+            .collect::<HashMap<_, _>>();
+        let rows = build_validation_expression_similarity_rows(
+            &universe,
+            &rule_index,
+            &[],
+            &candidate_scores,
+            &HashMap::new(),
+            None,
+            &HashMap::new(),
+        );
+        assert_eq!(rows[0].jaccard, Some(1.0));
+        assert_eq!(rows[0].score_pearson, Some(1.0));
+
+        let points = validation_fold_test_axis(120);
+        let axis = sort_validation_points(&points);
+        let calendar = validation_calendar_of(&points);
+        let folds = build_validation_fold_plan(calendar.len(), 1, 0);
+        let core_daily = axis
+            .iter()
+            .enumerate()
+            .map(|(index, point)| (point.trade_date.clone(), 1.0 + index as f64))
+            .collect::<HashMap<_, _>>();
+        let candidate_daily = axis
+            .iter()
+            .enumerate()
+            .map(|(index, point)| {
+                let value = 1.0 + index as f64 + if index >= 30 { 3.0 } else { 0.0 };
+                (point.trade_date.clone(), value)
+            })
+            .collect::<HashMap<_, _>>();
+        let incremental = build_validation_incremental(
+            &calendar,
+            &folds,
+            0,
+            0,
+            &candidate_daily,
+            &[("核心策略".to_string(), &core_daily)],
+        );
+
+        // 与已有策略高度重合，样本外窗口仍然保留正增量，两者互不推导。
+        assert_eq!(incremental.positive_folds, 1);
+        assert_eq!(incremental.folds[0].status, "ok");
+        assert!(
+            incremental.folds[0]
+                .incremental_mean
+                .is_some_and(|value| value > 0.0)
+        );
+    }
+
+    #[test]
+    fn validation_low_similarity_can_still_lack_increment() {
+        let samples = ["000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ"]
+            .into_iter()
+            .map(|ts_code| RuleLayerSamplePoint {
+                ts_code: ts_code.to_string(),
+                trade_date: "20240102".to_string(),
+                rule_score: 0.0,
+                residual_return: 0.01,
+                er_change: f64::INFINITY,
+            })
+            .collect::<Vec<_>>();
+        let universe = build_validation_universe_index(&samples);
+        let mut rule_index = ValidationExistingRuleScoreIndex::default();
+        rule_index.rule_names.push("核心策略".to_string());
+        rule_index.hit_counts.push(2);
+        rule_index.score_sums.push(2.0);
+        rule_index.score_square_sums.push(2.0);
+        for ts_code in ["000003.SZ", "000004.SZ"] {
+            rule_index.hits.push(ValidationRuleHit {
+                pair_hash: validation_pair_hash(ts_code, "20240102"),
+                universe_index: 0,
+                rule_index: 0,
+                score: 1.0,
+            });
+        }
+        rule_index
+            .hits
+            .sort_unstable_by_key(|hit| (hit.pair_hash, hit.rule_index));
+        let candidate_scores = ["000001.SZ", "000002.SZ"]
+            .into_iter()
+            .map(|ts_code| (validation_pair_hash(ts_code, "20240102"), 1.0))
+            .collect::<HashMap<_, _>>();
+        let rows = build_validation_expression_similarity_rows(
+            &universe,
+            &rule_index,
+            &[],
+            &candidate_scores,
+            &HashMap::new(),
+            None,
+            &HashMap::new(),
+        );
+        assert_eq!(rows[0].jaccard, Some(0.0));
+
+        let points = validation_fold_test_axis(120);
+        let axis = sort_validation_points(&points);
+        let calendar = validation_calendar_of(&points);
+        let folds = build_validation_fold_plan(calendar.len(), 1, 0);
+        let core_daily = axis
+            .iter()
+            .enumerate()
+            .map(|(index, point)| (point.trade_date.clone(), 1.0 + index as f64))
+            .collect::<HashMap<_, _>>();
+        let candidate_daily = axis
+            .iter()
+            .enumerate()
+            .map(|(index, point)| {
+                let value = 1.0 + index as f64;
+                let candidate = -(value) - if index >= 30 { 3.0 } else { 0.0 };
+                (point.trade_date.clone(), candidate)
+            })
+            .collect::<HashMap<_, _>>();
+        let incremental = build_validation_incremental(
+            &calendar,
+            &folds,
+            0,
+            0,
+            &candidate_daily,
+            &[("核心策略".to_string(), &core_daily)],
+        );
+
+        // 低相关只说明比较独立，没有观察到稳定新增收益时不能据此判好。
+        assert_eq!(incremental.positive_folds, 0);
+        assert!(
+            incremental.folds[0]
+                .incremental_mean
+                .is_some_and(|value| value < 0.0)
+        );
+    }
+
+    #[test]
+    fn rule_expression_validation_returns_every_combo_in_enumeration_order() {
+        let source_dir = temp_source_dir();
+        let source_dir_str = source_dir.to_str().expect("utf8 source dir");
+        prepare_validation_source_files(source_dir_str);
+        write(
+            PathBuf::from(source_dir_str).join("stock_concepts.csv"),
+            "ts_code,c1,c2,c3,concept\n",
+        )
+        .expect("write stock_concepts.csv");
+        write(
+            PathBuf::from(source_dir_str).join("score_rule.toml"),
+            r#"
+version = 1
+
+[[scene]]
+name = "趋势启动"
+direction = "long"
+observe_threshold = 1.0
+trigger_threshold = 2.0
+confirm_threshold = 3.0
+fail_threshold = 1.0
+
+[[rule]]
+name = "有效策略"
+scene = "趋势启动"
+stage = "base"
+scope_windows = 1
+scope_way = "LAST"
+when = "C > O"
+points = 1.0
+explain = "test"
+"#,
+        )
+        .expect("write score_rule.toml");
+
+        let data = super::run_rule_expression_validation(
+            source_dir_str.to_string(),
+            String::new(),
+            Some("C > REF(C, N)".to_string()),
+            Some("LAST".to_string()),
+            Some(1),
+            Some("qfq".to_string()),
+            "000001.SH".to_string(),
+            Some(0.5),
+            Some(0.2),
+            Some(0.0),
+            "20240102".to_string(),
+            "20240104".to_string(),
+            Some(1),
+            Some(0),
+            Some(1),
+            None,
+            Some(vec![super::RuleValidationUnknownConfig {
+                name: "N".to_string(),
+                start: 1.0,
+                end: 2.0,
+                step: 1.0,
+            }]),
+            Some(1),
+            None,
+            Some(false),
+            None,
+            None,
+            Some(2),
+            None,
+        )
+        .expect("rule expression validation");
+
+        // 未知数两个取值都返回，顺序等于枚举顺序，没有任何性能排序或最佳组合标记。
+        assert_eq!(data.combo_results.len(), 2);
+        assert_eq!(data.core_rule_names, Vec::<String>::new());
+        for (index, combo) in data.combo_results.iter().enumerate() {
+            assert_eq!(combo.unknown_values.len(), 1);
+            assert_eq!(combo.unknown_values[0].value, 1.0 + index as f64);
+            assert!(combo.incremental.folds.is_empty());
+        }
+
+        // 核心策略缺失时必须报错，不能静默忽略 predictors。
+        let missing_core_error = super::run_rule_expression_validation(
+            source_dir_str.to_string(),
+            String::new(),
+            Some("C > O".to_string()),
+            Some("LAST".to_string()),
+            Some(1),
+            Some("qfq".to_string()),
+            "000001.SH".to_string(),
+            Some(0.5),
+            Some(0.2),
+            Some(0.0),
+            "20240102".to_string(),
+            "20240104".to_string(),
+            Some(1),
+            Some(0),
+            Some(1),
+            None,
+            None,
+            Some(1),
+            None,
+            Some(false),
+            None,
+            None,
+            Some(2),
+            Some(vec!["不存在的核心策略".to_string()]),
+        )
+        .expect_err("missing core strategy should fail");
+        assert!(
+            missing_core_error.contains("不存在的核心策略")
+                && missing_core_error.contains("核心策略在结果库中不存在"),
+            "{missing_core_error}"
+        );
+        let _ = std::fs::remove_dir_all(&source_dir);
+    }
+
+    #[test]
+    fn expression_validation_api_drops_auto_scoring_symbols() {
+        let sources = [
+            ("app statistics", include_str!("statistics.rs")),
+            (
+                "tauri commands",
+                include_str!("../../../ui/lianghua_web/src-tauri/src/lib.rs"),
+            ),
+            (
+                "frontend api",
+                include_str!("../../../ui/lianghua_web/src/apis/strategyTrigger.ts"),
+            ),
+            (
+                "frontend page",
+                include_str!(
+                    "../../../ui/lianghua_web/src/pages/desktop/SceneLayerBacktestPage.tsx"
+                ),
+            ),
+        ];
+        let forbidden = [
+            ["suggested", "points"].join("_"),
+            ["suggested", "total", "points"].join("_"),
+            ["suggested", "dist", "points"].join("_"),
+            ["calibration", "score"].join("_"),
+            ["recommended", "candidate", "key"].join("_"),
+            ["best", "combo", "key"].join("_"),
+            ["point", "scale", "description"].join("_"),
+            ["run_rule_expression", "calibration"].join("_"),
+        ];
+        for (label, source) in sources {
+            for symbol in &forbidden {
+                assert!(!source.contains(symbol), "{label} 仍包含 {symbol}");
+            }
+        }
     }
 }

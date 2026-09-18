@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { ensureManagedSourcePath } from "../../apis/managedSource";
 import { getStrategyManagePage, type StrategyManageRuleItem } from "../../apis/strategyManage";
@@ -6,7 +6,6 @@ import {
   getCachedRuleLayerBacktestDetail,
   getRuleLayerBacktestDefaults,
   runRankLayerBacktest,
-  runRuleExpressionCalibration,
   runRuleExpressionValidation,
   runTransientRankLayerBacktest,
   runTransientRuleLayerBacktest,
@@ -17,8 +16,6 @@ import {
   type RankLayerBacktestData,
   type RankLayerMethod,
   type RankLayerSampleGroup,
-  type RuleExpressionCalibrationCandidate,
-  type RuleExpressionCalibrationData,
   type RuleExpressionValidationData,
   type RuleValidationComboResult,
   type RuleDecayValidation,
@@ -197,7 +194,7 @@ function formatPercent(value?: number | null, digits = 2) {
 }
 
 function getRuleDecayValidation(
-  row: RuleLayerRuleSummary,
+  row: { decay_validations?: RuleDecayValidation[] | null },
   windowDays: number,
 ): RuleDecayValidation | undefined {
   return (row.decay_validations ?? []).find((item) => item.window_days === windowDays);
@@ -271,27 +268,6 @@ function renderRuleDecayValidations(row: RuleLayerRuleSummary) {
     return "--";
   }
   return renderDecayValidations(validations, row.rule_name);
-}
-
-function formatCalibrationDistancePoints(candidate: RuleExpressionCalibrationCandidate) {
-  if (candidate.suggested_dist_points.length === 0) {
-    return "—";
-  }
-  return candidate.suggested_dist_points
-    .map((item) => `${item.min}-${item.max}:${formatNumber(item.points, 2)}`)
-    .join("；");
-}
-
-function formatCalibrationBuckets(candidate: RuleExpressionCalibrationCandidate) {
-  if (candidate.score_buckets.length === 0) {
-    return "无可用分桶";
-  }
-  return candidate.score_buckets
-    .map(
-      (item) =>
-        `×${formatNumber(item.score_multiplier, 2)}：${item.sample_count}样本 / ${formatPercent(item.avg_residual_return)}`,
-    )
-    .join("；");
 }
 
 function formatBacktestBoardLabel(value?: {
@@ -727,10 +703,8 @@ export default function SceneLayerBacktestPage() {
   const [validationLoading, setValidationLoading] = useState(false);
   const [validationError, setValidationError] = useState("");
   const [validationResult, setValidationResult] = useState<RuleExpressionValidationData | null>(null);
-  const [validationCalibrationLoading, setValidationCalibrationLoading] = useState(false);
-  const [validationCalibrationError, setValidationCalibrationError] = useState("");
-  const [validationCalibrationResult, setValidationCalibrationResult] =
-    useState<RuleExpressionCalibrationData | null>(null);
+  const [validationWalkForwardFoldsText, setValidationWalkForwardFoldsText] = useState("4");
+  const [validationCoreRuleNames, setValidationCoreRuleNames] = useState<string[]>([]);
   const [validationSelectedComboKey, setValidationSelectedComboKey] = useState("");
   const [validationRestoredComboKey, setValidationRestoredComboKey] = useState("");
   const [validationDetailModalOpen, setValidationDetailModalOpen] = useState(false);
@@ -745,8 +719,7 @@ export default function SceneLayerBacktestPage() {
     rankTransientLoading ||
     ruleLoading ||
     ruleTransientLoading ||
-    validationLoading ||
-    validationCalibrationLoading;
+    validationLoading;
   const backtestBoardOptions = useMemo(
     () => buildBoardFilterOptions(STOCK_PICK_BOARD_OPTIONS, excludeStBoard),
     [excludeStBoard],
@@ -981,14 +954,6 @@ export default function SceneLayerBacktestPage() {
       ) ?? validationResult.combo_results[0] ?? null
     );
   }, [validationResult, validationSelectedComboKey]);
-  const activeValidationCalibration =
-    validationCalibrationResult?.combo_key === selectedValidationCombo?.combo_key
-      ? validationCalibrationResult
-      : null;
-  const recommendedValidationCalibration = activeValidationCalibration?.candidates.find(
-    (item) => item.candidate_key === activeValidationCalibration.recommended_candidate_key,
-  );
-
   const validationComboCount = validationResult?.combo_results.length ?? 0;
   const hasUnknownValidationCombo =
     validationResult?.combo_results.some((item) => item.unknown_values.length > 0) ?? false;
@@ -1015,10 +980,7 @@ export default function SceneLayerBacktestPage() {
       return;
     }
 
-    const preferred =
-      validationResult.best_combo_key?.trim() ||
-      validationResult.combo_results[0]?.combo_key ||
-      "";
+    const preferred = validationResult.combo_results[0]?.combo_key || "";
     setValidationRestoredComboKey("");
     setValidationSelectedComboKey(preferred);
     setValidationDetailModalOpen(
@@ -1185,10 +1147,6 @@ export default function SceneLayerBacktestPage() {
   } = useTableSort<RuleValidationComboResult, ValidationComboSortKey>(
     validationComboRows,
     validationComboSortDefinitions,
-    {
-      key: "spread_mean",
-      direction: "desc",
-    },
   );
 
   function renderValidationComboSortHeader(key: ValidationComboSortKey, label: string) {
@@ -1203,6 +1161,31 @@ export default function SceneLayerBacktestPage() {
         />
       </th>
     );
+  }
+
+  function formatValidationWindowRatio(
+    combo: RuleValidationComboResult,
+    kind: "ic" | "residual" | "incremental",
+  ) {
+    // 分母固定为全部 fold：样本不足的窗口按“不是正窗口”计入，避免只评估 1/1 个窗口
+    // 的参数在鲁棒性表里看起来最好。
+    const folds = (kind === "incremental" ? combo.incremental?.folds : combo.walk_forward?.folds) ?? [];
+    if (folds.length === 0) {
+      return "--";
+    }
+    const positive =
+      kind === "incremental"
+        ? combo.incremental?.positive_folds
+        : kind === "ic"
+          ? combo.walk_forward?.ic_positive_folds
+          : combo.walk_forward?.residual_positive_folds;
+    return `${positive ?? 0} / ${folds.length}`;
+  }
+
+  function formatValidationInsufficientHint(combo: RuleValidationComboResult, kind: "walk_forward" | "incremental") {
+    const folds = (kind === "incremental" ? combo.incremental?.folds : combo.walk_forward?.folds) ?? [];
+    const insufficient = folds.filter((fold) => fold.status === "insufficient").length;
+    return insufficient > 0 ? `${insufficient} / ${folds.length} 个 fold 样本不足（计入分母但不计为正窗口）` : "";
   }
 
   function readManualMarketValueFilter(setMessage: (message: string) => void) {
@@ -1575,8 +1558,6 @@ export default function SceneLayerBacktestPage() {
     const matched = strategyRuleOptions.find((item) => item.name === ruleName);
     if (!matched) {
       setValidationResult(null);
-      setValidationCalibrationResult(null);
-      setValidationCalibrationError("");
       setValidationError("");
       return;
     }
@@ -1595,8 +1576,6 @@ export default function SceneLayerBacktestPage() {
       setValidationUnknownConfigs([]);
     }
     setValidationResult(null);
-    setValidationCalibrationResult(null);
-    setValidationCalibrationError("");
     setValidationError("");
   }
 
@@ -1623,8 +1602,6 @@ export default function SceneLayerBacktestPage() {
     setValidationUnknownConfigs([]);
     setValidationSampleLimitText(String(VALIDATION_DEFAULT_SAMPLE_LIMIT));
     setValidationResult(null);
-    setValidationCalibrationResult(null);
-    setValidationCalibrationError("");
     setValidationSelectedComboKey("");
     setValidationRestoredComboKey("");
     setValidationDetailModalOpen(false);
@@ -1643,8 +1620,9 @@ export default function SceneLayerBacktestPage() {
         scope_way: matched.scope_way || parsedScopeWay.scopeWay,
         scope_windows: scopeWindows,
         sample_limit_per_group: VALIDATION_DEFAULT_SAMPLE_LIMIT,
+        walk_forward_folds: detail.walk_forward?.fold_count ?? 4,
+        core_rule_names: detail.incremental?.core_rule_names ?? [],
         combo_results: [detail],
-        best_combo_key: detail.combo_key,
       });
     } catch (detailError) {
       setValidationResult(null);
@@ -1747,6 +1725,21 @@ export default function SceneLayerBacktestPage() {
       sampleLimitPerGroupRaw,
     );
 
+    const walkForwardFoldsRaw = Number(validationWalkForwardFoldsText);
+    if (
+      !Number.isFinite(walkForwardFoldsRaw) ||
+      !Number.isInteger(walkForwardFoldsRaw) ||
+      walkForwardFoldsRaw < 1 ||
+      walkForwardFoldsRaw > 8
+    ) {
+      setValidationError("Walk-forward folds 必须是 1 到 8 的整数。");
+      return;
+    }
+    if (validationCoreRuleNames.length > 8) {
+      setValidationError("核心策略最多选择 8 个，请减少 predictors 后重试。");
+      return;
+    }
+
     const selectedRule = strategyRuleOptions.find(
       (item) => item.name === validationImportRuleName.trim(),
     );
@@ -1755,8 +1748,6 @@ export default function SceneLayerBacktestPage() {
     const normalizedManualPoints = validationDirection === "negative" ? -1 : 1;
 
     setValidationResult(null);
-    setValidationCalibrationResult(null);
-    setValidationCalibrationError("");
     setValidationSelectedComboKey("");
     setValidationRestoredComboKey("");
     setValidationDetailModalOpen(false);
@@ -1794,6 +1785,8 @@ export default function SceneLayerBacktestPage() {
         sampleLimitPerGroup,
         board: backtestBoardFilter === "全部" ? undefined : backtestBoardFilter,
         excludeStBoard: excludeStBoard || undefined,
+        walkForwardFolds: walkForwardFoldsRaw,
+        coreRuleNames: validationCoreRuleNames,
         ...marketValueFilter,
       });
       const compacted = compactRuleExpressionValidationData(data);
@@ -1804,35 +1797,6 @@ export default function SceneLayerBacktestPage() {
       setValidationError(`执行表达式验证失败: ${String(runError)}`);
     } finally {
       setValidationLoading(false);
-    }
-  }
-
-  async function onRunRuleExpressionCalibration() {
-    if (!validationResult || !selectedValidationCombo) {
-      setValidationCalibrationError("请先完成基础表达式验证并选择一个参数组合。");
-      return;
-    }
-    const continuationId = validationResult.continuation_id?.trim();
-    if (!continuationId) {
-      setValidationCalibrationError(
-        "当前结果没有可复用的基础数据，可能来自旧会话或策略回测详情；请重新执行一次表达式验证。",
-      );
-      return;
-    }
-
-    setValidationCalibrationLoading(true);
-    setValidationCalibrationError("");
-    setValidationCalibrationResult(null);
-    try {
-      const data = await runRuleExpressionCalibration(
-        continuationId,
-        selectedValidationCombo.combo_key,
-      );
-      setValidationCalibrationResult(data);
-    } catch (runError) {
-      setValidationCalibrationError(`继续验证失败: ${String(runError)}`);
-    } finally {
-      setValidationCalibrationLoading(false);
     }
   }
 
@@ -1942,6 +1906,7 @@ export default function SceneLayerBacktestPage() {
   function renderValidationComboDetailSections(
     combo: RuleValidationComboResult,
     useModalLayout = false,
+    robustnessSection?: ReactNode,
   ) {
     if (!validationResult) {
       return null;
@@ -1968,6 +1933,86 @@ export default function SceneLayerBacktestPage() {
       (maxCount, bucket) => Math.max(maxCount, bucket.sample_count),
       0,
     );
+    const dailyMetrics = combo.daily_metrics ?? [];
+    const walkForward = combo.walk_forward ?? null;
+    const incremental = combo.incremental ?? null;
+    const topSimilarity = combo.similarity_rows[0] ?? null;
+    const decay20 = getRuleDecayValidation(combo.backtest, 20);
+    const foldPositiveSummary = (value?: number | null) =>
+      !walkForward || walkForward.folds.length === 0 || value === null || value === undefined
+        ? "--"
+        : `${value} / ${walkForward.folds.length}`;
+    const incrementalEvaluatedFolds =
+      incremental?.folds.filter((fold) => fold.status !== "insufficient").length ?? 0;
+    const incrementalInsufficientFolds =
+      (incremental?.folds.length ?? 0) - incrementalEvaluatedFolds;
+    const incrementalSummary =
+      !incremental || incremental.core_rule_names.length === 0
+        ? "未选择核心策略"
+        : incremental.folds.length > 0
+          ? `${incremental.positive_folds} / ${incremental.folds.length}${
+              incrementalInsufficientFolds > 0
+                ? `（${incrementalInsufficientFolds} fold 样本不足）`
+                : ""
+            }`
+          : "样本不足，无有效窗口";
+
+    const samplesSection = (
+      <div className={`${sectionClassName} scene-layer-validation-trigger-count-section`}>
+        {!shouldSkipTriggerCountSelection ? (
+          <>
+            <div className="scene-layer-validation-trigger-count-head">
+              <h3>样本检查</h3>
+              <span>选择次数后查看对应样本</span>
+            </div>
+            <div className="scene-layer-validation-trigger-count-options">
+              {triggerCountStats.map((item) => (
+                <button
+                  key={`${combo.combo_key}-trigger-count-${item.trigger_count}`}
+                  type="button"
+                  className={
+                    validationSelectedTriggerCount === item.trigger_count
+                      ? "scene-layer-validation-trigger-count-btn scene-layer-validation-trigger-count-btn-active"
+                      : "scene-layer-validation-trigger-count-btn"
+                  }
+                  onClick={() =>
+                    setValidationSelectedTriggerCount((current) =>
+                      current === item.trigger_count ? null : item.trigger_count,
+                    )
+                  }
+                >
+                  <strong>{item.trigger_count} 次</strong>
+                  <span>{item.total_samples} 个样本</span>
+                </button>
+              ))}
+            </div>
+          </>
+        ) : (
+          <div className="scene-layer-validation-trigger-count-head">
+            <h3>样本检查</h3>
+            <span>正样本 / 负样本 / 随机样本</span>
+          </div>
+        )}
+        {selectedTriggerCombo ? (
+          <div className="scene-layer-validation-sample-summary">
+            <ExpressionValidationSamplesPanel
+              data={{
+                importRuleName: validationResult.import_rule_name,
+                importRuleExplain: validationResult.import_rule_explain,
+                expression: validationExpression,
+                combo: selectedTriggerCombo,
+                comboParamSummary: formatUnknownValuesForCombo(combo),
+                sampleLimitPerGroup: validationResult.sample_limit_per_group,
+                sourcePath,
+              }}
+              layout="modal"
+            />
+          </div>
+        ) : (
+          <div className="scene-layer-empty">请选择一个触发次数。</div>
+        )}
+      </div>
+    );
 
     return (
       <>
@@ -1976,97 +2021,87 @@ export default function SceneLayerBacktestPage() {
           <p>{combo.formula || "--"}</p>
         </div>
 
-        <div className={`${sectionClassName} scene-layer-validation-trigger-count-section`}>
-          {!shouldSkipTriggerCountSelection ? (
-            <>
-              <div className="scene-layer-validation-trigger-count-head">
-                <h3>触发次数</h3>
-                <span>选择次数后查看对应样本</span>
-              </div>
-              <div className="scene-layer-validation-trigger-count-options">
-                {triggerCountStats.map((item) => (
-                  <button
-                    key={`${combo.combo_key}-trigger-count-${item.trigger_count}`}
-                    type="button"
-                    className={
-                      validationSelectedTriggerCount === item.trigger_count
-                        ? "scene-layer-validation-trigger-count-btn scene-layer-validation-trigger-count-btn-active"
-                        : "scene-layer-validation-trigger-count-btn"
-                    }
-                    onClick={() =>
-                      setValidationSelectedTriggerCount((current) =>
-                        current === item.trigger_count ? null : item.trigger_count,
-                      )
-                    }
-                  >
-                    <strong>{item.trigger_count} 次</strong>
-                    <span>{item.total_samples} 个样本</span>
-                  </button>
-                ))}
-              </div>
-            </>
-          ) : null}
-          {selectedTriggerCombo ? (
-            <div className="scene-layer-validation-sample-summary">
-              <ExpressionValidationSamplesPanel
-                data={{
-                  importRuleName: validationResult.import_rule_name,
-                  importRuleExplain: validationResult.import_rule_explain,
-                  expression: validationExpression,
-                  combo: selectedTriggerCombo,
-                  comboParamSummary: formatUnknownValuesForCombo(combo),
-                  sampleLimitPerGroup: validationResult.sample_limit_per_group,
-                  sourcePath,
-                }}
-                layout="modal"
-              />
+        <div className={sectionClassName}>
+          <h3>核心结果</h3>
+          <div className="scene-layer-summary-grid">
+            <div className="scene-layer-summary-item">
+              <span>触发样本</span>
+              <strong>
+                {combo.trigger_samples} / {combo.triggered_days} 日
+              </strong>
             </div>
-          ) : (
-            <div className="scene-layer-empty">请选择一个触发次数。</div>
-          )}
+            <div className="scene-layer-summary-item">
+              <span>IC</span>
+              <strong>{formatNumber(combo.backtest.ic_mean)}</strong>
+            </div>
+            <div className="scene-layer-summary-item">
+              <span>IC t</span>
+              <strong>{formatNumber(combo.backtest.ic_t_value)}</strong>
+            </div>
+            <div className="scene-layer-summary-item">
+              <span>ICIR</span>
+              <strong>{formatNumber(combo.backtest.icir)}</strong>
+            </div>
+            <div className="scene-layer-summary-item">
+              <span>残差收益</span>
+              <strong>{formatPercent(combo.backtest.avg_excess_residual_mean)}</strong>
+            </div>
+            <div className="scene-layer-summary-item">
+              <span>Top-Bottom Spread</span>
+              <strong>{formatPercent(combo.backtest.spread_mean)}</strong>
+            </div>
+            <div className="scene-layer-summary-item">
+              <span>OOS 正窗口</span>
+              <strong>{foldPositiveSummary(walkForward?.ic_positive_folds)}</strong>
+            </div>
+            <div className="scene-layer-summary-item">
+              <span>最近衰减（20日）</span>
+              <strong>{formatPercent(decay20?.decay_change)}</strong>
+            </div>
+            <div className="scene-layer-summary-item">
+              <span>最相似策略</span>
+              <strong>{topSimilarity?.rule_name ?? "--"}</strong>
+            </div>
+            <div className="scene-layer-summary-item">
+              <span>Jaccard</span>
+              <strong>{formatNumber(topSimilarity?.jaccard, 3)}</strong>
+            </div>
+            <div className="scene-layer-summary-item">
+              <span>增量正窗口</span>
+              <strong>{incrementalSummary}</strong>
+            </div>
+          </div>
+          <p className="scene-layer-caption">
+            这里只展示事实指标，不产出综合得分、评级或推荐；是否加入正式策略由人工决定。
+          </p>
         </div>
 
-        <details className={`${sectionClassName} scene-layer-validation-fold`}>
-          <summary className="scene-layer-validation-fold-summary">
-            <h3>策略相似度检查</h3>
-            <span>{combo.similarity_rows.length} 条</span>
-          </summary>
-          <div className="scene-layer-contrib-table-wrap">
-            <table className="scene-layer-contrib-table">
-              <thead>
-                <tr>
-                  <th>现有策略</th>
-                  <th>同时触发样本</th>
-                  <th>占当前组合</th>
-                  <th>占现有策略</th>
-                  <th>Lift</th>
-                </tr>
-              </thead>
-              <tbody>
-                {combo.similarity_rows.length > 0 ? (
-                  combo.similarity_rows.map((row) => (
-                    <tr key={row.rule_name}>
-                      <td>
-                        <strong>{row.rule_name}</strong>
-                        {row.explain ? (
-                          <div className="scene-layer-similarity-explain">{row.explain}</div>
-                        ) : null}
-                      </td>
-                      <td>{row.overlap_samples}</td>
-                      <td>{formatRate(row.overlap_rate_vs_validation)}</td>
-                      <td>{formatRate(row.overlap_rate_vs_existing)}</td>
-                      <td>{formatLift(row.overlap_lift)}</td>
-                    </tr>
-                  ))
-                ) : (
+        {dailyMetrics.length > 0 ? (
+          <div className={sectionClassName}>
+            <h3>日度 IC / 日度残差收益</h3>
+            <div className="scene-layer-contrib-table-wrap scene-layer-daily-metric-scroll">
+              <table className="scene-layer-contrib-table">
+                <thead>
                   <tr>
-                    <td colSpan={5}>暂无与当前组合同日同股同时触发的现有策略。</td>
+                    <th>交易日</th>
+                    <th>IC</th>
+                    <th>残差收益（方向）</th>
                   </tr>
-                )}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {dailyMetrics.map((row) => (
+                    <tr key={`${combo.combo_key}-daily-${row.trade_date}`}>
+                      <td>{formatDateLabel(row.trade_date)}</td>
+                      <td>{formatNumber(row.ic, 4)}</td>
+                      <td>{formatPercent(row.avg_residual_return)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="scene-layer-caption">日度指标按表达式方向调整符号。</p>
           </div>
-        </details>
+        ) : null}
 
         {validationLayerSummaries.length > 0 ? (
           <div className={sectionClassName}>
@@ -2148,9 +2183,343 @@ export default function SceneLayerBacktestPage() {
             ) : null}
           </div>
         ) : null}
+
+        {walkForward && walkForward.folds.length > 0 ? (
+          <div className={sectionClassName}>
+            <h3>Walk-forward 稳定性（expanding，禁止随机切分）</h3>
+            <div className="scene-layer-contrib-table-wrap">
+              <table className="scene-layer-contrib-table">
+                <thead>
+                  <tr>
+                    <th>Fold</th>
+                    <th>Train</th>
+                    <th>Test</th>
+                    <th>IC</th>
+                    <th>IC t</th>
+                    <th>残差收益（方向）</th>
+                    <th>Spread（原始）</th>
+                    <th>Test 样本</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {walkForward.folds.map((fold) => (
+                    <tr key={`${combo.combo_key}-fold-${fold.fold_index}`}>
+                      <td>
+                        {fold.fold_index + 1}
+                        {fold.status === "insufficient" ? (
+                          <span className="scene-layer-incremental-insufficient">样本不足</span>
+                        ) : null}
+                      </td>
+                      <td>
+                        {formatDateLabel(fold.train_start_date)} ~ {formatDateLabel(fold.train_end_date)}
+                      </td>
+                      <td>
+                        {formatDateLabel(fold.test_start_date)} ~ {formatDateLabel(fold.test_end_date)}
+                      </td>
+                      <td>{formatNumber(fold.ic_mean)}</td>
+                      <td>{formatNumber(fold.ic_t_value, 2)}</td>
+                      <td>{formatPercent(fold.avg_residual_return)}</td>
+                      <td>{formatPercent(fold.spread_mean)}</td>
+                      <td>
+                        {fold.test_sample_count} / {fold.test_day_count} 日
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="scene-layer-summary-grid">
+              <div className="scene-layer-summary-item">
+                <span>IC 正窗口</span>
+                <strong>{foldPositiveSummary(walkForward.ic_positive_folds)}</strong>
+              </div>
+              <div className="scene-layer-summary-item">
+                <span>残差收益正窗口</span>
+                <strong>{foldPositiveSummary(walkForward.residual_positive_folds)}</strong>
+              </div>
+              <div className="scene-layer-summary-item">
+                <span>Spread 正窗口</span>
+                <strong>{foldPositiveSummary(walkForward.spread_positive_folds)}</strong>
+              </div>
+              <div className="scene-layer-summary-item">
+                <span>Purge 交易日</span>
+                <strong>{walkForward.purge_days}</strong>
+              </div>
+            </div>
+            <p className="scene-layer-caption">
+              训练区间末与样本外起点之间固定排除 holding period 个交易日（HAC lag 仍按 holding period - 1）；
+              IC 与 Spread 由分数符号/排序天然携带方向，负向规则不再额外翻转；残差收益是方向盲的均值，
+              按表达式方向调整符号。样本不足的 fold 计入分母但不计为正窗口
+              {formatValidationInsufficientHint(combo, "walk_forward")
+                ? `（本次 ${formatValidationInsufficientHint(combo, "walk_forward")}）`
+                : ""}。
+            </p>
+          </div>
+        ) : null}
+
+        {robustnessSection}
+
+        <div className={sectionClassName}>
+          <h3>与已有策略重复性</h3>
+          <div className="scene-layer-contrib-table-wrap">
+            <table className="scene-layer-contrib-table">
+              <thead>
+                <tr>
+                  <th>策略</th>
+                  <th>Jaccard</th>
+                  <th>Phi</th>
+                  <th>Score Corr</th>
+                  <th>Return Corr</th>
+                  <th>同时触发</th>
+                  <th>共享收益日</th>
+                  <th>占当前组合</th>
+                  <th>Lift</th>
+                </tr>
+              </thead>
+              <tbody>
+                {combo.similarity_rows.length > 0 ? (
+                  combo.similarity_rows.slice(0, 5).map((row) => (
+                    <tr key={`${combo.combo_key}-similarity-${row.rule_name}`}>
+                      <td>
+                        <strong>{row.rule_name}</strong>
+                        {row.explain ? (
+                          <div className="scene-layer-similarity-explain">{row.explain}</div>
+                        ) : null}
+                      </td>
+                      <td>{formatNumber(row.jaccard, 3)}</td>
+                      <td>{formatNumber(row.phi, 3)}</td>
+                      <td>{formatNumber(row.score_pearson, 3)}</td>
+                      <td>{formatNumber(row.return_pearson, 3)}</td>
+                      <td>{row.overlap_samples}</td>
+                      <td>{row.shared_return_days}</td>
+                      <td>{formatRate(row.overlap_rate_vs_validation)}</td>
+                      <td>{formatLift(row.overlap_lift)}</td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={9}>
+                      暂无与当前组合同日同股同时触发的现有策略（相关性与正交研究见独立页面）。
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+          {combo.similarity_rows.length > 5 ? (
+            <details className="scene-layer-validation-fold">
+              <summary className="scene-layer-validation-fold-summary">
+                <h4>全部 {combo.similarity_rows.length} 条重复性结果</h4>
+              </summary>
+              <div className="scene-layer-contrib-table-wrap">
+                <table className="scene-layer-contrib-table">
+                  <thead>
+                    <tr>
+                      <th>策略</th>
+                      <th>Jaccard</th>
+                      <th>Phi</th>
+                      <th>Score Corr</th>
+                      <th>Return Corr</th>
+                      <th>同时触发</th>
+                      <th>占现有策略</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {combo.similarity_rows.slice(5).map((row) => (
+                      <tr key={`${combo.combo_key}-similarity-rest-${row.rule_name}`}>
+                        <td>{row.rule_name}</td>
+                        <td>{formatNumber(row.jaccard, 3)}</td>
+                        <td>{formatNumber(row.phi, 3)}</td>
+                        <td>{formatNumber(row.score_pearson, 3)}</td>
+                        <td>{formatNumber(row.return_pearson, 3)}</td>
+                        <td>{row.overlap_samples}</td>
+                        <td>{formatRate(row.overlap_rate_vs_existing)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </details>
+          ) : null}
+          <p className="scene-layer-caption">
+            相关性只描述重合程度，不代表策略价值：重合高但样本外仍有正增量可以同时成立，低相关也不等于更好。
+            其中 Return Corr 与增量收益统一使用 Σ(score × residual) / Σ|score| 的日收益口径。
+          </p>
+        </div>
+
+        <div className={sectionClassName}>
+          <h3>对核心策略组合的新增价值（incremental）</h3>
+          {incremental && incremental.folds.length > 0 ? (
+            <>
+              <div className="scene-layer-contrib-table-wrap">
+                <table className="scene-layer-contrib-table">
+                  <thead>
+                    <tr>
+                      <th>Fold</th>
+                      <th>Train</th>
+                      <th>Test</th>
+                      <th>Incremental</th>
+                      <th>HAC t</th>
+                      <th>Positive</th>
+                      <th>Test days</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {incremental.folds.map((fold) => (
+                      <tr key={`${combo.combo_key}-incremental-${fold.fold_index}`}>
+                        <td>
+                          {fold.fold_index + 1}
+                          {fold.status === "insufficient" ? (
+                            <span className="scene-layer-incremental-insufficient">样本不足</span>
+                          ) : null}
+                        </td>
+                        <td>
+                          {formatDateLabel(fold.train_start_date)} ~ {formatDateLabel(fold.train_end_date)}
+                        </td>
+                        <td>
+                          {formatDateLabel(fold.test_start_date)} ~ {formatDateLabel(fold.test_end_date)}
+                        </td>
+                        <td>{formatPercent(fold.incremental_mean)}</td>
+                        <td>{formatNumber(fold.incremental_hac_t, 2)}</td>
+                        <td>{formatRate(fold.positive_day_ratio)}</td>
+                        <td>{fold.test_day_count}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="scene-layer-summary-grid">
+                <div className="scene-layer-summary-item">
+                  <span>正增量窗口</span>
+                  <strong>{incrementalSummary}</strong>
+                </div>
+                <div className="scene-layer-summary-item">
+                  <span>核心策略（predictors）</span>
+                  <strong>{incremental.core_rule_names.join(" / ") || "--"}</strong>
+                </div>
+              </div>
+              <p className="scene-layer-caption">
+                每个 fold 只用 train 做标准化 ridge 回归（train 行至少 max(30, 核心策略数 × 5)，样本外至少 20
+                个共同有效日），predictors 是核心策略，候选表达式始终是 target；test 增量定义为
+                y − Σβx（不减 train intercept），均值即控制核心策略后的样本外增量 alpha；样本不足的 fold
+                标记为 insufficient 且不计入正增量窗口。
+              </p>
+            </>
+          ) : (
+            <div className="scene-layer-empty">
+              未选择核心策略：在上方“核心策略（增量性 predictors）”中选择后重新运行回测，即可得到样本外增量。
+            </div>
+          )}
+        </div>
+
+        {samplesSection}
       </>
     );
   }
+
+  const robustnessSection = hasUnknownValidationCombo ? (
+    <div className="scene-layer-layer-summary">
+      <h3>参数鲁棒性（点击表头排序）</h3>
+      <p className="scene-layer-caption">
+        单击任意组合可切换这一页的全部结果；系统不会自动挑选最佳参数，请比较相邻参数是否方向一致、
+        是否只有单点异常突出。三张正窗口列共用同一套 walk-forward calendar（同一次请求里所有参数组合的
+        train/test 日期完全一致）；样本不足的 fold 计入分母但不计为正窗口，悬停单元格可看不足数量。
+      </p>
+      <div className="scene-layer-contrib-table-wrap">
+        <table className="scene-layer-contrib-table scene-layer-validation-table">
+          <thead>
+            <tr>
+              {renderValidationComboSortHeader("combo_label", "组合")}
+              {renderValidationComboSortHeader("params", "策略参数")}
+              {renderValidationComboSortHeader("trigger_samples", "触发样本")}
+              {renderValidationComboSortHeader("triggered_days", "触发交易日")}
+              {renderValidationComboSortHeader("avg_daily_trigger", "平均每日触发")}
+              {renderValidationComboSortHeader("spread_mean", "分层差均值（按得分值）")}
+              {renderValidationComboSortHeader("profit_loss_ratio", "样本利润因子")}
+              {renderValidationComboSortHeader("avg_excess_residual_mean", "超额残差（日度）")}
+              {renderValidationComboSortHeader("avg_er_change", "ΔER(20)")}
+              {renderValidationComboSortHeader("ic_mean", "IC 均值")}
+              {renderValidationComboSortHeader("ic_t_value", "IC t值")}
+              {renderValidationComboSortHeader("icir", "ICIR")}
+              <th title="walk-forward 样本外窗口中 IC 为正的数量；分母为全部 fold，样本不足的 fold 计为非正">
+                OOS IC 正窗口
+              </th>
+              <th title="walk-forward 样本外窗口中方向残差收益为正的数量；分母为全部 fold，样本不足的 fold 计为非正">
+                OOS residual 正窗口
+              </th>
+              <th title="增量研究样本外窗口中增量均值为正的数量；分母为全部 fold，样本不足的 fold 计为非正">
+                incremental 正窗口
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {sortedValidationComboRows.map((item) => {
+              const isActive = selectedValidationCombo?.combo_key === item.combo_key;
+              const rowClassName = isActive
+                ? "scene-layer-validation-row-active scene-layer-validation-row-selectable"
+                : "scene-layer-validation-row-selectable";
+              const unknownValueText = formatUnknownValuesForCombo(item);
+              return (
+                <tr
+                  key={item.combo_key}
+                  className={rowClassName}
+                  onClick={() =>
+                    shouldUseValidationDetailModal
+                      ? openValidationDetail(item.combo_key)
+                      : setValidationSelectedComboKey(item.combo_key)
+                  }
+                >
+                  <td>
+                    <strong>{item.combo_label}</strong>
+                  </td>
+                  <td>
+                    <span className="scene-layer-validation-params-text" title={unknownValueText}>
+                      {unknownValueText}
+                    </span>
+                  </td>
+                  <td>{item.trigger_samples}</td>
+                  <td>{item.triggered_days}</td>
+                  <td>{formatNumber(item.avg_daily_trigger, 2)}</td>
+                  <td>{formatPercent(item.backtest.spread_mean)}</td>
+                  <td>{formatProfitLossRatio(item.backtest.profit_loss_ratio)}</td>
+                  <td
+                    className={residualMetricHighlightClass(
+                      item.backtest.avg_excess_residual_mean,
+                      resolveResidualDirection(item.backtest.avg_contribution_score, validationDirection),
+                    )}
+                  >
+                    {renderResidualMetric(
+                      item.backtest.avg_excess_residual_mean,
+                      resolveResidualDirection(item.backtest.avg_contribution_score, validationDirection),
+                    )}
+                  </td>
+                  <td>{formatNumber(item.backtest.avg_er_change, 4)}</td>
+                  <td className={metricHighlightClass("ic", item.backtest.ic_mean)}>
+                    {formatNumber(item.backtest.ic_mean)}
+                  </td>
+                  <td className={metricHighlightClass("t", item.backtest.ic_t_value)}>
+                    {formatNumber(item.backtest.ic_t_value)}
+                  </td>
+                  <td className={metricHighlightClass("ir", item.backtest.icir)}>
+                    {formatNumber(item.backtest.icir)}
+                  </td>
+                  <td title={formatValidationInsufficientHint(item, "walk_forward")}>
+                    {formatValidationWindowRatio(item, "ic")}
+                  </td>
+                  <td title={formatValidationInsufficientHint(item, "walk_forward")}>
+                    {formatValidationWindowRatio(item, "residual")}
+                  </td>
+                  <td title={formatValidationInsufficientHint(item, "incremental")}>
+                    {formatValidationWindowRatio(item, "incremental")}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  ) : null;
 
   return (
     <div className="scene-layer-page">
@@ -2789,9 +3158,14 @@ export default function SceneLayerBacktestPage() {
       ) : null}
 
       <section className="scene-layer-card">
-        <h2 className="scene-layer-title">表达式验证</h2>
+        <h2 className="scene-layer-title">表达式回测</h2>
         <p className="scene-layer-caption">
-          默认空白模板；选择策略后自动带入表达式与参数，后续可继续手动调整并展开参数组合验证。
+          默认空白模板；选择策略后自动带入表达式与参数。回测只做事实统计：有效性、稳定性、参数鲁棒性、重复性、增量性与样本检查，不自动给分或推荐参数。
+        </p>
+        <p className="scene-layer-caption">
+          回测忽略正式策略的 points / dist_points：表达式内部只按 ±1 计分、方向来自下方“方向”选择，
+          因此 IC、分层、Spread、增量等统计与正式分值大小无关；是否给分、给多少分仍由人工在正式策略里设置，
+          最终效果交给 Ranking Compute 与 RankLayer 回测验证。
         </p>
 
         <div className="scene-layer-form-grid">
@@ -2864,6 +3238,40 @@ export default function SceneLayerBacktestPage() {
               value={validationSampleLimitText}
               onChange={(event) => setValidationSampleLimitText(event.target.value)}
             />
+          </label>
+          <label className="scene-layer-field">
+            <span title="expanding walk-forward 的样本外窗口数量；train 与 test 之间按 holding period 做 purge">
+              Walk-forward folds
+            </span>
+            <input
+              type="number"
+              min={1}
+              max={8}
+              step={1}
+              value={validationWalkForwardFoldsText}
+              onChange={(event) => setValidationWalkForwardFoldsText(event.target.value)}
+            />
+          </label>
+          <label className="scene-layer-field scene-layer-field-span-full">
+            <span title="选中的已有策略作为增量回归的解释变量；候选表达式永远是 target">
+              核心策略（增量性 predictors，可多选）
+            </span>
+            <select
+              multiple
+              size={Math.min(6, Math.max(3, strategyRuleOptions.length))}
+              value={validationCoreRuleNames}
+              onChange={(event) =>
+                setValidationCoreRuleNames(
+                  Array.from(event.target.selectedOptions, (option) => option.value),
+                )
+              }
+            >
+              {strategyRuleOptions.map((item) => (
+                <option key={`validation-core-${item.name}`} value={item.name}>
+                  {item.name}
+                </option>
+              ))}
+            </select>
           </label>
         </div>
 
@@ -3020,7 +3428,7 @@ export default function SceneLayerBacktestPage() {
             onClick={() => void onRunRuleExpressionValidation()}
             disabled={heavyTaskRunning || initializing}
           >
-            {validationLoading ? "验证中..." : "执行表达式验证"}
+            {validationLoading ? "回测中..." : "运行回测"}
           </button>
         </div>
 
@@ -3029,208 +3437,6 @@ export default function SceneLayerBacktestPage() {
 
       {validationResult ? (
         <section id="scene-layer-expression-validation-results" className="scene-layer-card">
-          <div className="scene-layer-layer-summary">
-            <h3>参数组合表现（点击表头排序）</h3>
-            <div className="scene-layer-contrib-table-wrap">
-              <table className="scene-layer-contrib-table scene-layer-validation-table">
-                <thead>
-                  <tr>
-                    {renderValidationComboSortHeader("combo_label", "组合")}
-                    {renderValidationComboSortHeader("params", "策略参数")}
-                    {renderValidationComboSortHeader("trigger_samples", "触发样本")}
-                    {renderValidationComboSortHeader("triggered_days", "触发交易日")}
-                    {renderValidationComboSortHeader("avg_daily_trigger", "平均每日触发")}
-                    {renderValidationComboSortHeader("spread_mean", "分层差均值（按得分值）")}
-                    {renderValidationComboSortHeader("profit_loss_ratio", "样本利润因子")}
-                    {renderValidationComboSortHeader("avg_excess_residual_mean", "超额残差（日度）")}
-                    {renderValidationComboSortHeader("avg_er_change", "ΔER(20)")}
-                    {renderValidationComboSortHeader("ic_mean", "IC 均值")}
-                    {renderValidationComboSortHeader("ic_t_value", "IC t值")}
-                    {renderValidationComboSortHeader("icir", "ICIR")}
-                  </tr>
-                </thead>
-                <tbody>
-                  {sortedValidationComboRows.map((item) => {
-                    const isActive = selectedValidationCombo?.combo_key === item.combo_key;
-                    const rowClassName = [
-                      isActive ? "scene-layer-validation-row-active" : "",
-                      shouldUseInlineComboSelection
-                        ? "scene-layer-validation-row-selectable"
-                        : "",
-                    ]
-                      .filter((name) => name.length > 0)
-                      .join(" ");
-                    const unknownValueText = formatUnknownValuesForCombo(item);
-                    return (
-                      <tr
-                        key={item.combo_key}
-                        className={rowClassName || undefined}
-                        onClick={
-                          shouldUseInlineComboSelection
-                            ? () => setValidationSelectedComboKey(item.combo_key)
-                            : undefined
-                        }
-                      >
-                        <td>
-                          <strong>{item.combo_label}</strong>
-                        </td>
-                        <td>
-                          {shouldUseValidationDetailModal ? (
-                            <button
-                              type="button"
-                              className="scene-layer-validation-detail-link"
-                              title={unknownValueText}
-                              onClick={() => openValidationDetail(item.combo_key)}
-                            >
-                              {unknownValueText}
-                            </button>
-                          ) : (
-                            <span className="scene-layer-validation-params-text" title={unknownValueText}>
-                              {unknownValueText}
-                            </span>
-                          )}
-                        </td>
-                        <td>{item.trigger_samples}</td>
-                        <td>{item.triggered_days}</td>
-                        <td>{formatNumber(item.avg_daily_trigger, 2)}</td>
-                        <td>{formatPercent(item.backtest.spread_mean)}</td>
-                        <td>{formatProfitLossRatio(item.backtest.profit_loss_ratio)}</td>
-                        <td className={residualMetricHighlightClass(item.backtest.avg_excess_residual_mean, resolveResidualDirection(item.backtest.avg_contribution_score, validationDirection))}>
-                          {renderResidualMetric(item.backtest.avg_excess_residual_mean, resolveResidualDirection(item.backtest.avg_contribution_score, validationDirection))}
-                        </td>
-                        <td>{formatNumber(item.backtest.avg_er_change, 4)}</td>
-                        <td className={metricHighlightClass("ic", item.backtest.ic_mean)}>{formatNumber(item.backtest.ic_mean)}</td>
-                        <td className={metricHighlightClass("t", item.backtest.ic_t_value)}>{formatNumber(item.backtest.ic_t_value)}</td>
-                        <td className={metricHighlightClass("ir", item.backtest.icir)}>{formatNumber(item.backtest.icir)}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          <div className="scene-layer-calibration-entry">
-            <div className="scene-layer-calibration-entry-copy">
-              <h3>继续验证：量化定分与触发方式</h3>
-              <p>
-                复用上面的收益样本，对选中组合比较 LAST、ANY、EACH、CONSEC 和带衰减的
-                RECENT；前半区间只用于选择并冻结候选，后半区间只做样本外评价。
-              </p>
-            </div>
-            <button
-              type="button"
-              className="scene-layer-primary-btn"
-              onClick={() => void onRunRuleExpressionCalibration()}
-              disabled={heavyTaskRunning || !selectedValidationCombo}
-            >
-              {validationCalibrationLoading ? "继续验证中..." : "继续验证定分与触发方式"}
-            </button>
-          </div>
-          {validationCalibrationError ? (
-            <div className="scene-layer-error">{validationCalibrationError}</div>
-          ) : null}
-
-          {activeValidationCalibration ? (
-            <div className="scene-layer-calibration-results">
-              <div className="scene-layer-summary-grid">
-                <div className="scene-layer-summary-item">
-                  <span>验证参数组合</span>
-                  <strong>{activeValidationCalibration.combo_label}</strong>
-                </div>
-                <div className="scene-layer-summary-item">
-                  <span>候选触发方式</span>
-                  <strong>{activeValidationCalibration.candidate_count}</strong>
-                </div>
-                <div className="scene-layer-summary-item">
-                  <span>建议触发方式</span>
-                  <strong>{recommendedValidationCalibration?.scope_label ?? "暂无样本外通过建议"}</strong>
-                </div>
-                <div className="scene-layer-summary-item">
-                  <span>建议单次分 / 典型总分</span>
-                  <strong>
-                    {recommendedValidationCalibration
-                      ? `${formatNumber(recommendedValidationCalibration.suggested_points, 1)} / ${formatNumber(recommendedValidationCalibration.suggested_total_points, 1)}`
-                      : "--"}
-                  </strong>
-                </div>
-              </div>
-              <p className="scene-layer-calibration-note">
-                {activeValidationCalibration.point_scale_description}。建议分只用于给出一致标尺，最终仍应在整套策略组合回测中确认。
-              </p>
-              <div className="scene-layer-contrib-table-wrap">
-                <table className="scene-layer-contrib-table scene-layer-calibration-table">
-                  <thead>
-                    <tr>
-                      <th>候选方式</th>
-                      <th>结论</th>
-                      <th>样本 / 交易日</th>
-                      <th>日均触发</th>
-                      <th>训练期日度超额</th>
-                      <th>训练期90%保守边际</th>
-                      <th>训练 / 样本外</th>
-                      <th>训练期 IC / t值</th>
-                      <th>分数单调性</th>
-                      <th>平均分倍数</th>
-                      <th>建议单次分</th>
-                      <th>典型总分</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {activeValidationCalibration.candidates.map((candidate) => {
-                      const isRecommended =
-                        candidate.candidate_key ===
-                        activeValidationCalibration.recommended_candidate_key;
-                      return (
-                        <tr
-                          key={candidate.candidate_key}
-                          className={isRecommended ? "scene-layer-calibration-row-recommended" : undefined}
-                        >
-                          <td>
-                            <div className="scene-layer-calibration-candidate-name">
-                              <strong>{candidate.scope_label}</strong>
-                              {isRecommended ? <span>建议</span> : null}
-                              {candidate.is_current ? <span>当前</span> : null}
-                            </div>
-                            {candidate.suggested_dist_points.length > 0 ? (
-                              <small title={formatCalibrationDistancePoints(candidate)}>
-                                衰减分：{formatCalibrationDistancePoints(candidate)}
-                              </small>
-                            ) : null}
-                          </td>
-                          <td>
-                            <span className={`scene-layer-calibration-status scene-layer-calibration-status-${candidate.status}`}>
-                              {candidate.status_label}
-                            </span>
-                          </td>
-                          <td>{candidate.trigger_samples} / {candidate.triggered_days}</td>
-                          <td>{formatNumber(candidate.avg_daily_trigger, 2)}</td>
-                          <td>{formatPercent(candidate.avg_excess_residual_mean)}</td>
-                          <td>{formatPercent(candidate.conservative_edge)}</td>
-                          <td>
-                            {formatPercent(candidate.early_excess_residual_mean)} / {formatPercent(candidate.late_excess_residual_mean)}
-                          </td>
-                          <td>{formatNumber(candidate.ic_mean)} / {formatNumber(candidate.ic_t_value, 2)}</td>
-                          <td title={formatCalibrationBuckets(candidate)}>
-                            {candidate.score_monotonicity === null || candidate.score_monotonicity === undefined
-                              ? "--"
-                              : `${formatNumber(candidate.score_monotonicity * 100, 0)}%`}
-                          </td>
-                          <td>{formatNumber(candidate.avg_score_multiplier, 2)}</td>
-                          <td><strong>{formatNumber(candidate.suggested_points, 1)}</strong></td>
-                          <td><strong>{formatNumber(candidate.suggested_total_points, 1)}</strong></td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-              <p className="scene-layer-calibration-note">
-                “单次分”可作为 points 起点；EACH 会按触发次数累加，所以同时看“平均分倍数”和“典型总分”。悬停“分数单调性”可查看各倍数分桶的样本与收益。
-              </p>
-            </div>
-          ) : null}
-
           {!shouldUseValidationDetailModal && selectedValidationCombo ? (
             <>
               {shouldUseInlineComboSelection ? (
@@ -3238,7 +3444,7 @@ export default function SceneLayerBacktestPage() {
                   <h3>选中组合：{selectedValidationCombo.combo_label}</h3>
                 </div>
               ) : null}
-              {renderValidationComboDetailSections(selectedValidationCombo)}
+              {renderValidationComboDetailSections(selectedValidationCombo, false, robustnessSection)}
             </>
           ) : null}
 
@@ -3258,7 +3464,7 @@ export default function SceneLayerBacktestPage() {
                   </button>
                 </div>
                 <div className="scene-layer-modal-scroll-body">
-                  {renderValidationComboDetailSections(selectedValidationCombo, true)}
+                  {renderValidationComboDetailSections(selectedValidationCombo, true, robustnessSection)}
                 </div>
               </div>
             </div>

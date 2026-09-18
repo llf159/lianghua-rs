@@ -386,6 +386,62 @@ export type RuleValidationSimilarityRow = {
   overlap_rate_vs_validation?: number | null
   overlap_rate_vs_existing?: number | null
   overlap_lift?: number | null
+  jaccard?: number | null
+  phi?: number | null
+  score_pearson?: number | null
+  return_pearson?: number | null
+  shared_return_days: number
+}
+
+export type RuleValidationWalkForwardFold = {
+  fold_index: number
+  status: string
+  train_start_date: string
+  train_end_date: string
+  test_start_date: string
+  test_end_date: string
+  test_day_count: number
+  test_sample_count: number
+  ic_mean?: number | null
+  ic_t_value?: number | null
+  avg_residual_return?: number | null
+  spread_mean?: number | null
+}
+
+export type RuleValidationWalkForwardData = {
+  fold_count: number
+  purge_days: number
+  folds: RuleValidationWalkForwardFold[]
+  ic_positive_folds: number
+  residual_positive_folds: number
+  spread_positive_folds: number
+}
+
+export type RuleValidationIncrementalFold = {
+  fold_index: number
+  status: string
+  train_start_date: string
+  train_end_date: string
+  test_start_date: string
+  test_end_date: string
+  train_day_count: number
+  test_day_count: number
+  incremental_mean?: number | null
+  incremental_hac_t?: number | null
+  positive_day_ratio?: number | null
+}
+
+export type RuleValidationIncrementalData = {
+  core_rule_names: string[]
+  purge_days: number
+  folds: RuleValidationIncrementalFold[]
+  positive_folds: number
+}
+
+export type RuleValidationDailyMetric = {
+  trade_date: string
+  ic?: number | null
+  avg_residual_return?: number | null
 }
 
 export type RuleValidationSampleStats = {
@@ -435,6 +491,9 @@ export type RuleValidationComboResult = {
   sample_groups: RuleValidationSampleGroups
   return_distribution: RuleValidationReturnDistributionBucket[]
   backtest: RuleLayerBacktestData
+  daily_metrics?: RuleValidationDailyMetric[] | null
+  walk_forward?: RuleValidationWalkForwardData | null
+  incremental?: RuleValidationIncrementalData | null
   similarity_rows: RuleValidationSimilarityRow[]
 }
 
@@ -444,61 +503,9 @@ export type RuleExpressionValidationData = {
   scope_way: string
   scope_windows: number
   sample_limit_per_group: number
+  walk_forward_folds: number
+  core_rule_names: string[]
   combo_results: RuleValidationComboResult[]
-  best_combo_key?: string | null
-  continuation_id?: string | null
-}
-
-export type RuleExpressionCalibrationBucket = {
-  score_multiplier: number
-  sample_count: number
-  avg_residual_return?: number | null
-}
-
-export type RuleExpressionCalibrationDistancePoint = {
-  min: number
-  max: number
-  points: number
-}
-
-export type RuleExpressionCalibrationCandidate = {
-  candidate_key: string
-  scope_way: string
-  scope_label: string
-  scope_windows: number
-  is_current: boolean
-  trigger_samples: number
-  triggered_days: number
-  avg_daily_trigger: number
-  avg_residual_mean?: number | null
-  avg_excess_residual_mean?: number | null
-  daily_std?: number | null
-  standard_error?: number | null
-  conservative_edge?: number | null
-  early_excess_residual_mean?: number | null
-  late_excess_residual_mean?: number | null
-  ic_mean?: number | null
-  ic_t_value?: number | null
-  score_monotonicity?: number | null
-  avg_score_multiplier?: number | null
-  suggested_points: number
-  suggested_total_points: number
-  calibration_score: number
-  status: string
-  status_label: string
-  score_buckets: RuleExpressionCalibrationBucket[]
-  suggested_dist_points: RuleExpressionCalibrationDistancePoint[]
-}
-
-export type RuleExpressionCalibrationData = {
-  continuation_id: string
-  combo_key: string
-  combo_label: string
-  direction: string
-  candidate_count: number
-  point_scale_description: string
-  recommended_candidate_key?: string | null
-  candidates: RuleExpressionCalibrationCandidate[]
 }
 
 export type MarketRankItem = {
@@ -743,6 +750,8 @@ export type RuleExpressionValidationQuery = {
   excludeStBoard?: boolean
   totalMvMin?: number
   totalMvMax?: number
+  walkForwardFolds?: number
+  coreRuleNames?: string[]
 }
 
 export async function getSceneLayerBacktestDefaults(sourcePath: string) {
@@ -786,13 +795,6 @@ export async function runTransientRankLayerBacktest(query: RankLayerBacktestQuer
 
 export async function runRuleExpressionValidation(query: RuleExpressionValidationQuery) {
   return invoke<RuleExpressionValidationData>('run_rule_expression_validation', query)
-}
-
-export async function runRuleExpressionCalibration(continuationId: string, comboKey: string) {
-  return invoke<RuleExpressionCalibrationData>('run_rule_expression_calibration', {
-    continuationId,
-    comboKey,
-  })
 }
 
 export async function getMarketAnalysis(query: {

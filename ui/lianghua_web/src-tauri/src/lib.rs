@@ -194,7 +194,6 @@ use {
         get_strategy_statistics_page as core_get_strategy_statistics_page,
         get_strategy_triggered_stocks as core_get_strategy_triggered_stocks,
         run_rank_layer_backtest as core_run_rank_layer_backtest,
-        run_rule_expression_calibration as core_run_rule_expression_calibration,
         run_rule_expression_validation as core_run_rule_expression_validation,
         run_rule_layer_backtest as core_run_rule_layer_backtest,
         run_scene_layer_backtest as core_run_scene_layer_backtest,
@@ -202,11 +201,10 @@ use {
         run_transient_rule_layer_backtest as core_run_transient_rule_layer_backtest,
         run_transient_scene_layer_backtest as core_run_transient_scene_layer_backtest,
         MarketAnalysisData, MarketContributionData, RankLayerBacktestData,
-        RuleExpressionCalibrationData, RuleExpressionValidationData,
-        RuleExpressionValidationManualStrategy, RuleLayerBacktestData,
-        RuleLayerBacktestDefaultsData, RuleValidationUnknownConfig, SceneLayerBacktestData,
-        SceneLayerBacktestDefaultsData, SceneStatisticsPageData, StrategyStatisticsDetailData,
-        StrategyStatisticsPageData, TriggeredStockRow,
+        RuleExpressionValidationData, RuleExpressionValidationManualStrategy,
+        RuleLayerBacktestData, RuleLayerBacktestDefaultsData, RuleValidationUnknownConfig,
+        SceneLayerBacktestData, SceneLayerBacktestDefaultsData, SceneStatisticsPageData,
+        StrategyStatisticsDetailData, StrategyStatisticsPageData, TriggeredStockRow,
     },
     strategy::stock_pick::{
         get_stock_pick_options as core_get_stock_pick_options, StockPickOptionsData,
@@ -1623,6 +1621,8 @@ async fn run_rule_expression_validation(
     exclude_st_board: Option<bool>,
     total_mv_min: Option<f64>,
     total_mv_max: Option<f64>,
+    walk_forward_folds: Option<usize>,
+    core_rule_names: Option<Vec<String>>,
 ) -> Result<RuleExpressionValidationData, String> {
     tauri::async_runtime::spawn_blocking(move || {
         run_with_heap_trim(|| {
@@ -1649,20 +1649,10 @@ async fn run_rule_expression_validation(
                 exclude_st_board,
                 total_mv_min,
                 total_mv_max,
+                walk_forward_folds,
+                core_rule_names,
             )
         })
-    })
-    .await
-    .map_err(|error| error.to_string())?
-}
-
-#[tauri::command]
-async fn run_rule_expression_calibration(
-    continuation_id: String,
-    combo_key: String,
-) -> Result<RuleExpressionCalibrationData, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        run_with_heap_trim(|| core_run_rule_expression_calibration(continuation_id, combo_key))
     })
     .await
     .map_err(|error| error.to_string())?
@@ -2712,7 +2702,6 @@ pub fn run() {
             run_transient_scene_layer_backtest,
             run_transient_rule_layer_backtest,
             run_rule_expression_validation,
-            run_rule_expression_calibration,
             get_ranking_compute_status,
             preview_ranking_score_calculation_warnings,
             run_ranking_score_calculation,
