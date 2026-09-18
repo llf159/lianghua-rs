@@ -41,7 +41,7 @@ export const VALIDATION_SCOPE_WAY_OPTIONS: Array<{ value: ValidationScopeWayOpti
   { value: "CONSEC", label: "CONSEC" },
 ];
 
-const BASE_SERIES_IDENTIFIERS = new Set([
+const KNOWN_EXPRESSION_IDENTIFIERS = new Set([
   "O",
   "H",
   "L",
@@ -51,7 +51,54 @@ const BASE_SERIES_IDENTIFIERS = new Set([
   "PRE_CLOSE",
   "CHANGE",
   "PCT_CHG",
+  "TOR",
+  "B_SM_V",
+  "S_SM_V",
+  "B_MD_V",
+  "S_MD_V",
+  "B_LG_V",
+  "S_LG_V",
+  "B_ELG_V",
+  "S_ELG_V",
+  "NET_MF_V",
+  "OPEN",
+  "HIGH",
+  "LOW",
+  "CLOSE",
+  "VOL",
+  "RANK",
+  "SCORE",
+  "S_RANK",
   "ZHANG",
+  "TOTAL_MV_YI",
+  "TIME",
+  "RT_OP",
+  "RT_FH",
+  "RT_VR",
+  "RT_AVG",
+  "RATEO",
+  "RATEH",
+  "RATEL",
+  "RATEC",
+  "MAIN_CHIP_RATIO",
+  "MAIN_CHIP_TOTAL",
+  "RETAIL_CHIP_TOTAL",
+  "CYQ_MIN",
+  "CYQ_MAX",
+  "CYQ_MT",
+  "CYQ_RT",
+  "CYQ_TPR",
+  "CYQ_TTR",
+  "CYQ_MPR",
+  "CYQ_MTR",
+  "CYQ_MAC",
+  "CYQ_PEAK",
+  "CYQ_P70L",
+  "CYQ_P70H",
+  "CYQ_P70C",
+  "CYQ_P90L",
+  "CYQ_P90H",
+  "CYQ_P90C",
 ]);
 
 const RESERVED_BOOLEAN_IDENTIFIERS = new Set(["AND", "OR", "NOT", "TRUE", "FALSE"]);
@@ -79,7 +126,13 @@ export function hasValidUnknownConfig(configs: ValidationUnknownConfigDraft[]): 
   return configs.some((item) => item.name.trim().length > 0);
 }
 
-export function inferUnknownConfigs(expression: string): ValidationUnknownConfigDraft[] {
+export function inferUnknownConfigs(
+  expression: string,
+  excludedIdentifiers?: Iterable<string>,
+): ValidationUnknownConfigDraft[] {
+  const excluded = new Set(
+    Array.from(excludedIdentifiers ?? [], (name) => name.trim().toUpperCase()),
+  );
   const assigned = new Set<string>();
   for (const match of expression.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)\s*:=/g)) {
     const name = match[1]?.trim();
@@ -105,7 +158,8 @@ export function inferUnknownConfigs(expression: string): ValidationUnknownConfig
 
     if (
       RESERVED_BOOLEAN_IDENTIFIERS.has(upper) ||
-      BASE_SERIES_IDENTIFIERS.has(upper) ||
+      KNOWN_EXPRESSION_IDENTIFIERS.has(upper) ||
+      excluded.has(upper) ||
       /^(?:I|ISZ|I300|I500|ICY|I50|I1000)(?:_[A-Z][A-Z0-9_]*)?$/.test(upper) ||
       assigned.has(upper)
     ) {

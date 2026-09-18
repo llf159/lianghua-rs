@@ -575,10 +575,6 @@ pub(in crate::statistics) fn build_validation_score_layer_details(
     let mut summary_map = HashMap::<u64, ValidationScoreLayerAgg>::new();
 
     for day_samples in grouped_by_day.into_values() {
-        if day_samples.len() < min_samples_per_day {
-            continue;
-        }
-
         let mut ordered = day_samples
             .into_iter()
             .map(|sample| {
@@ -590,6 +586,14 @@ pub(in crate::statistics) fn build_validation_score_layer_details(
                 (score, sample.residual_return)
             })
             .collect::<Vec<_>>();
+        if ordered
+            .iter()
+            .filter(|(score, _)| score.abs() >= VALIDATION_EPS)
+            .count()
+            < min_samples_per_day
+        {
+            continue;
+        }
         ordered.sort_by(|left, right| {
             left.0
                 .partial_cmp(&right.0)
@@ -662,6 +666,7 @@ pub(in crate::statistics) fn build_validation_score_layer_details(
 
 pub(in crate::statistics) fn build_validation_score_layer_details_from_daily_layers(
     mut daily_layers: Vec<RuleLayerDailyScoreLayers>,
+    min_samples_per_day: usize,
 ) -> ValidationScoreLayerDetails {
     daily_layers.sort_by(|left, right| left.trade_date.cmp(&right.trade_date));
     let mut spread_values = Vec::new();
@@ -669,6 +674,16 @@ pub(in crate::statistics) fn build_validation_score_layer_details_from_daily_lay
 
     for day in daily_layers {
         if day.groups.is_empty() {
+            continue;
+        }
+        if day
+            .groups
+            .iter()
+            .filter(|group| group.score.abs() >= VALIDATION_EPS)
+            .map(|group| group.sample_count)
+            .sum::<usize>()
+            < min_samples_per_day
+        {
             continue;
         }
         for group in &day.groups {
@@ -730,7 +745,7 @@ pub(in crate::statistics) fn build_validation_return_distribution(
 ) -> Vec<RuleValidationReturnDistributionBucket> {
     let mut counts = [0usize; 7];
     for sample in samples {
-        if !sample.residual_return.is_finite() {
+        if sample.rule_score.abs() < VALIDATION_EPS || !sample.residual_return.is_finite() {
             continue;
         }
 
@@ -941,31 +956,34 @@ mod tests {
             },
         ];
         let full = build_validation_score_layer_details(&samples, 1);
-        let compressed = build_validation_score_layer_details_from_daily_layers(vec![
-            RuleLayerDailyScoreLayers {
-                trade_date: "20240103".to_string(),
-                groups: vec![RuleLayerDailyScoreGroup {
-                    score: 0.0,
-                    sample_count: 2,
-                    avg_residual_return: 3.0,
-                }],
-            },
-            RuleLayerDailyScoreLayers {
-                trade_date: "20240102".to_string(),
-                groups: vec![
-                    RuleLayerDailyScoreGroup {
+        let compressed = build_validation_score_layer_details_from_daily_layers(
+            vec![
+                RuleLayerDailyScoreLayers {
+                    trade_date: "20240103".to_string(),
+                    groups: vec![RuleLayerDailyScoreGroup {
                         score: 0.0,
-                        sample_count: 1,
-                        avg_residual_return: 1.0,
-                    },
-                    RuleLayerDailyScoreGroup {
-                        score: 2.0,
-                        sample_count: 1,
+                        sample_count: 2,
                         avg_residual_return: 3.0,
-                    },
-                ],
-            },
-        ]);
+                    }],
+                },
+                RuleLayerDailyScoreLayers {
+                    trade_date: "20240102".to_string(),
+                    groups: vec![
+                        RuleLayerDailyScoreGroup {
+                            score: 0.0,
+                            sample_count: 1,
+                            avg_residual_return: 1.0,
+                        },
+                        RuleLayerDailyScoreGroup {
+                            score: 2.0,
+                            sample_count: 1,
+                            avg_residual_return: 3.0,
+                        },
+                    ],
+                },
+            ],
+            1,
+        );
 
         assert_eq!(compressed.spread_mean, full.spread_mean);
         assert_eq!(compressed.layer_summaries.len(), full.layer_summaries.len());

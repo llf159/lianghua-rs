@@ -545,37 +545,37 @@ impl DayGroupsFoldAccum {
                 residuals.push(sample.residual_return);
             }
 
-            if collect_validation_details
-                && let Some(bucket_index) = (|residual_return: f64| -> Option<usize> {
-                    if !residual_return.is_finite() {
-                        return None;
-                    }
-                    Some(if residual_return <= -10.0 {
-                        0
-                    } else if residual_return <= -5.0 {
-                        1
-                    } else if residual_return <= -2.0 {
-                        2
-                    } else if residual_return <= 2.0 {
-                        3
-                    } else if residual_return <= 5.0 {
-                        4
-                    } else if residual_return <= 10.0 {
-                        5
-                    } else {
-                        6
-                    })
-                })(sample.residual_return)
-            {
-                self.return_distribution_counts[bucket_index] += 1;
-            }
-
             if let Some(rule_score) = triggered_score {
                 if collect_metrics {
                     triggered_residuals.push(sample.residual_return);
                     if sample.er_change.is_finite() {
                         triggered_er_changes.push(sample.er_change);
                     }
+                }
+
+                if collect_validation_details
+                    && let Some(bucket_index) = (|residual_return: f64| -> Option<usize> {
+                        if !residual_return.is_finite() {
+                            return None;
+                        }
+                        Some(if residual_return <= -10.0 {
+                            0
+                        } else if residual_return <= -5.0 {
+                            1
+                        } else if residual_return <= -2.0 {
+                            2
+                        } else if residual_return <= 2.0 {
+                            3
+                        } else if residual_return <= 5.0 {
+                            4
+                        } else if residual_return <= 10.0 {
+                            5
+                        } else {
+                            6
+                        })
+                    })(sample.residual_return)
+                {
+                    self.return_distribution_counts[bucket_index] += 1;
                 }
 
                 if collect_options.triggered_samples || collect_validation_details {

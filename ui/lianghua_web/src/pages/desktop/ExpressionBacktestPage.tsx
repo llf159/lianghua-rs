@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { getIndicatorManagePage } from "../../apis/dataDownload";
 import { ensureManagedSourcePath } from "../../apis/managedSource";
 import { getStrategyManagePage, type StrategyManageRuleItem } from "../../apis/strategyManage";
 import {
@@ -50,6 +51,7 @@ export default function ExpressionBacktestPage() {
   const storedCommonParams = useMemo(() => readStoredBacktestCommonParams(), []);
   const [sourcePath, setSourcePath] = useState(() => readStoredSourcePath());
   const [strategyOptions, setStrategyOptions] = useState<StrategyManageRuleItem[]>([]);
+  const [indicatorNames, setIndicatorNames] = useState<string[]>([]);
   const [coreRuleOptions, setCoreRuleOptions] = useState<ValidationCoreRuleOption[]>([]);
   const [form, setForm] = useState<ExpressionBacktestFormValues>(() => ({
     importRuleName: "",
@@ -147,6 +149,16 @@ export default function ExpressionBacktestPage() {
             setError(`读取核心策略可用性失败: ${String(coreRuleError)}`);
           }
         }
+        try {
+          const indicatorPage = await getIndicatorManagePage(resolved);
+          if (!cancelled) {
+            setIndicatorNames(indicatorPage.items.map((item) => item.name));
+          }
+        } catch (indicatorError) {
+          if (!cancelled) {
+            setError(`读取指标配置失败: ${String(indicatorError)}`);
+          }
+        }
       } catch (initError) {
         if (!cancelled) {
           setError(`读取回测默认参数失败: ${String(initError)}`);
@@ -229,7 +241,9 @@ export default function ExpressionBacktestPage() {
       scopeWay: parsedScopeWay.scopeWay,
       consecThresholdText: String(parsedScopeWay.consecThreshold),
       scopeWindowsText: String(Math.max(1, matched.scope_windows ?? 1)),
-      unknownConfigs: form.enableUnknown ? inferUnknownConfigs(matched.when ?? "") : [],
+      unknownConfigs: form.enableUnknown
+        ? inferUnknownConfigs(matched.when ?? "", indicatorNames)
+        : [],
     });
   }
 
@@ -416,6 +430,7 @@ export default function ExpressionBacktestPage() {
       <ExpressionBacktestForm
         values={form}
         strategyOptions={strategyOptions}
+        indicatorNames={indicatorNames}
         coreRuleOptions={coreRuleOptions}
         boardOptions={backtestBoardOptions}
         loading={loading}

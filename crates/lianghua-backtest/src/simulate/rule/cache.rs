@@ -785,7 +785,7 @@ mod tests {
         assert_eq!(validation.daily_score_layers[0].groups[1].sample_count, 1);
         assert_eq!(
             validation.return_distribution_counts.iter().sum::<usize>(),
-            4
+            validation.triggered_samples.len()
         );
         assert_eq!(triggered_samples.triggered_samples[0].ts_code, "000001.SZ");
         assert_eq!(

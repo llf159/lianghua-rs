@@ -46,6 +46,7 @@ export type ExpressionBacktestFormValues = {
 export function ExpressionBacktestForm({
   values,
   strategyOptions,
+  indicatorNames,
   coreRuleOptions,
   boardOptions,
   loading,
@@ -57,6 +58,7 @@ export function ExpressionBacktestForm({
 }: {
   values: ExpressionBacktestFormValues;
   strategyOptions: StrategyManageRuleItem[];
+  indicatorNames: string[];
   coreRuleOptions: ValidationCoreRuleOption[];
   boardOptions: string[];
   loading: boolean;
@@ -69,9 +71,19 @@ export function ExpressionBacktestForm({
   const [coreRuleKeyword, setCoreRuleKeyword] = useState("");
   const coreRuleKeywordText = coreRuleKeyword.trim().toLowerCase();
   const coreRuleOptionByName = new Map(coreRuleOptions.map((item) => [item.name, item]));
-  const visibleCoreRules = coreRuleKeywordText
-    ? strategyOptions.filter((item) => item.name.toLowerCase().includes(coreRuleKeywordText))
-    : strategyOptions;
+  const visibleCoreRules = strategyOptions
+    .filter((item) => !coreRuleKeywordText || item.name.toLowerCase().includes(coreRuleKeywordText))
+    .sort((left, right) => {
+      const leftOption = coreRuleOptionByName.get(left.name);
+      const rightOption = coreRuleOptionByName.get(right.name);
+      const leftUsable = Boolean(leftOption && leftOption.valid_trigger_count > 0);
+      const rightUsable = Boolean(rightOption && rightOption.valid_trigger_count > 0);
+      return (
+        Number(!leftUsable) - Number(!rightUsable) ||
+        (rightOption?.trigger_count ?? 0) - (leftOption?.trigger_count ?? 0) ||
+        left.name.localeCompare(right.name)
+      );
+    });
   const coreRuleUnavailableReason = (ruleName: string) => {
     const option = coreRuleOptionByName.get(ruleName);
     if (!option) {
@@ -278,7 +290,7 @@ export function ExpressionBacktestForm({
                 unknownConfigs: checked
                   ? hasValidUnknownConfig(values.unknownConfigs)
                     ? values.unknownConfigs
-                    : inferUnknownConfigs(values.expression)
+                    : inferUnknownConfigs(values.expression, indicatorNames)
                   : [],
               });
             }}
@@ -364,7 +376,10 @@ export function ExpressionBacktestForm({
         <div className="expression-backtest-unknown-block">
           <div className="expression-backtest-unknown-head">
             <strong>参数研究</strong>
-            <span>为表达式中的未知变量设定扫描范围，每个组合都会独立回测</span>
+            <span>
+              为表达式中的未知变量设定扫描范围，每个组合都会独立回测；自动识别会跳过行情/运行字段与指标管理里的指标
+              {indicatorNames.length > 0 ? `（当前 ${indicatorNames.length} 个指标）` : ""}
+            </span>
           </div>
           <div className="expression-backtest-unknown-list">
             {values.unknownConfigs.map((config, index) => (
@@ -424,7 +439,9 @@ export function ExpressionBacktestForm({
             <button
               type="button"
               className="expression-backtest-secondary-btn"
-              onClick={() => onChange({ unknownConfigs: inferUnknownConfigs(values.expression) })}
+              onClick={() =>
+                onChange({ unknownConfigs: inferUnknownConfigs(values.expression, indicatorNames) })
+              }
             >
               自动识别
             </button>

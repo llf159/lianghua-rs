@@ -863,8 +863,10 @@ pub(in crate::statistics) fn build_one_rule_backtest_summary_and_detail(
                 daily_score_layers,
                 return_distribution_counts,
             } = validation;
-            let validation_layer_details =
-                build_validation_score_layer_details_from_daily_layers(daily_score_layers);
+            let validation_layer_details = build_validation_score_layer_details_from_daily_layers(
+                daily_score_layers,
+                params.min_samples_per_day,
+            );
             let return_distribution =
                 build_validation_return_distribution_from_counts(return_distribution_counts);
             let mut sample_accumulator = ValidationSampleAccumulator::new(
