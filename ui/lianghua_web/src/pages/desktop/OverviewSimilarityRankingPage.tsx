@@ -1,0 +1,520 @@
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
+import { ensureManagedSourcePath } from '../../apis/managedSource'
+import { listRankTradeDates, listStockLookupRows, type StockLookupRow } from '../../apis/reader'
+import {
+  getStrategyTriggerSimilarityRankingPage,
+  type StrategyTriggerRankingPageData,
+} from '../../apis/strategyTriggerSimilarity'
+import DetailsLink from '../../shared/DetailsLink'
+import type { DetailsNavigationItem } from '../../shared/detailsLinkState'
+import {
+  filterBoardItems,
+  formatConceptText,
+  isStBoard,
+  useConceptExclusions,
+} from '../../shared/conceptExclusions'
+import { STOCK_PICK_BOARD_OPTIONS } from '../../shared/stockPickShared'
+import { readStoredDefaultBoardFilter } from '../../shared/defaultBoardFilter'
+import {
+  buildStockLookupCandidates,
+  findExactStockLookupMatch,
+  getLookupDigits,
+} from '../../shared/stockLookup'
+import { normalizeTradeDates, pickDateValue } from '../../shared/tradeDate'
+import StickyHorizontalTable from '../../shared/StickyHorizontalTable'
+import './css/StrategyTriggerSimilarityPage.css'
+import './css/OverviewScenePage.css'
+
+function formatNumber(value: number | null | undefined, digits = 1) {
+  return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : '--'
+}
+
+function formatPercent(value: number | null | undefined, digits = 2) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '--'
+  return `${value > 0 ? '+' : ''}${value.toFixed(digits)}%`
+}
+
+function formatElapsed(value: number | null | undefined) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '--'
+  if (value < 60_000) return `${(value / 1000).toFixed(1)} 秒`
+  return `${Math.floor(value / 60_000)} 分 ${Math.round((value % 60_000) / 1000)} 秒`
+}
+
+function formatGeneratedAt(value: number | null | undefined) {
+  return typeof value === 'number' && Number.isFinite(value) ? new Date(value * 1000).toLocaleString() : '--'
+}
+
+function outcomeTone(value: number | null | undefined) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value === 0) return ''
+  return value > 0 ? ' is-positive' : ' is-negative'
+}
+
+export default function OverviewSimilarityRankingPage() {
+  const [sourcePath, setSourcePath] = useState('')
+  const [dateOptions, setDateOptions] = useState<string[]>([])
+  const [tradeDate, setTradeDate] = useState('')
+  const [data, setData] = useState<StrategyTriggerRankingPageData | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const { excludedConcepts, excludeStBoard } = useConceptExclusions()
+  const [limitInput, setLimitInput] = useState('100')
+  const [boardFilter, setBoardFilter] = useState(() => readStoredDefaultBoardFilter())
+  const [lookupRows, setLookupRows] = useState<StockLookupRow[]>([])
+  const [lookupInput, setLookupInput] = useState('')
+  const [lookupFocused, setLookupFocused] = useState(false)
+  const [selectedTsCode, setSelectedTsCode] = useState('')
+  const [totalMvMinInput, setTotalMvMinInput] = useState('')
+  const [totalMvMaxInput, setTotalMvMaxInput] = useState('')
+  const initialAutoReadFiltersRef = useRef({
+    board:
+      boardFilter === '全部' || (excludeStBoard && isStBoard(boardFilter))
+        ? undefined
+        : boardFilter,
+    excludeStBoard: excludeStBoard || undefined,
+  })
+
+  const boardOptions = useMemo(() => filterBoardItems(STOCK_PICK_BOARD_OPTIONS, excludeStBoard), [excludeStBoard])
+  const deferredLookupInput = useDeferredValue(lookupInput)
+  const stockCandidates = useMemo(
+    () => buildStockLookupCandidates(lookupRows, deferredLookupInput, 12),
+    [deferredLookupInput, lookupRows],
+  )
+  const exactStockMatch = useMemo(
+    () => findExactStockLookupMatch(lookupRows, lookupInput),
+    [lookupInput, lookupRows],
+  )
+  const targetTsCode = selectedTsCode || exactStockMatch?.ts_code || ''
+  const showStockCandidates =
+    lookupFocused && lookupInput.trim() !== '' && stockCandidates.length > 0
+
+  useEffect(() => {
+    if (excludeStBoard && isStBoard(boardFilter)) {
+      setBoardFilter('全部')
+    }
+  }, [boardFilter, excludeStBoard])
+
+  const navigationItems = useMemo(
+    () =>
+      (data?.items ?? []).map((row) => ({
+        tsCode: row.tsCode,
+        tradeDate: data?.resolvedTradeDate,
+        sourcePath: sourcePath || undefined,
+        name: row.name || row.tsCode,
+      })),
+    [data, sourcePath],
+  )
+
+  const evidenceNavigationItems = useMemo<DetailsNavigationItem[]>(
+    () =>
+      (data?.items ?? []).flatMap((row) => {
+        const groupId = `${row.rank ?? row.tsCode}:${row.tsCode}`
+        const groupItems: DetailsNavigationItem[] = [
+          {
+            tsCode: row.tsCode,
+            tradeDate: data?.resolvedTradeDate,
+            sourcePath: sourcePath || undefined,
+            name: row.name || row.tsCode,
+            role: 'self',
+            groupId,
+          },
+        ]
+        const matches = [
+          { match: row.topMatches.find((match) => match.templateClass > 0), role: 'success' as const },
+          { match: row.topMatches.find((match) => match.templateClass < 0), role: 'failure' as const },
+        ]
+        for (const { match, role } of matches) {
+          if (!match) continue
+          groupItems.push({
+            tsCode: match.tsCode,
+            tradeDate: match.candidateEndTradeDate,
+            intervalStartTradeDate: match.outcomeStartTradeDate,
+            intervalEndTradeDate: match.outcomeEndTradeDate,
+            sourcePath: sourcePath || undefined,
+            name: match.name || match.tsCode,
+            role,
+            groupId,
+          })
+        }
+        return groupItems
+      }),
+    [data, sourcePath],
+  )
+
+  useEffect(() => {
+    let cancelled = false
+    void ensureManagedSourcePath()
+      .then(async (path) => {
+        const [dates, stocks] = await Promise.all([
+          listRankTradeDates(path),
+          listStockLookupRows(path),
+        ])
+        if (cancelled) return
+        const normalizedDates = normalizeTradeDates(dates)
+        const initialTradeDate = pickDateValue('', normalizedDates)
+        setSourcePath(path)
+        setLookupRows(stocks)
+        setDateOptions(normalizedDates)
+        setTradeDate(initialTradeDate)
+        if (initialTradeDate) {
+          const initialData = await getStrategyTriggerSimilarityRankingPage({
+            sourcePath: path,
+            tradeDate: initialTradeDate,
+            limit: 100,
+            board: initialAutoReadFiltersRef.current.board,
+            excludeStBoard: initialAutoReadFiltersRef.current.excludeStBoard,
+          })
+          if (!cancelled) setData(initialData)
+        }
+      })
+      .catch((loadError) => {
+        if (!cancelled) setError(`初始化失败: ${String(loadError)}`)
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  async function onRead() {
+    if (!sourcePath || !tradeDate) return
+    setLoading(true)
+    setError('')
+    if (lookupInput.trim() && !targetTsCode) {
+      setError('请从搜索候选中选择股票')
+      setLoading(false)
+      return
+    }
+    let limit: number | undefined
+    const limitRaw = limitInput.trim()
+    if (limitRaw) {
+      const parsedLimit = Number(limitRaw)
+      if (!Number.isInteger(parsedLimit) || parsedLimit <= 0) {
+        setError('限制行数必须是正整数')
+        setLoading(false)
+        return
+      }
+      limit = parsedLimit
+    }
+
+    let totalMvMin: number | undefined
+    const minRaw = totalMvMinInput.trim()
+    if (minRaw) {
+      const parsedMin = Number(minRaw)
+      if (!Number.isFinite(parsedMin)) {
+        setError('总市值最小值必须是数字')
+        setLoading(false)
+        return
+      }
+      totalMvMin = parsedMin
+    }
+
+    let totalMvMax: number | undefined
+    const maxRaw = totalMvMaxInput.trim()
+    if (maxRaw) {
+      const parsedMax = Number(maxRaw)
+      if (!Number.isFinite(parsedMax)) {
+        setError('总市值最大值必须是数字')
+        setLoading(false)
+        return
+      }
+      totalMvMax = parsedMax
+    }
+
+    if (totalMvMin !== undefined && totalMvMax !== undefined && totalMvMin > totalMvMax) {
+      setError('总市值最小值不能大于最大值')
+      setLoading(false)
+      return
+    }
+
+    try {
+      const result = await getStrategyTriggerSimilarityRankingPage({
+        sourcePath,
+        tradeDate,
+        limit,
+        board: boardFilter === '全部' ? undefined : boardFilter,
+        excludeStBoard: excludeStBoard || undefined,
+        totalMvMin,
+        totalMvMax,
+        tsCode: targetTsCode || undefined,
+      })
+      setData(result)
+    } catch (readError) {
+      setData(null)
+      setError(`读取走势相似排名失败: ${String(readError)}`)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  function renderRankingHead(accessible: boolean) {
+    return (
+      <thead aria-hidden={accessible ? undefined : true}>
+        <tr>
+          <th>排名</th>
+          <th>股票</th>
+          <th>板块</th>
+          <th>总市值(亿)</th>
+          <th>预测分</th>
+          <th>收缩超额</th>
+          <th>超额胜率</th>
+          <th>收益 / 超额</th>
+          <th>MFE / MAE</th>
+          <th>置信度</th>
+          <th>相似度</th>
+          <th>三日优排名</th>
+          <th>最相似成功模板</th>
+          <th>最相似失败模板</th>
+          <th>概念</th>
+        </tr>
+      </thead>
+    )
+  }
+
+  return (
+    <div className="trigger-sim-page">
+      <section className="trigger-sim-card trigger-sim-query-card">
+        <div className="trigger-sim-head">
+          <div>
+            <h2>走势相似排名</h2>
+          </div>
+          <span>{sourcePath || '--'}</span>
+        </div>
+        <div className="overview-form-grid">
+          <label className="overview-field">
+            <span>排名日期</span>
+            <select value={tradeDate} onChange={(event) => setTradeDate(event.target.value)}>
+              {dateOptions.map((date) => (
+                <option key={date} value={date}>
+                  {date}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="overview-field">
+            <span>限制行数</span>
+            <input
+              type="number"
+              min={1}
+              step={1}
+              value={limitInput}
+              onChange={(e) => setLimitInput(e.target.value)}
+              placeholder="100"
+            />
+          </label>
+          <label className="overview-field">
+            <span>板块筛选</span>
+            <select
+              value={boardFilter}
+              onChange={(event) => setBoardFilter(event.target.value as (typeof STOCK_PICK_BOARD_OPTIONS)[number])}
+            >
+              {boardOptions.map((board) => (
+                <option key={board} value={board}>
+                  {board}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="overview-field">
+            <span>股票搜索{targetTsCode ? `：${targetTsCode}` : ''}</span>
+            <div className="trigger-sim-autocomplete">
+              <input
+                type="text"
+                value={lookupInput}
+                onChange={(event) => {
+                  setLookupInput(event.target.value)
+                  setSelectedTsCode('')
+                }}
+                onFocus={() => setLookupFocused(true)}
+                onBlur={() => setLookupFocused(false)}
+                onKeyDown={(event) => {
+                  if (event.key !== 'Enter') return
+                  event.preventDefault()
+                  if (stockCandidates.length > 0) {
+                    const stock = stockCandidates[0]
+                    setLookupInput(stock.name || getLookupDigits(stock.ts_code) || stock.ts_code)
+                    setSelectedTsCode(stock.ts_code)
+                    setLookupFocused(false)
+                  } else {
+                    void onRead()
+                  }
+                }}
+                placeholder="输入代码 / 名称 / 拼音首字母"
+              />
+              {showStockCandidates ? (
+                <div className="trigger-sim-autocomplete-menu">
+                  {stockCandidates.map((stock) => (
+                    <button
+                      className="trigger-sim-autocomplete-option"
+                      key={stock.ts_code}
+                      type="button"
+                      onMouseDown={(event) => {
+                        event.preventDefault()
+                        setLookupInput(stock.name || getLookupDigits(stock.ts_code) || stock.ts_code)
+                        setSelectedTsCode(stock.ts_code)
+                        setLookupFocused(false)
+                      }}
+                    >
+                      <strong>{stock.name}</strong>
+                      <span>{getLookupDigits(stock.ts_code) || stock.ts_code}</span>
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          </label>
+          <label className="overview-field">
+            <span>总市值最小(亿)</span>
+            <input
+              type="number"
+              step={0.01}
+              value={totalMvMinInput}
+              onChange={(e) => setTotalMvMinInput(e.target.value)}
+              placeholder="留空=不限"
+            />
+          </label>
+          <label className="overview-field">
+            <span>总市值最大(亿)</span>
+            <input
+              type="number"
+              step={0.01}
+              value={totalMvMaxInput}
+              onChange={(e) => setTotalMvMaxInput(e.target.value)}
+              placeholder="留空=不限"
+            />
+          </label>
+        </div>
+        <div className="overview-actions">
+          <button
+            className="overview-read-btn"
+            type="button"
+            disabled={loading || !sourcePath || !tradeDate}
+            onClick={() => void onRead()}
+          >
+            {loading ? '读取中...' : '读取排名'}
+          </button>
+        </div>
+        {error ? <div className="trigger-sim-error">{error}</div> : null}
+      </section>
+
+      {data?.isFresh ? (
+        <section className="trigger-sim-card trigger-sim-ranking-card">
+          <div className="trigger-sim-result-head">
+            <div>
+              <h3>{data.resolvedTradeDate} 全市场排名</h3>
+              <p>
+                历史截止 {data.historicalCutoffDate} · 生成于 {formatGeneratedAt(data.generatedAtEpochSeconds)}
+              </p>
+            </div>
+            <span>耗时 {formatElapsed(data.elapsedMs)}</span>
+          </div>
+          <div className="trigger-sim-engine-meta">
+            <span>股票池 {data.universeCount}</span>
+            <span>有效排名 {data.rankedCount}</span>
+            <span>
+              历史模板 {data.evaluatedAnchorCount} / {data.candidateAnchorCount}
+            </span>
+            <span>
+              窗口 {data.windowTradeDays} · 池化 {data.poolSegments} · 后验 {data.outcomeTradeDays}
+            </span>
+            <span>基准 {data.benchmarkIndexCode}</span>
+            <span>实时水位核验通过</span>
+          </div>
+          <StickyHorizontalTable
+            scrollClassName="trigger-sim-ranking-scroll"
+            stickyHeader={
+              <table className="trigger-sim-table trigger-sim-ranking-table">{renderRankingHead(true)}</table>
+            }
+          >
+            <table className="trigger-sim-table trigger-sim-ranking-table">
+              {renderRankingHead(false)}
+              <tbody>
+                {data.items.map((row) => {
+                  const conceptText = formatConceptText(row.concept, excludedConcepts)
+                  const successMatch = row.topMatches.find((match) => match.templateClass > 0)
+                  const failureMatch = row.topMatches.find((match) => match.templateClass < 0)
+                  const renderTemplateMatch = (
+                    label: string,
+                    match: typeof successMatch,
+                  ) => match ? (
+                    <DetailsLink
+                      className="trigger-sim-stock-link trigger-sim-history-link"
+                      tsCode={match.tsCode}
+                      tradeDate={match.candidateEndTradeDate}
+                      intervalStartTradeDate={match.outcomeStartTradeDate}
+                      intervalEndTradeDate={match.outcomeEndTradeDate}
+                      sourcePath={sourcePath}
+                      navigationItems={navigationItems}
+                      evidenceNavigationItems={evidenceNavigationItems}
+                      title={`查看${label}${match.name || match.tsCode}的后验走势`}
+                    >
+                      <strong>{label} {match.name || match.tsCode}</strong>
+                      <span>{match.candidateEndTradeDate} · 超额 {formatPercent(match.forwardExcessReturnPct)}</span>
+                    </DetailsLink>
+                  ) : (
+                    <span>{label} --</span>
+                  )
+                  return (
+                    <tr key={row.tsCode}>
+                      <td>{row.rank ?? '--'}</td>
+                      <td>
+                        <DetailsLink
+                          className="trigger-sim-stock-link"
+                          tsCode={row.tsCode}
+                          tradeDate={data.resolvedTradeDate}
+                          sourcePath={sourcePath}
+                          navigationItems={navigationItems}
+                          evidenceNavigationItems={evidenceNavigationItems}
+                        >
+                          <strong>{row.name || row.tsCode}</strong>
+                          <span>{row.tsCode}</span>
+                        </DetailsLink>
+                      </td>
+                      <td>{row.board || '--'}</td>
+                      <td>{formatNumber(row.totalMvYi, 2)}</td>
+                      <td>{formatNumber(row.rankingScore)}</td>
+                      <td className={outcomeTone(row.shrunkExcessReturnPct)}>
+                        {formatPercent(row.shrunkExcessReturnPct)}
+                      </td>
+                      <td>{formatPercent(row.excessPositiveRate, 1)}</td>
+                      <td>
+                        {formatPercent(row.expectedReturnPct)} / {formatPercent(row.expectedExcessReturnPct)}
+                      </td>
+                      <td>
+                        {formatPercent(row.expectedMfePct)} / {formatPercent(row.expectedMaePct)}
+                      </td>
+                      <td>{formatPercent(row.confidence * 100, 1)}</td>
+                      <td>
+                        {formatNumber(row.averageSimilarity)} / {formatNumber(row.bestSimilarity)}
+                      </td>
+                      <td>{row.bestRank3d ?? '--'}</td>
+                      <td className="trigger-sim-template-cell">
+                        {renderTemplateMatch('成功', successMatch)}
+                      </td>
+                      <td className="trigger-sim-template-cell">
+                        {renderTemplateMatch('失败', failureMatch)}
+                      </td>
+                      <td className="trigger-sim-concept-cell" title={conceptText}>
+                        {conceptText}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </StickyHorizontalTable>
+        </section>
+      ) : (
+        <section className="trigger-sim-card">
+          <div className="trigger-sim-stale-banner">
+            <strong>{loading ? '正在读取' : '当前参数没有可用的新鲜排名'}</strong>
+            <span>{data?.staleReason || '请先到“下载/计算”页面生成走势相似排行榜。'}</span>
+            <Link to="/raw-data/download-compute">前往计算页面</Link>
+          </div>
+        </section>
+      )}
+    </div>
+  )
+}

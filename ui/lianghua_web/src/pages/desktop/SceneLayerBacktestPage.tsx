@@ -1,0 +1,3271 @@
+import { useEffect, useMemo, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
+import { ensureManagedSourcePath } from "../../apis/managedSource";
+import { getStrategyManagePage, type StrategyManageRuleItem } from "../../apis/strategyManage";
+import {
+  getCachedRuleLayerBacktestDetail,
+  getRuleLayerBacktestDefaults,
+  runRankLayerBacktest,
+  runRuleExpressionCalibration,
+  runRuleExpressionValidation,
+  runTransientRankLayerBacktest,
+  runTransientRuleLayerBacktest,
+  runTransientSceneLayerBacktest,
+  getSceneLayerBacktestDefaults,
+  runRuleLayerBacktest,
+  runSceneLayerBacktest,
+  type RankLayerBacktestData,
+  type RankLayerMethod,
+  type RankLayerSampleGroup,
+  type RuleExpressionCalibrationCandidate,
+  type RuleExpressionCalibrationData,
+  type RuleExpressionValidationData,
+  type RuleValidationComboResult,
+  type RuleDecayValidation,
+  type RuleLayerBacktestData,
+  type RuleLayerRuleSummary,
+  type RuleValidationUnknownConfig,
+  type SceneLayerBacktestData,
+} from "../../apis/strategyTrigger";
+import {
+  TableSortButton,
+  getAriaSort,
+  useTableSort,
+  type SortDefinition,
+} from "../../shared/tableSort";
+import {
+  readStoredBacktestHighlightSettings,
+  shouldHighlightBacktestMetric,
+  type BacktestHighlightMetric,
+} from "../../shared/backtestHighlightSettings";
+import { readJsonStorage, readStoredSourcePath, writeJsonStorage } from "../../shared/storage";
+import { useConceptExclusions } from "../../shared/conceptExclusions";
+import {
+  STOCK_PICK_BOARD_OPTIONS,
+  buildBoardFilterOptions,
+} from "../../shared/stockPickShared";
+import {
+  ExpressionValidationSamplesPanel,
+  type SceneLayerValidationReturnState,
+} from "./ExpressionValidationSamplesPage";
+import "./css/SceneLayerBacktestPage.css";
+
+type RuleSummarySortKey =
+  | "rule_name"
+  | "point_count"
+  | "profit_loss_ratio"
+  | "avg_excess_residual_mean"
+  | "avg_er_change"
+  | "avg_contribution_score"
+  | "avg_contribution_per_trigger"
+  | "decay_20"
+  | "ic_mean"
+  | "icir"
+  | "ic_t_value";
+
+type ValidationComboSortKey =
+  | "combo_label"
+  | "params"
+  | "trigger_samples"
+  | "triggered_days"
+  | "avg_daily_trigger"
+  | "spread_mean"
+  | "profit_loss_ratio"
+  | "avg_excess_residual_mean"
+  | "avg_er_change"
+  | "ic_mean"
+  | "ic_t_value"
+  | "icir";
+
+type ValidationScopeWayOption = "ANY" | "LAST" | "EACH" | "RECENT" | "CONSEC";
+type ValidationDirection = "positive" | "negative";
+type ValidationUnknownConfigDraft = {
+  name: string;
+  start: string;
+  end: string;
+  step: string;
+};
+
+type BacktestCommonParamsDraft = {
+  stockAdjType: string;
+  indexTsCode: string;
+  indexBeta: string;
+  conceptBeta: string;
+  industryBeta: string;
+  startDateInput: string;
+  endDateInput: string;
+  minSamplesPerDay: string;
+  minListedTradeDays: string;
+  backtestPeriod: string;
+  parallelBatchSize: string;
+  totalMvMin: string;
+  totalMvMax: string;
+  rankLayerCount: string;
+  rankLayerMethod: RankLayerMethod;
+  backtestBoardFilter: (typeof STOCK_PICK_BOARD_OPTIONS)[number];
+};
+
+type StoredBacktestCommonParamsDraft = Omit<BacktestCommonParamsDraft, "endDateInput">;
+
+type StoredBacktestCommonParams = BacktestCommonParamsDraft & {
+  hasStoredParams: boolean;
+};
+
+const BACKTEST_COMMON_PARAMS_STORAGE_KEY = "lh_scene_layer_backtest_common_params";
+const VALIDATION_DEFAULT_SAMPLE_LIMIT = 5;
+const VALIDATION_MAX_SAMPLE_LIMIT = 200;
+const RANK_LAYER_SAMPLE_LIMIT_PER_GROUP = 5;
+const EMPTY_VALIDATION_COMBO_RESULTS: RuleValidationComboResult[] = [];
+
+type SceneLayerBacktestLocationState = {
+  validationReturnState?: SceneLayerValidationReturnState;
+};
+
+function formatDateLabel(value?: string | null) {
+  if (!value || value.length !== 8) {
+    return "--";
+  }
+  return `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}`;
+}
+
+function normalizedSampleTriggerCount(value?: number | null) {
+  return Number.isInteger(value) && Number(value) >= 1 ? Number(value) : 1;
+}
+
+function filterValidationComboByTriggerCount(
+  combo: RuleValidationComboResult,
+  triggerCount: number,
+): RuleValidationComboResult {
+  const filterRows = (rows: RuleValidationComboResult["sample_groups"]["positive"]) =>
+    rows.filter((row) => normalizedSampleTriggerCount(row.trigger_count) === triggerCount);
+  const sampleGroups = {
+    positive: filterRows(combo.sample_groups.positive),
+    negative: filterRows(combo.sample_groups.negative),
+    random: filterRows(combo.sample_groups.random),
+  };
+  const stats = (combo.trigger_count_stats ?? []).find(
+    (item) => item.trigger_count === triggerCount,
+  ) ?? {
+    trigger_count: triggerCount,
+    positive_count: sampleGroups.positive.length,
+    negative_count: sampleGroups.negative.length,
+    random_count: sampleGroups.random.length,
+    total_samples: new Set(
+      [...sampleGroups.positive, ...sampleGroups.negative, ...sampleGroups.random].map(
+        (row) => `${row.ts_code}__${row.trade_date}`,
+      ),
+    ).size,
+  };
+
+  return {
+    ...combo,
+    combo_label: `${combo.combo_label} · ${triggerCount}次触发`,
+    trigger_samples: stats.total_samples,
+    sample_stats: {
+      positive_count: stats.positive_count,
+      negative_count: stats.negative_count,
+      random_count: stats.random_count,
+      total_samples: stats.total_samples,
+    },
+    sample_groups: sampleGroups,
+  };
+}
+
+function formatNumber(value?: number | null, digits = 4) {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return "--";
+  }
+  return value.toFixed(digits);
+}
+
+function normalizeDateInput(value: string) {
+  return value.replaceAll("-", "").trim();
+}
+
+function compactDateToInput(value?: string | null) {
+  if (!value || !/^\d{8}$/.test(value)) {
+    return "";
+  }
+  return `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}`;
+}
+
+function formatPercent(value?: number | null, digits = 2) {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return "--";
+  }
+  return `${value.toFixed(digits)}%`;
+}
+
+function getRuleDecayValidation(
+  row: RuleLayerRuleSummary,
+  windowDays: number,
+): RuleDecayValidation | undefined {
+  return (row.decay_validations ?? []).find((item) => item.window_days === windowDays);
+}
+
+function decayStatusClass(status?: string | null) {
+  switch (status) {
+    case "significant_decay":
+    case "decay":
+      return "scene-layer-decay-status-danger";
+    case "weakening":
+    case "weak":
+      return "scene-layer-decay-status-warning";
+    case "improving":
+      return "scene-layer-decay-status-improving";
+    case "stable":
+      return "scene-layer-decay-status-stable";
+    default:
+      return "scene-layer-decay-status-insufficient";
+  }
+}
+
+function formatDecayValidationTitle(
+  item: RuleDecayValidation,
+  valueLabel = "方向超额",
+) {
+  const dateRange = item.recent_start_date && item.recent_end_date
+    ? `${formatDateLabel(item.recent_start_date)} ~ ${formatDateLabel(item.recent_end_date)}`
+    : "--";
+  return [
+    `最近窗口：${dateRange}`,
+    `近期${valueLabel}：${formatPercent(item.recent_directional_excess_mean, 4)}`,
+    `此前${valueLabel}：${formatPercent(item.prior_directional_excess_mean, 4)}`,
+    `变化：${formatPercent(item.decay_change, 4)}`,
+    `Welch t值：${formatNumber(item.decay_t_value, 3)}`,
+    `有效日：近期${item.recent_day_count} / 此前${item.prior_day_count}`,
+  ].join("；");
+}
+
+function renderDecayValidations(
+  validations: RuleDecayValidation[] | undefined,
+  keyPrefix: string,
+  valueLabel?: string,
+) {
+  const rows = validations ?? [];
+  if (rows.length === 0) {
+    return "--";
+  }
+  return (
+    <div className="scene-layer-decay-list">
+      {rows.map((item) => (
+        <div
+          key={`${keyPrefix}-decay-${item.window_days}`}
+          className={`scene-layer-decay-item ${decayStatusClass(item.status)}`}
+          title={formatDecayValidationTitle(item, valueLabel)}
+        >
+          <span>{item.window_days}日</span>
+          <strong>{item.status_label}</strong>
+          <em>
+            近 {formatPercent(item.recent_directional_excess_mean, 2)} / Δ {formatPercent(item.decay_change, 2)}
+          </em>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function renderRuleDecayValidations(row: RuleLayerRuleSummary) {
+  const validations = row.decay_validations ?? [];
+  if (validations.length === 0) {
+    return "--";
+  }
+  return renderDecayValidations(validations, row.rule_name);
+}
+
+function formatCalibrationDistancePoints(candidate: RuleExpressionCalibrationCandidate) {
+  if (candidate.suggested_dist_points.length === 0) {
+    return "—";
+  }
+  return candidate.suggested_dist_points
+    .map((item) => `${item.min}-${item.max}:${formatNumber(item.points, 2)}`)
+    .join("；");
+}
+
+function formatCalibrationBuckets(candidate: RuleExpressionCalibrationCandidate) {
+  if (candidate.score_buckets.length === 0) {
+    return "无可用分桶";
+  }
+  return candidate.score_buckets
+    .map(
+      (item) =>
+        `×${formatNumber(item.score_multiplier, 2)}：${item.sample_count}样本 / ${formatPercent(item.avg_residual_return)}`,
+    )
+    .join("；");
+}
+
+function formatBacktestBoardLabel(value?: {
+  resolved_board?: string | null;
+  exclude_st_board?: boolean | null;
+}) {
+  return [value?.resolved_board ?? "不限", value?.exclude_st_board ? "排除ST" : ""]
+    .filter(Boolean)
+    .join(" / ");
+}
+
+function formatMarketValueRange(value?: {
+  total_mv_min?: number | null;
+  total_mv_max?: number | null;
+}) {
+  const minValue = value?.total_mv_min;
+  const maxValue = value?.total_mv_max;
+  if (
+    (minValue === null || minValue === undefined || !Number.isFinite(minValue)) &&
+    (maxValue === null || maxValue === undefined || !Number.isFinite(maxValue))
+  ) {
+    return "不限";
+  }
+  const minText = minValue !== null && minValue !== undefined && Number.isFinite(minValue)
+    ? `${formatNumber(minValue, 0)}亿`
+    : "-∞";
+  const maxText = maxValue !== null && maxValue !== undefined && Number.isFinite(maxValue)
+    ? `${formatNumber(maxValue, 0)}亿`
+    : "+∞";
+  return `${minText} ~ ${maxText}`;
+}
+
+function parseOptionalNumberInput(value: string): number | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function formatRate(value?: number | null, digits = 1) {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return "--";
+  }
+  return `${(value * 100).toFixed(digits)}%`;
+}
+
+function formatProfitLossRatio(value?: number | null, digits = 2) {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return "--";
+  }
+  return `${value.toFixed(digits)}:1`;
+}
+
+function formatLift(value?: number | null) {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return "--";
+  }
+  return `${value.toFixed(2)}x`;
+}
+
+function resolveResidualDirection(
+  contributionScore?: number | null,
+  fallbackDirection?: ValidationDirection,
+): ValidationDirection | null {
+  if (contributionScore !== null && contributionScore !== undefined && Number.isFinite(contributionScore)) {
+    if (contributionScore < 0) {
+      return "negative";
+    }
+    if (contributionScore > 0) {
+      return "positive";
+    }
+  }
+  return fallbackDirection ?? null;
+}
+
+function buildEmptyUnknownConfig(): ValidationUnknownConfigDraft {
+  return {
+    name: "",
+    start: "",
+    end: "",
+    step: "",
+  };
+}
+
+function toUnknownConfigDraft(item: RuleValidationUnknownConfig): ValidationUnknownConfigDraft {
+  return {
+    name: item.name,
+    start: String(item.start),
+    end: String(item.end),
+    step: String(item.step),
+  };
+}
+
+function hasValidUnknownConfig(configs: ValidationUnknownConfigDraft[]): boolean {
+  return configs.some((item) => item.name.trim().length > 0);
+}
+
+function formatUnknownValuesForCombo(item: RuleValidationComboResult) {
+  return item.unknown_values.length > 0
+    ? item.unknown_values
+        .map((unknown) => `${unknown.name}=${formatNumber(unknown.value, 4)}`)
+        .join(", ")
+    : "默认参数";
+}
+
+function compactRuleLayerBacktestPayload(data: RuleLayerBacktestData): RuleLayerBacktestData {
+  if (data.points.length === 0) {
+    return data;
+  }
+  return {
+    ...data,
+    points: [],
+  };
+}
+
+function compactRuleExpressionValidationData(
+  data: RuleExpressionValidationData,
+): RuleExpressionValidationData {
+  return {
+    ...data,
+    combo_results: data.combo_results.map((combo) => {
+      const backtest = compactRuleLayerBacktestPayload(combo.backtest);
+      return backtest === combo.backtest
+        ? combo
+        : {
+            ...combo,
+            backtest,
+          };
+    }),
+  };
+}
+
+const BASE_SERIES_IDENTIFIERS = new Set([
+  "O",
+  "H",
+  "L",
+  "C",
+  "V",
+  "AMOUNT",
+  "PRE_CLOSE",
+  "CHANGE",
+  "PCT_CHG",
+  "ZHANG",
+]);
+
+const RESERVED_BOOLEAN_IDENTIFIERS = new Set(["AND", "OR", "NOT", "TRUE", "FALSE"]);
+
+function readNextNonSpaceChar(expression: string, from: number): string {
+  for (let index = from; index < expression.length; index += 1) {
+    const ch = expression[index];
+    if (!/\s/.test(ch)) {
+      return ch;
+    }
+  }
+  return "";
+}
+
+function inferUnknownConfigs(expression: string): ValidationUnknownConfigDraft[] {
+  const assigned = new Set<string>();
+  for (const match of expression.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)\s*:=/g)) {
+    const name = match[1]?.trim();
+    if (!name) {
+      continue;
+    }
+    assigned.add(name.toUpperCase());
+  }
+
+  const found = new Set<string>();
+  const tokenRegExp = /\b([A-Za-z_][A-Za-z0-9_]*)\b/g;
+  for (const match of expression.matchAll(tokenRegExp)) {
+    const token = match[1]?.trim();
+    const full = match[0];
+    const matchStart = match.index;
+    if (!token) {
+      continue;
+    }
+    if (matchStart === undefined) {
+      continue;
+    }
+    const upper = token.toUpperCase();
+
+    if (
+      RESERVED_BOOLEAN_IDENTIFIERS.has(upper) ||
+      BASE_SERIES_IDENTIFIERS.has(upper) ||
+      /^(?:I|ISZ|I300|I500|ICY|I50|I1000)(?:_[A-Z][A-Z0-9_]*)?$/.test(upper) ||
+      assigned.has(upper)
+    ) {
+      continue;
+    }
+
+    const nextNonSpaceChar = readNextNonSpaceChar(expression, matchStart + full.length);
+    const isFunctionCall = nextNonSpaceChar === "(";
+    if (isFunctionCall) {
+      continue;
+    }
+
+    found.add(token);
+  }
+
+  const names = Array.from(found).sort((left, right) => left.localeCompare(right));
+  if (names.length === 0) {
+    return [buildEmptyUnknownConfig()];
+  }
+
+  return names.map((name) => ({
+    name,
+    start: "",
+    end: "",
+    step: "",
+  }));
+}
+
+function resolveValidationScopeWay(rawValue?: string | null): {
+  scopeWay: ValidationScopeWayOption;
+  consecThreshold: number;
+} {
+  const normalized = (rawValue ?? "").trim().toUpperCase();
+  if (!normalized) {
+    return {
+      scopeWay: "LAST",
+      consecThreshold: 2,
+    };
+  }
+  if (normalized === "ANY" || normalized === "LAST" || normalized === "EACH" || normalized === "RECENT") {
+    return {
+      scopeWay: normalized,
+      consecThreshold: 2,
+    };
+  }
+  if (normalized.startsWith("CONSEC>=")) {
+    const rawThreshold = normalized.slice("CONSEC>=".length).trim();
+    const parsedThreshold = Number(rawThreshold);
+    return {
+      scopeWay: "CONSEC",
+      consecThreshold:
+        Number.isFinite(parsedThreshold) && Number.isInteger(parsedThreshold) && parsedThreshold >= 1
+          ? parsedThreshold
+          : 2,
+    };
+  }
+  return {
+    scopeWay: "LAST",
+    consecThreshold: 2,
+  };
+}
+
+const INDEX_OPTIONS = [
+  { value: "000001.SH", label: "上证指数" },
+  { value: "399001.SZ", label: "深证成指" },
+  { value: "399006.SZ", label: "创业板指" },
+  { value: "000300.SH", label: "沪深300" },
+  { value: "000905.SH", label: "中证500" },
+  { value: "000852.SH", label: "中证1000" },
+  { value: "000688.SH", label: "科创50" },
+] as const;
+
+const DEFAULT_BACKTEST_COMMON_PARAMS: BacktestCommonParamsDraft = {
+  stockAdjType: "qfq",
+  indexTsCode: INDEX_OPTIONS[0].value,
+  indexBeta: "0.5",
+  conceptBeta: "0.1",
+  industryBeta: "0.1",
+  startDateInput: "",
+  endDateInput: "",
+  minSamplesPerDay: "5",
+  minListedTradeDays: "60",
+  backtestPeriod: "3",
+  parallelBatchSize: "4",
+  totalMvMin: "",
+  totalMvMax: "",
+  rankLayerCount: "5",
+  rankLayerMethod: "sample_count",
+  backtestBoardFilter: "全部",
+};
+
+function normalizeStoredString(value: unknown, fallback: string) {
+  return typeof value === "string" ? value : fallback;
+}
+
+function normalizeRankLayerMethod(value: unknown): RankLayerMethod {
+  return RANK_LAYER_METHOD_OPTIONS.some((item) => item.value === value)
+    ? (value as RankLayerMethod)
+    : DEFAULT_BACKTEST_COMMON_PARAMS.rankLayerMethod;
+}
+
+function readStoredBacktestCommonParams(): StoredBacktestCommonParams {
+  const parsed = readJsonStorage<
+    Partial<StoredBacktestCommonParamsDraft> & {
+      ruleBoardFilter?: (typeof STOCK_PICK_BOARD_OPTIONS)[number];
+    }
+  >(
+    typeof window === "undefined" ? null : window.localStorage,
+    BACKTEST_COMMON_PARAMS_STORAGE_KEY,
+  );
+  const indexTsCode = normalizeStoredString(parsed?.indexTsCode, DEFAULT_BACKTEST_COMMON_PARAMS.indexTsCode);
+  const parsedBoardFilter =
+    parsed?.backtestBoardFilter && STOCK_PICK_BOARD_OPTIONS.includes(parsed.backtestBoardFilter)
+      ? parsed.backtestBoardFilter
+      : parsed?.ruleBoardFilter && STOCK_PICK_BOARD_OPTIONS.includes(parsed.ruleBoardFilter)
+        ? parsed.ruleBoardFilter
+        : DEFAULT_BACKTEST_COMMON_PARAMS.backtestBoardFilter;
+
+  return {
+    stockAdjType: normalizeStoredString(parsed?.stockAdjType, DEFAULT_BACKTEST_COMMON_PARAMS.stockAdjType),
+    indexTsCode: INDEX_OPTIONS.some((item) => item.value === indexTsCode)
+      ? indexTsCode
+      : DEFAULT_BACKTEST_COMMON_PARAMS.indexTsCode,
+    indexBeta: normalizeStoredString(parsed?.indexBeta, DEFAULT_BACKTEST_COMMON_PARAMS.indexBeta),
+    conceptBeta: normalizeStoredString(parsed?.conceptBeta, DEFAULT_BACKTEST_COMMON_PARAMS.conceptBeta),
+    industryBeta: normalizeStoredString(parsed?.industryBeta, DEFAULT_BACKTEST_COMMON_PARAMS.industryBeta),
+    startDateInput: normalizeStoredString(parsed?.startDateInput, DEFAULT_BACKTEST_COMMON_PARAMS.startDateInput),
+    endDateInput: DEFAULT_BACKTEST_COMMON_PARAMS.endDateInput,
+    minSamplesPerDay: normalizeStoredString(parsed?.minSamplesPerDay, DEFAULT_BACKTEST_COMMON_PARAMS.minSamplesPerDay),
+    minListedTradeDays: normalizeStoredString(
+      parsed?.minListedTradeDays,
+      DEFAULT_BACKTEST_COMMON_PARAMS.minListedTradeDays,
+    ),
+    backtestPeriod: normalizeStoredString(parsed?.backtestPeriod, DEFAULT_BACKTEST_COMMON_PARAMS.backtestPeriod),
+    parallelBatchSize: normalizeStoredString(
+      parsed?.parallelBatchSize,
+      DEFAULT_BACKTEST_COMMON_PARAMS.parallelBatchSize,
+    ),
+    totalMvMin: normalizeStoredString(parsed?.totalMvMin, DEFAULT_BACKTEST_COMMON_PARAMS.totalMvMin),
+    totalMvMax: normalizeStoredString(parsed?.totalMvMax, DEFAULT_BACKTEST_COMMON_PARAMS.totalMvMax),
+    rankLayerCount: normalizeStoredString(parsed?.rankLayerCount, DEFAULT_BACKTEST_COMMON_PARAMS.rankLayerCount),
+    rankLayerMethod: normalizeRankLayerMethod(parsed?.rankLayerMethod),
+    backtestBoardFilter: parsedBoardFilter,
+    hasStoredParams: Boolean(parsed),
+  };
+}
+
+function writeStoredBacktestCommonParams(value: BacktestCommonParamsDraft) {
+  const storedValue: StoredBacktestCommonParamsDraft = {
+    stockAdjType: value.stockAdjType,
+    indexTsCode: value.indexTsCode,
+    indexBeta: value.indexBeta,
+    conceptBeta: value.conceptBeta,
+    industryBeta: value.industryBeta,
+    startDateInput: value.startDateInput,
+    minSamplesPerDay: value.minSamplesPerDay,
+    minListedTradeDays: value.minListedTradeDays,
+    backtestPeriod: value.backtestPeriod,
+    parallelBatchSize: value.parallelBatchSize,
+    totalMvMin: value.totalMvMin,
+    totalMvMax: value.totalMvMax,
+    rankLayerCount: value.rankLayerCount,
+    rankLayerMethod: value.rankLayerMethod,
+    backtestBoardFilter: value.backtestBoardFilter,
+  };
+  writeJsonStorage(
+    typeof window === "undefined" ? null : window.localStorage,
+    BACKTEST_COMMON_PARAMS_STORAGE_KEY,
+    storedValue,
+  );
+}
+
+const VALIDATION_SCOPE_WAY_OPTIONS: Array<{ value: ValidationScopeWayOption; label: string }> = [
+  { value: "ANY", label: "ANY" },
+  { value: "LAST", label: "LAST" },
+  { value: "EACH", label: "EACH" },
+  { value: "RECENT", label: "RECENT" },
+  { value: "CONSEC", label: "CONSEC" },
+];
+
+const RANK_LAYER_METHOD_OPTIONS: Array<{ value: RankLayerMethod; label: string }> = [
+  { value: "sample_count", label: "按样本数分层" },
+  { value: "score", label: "按分数分层" },
+  { value: "rank", label: "按排名分层" },
+];
+
+export default function SceneLayerBacktestPage() {
+  const { excludeStBoard } = useConceptExclusions();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const locationState =
+    location.state && typeof location.state === "object"
+      ? (location.state as SceneLayerBacktestLocationState)
+      : null;
+  const storedCommonParams = useMemo(() => readStoredBacktestCommonParams(), []);
+  const [sourcePath, setSourcePath] = useState(() => readStoredSourcePath());
+  const [stockAdjType, setStockAdjType] = useState(storedCommonParams.stockAdjType);
+  const [indexTsCode, setIndexTsCode] = useState<string>(storedCommonParams.indexTsCode);
+  const [indexBeta, setIndexBeta] = useState(storedCommonParams.indexBeta);
+  const [conceptBeta, setConceptBeta] = useState(storedCommonParams.conceptBeta);
+  const [industryBeta, setIndustryBeta] = useState(storedCommonParams.industryBeta);
+  const [startDateInput, setStartDateInput] = useState(storedCommonParams.startDateInput);
+  const [endDateInput, setEndDateInput] = useState(storedCommonParams.endDateInput);
+  const [minSamplesPerDay, setMinSamplesPerDay] = useState(storedCommonParams.minSamplesPerDay);
+  const [minListedTradeDays, setMinListedTradeDays] = useState(storedCommonParams.minListedTradeDays);
+  const [backtestPeriod, setBacktestPeriod] = useState(storedCommonParams.backtestPeriod);
+  const [parallelBatchSize, setParallelBatchSize] = useState(storedCommonParams.parallelBatchSize);
+  const [totalMvMin, setTotalMvMin] = useState(storedCommonParams.totalMvMin);
+  const [totalMvMax, setTotalMvMax] = useState(storedCommonParams.totalMvMax);
+  const [rankLayerCount, setRankLayerCount] = useState(storedCommonParams.rankLayerCount);
+  const [rankLayerMethod, setRankLayerMethod] = useState<RankLayerMethod>(
+    storedCommonParams.rankLayerMethod,
+  );
+  const [backtestBoardFilter, setBacktestBoardFilter] = useState<
+    (typeof STOCK_PICK_BOARD_OPTIONS)[number]
+  >(storedCommonParams.backtestBoardFilter);
+
+  const [loading, setLoading] = useState(false);
+  const [initializing, setInitializing] = useState(false);
+  const [error, setError] = useState("");
+  const [rankLoading, setRankLoading] = useState(false);
+  const [rankTransientLoading, setRankTransientLoading] = useState(false);
+  const [rankError, setRankError] = useState("");
+  const [rankResult, setRankResult] = useState<RankLayerBacktestData | null>(null);
+  const [rankLayerSampleModal, setRankLayerSampleModal] = useState<RankLayerSampleGroup | null>(null);
+  const [result, setResult] = useState<SceneLayerBacktestData | null>(null);
+  const [transientLoading, setTransientLoading] = useState(false);
+
+  const [ruleLoading, setRuleLoading] = useState(false);
+  const [ruleTransientLoading, setRuleTransientLoading] = useState(false);
+  const [ruleError, setRuleError] = useState("");
+  const [ruleResult, setRuleResult] = useState<RuleLayerBacktestData | null>(null);
+  const [strategyRuleOptions, setStrategyRuleOptions] = useState<StrategyManageRuleItem[]>([]);
+  const [validationImportRuleName, setValidationImportRuleName] = useState("");
+  const [validationExpression, setValidationExpression] = useState("");
+  const [validationDirection, setValidationDirection] = useState<ValidationDirection>("positive");
+  const [validationScopeWay, setValidationScopeWay] = useState<ValidationScopeWayOption>("LAST");
+  const [validationConsecThresholdText, setValidationConsecThresholdText] = useState("2");
+  const [validationScopeWindowsText, setValidationScopeWindowsText] = useState("1");
+  const [validationEnableUnknown, setValidationEnableUnknown] = useState(false);
+  const [validationUnknownConfigs, setValidationUnknownConfigs] = useState<
+    ValidationUnknownConfigDraft[]
+  >([]);
+  const [validationSampleLimitText, setValidationSampleLimitText] = useState(
+    String(VALIDATION_DEFAULT_SAMPLE_LIMIT),
+  );
+  const [validationLoading, setValidationLoading] = useState(false);
+  const [validationError, setValidationError] = useState("");
+  const [validationResult, setValidationResult] = useState<RuleExpressionValidationData | null>(null);
+  const [validationCalibrationLoading, setValidationCalibrationLoading] = useState(false);
+  const [validationCalibrationError, setValidationCalibrationError] = useState("");
+  const [validationCalibrationResult, setValidationCalibrationResult] =
+    useState<RuleExpressionCalibrationData | null>(null);
+  const [validationSelectedComboKey, setValidationSelectedComboKey] = useState("");
+  const [validationRestoredComboKey, setValidationRestoredComboKey] = useState("");
+  const [validationDetailModalOpen, setValidationDetailModalOpen] = useState(false);
+  const [validationSelectedTriggerCount, setValidationSelectedTriggerCount] = useState<
+    number | null
+  >(null);
+  const [shouldAutoOpenDetail, setShouldAutoOpenDetail] = useState(false);
+  const heavyTaskRunning =
+    loading ||
+    transientLoading ||
+    rankLoading ||
+    rankTransientLoading ||
+    ruleLoading ||
+    ruleTransientLoading ||
+    validationLoading ||
+    validationCalibrationLoading;
+  const backtestBoardOptions = useMemo(
+    () => buildBoardFilterOptions(STOCK_PICK_BOARD_OPTIONS, excludeStBoard),
+    [excludeStBoard],
+  );
+
+  useEffect(() => {
+    const returnState = locationState?.validationReturnState;
+    if (!returnState) {
+      return;
+    }
+
+    setStockAdjType(returnState.stockAdjType);
+    setIndexTsCode(returnState.indexTsCode);
+    setIndexBeta(returnState.indexBeta);
+    setConceptBeta(returnState.conceptBeta);
+    setIndustryBeta(returnState.industryBeta);
+    setStartDateInput(returnState.startDateInput);
+    setEndDateInput(returnState.endDateInput);
+    setMinSamplesPerDay(returnState.minSamplesPerDay);
+    setMinListedTradeDays(returnState.minListedTradeDays ?? "60");
+    setBacktestPeriod(returnState.backtestPeriod);
+    setValidationImportRuleName(returnState.validationImportRuleName);
+    setValidationExpression(returnState.validationExpression);
+    setValidationDirection("positive");
+    setValidationScopeWay(returnState.validationScopeWay);
+    setValidationConsecThresholdText(returnState.validationConsecThresholdText);
+    setValidationScopeWindowsText(returnState.validationScopeWindowsText);
+    setValidationEnableUnknown(returnState.validationEnableUnknown);
+    setValidationUnknownConfigs(returnState.validationUnknownConfigs.map(toUnknownConfigDraft));
+    setValidationSampleLimitText(returnState.validationSampleLimitText);
+    setValidationError("");
+    setValidationResult(compactRuleExpressionValidationData(returnState.validationResult));
+    setValidationRestoredComboKey(returnState.validationSelectedComboKey);
+    setValidationSelectedComboKey(returnState.validationSelectedComboKey);
+    setValidationDetailModalOpen(false);
+    navigate(location.pathname, { replace: true, state: null });
+  }, [location.pathname, locationState, navigate]);
+
+  useEffect(() => {
+    writeStoredBacktestCommonParams({
+      stockAdjType,
+      indexTsCode,
+      indexBeta,
+      conceptBeta,
+      industryBeta,
+      startDateInput,
+      endDateInput,
+      minSamplesPerDay,
+      minListedTradeDays,
+      backtestPeriod,
+      parallelBatchSize,
+      totalMvMin,
+      totalMvMax,
+      rankLayerCount,
+      rankLayerMethod,
+      backtestBoardFilter,
+    });
+  }, [
+    stockAdjType,
+    indexTsCode,
+    indexBeta,
+    conceptBeta,
+    industryBeta,
+    startDateInput,
+    endDateInput,
+    minSamplesPerDay,
+    minListedTradeDays,
+    backtestPeriod,
+    parallelBatchSize,
+    totalMvMin,
+    totalMvMax,
+    rankLayerCount,
+    rankLayerMethod,
+    backtestBoardFilter,
+  ]);
+
+  useEffect(() => {
+    if (!backtestBoardOptions.includes(backtestBoardFilter)) {
+      setBacktestBoardFilter("全部");
+    }
+  }, [backtestBoardFilter, backtestBoardOptions]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const init = async () => {
+      setInitializing(true);
+      try {
+        const resolved = await ensureManagedSourcePath();
+        if (cancelled) {
+          return;
+        }
+        setSourcePath(resolved);
+
+        let hasSceneDateDefaults = false;
+        try {
+          const sceneDefaults = await getSceneLayerBacktestDefaults(resolved);
+          if (cancelled) {
+            return;
+          }
+          hasSceneDateDefaults = Boolean(sceneDefaults.start_date && sceneDefaults.end_date);
+          if (
+            !locationState?.validationReturnState &&
+            sceneDefaults.start_date &&
+            !storedCommonParams.hasStoredParams
+          ) {
+            setStartDateInput(compactDateToInput(sceneDefaults.start_date));
+          }
+          if (
+            !locationState?.validationReturnState &&
+            sceneDefaults.end_date
+          ) {
+            setEndDateInput(compactDateToInput(sceneDefaults.end_date));
+          }
+        } catch (sceneInitError) {
+          if (!cancelled) {
+            setError(`读取场景默认参数失败: ${String(sceneInitError)}`);
+          }
+        }
+
+        try {
+          const ruleDefaults = await getRuleLayerBacktestDefaults(resolved);
+          if (cancelled) {
+            return;
+          }
+          if (
+            !locationState?.validationReturnState &&
+            !hasSceneDateDefaults &&
+            ruleDefaults.start_date &&
+            !storedCommonParams.hasStoredParams
+          ) {
+            setStartDateInput(compactDateToInput(ruleDefaults.start_date));
+          }
+          if (
+            !locationState?.validationReturnState &&
+            !hasSceneDateDefaults &&
+            ruleDefaults.end_date
+          ) {
+            setEndDateInput(compactDateToInput(ruleDefaults.end_date));
+          }
+        } catch (ruleInitError) {
+          if (!cancelled) {
+            setRuleError(`读取策略默认参数失败: ${String(ruleInitError)}`);
+          }
+        }
+
+        try {
+          const managePage = await getStrategyManagePage(resolved);
+          if (cancelled) {
+            return;
+          }
+          const options = managePage.rules ?? [];
+          setStrategyRuleOptions(options);
+        } catch (strategyInitError) {
+          if (!cancelled) {
+            setValidationError(`读取策略编辑参数失败: ${String(strategyInitError)}`);
+          }
+        }
+      } catch (initError) {
+        if (!cancelled) {
+          setError(`读取回测默认参数失败: ${String(initError)}`);
+          setRuleError(`读取回测默认参数失败: ${String(initError)}`);
+          setValidationError(`读取回测默认参数失败: ${String(initError)}`);
+        }
+      } finally {
+        if (!cancelled) {
+          setInitializing(false);
+        }
+      }
+    };
+
+    void init();
+    return () => {
+      cancelled = true;
+    };
+  }, [locationState, storedCommonParams]);
+
+  const allSceneSummaries = result?.all_scene_summaries ?? [];
+  const allRuleSummaries = ruleResult?.all_rule_summaries ?? [];
+  const validationComboRows = validationResult?.combo_results ?? EMPTY_VALIDATION_COMBO_RESULTS;
+  const rankLayerSummaries = rankResult?.layer_summaries ?? [];
+  const rankTopKSummaries = rankResult?.top_k_summaries ?? [];
+  const rankTopKPeriodSummaries = rankResult?.top_k_period_summaries ?? [];
+  const rankLayerSampleGroupByIndex = useMemo(() => {
+    const groups = rankResult?.layer_sample_groups ?? [];
+    return new Map(groups.map((item) => [item.layer_index, item]));
+  }, [rankResult]);
+  const backtestHighlightSettings = readStoredBacktestHighlightSettings();
+
+  function metricHighlightClass(
+    metric: BacktestHighlightMetric,
+    value?: number | null,
+  ) {
+    return shouldHighlightBacktestMetric(metric, value, backtestHighlightSettings)
+      ? "scene-layer-metric-hit"
+      : undefined;
+  }
+
+  function residualMetricHighlightClass(
+    value?: number | null,
+    direction?: ValidationDirection | null,
+  ) {
+    const checkedValue = direction === "negative" && value !== null && value !== undefined
+      ? -value
+      : value;
+    return metricHighlightClass("residual", checkedValue);
+  }
+
+  function renderResidualMetric(
+    value?: number | null,
+    direction?: ValidationDirection | null,
+  ) {
+    const directionLabel = direction === "negative" ? "扣" : direction === "positive" ? "加" : null;
+    return (
+      <span className="scene-layer-residual-metric">
+        <span>{formatPercent(value)}</span>
+        {directionLabel ? (
+          <span className={`scene-layer-residual-badge scene-layer-residual-badge-${direction}`}>
+            {directionLabel}
+          </span>
+        ) : null}
+      </span>
+    );
+  }
+
+  const selectedValidationCombo = useMemo(() => {
+    if (!validationResult) {
+      return null;
+    }
+    return (
+      validationResult.combo_results.find(
+        (item) => item.combo_key === validationSelectedComboKey,
+      ) ?? validationResult.combo_results[0] ?? null
+    );
+  }, [validationResult, validationSelectedComboKey]);
+  const activeValidationCalibration =
+    validationCalibrationResult?.combo_key === selectedValidationCombo?.combo_key
+      ? validationCalibrationResult
+      : null;
+  const recommendedValidationCalibration = activeValidationCalibration?.candidates.find(
+    (item) => item.candidate_key === activeValidationCalibration.recommended_candidate_key,
+  );
+
+  const validationComboCount = validationResult?.combo_results.length ?? 0;
+  const hasUnknownValidationCombo =
+    validationResult?.combo_results.some((item) => item.unknown_values.length > 0) ?? false;
+  const shouldUseValidationDetailModal =
+    validationComboCount === 1 || (validationComboCount > 1 && hasUnknownValidationCombo);
+  const shouldUseInlineComboSelection =
+    !shouldUseValidationDetailModal && validationComboCount > 1;
+
+  useEffect(() => {
+    if (!validationResult) {
+      setValidationRestoredComboKey("");
+      setValidationSelectedComboKey("");
+      setValidationDetailModalOpen(false);
+      return;
+    }
+
+    if (
+      validationRestoredComboKey &&
+      validationResult.combo_results.some((item) => item.combo_key === validationRestoredComboKey)
+    ) {
+      setValidationSelectedComboKey(validationRestoredComboKey);
+      setValidationRestoredComboKey("");
+      setValidationDetailModalOpen(false);
+      return;
+    }
+
+    const preferred =
+      validationResult.best_combo_key?.trim() ||
+      validationResult.combo_results[0]?.combo_key ||
+      "";
+    setValidationRestoredComboKey("");
+    setValidationSelectedComboKey(preferred);
+    setValidationDetailModalOpen(
+      shouldAutoOpenDetail &&
+      (validationResult.combo_results.length === 1 ||
+        validationResult.combo_results.some((item) => item.unknown_values.length > 0))
+    );
+    setShouldAutoOpenDetail(false);
+  }, [validationResult, validationRestoredComboKey]);
+
+  useEffect(() => {
+    if (!validationDetailModalOpen) {
+      return;
+    }
+
+    const previousOverflow = document.body.style.overflow;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setValidationDetailModalOpen(false);
+      }
+    };
+
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [validationDetailModalOpen]);
+
+  useEffect(() => {
+    if (!rankLayerSampleModal) {
+      return;
+    }
+
+    const previousOverflow = document.body.style.overflow;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setRankLayerSampleModal(null);
+      }
+    };
+
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [rankLayerSampleModal]);
+
+  useEffect(() => {
+    if (!shouldUseValidationDetailModal) {
+      setValidationDetailModalOpen(false);
+    }
+  }, [shouldUseValidationDetailModal]);
+
+  const ruleSummarySortDefinitions = useMemo(
+    () =>
+      ({
+        rule_name: {
+          value: (row: RuleLayerRuleSummary) => row.rule_name,
+        },
+        point_count: {
+          value: (row: RuleLayerRuleSummary) => row.point_count,
+        },
+        profit_loss_ratio: {
+          value: (row: RuleLayerRuleSummary) => row.profit_loss_ratio,
+        },
+        avg_excess_residual_mean: {
+          value: (row: RuleLayerRuleSummary) => row.avg_excess_residual_mean,
+        },
+        avg_er_change: {
+          value: (row: RuleLayerRuleSummary) => row.avg_er_change,
+        },
+        avg_contribution_score: {
+          value: (row: RuleLayerRuleSummary) => row.avg_contribution_score,
+        },
+        avg_contribution_per_trigger: {
+          value: (row: RuleLayerRuleSummary) => row.avg_contribution_per_trigger,
+        },
+        decay_20: {
+          value: (row: RuleLayerRuleSummary) =>
+            getRuleDecayValidation(row, 20)?.decay_change,
+        },
+        ic_mean: {
+          value: (row: RuleLayerRuleSummary) => row.ic_mean,
+        },
+        icir: {
+          value: (row: RuleLayerRuleSummary) => row.icir,
+        },
+        ic_t_value: {
+          value: (row: RuleLayerRuleSummary) => row.ic_t_value,
+        },
+      }) satisfies Partial<
+        Record<RuleSummarySortKey, SortDefinition<RuleLayerRuleSummary>>
+      >,
+    [],
+  );
+
+  const {
+    sortKey: ruleSummarySortKey,
+    sortDirection: ruleSummarySortDirection,
+    sortedRows: sortedRuleSummaries,
+    toggleSort: toggleRuleSummarySort,
+  } = useTableSort<RuleLayerRuleSummary, RuleSummarySortKey>(
+    allRuleSummaries,
+    ruleSummarySortDefinitions,
+    {
+      key: "profit_loss_ratio",
+      direction: "desc",
+    },
+  );
+
+  const validationComboSortDefinitions = useMemo(
+    () =>
+      ({
+        combo_label: {
+          value: (row: RuleValidationComboResult) => row.combo_label,
+        },
+        params: {
+          value: (row: RuleValidationComboResult) => formatUnknownValuesForCombo(row),
+        },
+        trigger_samples: {
+          value: (row: RuleValidationComboResult) => row.trigger_samples,
+        },
+        triggered_days: {
+          value: (row: RuleValidationComboResult) => row.triggered_days,
+        },
+        avg_daily_trigger: {
+          value: (row: RuleValidationComboResult) => row.avg_daily_trigger,
+        },
+        spread_mean: {
+          value: (row: RuleValidationComboResult) => row.backtest.spread_mean,
+        },
+        profit_loss_ratio: {
+          value: (row: RuleValidationComboResult) => row.backtest.profit_loss_ratio,
+        },
+        avg_excess_residual_mean: {
+          value: (row: RuleValidationComboResult) => row.backtest.avg_excess_residual_mean,
+        },
+        avg_er_change: {
+          value: (row: RuleValidationComboResult) => row.backtest.avg_er_change,
+        },
+        ic_mean: {
+          value: (row: RuleValidationComboResult) => row.backtest.ic_mean,
+        },
+        ic_t_value: {
+          value: (row: RuleValidationComboResult) => row.backtest.ic_t_value,
+        },
+        icir: {
+          value: (row: RuleValidationComboResult) => row.backtest.icir,
+        },
+      }) satisfies Partial<
+        Record<ValidationComboSortKey, SortDefinition<RuleValidationComboResult>>
+      >,
+    [],
+  );
+
+  const {
+    sortKey: validationComboSortKey,
+    sortDirection: validationComboSortDirection,
+    sortedRows: sortedValidationComboRows,
+    toggleSort: toggleValidationComboSort,
+  } = useTableSort<RuleValidationComboResult, ValidationComboSortKey>(
+    validationComboRows,
+    validationComboSortDefinitions,
+    {
+      key: "spread_mean",
+      direction: "desc",
+    },
+  );
+
+  function renderValidationComboSortHeader(key: ValidationComboSortKey, label: string) {
+    return (
+      <th aria-sort={getAriaSort(validationComboSortKey === key, validationComboSortDirection)}>
+        <TableSortButton
+          label={label}
+          isActive={validationComboSortKey === key && validationComboSortDirection !== null}
+          direction={validationComboSortDirection}
+          onClick={() => toggleValidationComboSort(key)}
+          title={`按${label}排序`}
+        />
+      </th>
+    );
+  }
+
+  function readManualMarketValueFilter(setMessage: (message: string) => void) {
+    const minText = totalMvMin.trim();
+    const maxText = totalMvMax.trim();
+    const parsedMin = parseOptionalNumberInput(minText);
+    const parsedMax = parseOptionalNumberInput(maxText);
+    if (minText && parsedMin === undefined) {
+      setMessage("总市值最小值必须是数字。");
+      return null;
+    }
+    if (maxText && parsedMax === undefined) {
+      setMessage("总市值最大值必须是数字。");
+      return null;
+    }
+    if (parsedMin !== undefined && parsedMax !== undefined && parsedMin > parsedMax) {
+      setMessage("总市值最小值不能大于最大值。");
+      return null;
+    }
+    return {
+      totalMvMin: parsedMin,
+      totalMvMax: parsedMax,
+    };
+  }
+
+  async function onRunBacktest() {
+    const normalizedStart = normalizeDateInput(startDateInput);
+    const normalizedEnd = normalizeDateInput(endDateInput);
+
+    if (!sourcePath.trim()) {
+      setError("当前数据目录为空，请先在数据管理页确认目录。");
+      return;
+    }
+    if (!indexTsCode.trim()) {
+      setError("请选择指数。");
+      return;
+    }
+    if (!normalizedStart || !normalizedEnd) {
+      setError("请填写开始和结束日期。");
+      return;
+    }
+    if (normalizedStart > normalizedEnd) {
+      setError("开始日期不能晚于结束日期。");
+      return;
+    }
+    const marketValueFilter = readManualMarketValueFilter(setError);
+    if (!marketValueFilter) {
+      return;
+    }
+
+    setResult(null);
+    setLoading(true);
+    setError("");
+    try {
+      const data = await runSceneLayerBacktest({
+        sourcePath,
+        stockAdjType: stockAdjType.trim() || "qfq",
+        indexTsCode: indexTsCode.trim(),
+        indexBeta: Number(indexBeta),
+        conceptBeta: Number(conceptBeta),
+        industryBeta: Number(industryBeta),
+        startDate: normalizedStart,
+        endDate: normalizedEnd,
+        minSamplesPerSceneDay: Math.max(1, Number(minSamplesPerDay) || 1),
+        minListedTradeDays: Math.max(0, Number(minListedTradeDays) || 0),
+        backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
+        board: backtestBoardFilter === "全部" ? undefined : backtestBoardFilter,
+        excludeStBoard: excludeStBoard || undefined,
+        ...marketValueFilter,
+      });
+      setResult(data);
+    } catch (runError) {
+      setResult(null);
+      setError(`执行场景整体回测失败: ${String(runError)}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function onRunTransientSceneBacktest() {
+    const normalizedStart = normalizeDateInput(startDateInput);
+    const normalizedEnd = normalizeDateInput(endDateInput);
+
+    if (!sourcePath.trim()) {
+      setError("当前数据目录为空，请先在数据管理页确认目录。");
+      return;
+    }
+    if (!indexTsCode.trim()) {
+      setError("请选择指数。");
+      return;
+    }
+    if (!normalizedStart || !normalizedEnd) {
+      setError("请填写开始和结束日期。");
+      return;
+    }
+    if (normalizedStart > normalizedEnd) {
+      setError("开始日期不能晚于结束日期。");
+      return;
+    }
+    const marketValueFilter = readManualMarketValueFilter(setError);
+    if (!marketValueFilter) {
+      return;
+    }
+
+    setResult(null);
+    setTransientLoading(true);
+    setError("");
+    try {
+      const data = await runTransientSceneLayerBacktest({
+        sourcePath,
+        stockAdjType: stockAdjType.trim() || "qfq",
+        indexTsCode: indexTsCode.trim(),
+        indexBeta: Number(indexBeta),
+        conceptBeta: Number(conceptBeta),
+        industryBeta: Number(industryBeta),
+        startDate: normalizedStart,
+        endDate: normalizedEnd,
+        minSamplesPerSceneDay: Math.max(1, Number(minSamplesPerDay) || 1),
+        minListedTradeDays: Math.max(0, Number(minListedTradeDays) || 0),
+        backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
+        board: backtestBoardFilter === "全部" ? undefined : backtestBoardFilter,
+        excludeStBoard: excludeStBoard || undefined,
+        ...marketValueFilter,
+      });
+      setResult(data);
+    } catch (runError) {
+      setResult(null);
+      setError(`执行变更策略场景验证失败: ${String(runError)}`);
+    } finally {
+      setTransientLoading(false);
+    }
+  }
+
+  async function onRunRankBacktest() {
+    const normalizedStart = normalizeDateInput(startDateInput);
+    const normalizedEnd = normalizeDateInput(endDateInput);
+
+    if (!sourcePath.trim()) {
+      setRankError("当前数据目录为空，请先在数据管理页确认目录。");
+      return;
+    }
+    if (!indexTsCode.trim()) {
+      setRankError("请选择指数。");
+      return;
+    }
+    if (!normalizedStart || !normalizedEnd) {
+      setRankError("请填写开始和结束日期。");
+      return;
+    }
+    if (normalizedStart > normalizedEnd) {
+      setRankError("开始日期不能晚于结束日期。");
+      return;
+    }
+    const normalizedLayerCount = Number(rankLayerCount);
+    if (
+      !Number.isFinite(normalizedLayerCount) ||
+      !Number.isInteger(normalizedLayerCount) ||
+      normalizedLayerCount < 2
+    ) {
+      setRankError("分层层数必须是 >= 2 的整数。");
+      return;
+    }
+
+    setRankResult(null);
+    setRankLayerSampleModal(null);
+    setRankLoading(true);
+    setRankError("");
+    try {
+      const data = await runRankLayerBacktest({
+        sourcePath,
+        stockAdjType: stockAdjType.trim() || "qfq",
+        indexTsCode: indexTsCode.trim(),
+        indexBeta: Number(indexBeta),
+        conceptBeta: Number(conceptBeta),
+        industryBeta: Number(industryBeta),
+        startDate: normalizedStart,
+        endDate: normalizedEnd,
+        minSamplesPerRankDay: Math.max(1, Number(minSamplesPerDay) || 1),
+        minListedTradeDays: Math.max(0, Number(minListedTradeDays) || 0),
+        backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
+        layerCount: normalizedLayerCount,
+        layerMethod: rankLayerMethod,
+        board: backtestBoardFilter === "全部" ? undefined : backtestBoardFilter,
+        excludeStBoard: excludeStBoard || undefined,
+      });
+      setRankResult(data);
+    } catch (runError) {
+      setRankResult(null);
+      setRankError(`执行排名整体回测失败: ${String(runError)}`);
+    } finally {
+      setRankLoading(false);
+    }
+  }
+
+  async function onRunTransientRankBacktest() {
+    const normalizedStart = normalizeDateInput(startDateInput);
+    const normalizedEnd = normalizeDateInput(endDateInput);
+
+    if (!sourcePath.trim()) {
+      setRankError("当前数据目录为空，请先在数据管理页确认目录。");
+      return;
+    }
+    if (!indexTsCode.trim()) {
+      setRankError("请选择指数。");
+      return;
+    }
+    if (!normalizedStart || !normalizedEnd) {
+      setRankError("请填写开始和结束日期。");
+      return;
+    }
+    if (normalizedStart > normalizedEnd) {
+      setRankError("开始日期不能晚于结束日期。");
+      return;
+    }
+    const normalizedLayerCount = Number(rankLayerCount);
+    if (
+      !Number.isFinite(normalizedLayerCount) ||
+      !Number.isInteger(normalizedLayerCount) ||
+      normalizedLayerCount < 2
+    ) {
+      setRankError("分层层数必须是 >= 2 的整数。");
+      return;
+    }
+
+    setRankResult(null);
+    setRankLayerSampleModal(null);
+    setRankTransientLoading(true);
+    setRankError("");
+    try {
+      const data = await runTransientRankLayerBacktest({
+        sourcePath,
+        stockAdjType: stockAdjType.trim() || "qfq",
+        indexTsCode: indexTsCode.trim(),
+        indexBeta: Number(indexBeta),
+        conceptBeta: Number(conceptBeta),
+        industryBeta: Number(industryBeta),
+        startDate: normalizedStart,
+        endDate: normalizedEnd,
+        minSamplesPerRankDay: Math.max(1, Number(minSamplesPerDay) || 1),
+        minListedTradeDays: Math.max(0, Number(minListedTradeDays) || 0),
+        backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
+        layerCount: normalizedLayerCount,
+        layerMethod: rankLayerMethod,
+        board: backtestBoardFilter === "全部" ? undefined : backtestBoardFilter,
+        excludeStBoard: excludeStBoard || undefined,
+      });
+      setRankResult(data);
+    } catch (runError) {
+      setRankResult(null);
+      setRankError(`执行变更策略排名验证失败: ${String(runError)}`);
+    } finally {
+      setRankTransientLoading(false);
+    }
+  }
+
+  async function onRunRuleBacktest() {
+    const normalizedStart = normalizeDateInput(startDateInput);
+    const normalizedEnd = normalizeDateInput(endDateInput);
+
+    if (!sourcePath.trim()) {
+      setRuleError("当前数据目录为空，请先在数据管理页确认目录。");
+      return;
+    }
+    if (!indexTsCode.trim()) {
+      setRuleError("请选择指数。");
+      return;
+    }
+    if (!normalizedStart || !normalizedEnd) {
+      setRuleError("请填写开始和结束日期。");
+      return;
+    }
+    if (normalizedStart > normalizedEnd) {
+      setRuleError("开始日期不能晚于结束日期。");
+      return;
+    }
+    const marketValueFilter = readManualMarketValueFilter(setRuleError);
+    if (!marketValueFilter) {
+      return;
+    }
+
+    setRuleResult(null);
+    setRuleLoading(true);
+    setRuleError("");
+    try {
+      const data = await runRuleLayerBacktest({
+        sourcePath,
+        stockAdjType: stockAdjType.trim() || "qfq",
+        indexTsCode: indexTsCode.trim(),
+        indexBeta: Number(indexBeta),
+        conceptBeta: Number(conceptBeta),
+        industryBeta: Number(industryBeta),
+        startDate: normalizedStart,
+        endDate: normalizedEnd,
+        minSamplesPerRuleDay: Math.max(1, Number(minSamplesPerDay) || 1),
+        minListedTradeDays: Math.max(0, Number(minListedTradeDays) || 0),
+        backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
+        parallelBatchSize: Math.max(1, Number(parallelBatchSize) || 4),
+        board: backtestBoardFilter === "全部" ? undefined : backtestBoardFilter,
+        excludeStBoard: excludeStBoard || undefined,
+        ...marketValueFilter,
+      });
+      const compacted = compactRuleLayerBacktestPayload(data);
+      setRuleResult(compacted);
+    } catch (runError) {
+      setRuleResult(null);
+      setRuleError(`执行策略回测失败: ${String(runError)}`);
+    } finally {
+      setRuleLoading(false);
+    }
+  }
+
+  async function onRunTransientRuleBacktest() {
+    const normalizedStart = normalizeDateInput(startDateInput);
+    const normalizedEnd = normalizeDateInput(endDateInput);
+
+    if (!sourcePath.trim()) {
+      setRuleError("当前数据目录为空，请先在数据管理页确认目录。");
+      return;
+    }
+    if (!indexTsCode.trim()) {
+      setRuleError("请选择指数。");
+      return;
+    }
+    if (!normalizedStart || !normalizedEnd) {
+      setRuleError("请填写开始和结束日期。");
+      return;
+    }
+    if (normalizedStart > normalizedEnd) {
+      setRuleError("开始日期不能晚于结束日期。");
+      return;
+    }
+    const marketValueFilter = readManualMarketValueFilter(setRuleError);
+    if (!marketValueFilter) {
+      return;
+    }
+
+    setRuleResult(null);
+    setRuleTransientLoading(true);
+    setRuleError("");
+    try {
+      const data = await runTransientRuleLayerBacktest({
+        sourcePath,
+        stockAdjType: stockAdjType.trim() || "qfq",
+        indexTsCode: indexTsCode.trim(),
+        indexBeta: Number(indexBeta),
+        conceptBeta: Number(conceptBeta),
+        industryBeta: Number(industryBeta),
+        startDate: normalizedStart,
+        endDate: normalizedEnd,
+        minSamplesPerRuleDay: Math.max(1, Number(minSamplesPerDay) || 1),
+        minListedTradeDays: Math.max(0, Number(minListedTradeDays) || 0),
+        backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
+        parallelBatchSize: Math.max(1, Number(parallelBatchSize) || 4),
+        board: backtestBoardFilter === "全部" ? undefined : backtestBoardFilter,
+        excludeStBoard: excludeStBoard || undefined,
+        ...marketValueFilter,
+      });
+      const compacted = compactRuleLayerBacktestPayload(data);
+      setRuleResult(compacted);
+    } catch (runError) {
+      setRuleResult(null);
+      setRuleError(`执行变更策略回测验证失败: ${String(runError)}`);
+    } finally {
+      setRuleTransientLoading(false);
+    }
+  }
+
+  function applyValidationRule(ruleName: string) {
+    setValidationImportRuleName(ruleName);
+    const matched = strategyRuleOptions.find((item) => item.name === ruleName);
+    if (!matched) {
+      setValidationResult(null);
+      setValidationCalibrationResult(null);
+      setValidationCalibrationError("");
+      setValidationError("");
+      return;
+    }
+
+    setValidationExpression(matched.when ?? "");
+    setValidationDirection(
+      Number.isFinite(matched.points) && Number(matched.points) < 0 ? "negative" : "positive",
+    );
+    const parsedScopeWay = resolveValidationScopeWay(matched.scope_way);
+    setValidationScopeWay(parsedScopeWay.scopeWay);
+    setValidationConsecThresholdText(String(parsedScopeWay.consecThreshold));
+    setValidationScopeWindowsText(String(Math.max(1, matched.scope_windows ?? 1)));
+    if (validationEnableUnknown) {
+      setValidationUnknownConfigs(inferUnknownConfigs(matched.when ?? ""));
+    } else {
+      setValidationUnknownConfigs([]);
+    }
+    setValidationResult(null);
+    setValidationCalibrationResult(null);
+    setValidationCalibrationError("");
+    setValidationError("");
+  }
+
+  async function openStoredRuleValidationDetail(ruleName: string) {
+    const matched = strategyRuleOptions.find((item) => item.name === ruleName);
+
+    if (!matched) {
+      setRuleError(`策略 ${ruleName} 没有可用的详细配置。`);
+      return;
+    }
+
+    const parsedScopeWay = resolveValidationScopeWay(matched?.scope_way);
+    const scopeWindows = Math.max(1, matched?.scope_windows ?? 1);
+    const direction =
+      Number.isFinite(matched?.points) && Number(matched?.points) < 0 ? "negative" : "positive";
+
+    setValidationImportRuleName(ruleName);
+    setValidationExpression(matched.when ?? "");
+    setValidationDirection(direction);
+    setValidationScopeWay(parsedScopeWay.scopeWay);
+    setValidationConsecThresholdText(String(parsedScopeWay.consecThreshold));
+    setValidationScopeWindowsText(String(scopeWindows));
+    setValidationEnableUnknown(false);
+    setValidationUnknownConfigs([]);
+    setValidationSampleLimitText(String(VALIDATION_DEFAULT_SAMPLE_LIMIT));
+    setValidationResult(null);
+    setValidationCalibrationResult(null);
+    setValidationCalibrationError("");
+    setValidationSelectedComboKey("");
+    setValidationRestoredComboKey("");
+    setValidationDetailModalOpen(false);
+    setValidationError("");
+    setRuleError("");
+    setValidationLoading(true);
+    try {
+      const combo = await getCachedRuleLayerBacktestDetail({ sourcePath, ruleName });
+      const compacted = compactRuleLayerBacktestPayload(combo.backtest);
+      const detail = compacted === combo.backtest ? combo : { ...combo, backtest: compacted };
+      setShouldAutoOpenDetail(true);
+      setValidationExpression(detail.formula);
+      setValidationResult({
+        import_rule_name: ruleName,
+        import_rule_explain: matched.explain?.trim() || `策略详细统计：${ruleName}`,
+        scope_way: matched.scope_way || parsedScopeWay.scopeWay,
+        scope_windows: scopeWindows,
+        sample_limit_per_group: VALIDATION_DEFAULT_SAMPLE_LIMIT,
+        combo_results: [detail],
+        best_combo_key: detail.combo_key,
+      });
+    } catch (detailError) {
+      setValidationResult(null);
+      setRuleError(`读取策略 ${ruleName} 已计算明细失败: ${String(detailError)}`);
+    } finally {
+      setValidationLoading(false);
+    }
+    setValidationSampleLimitText(String(VALIDATION_DEFAULT_SAMPLE_LIMIT));
+  }
+
+  async function onRunRuleExpressionValidation() {
+    const normalizedStart = normalizeDateInput(startDateInput);
+    const normalizedEnd = normalizeDateInput(endDateInput);
+
+    if (!sourcePath.trim()) {
+      setValidationError("当前数据目录为空，请先在数据管理页确认目录。");
+      return;
+    }
+    if (!indexTsCode.trim()) {
+      setValidationError("请选择指数。");
+      return;
+    }
+    if (!normalizedStart || !normalizedEnd) {
+      setValidationError("请填写开始和结束日期。");
+      return;
+    }
+    if (normalizedStart > normalizedEnd) {
+      setValidationError("开始日期不能晚于结束日期。");
+      return;
+    }
+    const marketValueFilter = readManualMarketValueFilter(setValidationError);
+    if (!marketValueFilter) {
+      return;
+    }
+    if (!validationExpression.trim()) {
+      setValidationError("表达式不能为空。");
+      return;
+    }
+    const scopeWindows = Number(validationScopeWindowsText);
+    if (!Number.isFinite(scopeWindows) || !Number.isInteger(scopeWindows) || scopeWindows < 1) {
+      setValidationError("scope_windows 必须是 >= 1 的整数。");
+      return;
+    }
+    let normalizedScopeWay: string = validationScopeWay;
+    if (validationScopeWay === "CONSEC") {
+      const consecThreshold = Number(validationConsecThresholdText);
+      if (!Number.isFinite(consecThreshold) || !Number.isInteger(consecThreshold) || consecThreshold < 1) {
+        setValidationError("CONSEC 阈值必须是 >= 1 的整数。");
+        return;
+      }
+      if (scopeWindows < consecThreshold) {
+        setValidationError("scope_windows 不能小于 CONSEC 阈值。");
+        return;
+      }
+      normalizedScopeWay = `CONSEC>=${consecThreshold}`;
+    }
+
+    const unknownConfigs = validationEnableUnknown
+      ? validationUnknownConfigs
+          .map((item) => ({
+            name: item.name.trim(),
+            start: Number(item.start.trim()),
+            end: Number(item.end.trim()),
+            step: Number(item.step.trim()),
+          }))
+          .filter((item) => item.name.length > 0)
+      : [];
+
+    if (validationEnableUnknown && unknownConfigs.length === 0) {
+      setValidationError("启用未知数后，至少需要一个未知数配置。");
+      return;
+    }
+
+    for (const item of unknownConfigs) {
+      if (!Number.isFinite(item.start) || !Number.isFinite(item.end) || !Number.isFinite(item.step)) {
+        setValidationError(`未知数 ${item.name} 存在非法数值。`);
+        return;
+      }
+      if (item.step <= 0) {
+        setValidationError(`未知数 ${item.name} 的步长必须 > 0。`);
+        return;
+      }
+      if (item.end < item.start) {
+        setValidationError(`未知数 ${item.name} 的结束值不能小于起始值。`);
+        return;
+      }
+    }
+
+    const sampleLimitPerGroupRaw = Number(validationSampleLimitText);
+    if (
+      !Number.isFinite(sampleLimitPerGroupRaw) ||
+      !Number.isInteger(sampleLimitPerGroupRaw) ||
+      sampleLimitPerGroupRaw < 1
+    ) {
+      setValidationError("样本展示上限必须是 >= 1 的整数。");
+      return;
+    }
+    const sampleLimitPerGroup = Math.min(
+      VALIDATION_MAX_SAMPLE_LIMIT,
+      sampleLimitPerGroupRaw,
+    );
+
+    const selectedRule = strategyRuleOptions.find(
+      (item) => item.name === validationImportRuleName.trim(),
+    );
+    const resolvedRuleName = validationImportRuleName.trim();
+    const manualStrategyName = resolvedRuleName || "manual_expression_strategy";
+    const normalizedManualPoints = validationDirection === "negative" ? -1 : 1;
+
+    setValidationResult(null);
+    setValidationCalibrationResult(null);
+    setValidationCalibrationError("");
+    setValidationSelectedComboKey("");
+    setValidationRestoredComboKey("");
+    setValidationDetailModalOpen(false);
+    setShouldAutoOpenDetail(false);
+    setValidationLoading(true);
+    setValidationError("");
+    try {
+      const data = await runRuleExpressionValidation({
+        sourcePath,
+        importRuleName: resolvedRuleName,
+        manualStrategy: {
+          name: manualStrategyName,
+          sceneName: selectedRule?.scene_name,
+          stage: selectedRule?.stage,
+          scopeWay: normalizedScopeWay,
+          scopeWindows,
+          when: validationExpression.trim(),
+          points: normalizedManualPoints,
+          explain: selectedRule?.explain?.trim() || `手动表达式验证：${manualStrategyName}`,
+        },
+        when: validationExpression.trim(),
+        scopeWay: normalizedScopeWay,
+        scopeWindows,
+        stockAdjType: stockAdjType.trim() || "qfq",
+        indexTsCode: indexTsCode.trim(),
+        indexBeta: Number(indexBeta),
+        conceptBeta: Number(conceptBeta),
+        industryBeta: Number(industryBeta),
+        startDate: normalizedStart,
+        endDate: normalizedEnd,
+        minSamplesPerRuleDay: Math.max(1, Number(minSamplesPerDay) || 1),
+        minListedTradeDays: Math.max(0, Number(minListedTradeDays) || 0),
+        backtestPeriod: Math.max(1, Number(backtestPeriod) || 1),
+        unknownConfigs,
+        sampleLimitPerGroup,
+        board: backtestBoardFilter === "全部" ? undefined : backtestBoardFilter,
+        excludeStBoard: excludeStBoard || undefined,
+        ...marketValueFilter,
+      });
+      const compacted = compactRuleExpressionValidationData(data);
+      setValidationResult(compacted);
+      setValidationSampleLimitText(String(compacted.sample_limit_per_group));
+    } catch (runError) {
+      setValidationResult(null);
+      setValidationError(`执行表达式验证失败: ${String(runError)}`);
+    } finally {
+      setValidationLoading(false);
+    }
+  }
+
+  async function onRunRuleExpressionCalibration() {
+    if (!validationResult || !selectedValidationCombo) {
+      setValidationCalibrationError("请先完成基础表达式验证并选择一个参数组合。");
+      return;
+    }
+    const continuationId = validationResult.continuation_id?.trim();
+    if (!continuationId) {
+      setValidationCalibrationError(
+        "当前结果没有可复用的基础数据，可能来自旧会话或策略回测详情；请重新执行一次表达式验证。",
+      );
+      return;
+    }
+
+    setValidationCalibrationLoading(true);
+    setValidationCalibrationError("");
+    setValidationCalibrationResult(null);
+    try {
+      const data = await runRuleExpressionCalibration(
+        continuationId,
+        selectedValidationCombo.combo_key,
+      );
+      setValidationCalibrationResult(data);
+    } catch (runError) {
+      setValidationCalibrationError(`继续验证失败: ${String(runError)}`);
+    } finally {
+      setValidationCalibrationLoading(false);
+    }
+  }
+
+  function openValidationDetail(comboKey: string) {
+    if (!shouldUseValidationDetailModal) {
+      setValidationSelectedComboKey(comboKey);
+      return;
+    }
+    setValidationSelectedComboKey(comboKey);
+    setValidationSelectedTriggerCount(null);
+    setValidationDetailModalOpen(true);
+  }
+
+  function closeValidationDetailModal() {
+    setValidationSelectedTriggerCount(null);
+    setValidationDetailModalOpen(false);
+  }
+
+  function openRankLayerSamples(layerIndex: number) {
+    const group = rankLayerSampleGroupByIndex.get(layerIndex);
+    if (!group || group.total_samples === 0) {
+      setRankError("当前分层没有可展示的样本。");
+      return;
+    }
+    setRankError("");
+    setRankLayerSampleModal(group);
+  }
+
+  function closeRankLayerSampleModal() {
+    setRankLayerSampleModal(null);
+  }
+
+  function buildRankLayerSampleCombo(
+    group: RankLayerSampleGroup,
+    rankBacktest: RankLayerBacktestData,
+  ): RuleValidationComboResult {
+    const triggeredDays = group.triggered_days;
+    return {
+      combo_key: `rank_layer_${group.layer_index}`,
+      combo_label: group.layer_label,
+      formula: "TOTAL_SCORE",
+      unknown_values: [],
+      trigger_samples: group.total_samples,
+      triggered_days: triggeredDays,
+      avg_daily_trigger: triggeredDays > 0 ? group.total_samples / triggeredDays : 0,
+      sample_stats: {
+        positive_count: group.positive_count,
+        negative_count: group.negative_count,
+        random_count: group.random_count,
+        total_samples: group.total_samples,
+      },
+      trigger_count_stats: [
+        {
+          trigger_count: 1,
+          positive_count: group.positive_count,
+          negative_count: group.negative_count,
+          random_count: group.random_count,
+          total_samples: group.total_samples,
+        },
+      ],
+      sample_groups: {
+        positive: group.positive,
+        negative: group.negative,
+        random: group.random,
+      },
+      return_distribution: [],
+      backtest: {
+        rule_name: group.layer_label,
+        stock_adj_type: rankBacktest.stock_adj_type,
+        index_ts_code: rankBacktest.index_ts_code,
+        index_beta: rankBacktest.index_beta,
+        concept_beta: rankBacktest.concept_beta,
+        industry_beta: rankBacktest.industry_beta,
+        start_date: rankBacktest.start_date,
+        end_date: rankBacktest.end_date,
+        resolved_board: rankBacktest.resolved_board,
+        exclude_st_board: rankBacktest.exclude_st_board,
+        min_samples_per_rule_day: rankBacktest.min_samples_per_rank_day,
+        min_listed_trade_days: rankBacktest.min_listed_trade_days,
+        backtest_period: rankBacktest.backtest_period,
+        points: [],
+        avg_residual_mean: rankBacktest.layer_summaries.find(
+          (item) => item.layer_index === group.layer_index,
+        )?.avg_residual_return,
+        avg_excess_residual_mean: null,
+        avg_er_change: null,
+        profit_loss_ratio: null,
+        spread_mean: rankBacktest.spread_mean,
+        avg_contribution_score: null,
+        avg_contribution_per_trigger: null,
+        ic_mean: rankBacktest.ic_mean,
+        ic_std: rankBacktest.ic_std,
+        icir: rankBacktest.icir,
+        ic_t_value: rankBacktest.ic_t_value,
+        layer_count: rankBacktest.layer_count,
+        layer_method: rankBacktest.layer_method,
+        layer_method_label: rankBacktest.layer_method_label,
+        layer_summaries: rankBacktest.layer_summaries,
+        is_all_rules: false,
+        all_rule_summaries: [],
+        rule_validation_details: [],
+      },
+      similarity_rows: [],
+    };
+  }
+
+  function renderValidationComboDetailSections(
+    combo: RuleValidationComboResult,
+    useModalLayout = false,
+  ) {
+    if (!validationResult) {
+      return null;
+    }
+
+    const sectionClassName = useModalLayout
+      ? "scene-layer-layer-summary scene-layer-validation-detail-section"
+      : "scene-layer-layer-summary";
+    const validationLayerSummaries = combo.backtest.layer_summaries ?? [];
+    const returnDistribution = combo.return_distribution ?? [];
+    const triggerCountStats =
+      (combo.trigger_count_stats ?? []).length > 0
+        ? combo.trigger_count_stats
+        : [{ trigger_count: 1, ...combo.sample_stats }];
+    const shouldSkipTriggerCountSelection =
+      triggerCountStats.length === 1 && triggerCountStats[0]?.trigger_count === 1;
+    const selectedTriggerCombo =
+      shouldSkipTriggerCountSelection
+        ? filterValidationComboByTriggerCount(combo, 1)
+        : validationSelectedTriggerCount === null
+        ? null
+        : filterValidationComboByTriggerCount(combo, validationSelectedTriggerCount);
+    const maxDistributionCount = returnDistribution.reduce(
+      (maxCount, bucket) => Math.max(maxCount, bucket.sample_count),
+      0,
+    );
+
+    return (
+      <>
+        <div className="scene-layer-formula-box">
+          <strong>替换后表达式</strong>
+          <p>{combo.formula || "--"}</p>
+        </div>
+
+        <div className={`${sectionClassName} scene-layer-validation-trigger-count-section`}>
+          {!shouldSkipTriggerCountSelection ? (
+            <>
+              <div className="scene-layer-validation-trigger-count-head">
+                <h3>触发次数</h3>
+                <span>选择次数后查看对应样本</span>
+              </div>
+              <div className="scene-layer-validation-trigger-count-options">
+                {triggerCountStats.map((item) => (
+                  <button
+                    key={`${combo.combo_key}-trigger-count-${item.trigger_count}`}
+                    type="button"
+                    className={
+                      validationSelectedTriggerCount === item.trigger_count
+                        ? "scene-layer-validation-trigger-count-btn scene-layer-validation-trigger-count-btn-active"
+                        : "scene-layer-validation-trigger-count-btn"
+                    }
+                    onClick={() =>
+                      setValidationSelectedTriggerCount((current) =>
+                        current === item.trigger_count ? null : item.trigger_count,
+                      )
+                    }
+                  >
+                    <strong>{item.trigger_count} 次</strong>
+                    <span>{item.total_samples} 个样本</span>
+                  </button>
+                ))}
+              </div>
+            </>
+          ) : null}
+          {selectedTriggerCombo ? (
+            <div className="scene-layer-validation-sample-summary">
+              <ExpressionValidationSamplesPanel
+                data={{
+                  importRuleName: validationResult.import_rule_name,
+                  importRuleExplain: validationResult.import_rule_explain,
+                  expression: validationExpression,
+                  combo: selectedTriggerCombo,
+                  comboParamSummary: formatUnknownValuesForCombo(combo),
+                  sampleLimitPerGroup: validationResult.sample_limit_per_group,
+                  sourcePath,
+                }}
+                layout="modal"
+              />
+            </div>
+          ) : (
+            <div className="scene-layer-empty">请选择一个触发次数。</div>
+          )}
+        </div>
+
+        <details className={`${sectionClassName} scene-layer-validation-fold`}>
+          <summary className="scene-layer-validation-fold-summary">
+            <h3>策略相似度检查</h3>
+            <span>{combo.similarity_rows.length} 条</span>
+          </summary>
+          <div className="scene-layer-contrib-table-wrap">
+            <table className="scene-layer-contrib-table">
+              <thead>
+                <tr>
+                  <th>现有策略</th>
+                  <th>同时触发样本</th>
+                  <th>占当前组合</th>
+                  <th>占现有策略</th>
+                  <th>Lift</th>
+                </tr>
+              </thead>
+              <tbody>
+                {combo.similarity_rows.length > 0 ? (
+                  combo.similarity_rows.map((row) => (
+                    <tr key={row.rule_name}>
+                      <td>
+                        <strong>{row.rule_name}</strong>
+                        {row.explain ? (
+                          <div className="scene-layer-similarity-explain">{row.explain}</div>
+                        ) : null}
+                      </td>
+                      <td>{row.overlap_samples}</td>
+                      <td>{formatRate(row.overlap_rate_vs_validation)}</td>
+                      <td>{formatRate(row.overlap_rate_vs_existing)}</td>
+                      <td>{formatLift(row.overlap_lift)}</td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={5}>暂无与当前组合同日同股同时触发的现有策略。</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </details>
+
+        {validationLayerSummaries.length > 0 ? (
+          <div className={sectionClassName}>
+            <h3>
+              分值分层回测
+              {combo.backtest.layer_method_label
+                ? `（${combo.backtest.layer_method_label}，共 ${combo.backtest.layer_count ?? validationLayerSummaries.length} 层）`
+                : ""}
+            </h3>
+            <div className="scene-layer-contrib-table-wrap">
+              <table className="scene-layer-contrib-table">
+                <thead>
+                  <tr>
+                    <th>分层</th>
+                    <th>有效交易日</th>
+                    <th>样本数</th>
+                    <th>分值</th>
+                    <th>层级收益（日度残差均值）</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {validationLayerSummaries.map((item) => (
+                    <tr key={`${combo.combo_key}-layer-${item.layer_index}`}>
+                      <td>{item.layer_label}</td>
+                      <td>{item.point_count}</td>
+                      <td>{item.sample_count}</td>
+                      <td>{formatNumber(item.avg_score, 4)}</td>
+                      <td>{formatPercent(item.avg_residual_return)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="scene-layer-caption">
+              分层差均值按每日最高分层减最低分层计算：{formatPercent(combo.backtest.spread_mean)}
+            </p>
+            {returnDistribution.length > 0 ? (
+              <div className="scene-layer-return-distribution">
+                <div className="scene-layer-return-distribution-head">
+                  <h4>收益分布</h4>
+                  <span>{combo.trigger_samples} 个触发样本</span>
+                </div>
+                <div className="scene-layer-return-distribution-chart">
+                  <div className="scene-layer-return-distribution-plot">
+                    {returnDistribution.map((bucket, index) => {
+                      const barHeight =
+                        maxDistributionCount > 0 && bucket.sample_count > 0
+                          ? Math.max(4, (bucket.sample_count / maxDistributionCount) * 100)
+                          : 0;
+                      const tone =
+                        index < 3
+                          ? "negative"
+                          : index === 3
+                            ? "neutral"
+                            : "positive";
+                      return (
+                        <div
+                          key={`${combo.combo_key}-return-${bucket.bucket_label}`}
+                          className="scene-layer-return-distribution-bucket"
+                        >
+                          <span className="scene-layer-return-distribution-count">{bucket.sample_count}</span>
+                          <div className="scene-layer-return-distribution-track">
+                            <div
+                              className={`scene-layer-return-distribution-bar scene-layer-return-distribution-bar-${tone}`}
+                              style={{ height: `${barHeight}%` }}
+                              aria-label={`${bucket.bucket_label}: ${bucket.sample_count} 个样本`}
+                            />
+                          </div>
+                          <span className="scene-layer-return-distribution-rate">
+                            {formatRate(bucket.sample_ratio)}
+                          </span>
+                          <span className="scene-layer-return-distribution-label">{bucket.bucket_label}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+      </>
+    );
+  }
+
+  return (
+    <div className="scene-layer-page">
+      <section className="scene-layer-card">
+        <h2 className="scene-layer-title">回测全局参数</h2>
+        <div className="scene-layer-form-grid">
+          <label className="scene-layer-field">
+            <span>股票复权</span>
+            <input value={stockAdjType} onChange={(event) => setStockAdjType(event.target.value)} />
+          </label>
+          <label className="scene-layer-field">
+            <span>指数</span>
+            <select value={indexTsCode} onChange={(event) => setIndexTsCode(event.target.value)}>
+              {INDEX_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="scene-layer-field">
+            <span>指数 Beta</span>
+            <input type="number" step="0.01" value={indexBeta} onChange={(event) => setIndexBeta(event.target.value)} />
+          </label>
+          <label className="scene-layer-field">
+            <span>概念 Beta</span>
+            <input type="number" step="0.01" value={conceptBeta} onChange={(event) => setConceptBeta(event.target.value)} />
+          </label>
+          <label className="scene-layer-field">
+            <span>行业 Beta</span>
+            <input type="number" step="0.01" value={industryBeta} onChange={(event) => setIndustryBeta(event.target.value)} />
+          </label>
+          <label className="scene-layer-field">
+            <span>开始日期</span>
+            <input type="date" value={startDateInput} onChange={(event) => setStartDateInput(event.target.value)} />
+          </label>
+          <label className="scene-layer-field">
+            <span>结束日期</span>
+            <input type="date" value={endDateInput} onChange={(event) => setEndDateInput(event.target.value)} />
+          </label>
+          <label className="scene-layer-field">
+            <span title="规则回测按实际触发数过滤；排名和场景回测按当日有效横截面样本数过滤">日最少样本（规则=触发数）</span>
+            <input type="number" min="1" value={minSamplesPerDay} onChange={(event) => setMinSamplesPerDay(event.target.value)} />
+          </label>
+          <label className="scene-layer-field">
+            <span>最少上市交易日</span>
+            <input type="number" min="0" value={minListedTradeDays} onChange={(event) => setMinListedTradeDays(event.target.value)} />
+          </label>
+          <label className="scene-layer-field">
+            <span>回测周期（天）</span>
+            <input type="number" min="1" value={backtestPeriod} onChange={(event) => setBacktestPeriod(event.target.value)} />
+          </label>
+          <label className="scene-layer-field">
+            <span>策略并发数</span>
+            <input type="number" min="1" value={parallelBatchSize} onChange={(event) => setParallelBatchSize(event.target.value)} />
+          </label>
+          <label className="scene-layer-field">
+            <span>总市值最小(亿)</span>
+            <input type="number" min="0" step="1" value={totalMvMin} onChange={(event) => setTotalMvMin(event.target.value)} />
+          </label>
+          <label className="scene-layer-field">
+            <span>总市值最大(亿)</span>
+            <input type="number" min="0" step="1" value={totalMvMax} onChange={(event) => setTotalMvMax(event.target.value)} />
+          </label>
+          <label className="scene-layer-field">
+            <span>限定板块</span>
+            <select
+              value={backtestBoardFilter}
+              onChange={(event) =>
+                setBacktestBoardFilter(
+                  event.target.value as (typeof STOCK_PICK_BOARD_OPTIONS)[number],
+                )
+              }
+            >
+              {backtestBoardOptions.map((board) => (
+                <option key={board} value={board}>
+                  {board}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="scene-layer-field">
+            <span>分层层数</span>
+            <input type="number" min="2" value={rankLayerCount} onChange={(event) => setRankLayerCount(event.target.value)} />
+          </label>
+          <label className="scene-layer-field">
+            <span>分层方法</span>
+            <select value={rankLayerMethod} onChange={(event) => setRankLayerMethod(event.target.value as RankLayerMethod)}>
+              {RANK_LAYER_METHOD_OPTIONS.map((item) => (
+                <option key={item.value} value={item.value}>
+                  {item.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+      </section>
+
+      <section className="scene-layer-card">
+        <h2 className="scene-layer-title">排名整体回测</h2>
+        <p className="scene-layer-caption">
+          使用 score_summary 中的总分检验后续残差收益，除分层与 IC 外，直接展示每日等权 Top-K、持有期重叠修正后的 HAC t值及年度稳定性。
+        </p>
+
+        <div className="scene-layer-actions">
+          <button type="button" className="scene-layer-primary-btn" onClick={() => void onRunRankBacktest()} disabled={heavyTaskRunning || initializing}>
+            {rankLoading ? "回测中..." : "执行排名整体回测"}
+          </button>
+          <button type="button" className="scene-layer-secondary-btn" onClick={() => void onRunTransientRankBacktest()} disabled={heavyTaskRunning || initializing}>
+            {rankTransientLoading ? "验证中..." : "变更策略验证"}
+          </button>
+        </div>
+
+        {rankError ? <div className="scene-layer-error">{rankError}</div> : null}
+      </section>
+
+      {rankResult ? (
+        <section className="scene-layer-card">
+          <div className="scene-layer-layer-summary">
+            <h3>排名整体回测汇总</h3>
+            <div className="scene-layer-summary-section">
+              <h4>基础信息</h4>
+              <div className="scene-layer-contrib-table-wrap">
+                <table className="scene-layer-contrib-table">
+                  <thead>
+                    <tr>
+                      <th>对象</th>
+                      <th>区间</th>
+                      <th>指数</th>
+                      <th>Beta（指/概/行）</th>
+                      <th>限定板块</th>
+                      <th>市值区分</th>
+                      <th>有效交易日</th>
+                      <th>总样本数</th>
+                      <th>最小样本阈值</th>
+                      <th>分层层数</th>
+                      <th>分层方法</th>
+                      <th>最少上市交易日</th>
+                      <th>回测周期（天）</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>总分</td>
+                      <td>{formatDateLabel(rankResult.start_date)} ~ {formatDateLabel(rankResult.end_date)}</td>
+                      <td>{rankResult.index_ts_code}</td>
+                      <td>{formatNumber(rankResult.index_beta, 2)} / {formatNumber(rankResult.concept_beta, 2)} / {formatNumber(rankResult.industry_beta, 2)}</td>
+                      <td>{formatBacktestBoardLabel(rankResult)}</td>
+                      <td>{rankResult.market_value_grouping ? "默认分组聚合" : "不区分"}</td>
+                      <td>{rankResult.point_count}</td>
+                      <td>{rankResult.sample_count}</td>
+                      <td>{rankResult.min_samples_per_rank_day}</td>
+                      <td>{rankResult.layer_count}</td>
+                      <td>{rankResult.layer_method_label}</td>
+                      <td>{rankResult.min_listed_trade_days}</td>
+                      <td>{rankResult.backtest_period}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <div className="scene-layer-summary-section">
+              <h4>回测表现</h4>
+              <div className="scene-layer-contrib-table-wrap">
+                <table className="scene-layer-contrib-table">
+                  <thead>
+                    <tr>
+                      <th>分层差均值（日度高分层-低分层）</th>
+                      <th title="收益统计区间最后一天 ER(20) 减触发日 ER(20)">ΔER(20)</th>
+                      <th>IC 均值</th>
+                      <th title="按回测持有期修正重叠样本的 Newey-West t值">IC HAC t值</th>
+                      <th>ICIR</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>{formatPercent(rankResult.spread_mean)}</td>
+                      <td>{formatNumber(rankResult.avg_er_change, 4)}</td>
+                      <td className={metricHighlightClass("ic", rankResult.ic_mean)}>{formatNumber(rankResult.ic_mean)}</td>
+                      <td className={metricHighlightClass("t", rankResult.ic_t_value)}>{formatNumber(rankResult.ic_t_value)}</td>
+                      <td className={metricHighlightClass("ir", rankResult.icir)}>{formatNumber(rankResult.icir)}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          {rankTopKSummaries.length > 0 ? (
+            <div className="scene-layer-layer-summary">
+              <h3>Top-K 直接组合检验（每日等权）</h3>
+              <p className="scene-layer-caption">
+                直接检验实际会买到的头部股票；当日不足 K 只使用有效样本，HAC t值按持有期重叠修正标准误，避免普通t值虚高。
+              </p>
+              <div className="scene-layer-contrib-table-wrap">
+                <table className="scene-layer-contrib-table">
+                  <thead>
+                    <tr>
+                      <th>组合</th>
+                      <th>有效交易日</th>
+                      <th>样本数</th>
+                      <th>日均残差收益</th>
+                      <th>日收益中位数</th>
+                      <th>正收益日占比</th>
+                      <th>日波动</th>
+                      <th>HAC t值</th>
+                      <th>HAC滞后</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rankTopKSummaries.map((item) => (
+                      <tr key={item.top_k}>
+                        <td>Top {item.top_k}</td>
+                        <td>{item.point_count}</td>
+                        <td>{item.sample_count}</td>
+                        <td>{formatPercent(item.avg_daily_residual_return)}</td>
+                        <td>{formatPercent(item.median_daily_residual_return)}</td>
+                        <td>{formatRate(item.positive_day_ratio)}</td>
+                        <td>{formatPercent(item.daily_std)}</td>
+                        <td className={metricHighlightClass("t", item.hac_t_value)}>{formatNumber(item.hac_t_value)}</td>
+                        <td>{item.hac_lag}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : null}
+
+          {rankTopKPeriodSummaries.length > 0 ? (
+            <div className="scene-layer-layer-summary">
+              <h3>Top-K 年度稳定性</h3>
+              <div className="scene-layer-contrib-table-wrap">
+                <table className="scene-layer-contrib-table">
+                  <thead>
+                    <tr>
+                      <th>年度</th>
+                      <th>组合</th>
+                      <th>区间</th>
+                      <th>有效交易日</th>
+                      <th>日均残差收益</th>
+                      <th>日收益中位数</th>
+                      <th>正收益日占比</th>
+                      <th>HAC t值</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rankTopKPeriodSummaries.map((item) => (
+                      <tr key={`${item.period_label}-${item.top_k}`}>
+                        <td>{item.period_label}</td>
+                        <td>Top {item.top_k}</td>
+                        <td>{formatDateLabel(item.start_date)} ~ {formatDateLabel(item.end_date)}</td>
+                        <td>{item.point_count}</td>
+                        <td>{formatPercent(item.avg_daily_residual_return)}</td>
+                        <td>{formatPercent(item.median_daily_residual_return)}</td>
+                        <td>{formatRate(item.positive_day_ratio)}</td>
+                        <td className={metricHighlightClass("t", item.hac_t_value)}>{formatNumber(item.hac_t_value)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : null}
+
+          {rankLayerSummaries.length === 0 ? (
+            <div className="scene-layer-empty">当前没有可用于分层的总分样本。</div>
+          ) : (
+            <div className="scene-layer-layer-summary">
+              <h3>{rankResult.layer_count}层分层依据（{rankResult.layer_method_label}，按总分从低到高）</h3>
+              <div className="scene-layer-contrib-table-wrap">
+                <table className="scene-layer-contrib-table">
+                  <thead>
+                    <tr>
+                      <th>分层</th>
+                      <th>有效交易日</th>
+                      <th>分层样本数</th>
+                      <th>分层均分</th>
+                      <th>层级收益（日度残差均值）</th>
+                      <th title="收益统计区间最后一天 ER(20) 减触发日 ER(20)">ΔER(20)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rankLayerSummaries.map((item) => {
+                      const sampleGroup = rankLayerSampleGroupByIndex.get(item.layer_index);
+                      const canOpenSamples = Boolean(sampleGroup && sampleGroup.total_samples > 0);
+                      return (
+                        <tr key={item.layer_index}>
+                          <td>
+                            {canOpenSamples ? (
+                              <button
+                                type="button"
+                                className="scene-layer-validation-detail-link"
+                                onClick={() => openRankLayerSamples(item.layer_index)}
+                                title={`查看${item.layer_label}样本`}
+                              >
+                                {item.layer_label}
+                              </button>
+                            ) : (
+                              item.layer_label
+                            )}
+                          </td>
+                          <td>{item.point_count}</td>
+                          <td>{item.sample_count}</td>
+                          <td>{formatNumber(item.avg_score, 4)}</td>
+                          <td>{formatPercent(item.avg_residual_return)}</td>
+                          <td>{formatNumber(item.avg_er_change, 4)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {rankResult.market_value_summaries && rankResult.market_value_summaries.length > 0 ? (
+            <div className="scene-layer-layer-summary">
+              <h3>市值分组回测表现</h3>
+              <div className="scene-layer-contrib-table-wrap">
+                <table className="scene-layer-contrib-table">
+                  <thead>
+                    <tr>
+                      <th>市值分组</th>
+                      <th>有效交易日</th>
+                      <th>总样本数</th>
+                      <th title="收益统计区间最后一天 ER(20) 减触发日 ER(20)">ΔER(20)</th>
+                      <th>分层差均值</th>
+                      <th>IC 均值</th>
+                      <th>IC t值</th>
+                      <th>ICIR</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rankResult.market_value_summaries.map((item) => (
+                      <tr key={item.group_label}>
+                        <td>{item.group_label}</td>
+                        <td>{item.point_count}</td>
+                        <td>{item.sample_count}</td>
+                        <td>{formatNumber(item.avg_er_change, 4)}</td>
+                        <td>{formatPercent(item.spread_mean)}</td>
+                        <td className={metricHighlightClass("ic", item.ic_mean)}>{formatNumber(item.ic_mean)}</td>
+                        <td className={metricHighlightClass("t", item.ic_t_value)}>{formatNumber(item.ic_t_value)}</td>
+                        <td className={metricHighlightClass("ir", item.icir)}>{formatNumber(item.icir)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : null}
+
+          {rankLayerSampleModal && rankResult ? (
+            <div className="scene-layer-modal-mask" onClick={closeRankLayerSampleModal}>
+              <div
+                className="scene-layer-modal-card scene-layer-validation-detail-modal"
+                role="dialog"
+                aria-modal="true"
+                aria-label={`排名分层样本：${rankLayerSampleModal.layer_label}`}
+                onClick={(event) => event.stopPropagation()}
+              >
+                <div className="scene-layer-modal-header">
+                  <h3>排名分层样本：{rankLayerSampleModal.layer_label}</h3>
+                  <button type="button" className="scene-layer-modal-close" onClick={closeRankLayerSampleModal}>
+                    关闭
+                  </button>
+                </div>
+                <div className="scene-layer-modal-scroll-body">
+                  <ExpressionValidationSamplesPanel
+                    data={{
+                      importRuleName: "排名整体回测",
+                      importRuleExplain: `排名整体回测：${rankLayerSampleModal.layer_label}`,
+                      expression: "TOTAL_SCORE",
+                      combo: buildRankLayerSampleCombo(rankLayerSampleModal, rankResult),
+                      comboParamSummary: `${rankResult.layer_method_label} · ${rankLayerSampleModal.layer_label}`,
+                      sampleLimitPerGroup: RANK_LAYER_SAMPLE_LIMIT_PER_GROUP,
+                      sourcePath,
+                    }}
+                    layout="modal"
+                  />
+                </div>
+              </div>
+            </div>
+          ) : null}
+        </section>
+      ) : null}
+
+      <section className="scene-layer-card">
+        <h2 className="scene-layer-title">场景整体回测</h2>
+        <p className="scene-layer-caption">
+          使用 scene_details 中的场景状态与排序，计算各场景状态下的分层残差收益、分层差、IC / ICIR。
+        </p>
+
+        <div className="scene-layer-actions">
+          <button type="button" className="scene-layer-primary-btn" onClick={() => void onRunBacktest()} disabled={heavyTaskRunning || initializing}>
+            {loading ? "回测中..." : "执行场景整体回测"}
+          </button>
+          <button type="button" className="scene-layer-secondary-btn" onClick={() => void onRunTransientSceneBacktest()} disabled={heavyTaskRunning || initializing}>
+            {transientLoading ? "验证中..." : "变更策略验证"}
+          </button>
+        </div>
+
+        {error ? <div className="scene-layer-error">{error}</div> : null}
+      </section>
+
+
+      {result ? (
+        <section className="scene-layer-card">
+          <div className="scene-layer-summary-grid">
+            <div className="scene-layer-summary-item">
+              <span>场景</span>
+              <strong>全部场景</strong>
+            </div>
+            <div className="scene-layer-summary-item">
+              <span>区间</span>
+              <strong>{formatDateLabel(result.start_date)} ~ {formatDateLabel(result.end_date)}</strong>
+            </div>
+            <div className="scene-layer-summary-item">
+              <span>场景数</span>
+              <strong>{allSceneSummaries.length}</strong>
+            </div>
+            <div className="scene-layer-summary-item">
+              <span>限定板块</span>
+              <strong>{formatBacktestBoardLabel(result)}</strong>
+            </div>
+            <div className="scene-layer-summary-item">
+              <span>总市值范围</span>
+              <strong>{formatMarketValueRange(result)}</strong>
+            </div>
+            <div className="scene-layer-summary-item">
+              <span>最小样本阈值</span>
+              <strong>{result.min_samples_per_scene_day}</strong>
+            </div>
+            <div className="scene-layer-summary-item">
+              <span>最少上市交易日</span>
+              <strong>{result.min_listed_trade_days}</strong>
+            </div>
+            <div className="scene-layer-summary-item">
+              <span>回测周期（天）</span>
+              <strong>{result.backtest_period}</strong>
+            </div>
+          </div>
+
+          {allSceneSummaries.length === 0 ? (
+            <div className="scene-layer-empty">当前没有可回测的场景。</div>
+          ) : null}
+
+          {allSceneSummaries.length > 0 ? (
+            <div className="scene-layer-layer-summary">
+              <h3>全部场景汇总（按分层差均值降序）</h3>
+              <div className="scene-layer-layer-grid">
+                {allSceneSummaries.map((item) => (
+                  <div key={item.scene_name} className="scene-layer-layer-item">
+                    <span className="scene-layer-layer-state">{item.scene_name}</span>
+                    <span>有效交易日：{item.point_count}</span>
+                    <span>分层差均值：{formatPercent(item.spread_mean)}</span>
+                    <span className={metricHighlightClass("ic", item.ic_mean)}>IC 均值：{formatNumber(item.ic_mean)}</span>
+                    <span className={metricHighlightClass("ir", item.icir)}>ICIR：{formatNumber(item.icir)}</span>
+                    <span className={metricHighlightClass("t", item.ic_t_value)}>IC t值：{formatNumber(item.ic_t_value)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+        </section>
+      ) : null}
+
+      <section className="scene-layer-card">
+        <h2 className="scene-layer-title">策略回测</h2>
+        <p className="scene-layer-caption">
+          使用 rule_details 中的策略得分与次日开盘起算的复合残差收益，按实际触发数过滤有效日期，计算策略日度残差均值、贡献度、IC / ICIR；多日持有的 IC t值使用 HAC 修正。
+        </p>
+
+        <div className="scene-layer-actions">
+          <button type="button" className="scene-layer-primary-btn" onClick={() => void onRunRuleBacktest()} disabled={heavyTaskRunning || initializing}>
+            {ruleLoading ? "回测中..." : "执行策略回测"}
+          </button>
+          <button type="button" className="scene-layer-secondary-btn" onClick={() => void onRunTransientRuleBacktest()} disabled={heavyTaskRunning || initializing}>
+            {ruleTransientLoading ? "验证中..." : "变更策略验证"}
+          </button>
+        </div>
+
+        {ruleError ? <div className="scene-layer-error">{ruleError}</div> : null}
+      </section>
+
+      {ruleResult ? (
+        <section className="scene-layer-card">
+          {allRuleSummaries.length === 0 ? (
+            <div className="scene-layer-empty">当前没有可回测的策略。</div>
+          ) : null}
+
+          {allRuleSummaries.length > 0 ? (
+            <div className="scene-layer-layer-summary">
+              <h3>全部策略明细（点击表头排序）</h3>
+              <p className="scene-layer-caption">
+                衰减验证按策略方向归一化：正分策略上涨、负分策略下跌都记为正向超额；分别比较最近 20/40/60 个有效触发日与此前历史，Δ 为近期减此前。
+              </p>
+              <div className="scene-layer-contrib-table-wrap">
+                <table className="scene-layer-contrib-table scene-layer-rule-detail-table">
+                  <thead>
+                    <tr>
+                      <th aria-sort={getAriaSort(ruleSummarySortKey === "rule_name", ruleSummarySortDirection)}>
+                        <TableSortButton
+                          label="策略名"
+                          isActive={ruleSummarySortKey === "rule_name" && ruleSummarySortDirection !== null}
+                          direction={ruleSummarySortDirection}
+                          onClick={() => toggleRuleSummarySort("rule_name")}
+                          title="按策略名排序"
+                        />
+                      </th>
+                      <th aria-sort={getAriaSort(ruleSummarySortKey === "point_count", ruleSummarySortDirection)}>
+                        <TableSortButton
+                          label="有效交易日"
+                          isActive={ruleSummarySortKey === "point_count" && ruleSummarySortDirection !== null}
+                          direction={ruleSummarySortDirection}
+                          onClick={() => toggleRuleSummarySort("point_count")}
+                          title="按有效交易日排序"
+                        />
+                      </th>
+                      <th aria-sort={getAriaSort(ruleSummarySortKey === "avg_contribution_score", ruleSummarySortDirection)}>
+                        <TableSortButton
+                          label="平均贡献度"
+                          isActive={ruleSummarySortKey === "avg_contribution_score" && ruleSummarySortDirection !== null}
+                          direction={ruleSummarySortDirection}
+                          onClick={() => toggleRuleSummarySort("avg_contribution_score")}
+                          title="按平均贡献度排序"
+                        />
+                      </th>
+                      <th aria-sort={getAriaSort(ruleSummarySortKey === "avg_contribution_per_trigger", ruleSummarySortDirection)}>
+                        <TableSortButton
+                          label="平均单次贡献"
+                          isActive={ruleSummarySortKey === "avg_contribution_per_trigger" && ruleSummarySortDirection !== null}
+                          direction={ruleSummarySortDirection}
+                          onClick={() => toggleRuleSummarySort("avg_contribution_per_trigger")}
+                          title="按平均单次贡献排序"
+                        />
+                      </th>
+                      <th aria-sort={getAriaSort(ruleSummarySortKey === "profit_loss_ratio", ruleSummarySortDirection)}>
+                        <TableSortButton
+                          label="样本利润因子"
+                          isActive={ruleSummarySortKey === "profit_loss_ratio" && ruleSummarySortDirection !== null}
+                          direction={ruleSummarySortDirection}
+                          onClick={() => toggleRuleSummarySort("profit_loss_ratio")}
+                          title="按触发股票样本的 Profit Factor 排序"
+                        />
+                      </th>
+                      <th aria-sort={getAriaSort(ruleSummarySortKey === "avg_excess_residual_mean", ruleSummarySortDirection)}>
+                        <TableSortButton
+                          label="超额残差"
+                          isActive={ruleSummarySortKey === "avg_excess_residual_mean" && ruleSummarySortDirection !== null}
+                          direction={ruleSummarySortDirection}
+                          onClick={() => toggleRuleSummarySort("avg_excess_residual_mean")}
+                          title="按超额残差排序"
+                        />
+                      </th>
+                      <th aria-sort={getAriaSort(ruleSummarySortKey === "decay_20", ruleSummarySortDirection)}>
+                        <TableSortButton
+                          label="近期衰减"
+                          isActive={ruleSummarySortKey === "decay_20" && ruleSummarySortDirection !== null}
+                          direction={ruleSummarySortDirection}
+                          onClick={() => toggleRuleSummarySort("decay_20")}
+                          title="按最近20个有效触发日相对此前历史的方向超额变化排序"
+                        />
+                      </th>
+                      <th aria-sort={getAriaSort(ruleSummarySortKey === "avg_er_change", ruleSummarySortDirection)}>
+                        <TableSortButton
+                          label="ΔER(20)"
+                          isActive={ruleSummarySortKey === "avg_er_change" && ruleSummarySortDirection !== null}
+                          direction={ruleSummarySortDirection}
+                          onClick={() => toggleRuleSummarySort("avg_er_change")}
+                          title="按 ER(20) 区间变动均值排序"
+                        />
+                      </th>
+                      <th aria-sort={getAriaSort(ruleSummarySortKey === "ic_mean", ruleSummarySortDirection)}>
+                        <TableSortButton
+                          label="IC 均值"
+                          isActive={ruleSummarySortKey === "ic_mean" && ruleSummarySortDirection !== null}
+                          direction={ruleSummarySortDirection}
+                          onClick={() => toggleRuleSummarySort("ic_mean")}
+                          title="按 IC 均值排序"
+                        />
+                      </th>
+                      <th aria-sort={getAriaSort(ruleSummarySortKey === "ic_t_value", ruleSummarySortDirection)}>
+                        <TableSortButton
+                          label="IC t值"
+                          isActive={ruleSummarySortKey === "ic_t_value" && ruleSummarySortDirection !== null}
+                          direction={ruleSummarySortDirection}
+                          onClick={() => toggleRuleSummarySort("ic_t_value")}
+                          title="按 IC t值 排序"
+                        />
+                      </th>
+                      <th aria-sort={getAriaSort(ruleSummarySortKey === "icir", ruleSummarySortDirection)}>
+                        <TableSortButton
+                          label="ICIR"
+                          isActive={ruleSummarySortKey === "icir" && ruleSummarySortDirection !== null}
+                          direction={ruleSummarySortDirection}
+                          onClick={() => toggleRuleSummarySort("icir")}
+                          title="按 ICIR 排序"
+                        />
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sortedRuleSummaries.map((item) => (
+                      <tr key={item.rule_name}>
+                        <td title={item.rule_name}>
+                          <button
+                            type="button"
+                            className="scene-layer-validation-detail-link"
+                            onClick={() => void openStoredRuleValidationDetail(item.rule_name)}
+                          >
+                            {item.rule_name}
+                          </button>
+                        </td>
+                        <td>{item.point_count}</td>
+                        <td>{formatNumber(item.avg_contribution_score, 2)}</td>
+                        <td>{formatNumber(item.avg_contribution_per_trigger, 2)}</td>
+                        <td>{formatProfitLossRatio(item.profit_loss_ratio)}</td>
+                        <td className={residualMetricHighlightClass(item.avg_excess_residual_mean, resolveResidualDirection(item.avg_contribution_score))}>
+                          {renderResidualMetric(item.avg_excess_residual_mean, resolveResidualDirection(item.avg_contribution_score))}
+                        </td>
+                        <td className="scene-layer-decay-cell">{renderRuleDecayValidations(item)}</td>
+                        <td>{formatNumber(item.avg_er_change, 4)}</td>
+                        <td className={metricHighlightClass("ic", item.ic_mean)}>{formatNumber(item.ic_mean)}</td>
+                        <td className={metricHighlightClass("t", item.ic_t_value)}>{formatNumber(item.ic_t_value)}</td>
+                        <td className={metricHighlightClass("ir", item.icir)}>{formatNumber(item.icir)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : null}
+
+        </section>
+      ) : null}
+
+      <section className="scene-layer-card">
+        <h2 className="scene-layer-title">表达式验证</h2>
+        <p className="scene-layer-caption">
+          默认空白模板；选择策略后自动带入表达式与参数，后续可继续手动调整并展开参数组合验证。
+        </p>
+
+        <div className="scene-layer-form-grid">
+          <label className="scene-layer-field">
+            <span>策略（来自策略编辑）</span>
+            <select
+              value={validationImportRuleName}
+              onChange={(event) => applyValidationRule(event.target.value)}
+            >
+              <option value="">请选择策略</option>
+              {strategyRuleOptions.map((item) => (
+                <option key={item.name} value={item.name}>
+                  {item.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="scene-layer-field">
+            <span>方向</span>
+            <select
+              value={validationDirection}
+              onChange={(event) => setValidationDirection(event.target.value as ValidationDirection)}
+            >
+              <option value="positive">正向</option>
+              <option value="negative">负向</option>
+            </select>
+          </label>
+          <label className="scene-layer-field">
+            <span>scope_way</span>
+            <select
+              value={validationScopeWay}
+              onChange={(event) => setValidationScopeWay(event.target.value as ValidationScopeWayOption)}
+            >
+              {VALIDATION_SCOPE_WAY_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          {validationScopeWay === "CONSEC" ? (
+            <label className="scene-layer-field">
+              <span>CONSEC 阈值</span>
+              <input
+                type="number"
+                min={1}
+                step={1}
+                value={validationConsecThresholdText}
+                onChange={(event) => setValidationConsecThresholdText(event.target.value)}
+              />
+            </label>
+          ) : null}
+          <label className="scene-layer-field">
+            <span>scope_windows</span>
+            <input
+              type="number"
+              min={1}
+              step={1}
+              value={validationScopeWindowsText}
+              onChange={(event) => setValidationScopeWindowsText(event.target.value)}
+            />
+          </label>
+          <label className="scene-layer-field">
+            <span>样本展示上限/组</span>
+            <input
+              type="number"
+              min={1}
+              max={VALIDATION_MAX_SAMPLE_LIMIT}
+              step={1}
+              value={validationSampleLimitText}
+              onChange={(event) => setValidationSampleLimitText(event.target.value)}
+            />
+          </label>
+        </div>
+
+        <label className="scene-layer-field scene-layer-field-span-full">
+          <span>表达式</span>
+          <textarea
+            rows={6}
+            value={validationExpression}
+            onChange={(event) => setValidationExpression(event.target.value)}
+            placeholder="例如: C > REF(C, N) and V > MA(V, M)"
+          />
+        </label>
+
+        <div className="scene-layer-validation-unknown-block">
+          <div className="scene-layer-validation-unknown-toolbar">
+            <label className="scene-layer-validation-checkbox">
+              <input
+                type="checkbox"
+                checked={validationEnableUnknown}
+                onChange={(event) => {
+                  const checked = event.target.checked;
+                  setValidationEnableUnknown(checked);
+                  if (checked) {
+                    setValidationUnknownConfigs((current) =>
+                      hasValidUnknownConfig(current)
+                        ? current
+                        : inferUnknownConfigs(validationExpression),
+                    );
+                  } else {
+                    setValidationUnknownConfigs([]);
+                  }
+                }}
+              />
+              <span>启用未知数</span>
+            </label>
+            {validationEnableUnknown ? (
+              <div className="scene-layer-validation-unknown-actions">
+                <button
+                  type="button"
+                  className="scene-layer-secondary-btn"
+                  onClick={() => setValidationUnknownConfigs(inferUnknownConfigs(validationExpression))}
+                >
+                  自动填入未知数
+                </button>
+                <button
+                  type="button"
+                  className="scene-layer-secondary-btn"
+                  onClick={() =>
+                    setValidationUnknownConfigs((current) => [
+                      ...current,
+                      buildEmptyUnknownConfig(),
+                    ])
+                  }
+                >
+                  + 增加未知数
+                </button>
+              </div>
+            ) : null}
+          </div>
+
+          {validationEnableUnknown ? (
+            <div className="scene-layer-validation-unknown-list">
+              {validationUnknownConfigs.map((item, index) => (
+                <div key={`validation-unknown-${index}`} className="scene-layer-validation-unknown-row">
+                  <label className="scene-layer-field">
+                    <span>变量名</span>
+                    <input
+                      value={item.name}
+                      onChange={(event) =>
+                        setValidationUnknownConfigs((current) =>
+                          current.map((config, configIndex) =>
+                            configIndex === index
+                              ? { ...config, name: event.target.value }
+                              : config,
+                          ),
+                        )
+                      }
+                    />
+                  </label>
+                  <label className="scene-layer-field">
+                    <span>起始</span>
+                    <input
+                      type="number"
+                      step="any"
+                      value={item.start}
+                      onChange={(event) =>
+                        setValidationUnknownConfigs((current) =>
+                          current.map((config, configIndex) =>
+                            configIndex === index
+                              ? { ...config, start: event.target.value }
+                              : config,
+                          ),
+                        )
+                      }
+                    />
+                  </label>
+                  <label className="scene-layer-field">
+                    <span>结束</span>
+                    <input
+                      type="number"
+                      step="any"
+                      value={item.end}
+                      onChange={(event) =>
+                        setValidationUnknownConfigs((current) =>
+                          current.map((config, configIndex) =>
+                            configIndex === index
+                              ? { ...config, end: event.target.value }
+                              : config,
+                          ),
+                        )
+                      }
+                    />
+                  </label>
+                  <label className="scene-layer-field">
+                    <span>步长</span>
+                    <input
+                      type="number"
+                      step="any"
+                      value={item.step}
+                      onChange={(event) =>
+                        setValidationUnknownConfigs((current) =>
+                          current.map((config, configIndex) =>
+                            configIndex === index
+                              ? { ...config, step: event.target.value }
+                              : config,
+                          ),
+                        )
+                      }
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    className="scene-layer-secondary-btn scene-layer-validation-unknown-remove"
+                    onClick={() =>
+                      setValidationUnknownConfigs((current) =>
+                        current.length <= 1
+                          ? [buildEmptyUnknownConfig()]
+                          : current.filter((_, configIndex) => configIndex !== index),
+                      )
+                    }
+                  >
+                    删除
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </div>
+
+        <div className="scene-layer-actions">
+          <button
+            type="button"
+            className="scene-layer-primary-btn"
+            onClick={() => void onRunRuleExpressionValidation()}
+            disabled={heavyTaskRunning || initializing}
+          >
+            {validationLoading ? "验证中..." : "执行表达式验证"}
+          </button>
+        </div>
+
+        {validationError ? <div className="scene-layer-error">{validationError}</div> : null}
+      </section>
+
+      {validationResult ? (
+        <section id="scene-layer-expression-validation-results" className="scene-layer-card">
+          <div className="scene-layer-layer-summary">
+            <h3>参数组合表现（点击表头排序）</h3>
+            <div className="scene-layer-contrib-table-wrap">
+              <table className="scene-layer-contrib-table scene-layer-validation-table">
+                <thead>
+                  <tr>
+                    {renderValidationComboSortHeader("combo_label", "组合")}
+                    {renderValidationComboSortHeader("params", "策略参数")}
+                    {renderValidationComboSortHeader("trigger_samples", "触发样本")}
+                    {renderValidationComboSortHeader("triggered_days", "触发交易日")}
+                    {renderValidationComboSortHeader("avg_daily_trigger", "平均每日触发")}
+                    {renderValidationComboSortHeader("spread_mean", "分层差均值（按得分值）")}
+                    {renderValidationComboSortHeader("profit_loss_ratio", "样本利润因子")}
+                    {renderValidationComboSortHeader("avg_excess_residual_mean", "超额残差（日度）")}
+                    {renderValidationComboSortHeader("avg_er_change", "ΔER(20)")}
+                    {renderValidationComboSortHeader("ic_mean", "IC 均值")}
+                    {renderValidationComboSortHeader("ic_t_value", "IC t值")}
+                    {renderValidationComboSortHeader("icir", "ICIR")}
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortedValidationComboRows.map((item) => {
+                    const isActive = selectedValidationCombo?.combo_key === item.combo_key;
+                    const rowClassName = [
+                      isActive ? "scene-layer-validation-row-active" : "",
+                      shouldUseInlineComboSelection
+                        ? "scene-layer-validation-row-selectable"
+                        : "",
+                    ]
+                      .filter((name) => name.length > 0)
+                      .join(" ");
+                    const unknownValueText = formatUnknownValuesForCombo(item);
+                    return (
+                      <tr
+                        key={item.combo_key}
+                        className={rowClassName || undefined}
+                        onClick={
+                          shouldUseInlineComboSelection
+                            ? () => setValidationSelectedComboKey(item.combo_key)
+                            : undefined
+                        }
+                      >
+                        <td>
+                          <strong>{item.combo_label}</strong>
+                        </td>
+                        <td>
+                          {shouldUseValidationDetailModal ? (
+                            <button
+                              type="button"
+                              className="scene-layer-validation-detail-link"
+                              title={unknownValueText}
+                              onClick={() => openValidationDetail(item.combo_key)}
+                            >
+                              {unknownValueText}
+                            </button>
+                          ) : (
+                            <span className="scene-layer-validation-params-text" title={unknownValueText}>
+                              {unknownValueText}
+                            </span>
+                          )}
+                        </td>
+                        <td>{item.trigger_samples}</td>
+                        <td>{item.triggered_days}</td>
+                        <td>{formatNumber(item.avg_daily_trigger, 2)}</td>
+                        <td>{formatPercent(item.backtest.spread_mean)}</td>
+                        <td>{formatProfitLossRatio(item.backtest.profit_loss_ratio)}</td>
+                        <td className={residualMetricHighlightClass(item.backtest.avg_excess_residual_mean, resolveResidualDirection(item.backtest.avg_contribution_score, validationDirection))}>
+                          {renderResidualMetric(item.backtest.avg_excess_residual_mean, resolveResidualDirection(item.backtest.avg_contribution_score, validationDirection))}
+                        </td>
+                        <td>{formatNumber(item.backtest.avg_er_change, 4)}</td>
+                        <td className={metricHighlightClass("ic", item.backtest.ic_mean)}>{formatNumber(item.backtest.ic_mean)}</td>
+                        <td className={metricHighlightClass("t", item.backtest.ic_t_value)}>{formatNumber(item.backtest.ic_t_value)}</td>
+                        <td className={metricHighlightClass("ir", item.backtest.icir)}>{formatNumber(item.backtest.icir)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="scene-layer-calibration-entry">
+            <div className="scene-layer-calibration-entry-copy">
+              <h3>继续验证：量化定分与触发方式</h3>
+              <p>
+                复用上面的收益样本，对选中组合比较 LAST、ANY、EACH、CONSEC 和带衰减的
+                RECENT；前半区间只用于选择并冻结候选，后半区间只做样本外评价。
+              </p>
+            </div>
+            <button
+              type="button"
+              className="scene-layer-primary-btn"
+              onClick={() => void onRunRuleExpressionCalibration()}
+              disabled={heavyTaskRunning || !selectedValidationCombo}
+            >
+              {validationCalibrationLoading ? "继续验证中..." : "继续验证定分与触发方式"}
+            </button>
+          </div>
+          {validationCalibrationError ? (
+            <div className="scene-layer-error">{validationCalibrationError}</div>
+          ) : null}
+
+          {activeValidationCalibration ? (
+            <div className="scene-layer-calibration-results">
+              <div className="scene-layer-summary-grid">
+                <div className="scene-layer-summary-item">
+                  <span>验证参数组合</span>
+                  <strong>{activeValidationCalibration.combo_label}</strong>
+                </div>
+                <div className="scene-layer-summary-item">
+                  <span>候选触发方式</span>
+                  <strong>{activeValidationCalibration.candidate_count}</strong>
+                </div>
+                <div className="scene-layer-summary-item">
+                  <span>建议触发方式</span>
+                  <strong>{recommendedValidationCalibration?.scope_label ?? "暂无样本外通过建议"}</strong>
+                </div>
+                <div className="scene-layer-summary-item">
+                  <span>建议单次分 / 典型总分</span>
+                  <strong>
+                    {recommendedValidationCalibration
+                      ? `${formatNumber(recommendedValidationCalibration.suggested_points, 1)} / ${formatNumber(recommendedValidationCalibration.suggested_total_points, 1)}`
+                      : "--"}
+                  </strong>
+                </div>
+              </div>
+              <p className="scene-layer-calibration-note">
+                {activeValidationCalibration.point_scale_description}。建议分只用于给出一致标尺，最终仍应在整套策略组合回测中确认。
+              </p>
+              <div className="scene-layer-contrib-table-wrap">
+                <table className="scene-layer-contrib-table scene-layer-calibration-table">
+                  <thead>
+                    <tr>
+                      <th>候选方式</th>
+                      <th>结论</th>
+                      <th>样本 / 交易日</th>
+                      <th>日均触发</th>
+                      <th>训练期日度超额</th>
+                      <th>训练期90%保守边际</th>
+                      <th>训练 / 样本外</th>
+                      <th>训练期 IC / t值</th>
+                      <th>分数单调性</th>
+                      <th>平均分倍数</th>
+                      <th>建议单次分</th>
+                      <th>典型总分</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {activeValidationCalibration.candidates.map((candidate) => {
+                      const isRecommended =
+                        candidate.candidate_key ===
+                        activeValidationCalibration.recommended_candidate_key;
+                      return (
+                        <tr
+                          key={candidate.candidate_key}
+                          className={isRecommended ? "scene-layer-calibration-row-recommended" : undefined}
+                        >
+                          <td>
+                            <div className="scene-layer-calibration-candidate-name">
+                              <strong>{candidate.scope_label}</strong>
+                              {isRecommended ? <span>建议</span> : null}
+                              {candidate.is_current ? <span>当前</span> : null}
+                            </div>
+                            {candidate.suggested_dist_points.length > 0 ? (
+                              <small title={formatCalibrationDistancePoints(candidate)}>
+                                衰减分：{formatCalibrationDistancePoints(candidate)}
+                              </small>
+                            ) : null}
+                          </td>
+                          <td>
+                            <span className={`scene-layer-calibration-status scene-layer-calibration-status-${candidate.status}`}>
+                              {candidate.status_label}
+                            </span>
+                          </td>
+                          <td>{candidate.trigger_samples} / {candidate.triggered_days}</td>
+                          <td>{formatNumber(candidate.avg_daily_trigger, 2)}</td>
+                          <td>{formatPercent(candidate.avg_excess_residual_mean)}</td>
+                          <td>{formatPercent(candidate.conservative_edge)}</td>
+                          <td>
+                            {formatPercent(candidate.early_excess_residual_mean)} / {formatPercent(candidate.late_excess_residual_mean)}
+                          </td>
+                          <td>{formatNumber(candidate.ic_mean)} / {formatNumber(candidate.ic_t_value, 2)}</td>
+                          <td title={formatCalibrationBuckets(candidate)}>
+                            {candidate.score_monotonicity === null || candidate.score_monotonicity === undefined
+                              ? "--"
+                              : `${formatNumber(candidate.score_monotonicity * 100, 0)}%`}
+                          </td>
+                          <td>{formatNumber(candidate.avg_score_multiplier, 2)}</td>
+                          <td><strong>{formatNumber(candidate.suggested_points, 1)}</strong></td>
+                          <td><strong>{formatNumber(candidate.suggested_total_points, 1)}</strong></td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <p className="scene-layer-calibration-note">
+                “单次分”可作为 points 起点；EACH 会按触发次数累加，所以同时看“平均分倍数”和“典型总分”。悬停“分数单调性”可查看各倍数分桶的样本与收益。
+              </p>
+            </div>
+          ) : null}
+
+          {!shouldUseValidationDetailModal && selectedValidationCombo ? (
+            <>
+              {shouldUseInlineComboSelection ? (
+                <div className="scene-layer-layer-summary">
+                  <h3>选中组合：{selectedValidationCombo.combo_label}</h3>
+                </div>
+              ) : null}
+              {renderValidationComboDetailSections(selectedValidationCombo)}
+            </>
+          ) : null}
+
+          {shouldUseValidationDetailModal && validationDetailModalOpen && selectedValidationCombo ? (
+            <div className="scene-layer-modal-mask" onClick={closeValidationDetailModal}>
+              <div
+                className="scene-layer-modal-card scene-layer-validation-detail-modal"
+                role="dialog"
+                aria-modal="true"
+                aria-label={`参数组合详情：${selectedValidationCombo.combo_label}`}
+                onClick={(event) => event.stopPropagation()}
+              >
+                <div className="scene-layer-modal-header">
+                  <h3>参数组合详情：{selectedValidationCombo.combo_label}</h3>
+                  <button type="button" className="scene-layer-modal-close" onClick={closeValidationDetailModal}>
+                    关闭
+                  </button>
+                </div>
+                <div className="scene-layer-modal-scroll-body">
+                  {renderValidationComboDetailSections(selectedValidationCombo, true)}
+                </div>
+              </div>
+            </div>
+          ) : null}
+
+        </section>
+      ) : null}
+    </div>
+  );
+}

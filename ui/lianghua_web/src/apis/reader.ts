@@ -1,0 +1,384 @@
+import { invoke } from "@tauri-apps/api/core";
+
+export type OverviewRow = {
+  ts_code: string;
+  trade_date?: string;
+  ref_date?: string;
+  resolved_rank_date?: string;
+  resolved_ref_date?: string;
+  total_score?: number;
+  tiebreak_j?: number;
+  rank?: number | null;
+  ref_rank?: number | null;
+  post_rank_return_pct?: number | null;
+  name?: string;
+  board?: string;
+  board_category?: string;
+  total_mv_yi?: number;
+  concept?: string;
+  [key: string]: string | number | null | undefined;
+};
+
+export type OverviewQuery = {
+  sourcePath: string;
+  tradeDate?: string;
+  limit?: number;
+  board?: string;
+  totalMvMin?: number;
+  totalMvMax?: number;
+};
+
+export type OverviewPageQuery = {
+  sourcePath: string;
+  rankDate?: string;
+  refDate?: string;
+  limit?: number;
+  board?: string;
+  excludeStBoard?: boolean;
+  totalMvMin?: number;
+  totalMvMax?: number;
+};
+
+export type OverviewPageData = {
+  rows: OverviewRow[];
+  rank_date_options?: string[];
+  resolved_rank_date?: string;
+  resolved_ref_date?: string;
+};
+
+export type ConvolutionRankRow = {
+  ts_code: string;
+  name: string;
+  board: string;
+  concept: string;
+  total_mv_yi?: number | null;
+  trade_date: string;
+  database_rank?: number | null;
+  raw_rank: number;
+  convolution_rank: number;
+  rank_change: number;
+  raw_score: number;
+  convolution_score: number;
+  score_history: number[];
+};
+
+export type ConvolutionRankPageQuery = {
+  sourcePath: string;
+  tradeDate?: string;
+  limit?: number;
+  board?: string;
+  excludeStBoard?: boolean;
+  totalMvMin?: number;
+  totalMvMax?: number;
+};
+
+export type ConvolutionRankPageData = {
+  rows: ConvolutionRankRow[];
+  resolved_trade_date: string;
+  kernel_name: string;
+  kernel: number[];
+  history_trade_dates: string[];
+  universe_size: number;
+};
+
+export type SceneOverviewRow = {
+  ts_code: string;
+  trade_date?: string;
+  scene_name: string;
+  direction?: string | null;
+  scene_score?: number | null;
+  risk_score?: number | null;
+  confirm_strength?: number | null;
+  risk_intensity?: number | null;
+  scene_status?: string | null;
+  rank?: number | null;
+  total_rank?: number | null;
+  name?: string;
+  board?: string;
+  total_mv_yi?: number | null;
+  concept?: string;
+  [key: string]: string | number | null | undefined;
+};
+
+export type SceneOverviewPageQuery = {
+  sourcePath: string;
+  rankDate?: string;
+  limit?: number;
+  board?: string;
+  excludeStBoard?: boolean;
+  totalMvMin?: number;
+  totalMvMax?: number;
+};
+
+export type SceneOverviewPageData = {
+  rows: SceneOverviewRow[];
+  rank_date_options?: string[];
+  resolved_rank_date?: string;
+};
+
+export type IntradayMonitorRow = {
+  rank_mode: string;
+  ts_code: string;
+  trade_date?: string;
+  realtime_trade_date?: string | null;
+  scene_name: string;
+  direction?: string | null;
+  total_score?: number | null;
+  scene_score?: number | null;
+  risk_score?: number | null;
+  confirm_strength?: number | null;
+  risk_intensity?: number | null;
+  scene_status?: string | null;
+  rank?: number | null;
+  name?: string;
+  board?: string;
+  total_mv_yi?: number | null;
+  concept?: string;
+  realtime_price?: number | null;
+  realtime_open?: number | null;
+  realtime_high?: number | null;
+  realtime_low?: number | null;
+  realtime_pre_close?: number | null;
+  realtime_avg_price?: number | null;
+  realtime_vol?: number | null;
+  realtime_amount?: number | null;
+  realtime_change_pct?: number | null;
+  realtime_change_open_pct?: number | null;
+  realtime_vol_ratio?: number | null;
+  return_5d_pct?: number | null;
+  return_5d_base_close?: number | null;
+  template_tag_text?: string | null;
+  template_tag_tone?: string | null;
+  [key: string]: string | number | null | undefined;
+};
+
+export type IntradayMonitorTemplate = {
+  id: string;
+  name: string;
+  expression: string;
+  enabled: boolean;
+};
+
+export type AllMarketTemplateHit = {
+  template_id: string;
+  template_name: string;
+};
+
+export type IntradayMonitorRankModeConfig = {
+  mode: "total" | "scene";
+  sceneName: string;
+  templateId: string;
+};
+
+export type IntradayMonitorPageQuery = {
+  sourcePath: string;
+  rankMode?: "total" | "scene";
+  rankDate?: string;
+  sceneName?: string;
+  limit?: number;
+  board?: string;
+  excludeStBoard?: boolean;
+  totalMvMin?: number;
+  totalMvMax?: number;
+};
+
+export type IntradayMonitorPageData = {
+  rows: IntradayMonitorRow[];
+  rankDateOptions?: string[];
+  resolvedRankDate?: string;
+  sceneOptions?: string[];
+  refreshedAt?: string;
+  warningMessage?: string;
+};
+
+export type AllMarketMonitorRow = {
+  ts_code: string;
+  name: string;
+  board: string;
+  concept?: string;
+  rank?: number | null;
+  best_rank_3d?: number | null;
+  similarity_rank?: number | null;
+  total_score?: number | null;
+  realtime_trade_date?: string | null;
+  realtime_price?: number | null;
+  realtime_open?: number | null;
+  realtime_high?: number | null;
+  realtime_low?: number | null;
+  realtime_pre_close?: number | null;
+  realtime_avg_price?: number | null;
+  realtime_change_pct?: number | null;
+  realtime_change_open_pct?: number | null;
+  realtime_vol?: number | null;
+  realtime_amount?: number | null;
+  realtime_vol_ratio?: number | null;
+  return_5d_pct?: number | null;
+  other_sort_value?: number | null;
+  scene_marker?: string | null;
+  template_hits?: AllMarketTemplateHit[] | null;
+  total_mv_yi?: number | null;
+  refreshed_at?: string | null;
+};
+
+export type AllMarketIndexRow = {
+  ts_code: string;
+  name: string;
+  realtime_trade_date?: string | null;
+  realtime_price?: number | null;
+  realtime_change_pct?: number | null;
+};
+
+export type AllMarketMonitorSnapshotData = {
+  rows: AllMarketMonitorRow[];
+  index_rows?: AllMarketIndexRow[];
+  data_version?: string | null;
+  has_new_data?: boolean;
+  refreshed_at?: string | null;
+  rank_date?: string | null;
+  requested_count: number;
+  fetched_count: number;
+  template_warning_message?: string | null;
+};
+
+export type IntradayRealtimeRefreshQuery = {
+  sourcePath: string;
+  rows: IntradayMonitorRow[];
+  templates: IntradayMonitorTemplate[];
+  rankModeConfigs: IntradayMonitorRankModeConfig[];
+  realtimeProvider?: "sina" | "tencent";
+};
+
+export type IntradayMonitorTemplateValidationData = {
+  normalizedExpression: string;
+  warmupNeed: number;
+  message: string;
+};
+
+export type ExpressionFieldData = {
+  name: string;
+  description: string;
+  example: string;
+};
+
+export type ExpressionCapabilitiesData = {
+  supportedFunctions: string[];
+  intradayRealtimeFields: ExpressionFieldData[];
+};
+
+let expressionCapabilitiesRequest: Promise<ExpressionCapabilitiesData> | null =
+  null;
+
+export function getExpressionCapabilities() {
+  if (!expressionCapabilitiesRequest) {
+    expressionCapabilitiesRequest = invoke<ExpressionCapabilitiesData>(
+      "get_expression_capabilities",
+    ).catch((error) => {
+      expressionCapabilitiesRequest = null;
+      throw error;
+    });
+  }
+  return expressionCapabilitiesRequest;
+}
+
+export type StockLookupRow = {
+  ts_code: string;
+  name: string;
+  cnspell?: string | null;
+};
+
+export async function rankOverview(query: OverviewQuery) {
+  return invoke<OverviewRow[]>("get_rank_overview", query);
+}
+
+export async function rankOverviewPage(query: OverviewPageQuery) {
+  return invoke<OverviewPageData>("get_rank_overview_page", query);
+}
+
+export async function convolutionRankPage(query: ConvolutionRankPageQuery) {
+  return invoke<ConvolutionRankPageData>("get_convolution_rank_page", query);
+}
+
+export async function listRankTradeDates(sourcePath: string) {
+  return invoke<string[]>("get_rank_trade_date_options", { sourcePath });
+}
+
+export async function listSceneRankTradeDates(sourcePath: string) {
+  return invoke<string[]>("get_scene_rank_trade_date_options", { sourcePath });
+}
+
+export async function sceneRankOverviewPage(query: SceneOverviewPageQuery) {
+  return invoke<SceneOverviewPageData>("get_scene_rank_overview_page", query);
+}
+
+export async function intradayMonitorPage(query: IntradayMonitorPageQuery) {
+  return invoke<IntradayMonitorPageData>("get_intraday_monitor_page", query);
+}
+
+export async function refreshIntradayMonitorRealtime(
+  query: IntradayRealtimeRefreshQuery,
+) {
+  return invoke<IntradayMonitorPageData>(
+    "refresh_intraday_monitor_realtime",
+    query,
+  );
+}
+
+export async function refreshIntradayMonitorTemplateTags(
+  query: IntradayRealtimeRefreshQuery,
+) {
+  return invoke<IntradayMonitorPageData>(
+    "refresh_intraday_monitor_template_tags",
+    query,
+  );
+}
+
+export async function validateIntradayMonitorTemplateExpression(
+  sourcePath: string,
+  expression: string,
+) {
+  return invoke<IntradayMonitorTemplateValidationData>(
+    "validate_intraday_monitor_template_expression",
+    { sourcePath, expression },
+  );
+}
+
+export async function getAllMarketMonitorSnapshot(
+  sourcePath: string,
+  realtimeProvider?: "sina" | "tencent",
+  sceneStageThreshold?: "observe" | "trigger" | "confirm",
+  templateEnabled?: boolean,
+  templates?: IntradayMonitorTemplate[],
+  tsCodes?: string[],
+  otherSortExpression?: string,
+  otherSortUseRealtime?: boolean,
+  lastDataVersion?: string,
+) {
+  return invoke<AllMarketMonitorSnapshotData>(
+    "get_all_market_monitor_snapshot",
+    {
+      sourcePath,
+      realtimeProvider,
+      sceneStageThreshold,
+      templateEnabled,
+      templates,
+      tsCodes,
+      otherSortExpression,
+      otherSortUseRealtime,
+      lastDataVersion,
+    },
+  );
+}
+
+export async function listStockLookupRows(sourcePath: string) {
+  return invoke<StockLookupRow[]>("list_stock_lookup_rows", { sourcePath });
+}
+
+export function isMissingOverviewExtension(error: unknown) {
+  const message = String(error).toLowerCase();
+  return (
+    (message.includes("command") && message.includes("not found")) ||
+    message.includes("unknown command") ||
+    message.includes("get_rank_overview_page") ||
+    message.includes("get_rank_trade_date_options")
+  );
+}

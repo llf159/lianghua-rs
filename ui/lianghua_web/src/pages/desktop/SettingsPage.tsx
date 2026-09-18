@@ -1,0 +1,1398 @@
+import { useCallback, useDeferredValue, useEffect, useMemo, useState } from 'react'
+import {
+  getChartIndicatorSettings,
+  type ChartIndicatorSettingsPayload,
+} from '../../apis/chartIndicatorSettings'
+import { ensureManagedSourcePath } from '../../apis/managedSource'
+import { getStockPickOptions } from '../../apis/stockPick'
+import { filterConceptItems, useConceptExclusions } from '../../shared/conceptExclusions'
+import ChartIndicatorSettingsModal from './components/ChartIndicatorSettingsModal'
+import StrategySyntaxGuideModal from './components/StrategySyntaxGuideModal'
+import AlgorithmGuideModal from './components/AlgorithmGuideModal'
+import {
+  CHART_DEFAULT_VISIBLE_BARS_MAX,
+  CHART_DEFAULT_VISIBLE_BARS_MIN,
+  DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_MAX,
+  DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_MIN,
+  CHART_INDICATOR_WIDTH_RATIO_MAX,
+  CHART_INDICATOR_WIDTH_RATIO_MIN,
+  CHART_MAIN_PERCENT_HEIGHT_LIMIT_MAX,
+  CHART_MAIN_PERCENT_HEIGHT_LIMIT_MIN,
+  CHART_MAIN_PERCENT_PIXELS_MAX,
+  CHART_MAIN_PERCENT_PIXELS_MIN,
+  CHART_MAIN_WIDTH_RATIO_MAX,
+  CHART_MAIN_WIDTH_RATIO_MIN,
+  clampChartDefaultVisibleBars,
+  clampChartMainPercentHeight,
+  clampChartMainPercentPixels,
+  clampChartIndicatorWidthRatio,
+  clampChartMainWidthRatio,
+  clampDetailsNavLongPressIntervalSeconds,
+  readStoredChartDefaultVisibleBars,
+  readStoredChartIndicatorWidthRatio,
+  readStoredChartMainHeightMode,
+  readStoredChartMainPercentMaxHeight,
+  readStoredChartMainPercentMinHeight,
+  readStoredChartMainPercentPixels,
+  readStoredChartMainWidthRatio,
+  readStoredDetailCyqModel,
+  readStoredDetailsNavLongPressIntervalSeconds,
+  writeStoredChartDefaultVisibleBars,
+  writeStoredChartIndicatorWidthRatio,
+  writeStoredChartMainHeightMode,
+  writeStoredChartMainPercentMaxHeight,
+  writeStoredChartMainPercentMinHeight,
+  writeStoredChartMainPercentPixels,
+  writeStoredChartMainWidthRatio,
+  writeStoredDetailCyqModel,
+  writeStoredDetailsNavLongPressIntervalSeconds,
+  type DetailCyqModel,
+  type ChartMainHeightMode,
+} from '../../shared/chartSettings'
+import {
+  DEFAULT_BOARD_FILTER_OPTIONS,
+  readStoredDefaultBoardFilter,
+  writeStoredDefaultBoardFilter,
+  type DefaultBoardFilter,
+} from '../../shared/defaultBoardFilter'
+import {
+  BACKTEST_IC_THRESHOLD_DEFAULT,
+  BACKTEST_IR_THRESHOLD_DEFAULT,
+  BACKTEST_RESIDUAL_THRESHOLD_DEFAULT,
+  BACKTEST_T_THRESHOLD_DEFAULT,
+  readStoredBacktestHighlightSettings,
+  type BacktestHighlightSettings,
+  writeStoredBacktestHighlightSettings,
+} from '../../shared/backtestHighlightSettings'
+import {
+  getRealtimeQuoteProviderLabel,
+  readStoredRealtimeQuoteProvider,
+  writeStoredRealtimeQuoteProvider,
+  type RealtimeQuoteProvider,
+} from '../../shared/realtimeSettings'
+import './css/DataImportPage.css'
+import './css/StockPickPage.css'
+import './css/DetailsPage.css'
+
+const AUTOCOMPLETE_LIMIT = 12
+const RATIO_INPUT_STEP = 0.01
+
+function getChartIndicatorSettingsStatus(payload: ChartIndicatorSettingsPayload) {
+  if (payload.error) {
+    return '需修复'
+  }
+  if (!payload.exists) {
+    return '使用默认'
+  }
+  return `${payload.summary.panelCount} 个面板`
+}
+
+type SettingsModalType =
+  | 'concept'
+  | 'st'
+  | 'chart-layout'
+  | 'chart-default-visible-bars'
+  | 'default-board-filter'
+  | 'chart-indicator'
+  | 'detail-cyq-model'
+  | 'details-nav-long-press'
+  | 'backtest-highlight'
+  | 'realtime-provider'
+  | null
+
+function getDetailCyqModelLabel(value: DetailCyqModel) {
+  return value === 'chen' ? '新筹码' : '旧筹码'
+}
+
+export default function SettingsPage() {
+  const {
+    excludedConcepts,
+    setExcludedConcepts,
+    excludeStBoard,
+    setExcludeStBoard,
+  } = useConceptExclusions()
+  const [conceptOptions, setConceptOptions] = useState<string[]>([])
+  const [conceptKeyword, setConceptKeyword] = useState('')
+  const [lookupFocused, setLookupFocused] = useState(false)
+  const [activeModal, setActiveModal] = useState<SettingsModalType>(null)
+  const [isSyntaxGuideOpen, setIsSyntaxGuideOpen] = useState(false)
+  const [isAlgorithmGuideOpen, setIsAlgorithmGuideOpen] = useState(false)
+  const [chartMainRatioInput, setChartMainRatioInput] = useState(() =>
+    readStoredChartMainWidthRatio().toFixed(2),
+  )
+  const [chartDefaultVisibleBarsInput, setChartDefaultVisibleBarsInput] = useState(
+    () => String(readStoredChartDefaultVisibleBars()),
+  )
+  const [chartDefaultVisibleBarsError, setChartDefaultVisibleBarsError] = useState('')
+  const [chartDefaultVisibleBarsNotice, setChartDefaultVisibleBarsNotice] = useState('')
+  const [defaultBoardFilter, setDefaultBoardFilter] = useState<DefaultBoardFilter>(
+    () => readStoredDefaultBoardFilter(),
+  )
+  const [chartIndicatorRatioInput, setChartIndicatorRatioInput] = useState(() =>
+    readStoredChartIndicatorWidthRatio().toFixed(2),
+  )
+  const [chartMainHeightMode, setChartMainHeightMode] = useState<ChartMainHeightMode>(
+    () => readStoredChartMainHeightMode(),
+  )
+  const [chartMainPercentPixelsInput, setChartMainPercentPixelsInput] = useState(
+    () => String(readStoredChartMainPercentPixels()),
+  )
+  const [chartMainPercentMinHeightInput, setChartMainPercentMinHeightInput] = useState(
+    () => String(readStoredChartMainPercentMinHeight()),
+  )
+  const [chartMainPercentMaxHeightInput, setChartMainPercentMaxHeightInput] = useState(
+    () => String(readStoredChartMainPercentMaxHeight()),
+  )
+  const [chartLayoutSettingError, setChartLayoutSettingError] = useState('')
+  const [chartLayoutSettingNotice, setChartLayoutSettingNotice] = useState('')
+  const [chartIndicatorSettingsPayload, setChartIndicatorSettingsPayload] =
+    useState<ChartIndicatorSettingsPayload | null>(null)
+  const [chartIndicatorSettingsStatus, setChartIndicatorSettingsStatus] = useState('读取中...')
+  const [detailsNavLongPressIntervalInput, setDetailsNavLongPressIntervalInput] = useState(
+    () => String(readStoredDetailsNavLongPressIntervalSeconds()),
+  )
+  const [detailCyqModel, setDetailCyqModel] = useState(() => readStoredDetailCyqModel())
+  const [realtimeQuoteProvider, setRealtimeQuoteProvider] = useState(() => readStoredRealtimeQuoteProvider())
+  const [detailsNavLongPressSettingError, setDetailsNavLongPressSettingError] = useState('')
+  const [detailsNavLongPressSettingNotice, setDetailsNavLongPressSettingNotice] = useState('')
+  const [backtestHighlightIcThresholdInput, setBacktestHighlightIcThresholdInput] = useState(
+    () => String(readStoredBacktestHighlightSettings().icThreshold),
+  )
+  const [backtestHighlightIrThresholdInput, setBacktestHighlightIrThresholdInput] = useState(
+    () => String(readStoredBacktestHighlightSettings().irThreshold),
+  )
+  const [backtestHighlightTThresholdInput, setBacktestHighlightTThresholdInput] = useState(
+    () => String(readStoredBacktestHighlightSettings().tThreshold),
+  )
+  const [backtestHighlightResidualThresholdInput, setBacktestHighlightResidualThresholdInput] = useState(
+    () => String(readStoredBacktestHighlightSettings().residualThreshold),
+  )
+  const [backtestHighlightIcUseAbs, setBacktestHighlightIcUseAbs] = useState(
+    () => readStoredBacktestHighlightSettings().icUseAbs,
+  )
+  const [backtestHighlightIrUseAbs, setBacktestHighlightIrUseAbs] = useState(
+    () => readStoredBacktestHighlightSettings().irUseAbs,
+  )
+  const [backtestHighlightTUseAbs, setBacktestHighlightTUseAbs] = useState(
+    () => readStoredBacktestHighlightSettings().tUseAbs,
+  )
+  const [backtestHighlightResidualUseAbs, setBacktestHighlightResidualUseAbs] = useState(
+    () => readStoredBacktestHighlightSettings().residualUseAbs,
+  )
+  const [backtestHighlightSettingError, setBacktestHighlightSettingError] = useState('')
+  const [backtestHighlightSettingNotice, setBacktestHighlightSettingNotice] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const deferredConceptKeyword = useDeferredValue(conceptKeyword)
+  const isConceptEditorOpen = activeModal === 'concept'
+  const isStSettingOpen = activeModal === 'st'
+  const isChartLayoutSettingOpen = activeModal === 'chart-layout'
+  const isChartDefaultVisibleBarsSettingOpen = activeModal === 'chart-default-visible-bars'
+  const isDefaultBoardFilterSettingOpen = activeModal === 'default-board-filter'
+  const isChartIndicatorSettingOpen = activeModal === 'chart-indicator'
+  const isDetailCyqModelSettingOpen = activeModal === 'detail-cyq-model'
+  const isDetailsNavLongPressSettingOpen = activeModal === 'details-nav-long-press'
+  const isBacktestHighlightSettingOpen = activeModal === 'backtest-highlight'
+  const isRealtimeProviderSettingOpen = activeModal === 'realtime-provider'
+
+  useEffect(() => {
+    let cancelled = false
+
+    const loadOptions = async () => {
+      setLoading(true)
+      setError('')
+      try {
+        const resolvedSourcePath = await ensureManagedSourcePath()
+        const [options, chartIndicatorPayload] = await Promise.all([
+          getStockPickOptions(resolvedSourcePath),
+          getChartIndicatorSettings(resolvedSourcePath).catch((chartError) => {
+            if (!cancelled) {
+              setChartIndicatorSettingsPayload(null)
+              setChartIndicatorSettingsStatus('需修复')
+            }
+            console.error('读取图表指标配置失败', chartError)
+            return null
+          }),
+        ])
+        if (cancelled) {
+          return
+        }
+
+        setConceptOptions(filterConceptItems(options.concept_options ?? [], []))
+        setChartIndicatorSettingsPayload(chartIndicatorPayload)
+        setChartIndicatorSettingsStatus(
+          chartIndicatorPayload ? getChartIndicatorSettingsStatus(chartIndicatorPayload) : '需修复',
+        )
+      } catch (loadError) {
+        if (cancelled) {
+          return
+        }
+
+        setConceptOptions([])
+        setError(`读取概念列表失败: ${String(loadError)}`)
+      } finally {
+        if (!cancelled) {
+          setLoading(false)
+        }
+      }
+    }
+
+    void loadOptions()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  async function onRefreshOptions() {
+    setLoading(true)
+    setError('')
+
+    try {
+      const resolvedSourcePath = await ensureManagedSourcePath()
+      const options = await getStockPickOptions(resolvedSourcePath)
+      setConceptOptions(filterConceptItems(options.concept_options ?? [], []))
+    } catch (loadError) {
+      setConceptOptions([])
+      setError(`读取概念列表失败: ${String(loadError)}`)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const filteredConceptOptions = useMemo(() => {
+    const keyword = deferredConceptKeyword.trim().toLowerCase()
+    if (!keyword) {
+      return conceptOptions
+    }
+
+    return conceptOptions.filter((item) => item.toLowerCase().includes(keyword))
+  }, [conceptOptions, deferredConceptKeyword])
+
+  const autocompleteOptions = useMemo(() => {
+    if (!conceptKeyword.trim()) {
+      return []
+    }
+
+    return filteredConceptOptions.slice(0, AUTOCOMPLETE_LIMIT)
+  }, [conceptKeyword, filteredConceptOptions])
+
+  const showAutocomplete = lookupFocused && autocompleteOptions.length > 0
+
+  useEffect(() => {
+    if (!activeModal) {
+      return
+    }
+
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        setActiveModal(null)
+        setConceptKeyword('')
+        setLookupFocused(false)
+      }
+    }
+
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [activeModal])
+
+  const chartMainWidthRatioPreview = useMemo(() => {
+    const parsedValue = Number(chartMainRatioInput.trim())
+    if (!Number.isFinite(parsedValue)) {
+      return null
+    }
+
+    return clampChartMainWidthRatio(parsedValue)
+  }, [chartMainRatioInput])
+
+  const chartDefaultVisibleBarsPreview = useMemo(() => {
+    const parsedValue = Number(chartDefaultVisibleBarsInput.trim())
+    if (!Number.isFinite(parsedValue)) {
+      return null
+    }
+    return clampChartDefaultVisibleBars(parsedValue)
+  }, [chartDefaultVisibleBarsInput])
+
+  const chartIndicatorWidthRatioPreview = useMemo(() => {
+    const parsedValue = Number(chartIndicatorRatioInput.trim())
+    if (!Number.isFinite(parsedValue)) {
+      return null
+    }
+
+    return clampChartIndicatorWidthRatio(parsedValue)
+  }, [chartIndicatorRatioInput])
+
+  const currentChartMainWidthRatio = readStoredChartMainWidthRatio()
+  const currentChartIndicatorWidthRatio = readStoredChartIndicatorWidthRatio()
+  const currentChartMainHeightMode = readStoredChartMainHeightMode()
+  const currentChartMainPercentPixels = readStoredChartMainPercentPixels()
+  const currentDetailsNavLongPressInterval = readStoredDetailsNavLongPressIntervalSeconds()
+  const currentBacktestHighlightSettings = readStoredBacktestHighlightSettings()
+  const detailsNavLongPressIntervalPreview = useMemo(() => {
+    const parsedValue = Number(detailsNavLongPressIntervalInput.trim())
+    if (!Number.isFinite(parsedValue)) {
+      return null
+    }
+
+    return clampDetailsNavLongPressIntervalSeconds(parsedValue)
+  }, [detailsNavLongPressIntervalInput])
+
+  function openConceptEditor() {
+    setActiveModal('concept')
+    setConceptKeyword('')
+    setLookupFocused(false)
+  }
+
+  function openStSetting() {
+    setActiveModal('st')
+  }
+
+  function openChartLayoutSetting() {
+    setActiveModal('chart-layout')
+    setChartMainRatioInput(readStoredChartMainWidthRatio().toFixed(2))
+    setChartIndicatorRatioInput(readStoredChartIndicatorWidthRatio().toFixed(2))
+    setChartMainHeightMode(readStoredChartMainHeightMode())
+    setChartMainPercentPixelsInput(String(readStoredChartMainPercentPixels()))
+    setChartMainPercentMinHeightInput(String(readStoredChartMainPercentMinHeight()))
+    setChartMainPercentMaxHeightInput(String(readStoredChartMainPercentMaxHeight()))
+    setChartLayoutSettingError('')
+    setChartLayoutSettingNotice('')
+  }
+
+  function openChartDefaultVisibleBarsSetting() {
+    setActiveModal('chart-default-visible-bars')
+    setChartDefaultVisibleBarsInput(String(readStoredChartDefaultVisibleBars()))
+    setChartDefaultVisibleBarsError('')
+    setChartDefaultVisibleBarsNotice('')
+  }
+
+  function openDefaultBoardFilterSetting() {
+    setDefaultBoardFilter(readStoredDefaultBoardFilter())
+    setActiveModal('default-board-filter')
+  }
+
+  function openChartIndicatorSetting() {
+    setActiveModal('chart-indicator')
+  }
+
+  function openDetailCyqModelSetting() {
+    setDetailCyqModel(readStoredDetailCyqModel())
+    setActiveModal('detail-cyq-model')
+  }
+
+  function openRealtimeProviderSetting() {
+    setRealtimeQuoteProvider(readStoredRealtimeQuoteProvider())
+    setActiveModal('realtime-provider')
+  }
+
+  const onChartIndicatorSettingsLoaded = useCallback((nextPayload: ChartIndicatorSettingsPayload) => {
+    setChartIndicatorSettingsPayload(nextPayload)
+    setChartIndicatorSettingsStatus(getChartIndicatorSettingsStatus(nextPayload))
+  }, [])
+
+  function openDetailsNavLongPressSetting() {
+    setActiveModal('details-nav-long-press')
+    setDetailsNavLongPressIntervalInput(String(readStoredDetailsNavLongPressIntervalSeconds()))
+    setDetailsNavLongPressSettingError('')
+    setDetailsNavLongPressSettingNotice('')
+  }
+
+  function openBacktestHighlightSetting() {
+    const currentSettings = readStoredBacktestHighlightSettings()
+    setActiveModal('backtest-highlight')
+    setBacktestHighlightIcThresholdInput(String(currentSettings.icThreshold))
+    setBacktestHighlightIrThresholdInput(String(currentSettings.irThreshold))
+    setBacktestHighlightTThresholdInput(String(currentSettings.tThreshold))
+    setBacktestHighlightResidualThresholdInput(String(currentSettings.residualThreshold))
+    setBacktestHighlightIcUseAbs(currentSettings.icUseAbs)
+    setBacktestHighlightIrUseAbs(currentSettings.irUseAbs)
+    setBacktestHighlightTUseAbs(currentSettings.tUseAbs)
+    setBacktestHighlightResidualUseAbs(currentSettings.residualUseAbs)
+    setBacktestHighlightSettingError('')
+    setBacktestHighlightSettingNotice('')
+  }
+
+  function closeActiveModal() {
+    setActiveModal(null)
+    setConceptKeyword('')
+    setLookupFocused(false)
+  }
+
+  function onSaveChartLayoutRatios() {
+    const parsedMainValue = Number(chartMainRatioInput.trim())
+    const parsedIndicatorValue = Number(chartIndicatorRatioInput.trim())
+    const parsedPercentPixels = Number(chartMainPercentPixelsInput.trim())
+    const parsedPercentMinHeight = Number(chartMainPercentMinHeightInput.trim())
+    const parsedPercentMaxHeight = Number(chartMainPercentMaxHeightInput.trim())
+    if (
+      !Number.isFinite(parsedMainValue) ||
+      !Number.isFinite(parsedIndicatorValue) ||
+      !Number.isFinite(parsedPercentPixels) ||
+      !Number.isFinite(parsedPercentMinHeight) ||
+      !Number.isFinite(parsedPercentMaxHeight)
+    ) {
+      setChartLayoutSettingError('请输入有效数字。')
+      setChartLayoutSettingNotice('')
+      return
+    }
+
+    const normalizedMainValue = clampChartMainWidthRatio(parsedMainValue)
+    const normalizedIndicatorValue = clampChartIndicatorWidthRatio(parsedIndicatorValue)
+    const normalizedPercentPixels = clampChartMainPercentPixels(parsedPercentPixels)
+    const normalizedPercentMinHeight = clampChartMainPercentHeight(
+      parsedPercentMinHeight,
+      readStoredChartMainPercentMinHeight(),
+    )
+    const normalizedPercentMaxHeight = clampChartMainPercentHeight(
+      parsedPercentMaxHeight,
+      readStoredChartMainPercentMaxHeight(),
+    )
+    if (normalizedPercentMinHeight > normalizedPercentMaxHeight) {
+      setChartLayoutSettingError('百分比模式的最小高度不能大于最大高度。')
+      setChartLayoutSettingNotice('')
+      return
+    }
+
+    writeStoredChartMainWidthRatio(normalizedMainValue)
+    writeStoredChartIndicatorWidthRatio(normalizedIndicatorValue)
+    writeStoredChartMainHeightMode(chartMainHeightMode)
+    writeStoredChartMainPercentPixels(normalizedPercentPixels)
+    writeStoredChartMainPercentMinHeight(normalizedPercentMinHeight)
+    writeStoredChartMainPercentMaxHeight(normalizedPercentMaxHeight)
+    setChartMainRatioInput(normalizedMainValue.toFixed(2))
+    setChartIndicatorRatioInput(normalizedIndicatorValue.toFixed(2))
+    setChartMainPercentPixelsInput(String(normalizedPercentPixels))
+    setChartMainPercentMinHeightInput(String(normalizedPercentMinHeight))
+    setChartMainPercentMaxHeightInput(String(normalizedPercentMaxHeight))
+    setChartLayoutSettingError('')
+    setChartLayoutSettingNotice('已保存。切回详情页后会使用新的高度设置。')
+  }
+
+  function onSaveChartDefaultVisibleBars() {
+    const parsedValue = Number(chartDefaultVisibleBarsInput.trim())
+    if (!Number.isInteger(parsedValue)) {
+      setChartDefaultVisibleBarsError('请输入整数根数。')
+      setChartDefaultVisibleBarsNotice('')
+      return
+    }
+    if (
+      parsedValue < CHART_DEFAULT_VISIBLE_BARS_MIN ||
+      parsedValue > CHART_DEFAULT_VISIBLE_BARS_MAX
+    ) {
+      setChartDefaultVisibleBarsError(
+        `根数需在 ${CHART_DEFAULT_VISIBLE_BARS_MIN} 到 ${CHART_DEFAULT_VISIBLE_BARS_MAX} 之间。`,
+      )
+      setChartDefaultVisibleBarsNotice('')
+      return
+    }
+
+    const normalizedValue = clampChartDefaultVisibleBars(parsedValue)
+    writeStoredChartDefaultVisibleBars(normalizedValue)
+    setChartDefaultVisibleBarsInput(String(normalizedValue))
+    setChartDefaultVisibleBarsError('')
+    setChartDefaultVisibleBarsNotice('已保存。之后打开个股详情时会使用新的默认根数。')
+  }
+
+  function onSelectDefaultBoardFilter(nextValue: DefaultBoardFilter) {
+    const normalizedValue = writeStoredDefaultBoardFilter(nextValue)
+    setDefaultBoardFilter(normalizedValue)
+  }
+
+  function onSaveDetailsNavLongPressInterval() {
+    const parsedValue = Number(detailsNavLongPressIntervalInput.trim())
+    if (!Number.isFinite(parsedValue)) {
+      setDetailsNavLongPressSettingError('请输入有效秒数。')
+      setDetailsNavLongPressSettingNotice('')
+      return
+    }
+
+    const normalizedValue = clampDetailsNavLongPressIntervalSeconds(parsedValue)
+    writeStoredDetailsNavLongPressIntervalSeconds(normalizedValue)
+    setDetailsNavLongPressIntervalInput(String(normalizedValue))
+    setDetailsNavLongPressSettingError('')
+    setDetailsNavLongPressSettingNotice('已保存。详情页长按上一条/下一条会按该间隔自动切换。')
+  }
+
+  function onSelectDetailCyqModel(nextModel: DetailCyqModel) {
+    writeStoredDetailCyqModel(nextModel)
+    setDetailCyqModel(nextModel)
+  }
+
+  function onSelectRealtimeQuoteProvider(nextProvider: RealtimeQuoteProvider) {
+    const normalizedProvider = writeStoredRealtimeQuoteProvider(nextProvider)
+    setRealtimeQuoteProvider(normalizedProvider)
+  }
+
+  function onSaveBacktestHighlightSettings() {
+    const parsedIcThreshold = Number(backtestHighlightIcThresholdInput.trim())
+    const parsedIrThreshold = Number(backtestHighlightIrThresholdInput.trim())
+    const parsedTThreshold = Number(backtestHighlightTThresholdInput.trim())
+    const parsedResidualThreshold = Number(backtestHighlightResidualThresholdInput.trim())
+    if (
+      !Number.isFinite(parsedIcThreshold) ||
+      !Number.isFinite(parsedIrThreshold) ||
+      !Number.isFinite(parsedTThreshold) ||
+      !Number.isFinite(parsedResidualThreshold)
+    ) {
+      setBacktestHighlightSettingError('阈值请输入有效数字。')
+      setBacktestHighlightSettingNotice('')
+      return
+    }
+    if (
+      parsedIcThreshold < 0 ||
+      parsedIrThreshold < 0 ||
+      parsedTThreshold < 0 ||
+      parsedResidualThreshold < 0
+    ) {
+      setBacktestHighlightSettingError('阈值必须 >= 0。')
+      setBacktestHighlightSettingNotice('')
+      return
+    }
+
+    const nextSettings: BacktestHighlightSettings = {
+      icThreshold: parsedIcThreshold,
+      icUseAbs: backtestHighlightIcUseAbs,
+      irThreshold: parsedIrThreshold,
+      irUseAbs: backtestHighlightIrUseAbs,
+      tThreshold: parsedTThreshold,
+      tUseAbs: backtestHighlightTUseAbs,
+      residualThreshold: parsedResidualThreshold,
+      residualUseAbs: backtestHighlightResidualUseAbs,
+    }
+    writeStoredBacktestHighlightSettings(nextSettings)
+    setBacktestHighlightIcThresholdInput(String(nextSettings.icThreshold))
+    setBacktestHighlightIrThresholdInput(String(nextSettings.irThreshold))
+    setBacktestHighlightTThresholdInput(String(nextSettings.tThreshold))
+    setBacktestHighlightResidualThresholdInput(String(nextSettings.residualThreshold))
+    setBacktestHighlightSettingError('')
+    setBacktestHighlightSettingNotice('已保存。场景/策略回测页面会按新阈值高亮。')
+  }
+
+  function toggleConcept(value: string) {
+    setExcludedConcepts(
+      excludedConcepts.includes(value)
+        ? excludedConcepts.filter((item) => item !== value)
+        : [...excludedConcepts, value],
+    )
+  }
+
+  function onSelectAutocomplete(value: string) {
+    if (!excludedConcepts.includes(value)) {
+      setExcludedConcepts([...excludedConcepts, value])
+    }
+
+    setConceptKeyword('')
+    setLookupFocused(true)
+  }
+
+  return (
+    <div className="settings-page">
+      <section className="settings-card">
+        <div className="settings-head">
+          <div>
+            <h2 className="settings-title">设置</h2>
+            <p className="settings-section-note">每项设置单独编辑，点击条目打开对应设置弹窗。</p>
+          </div>
+          <div className="settings-actions">
+            <button
+              className="settings-secondary-btn"
+              type="button"
+              onClick={() => setIsAlgorithmGuideOpen(true)}
+            >
+              算法说明
+            </button>
+            <button
+              className="settings-secondary-btn"
+              type="button"
+              onClick={() => setIsSyntaxGuideOpen(true)}
+            >
+              语法说明书
+            </button>
+          </div>
+        </div>
+
+        <div className="settings-list">
+          <button className="settings-list-item" type="button" onClick={openConceptEditor}>
+            <div className="settings-list-item-main">
+              <strong>概念排除</strong>
+              <span>已排除 {excludedConcepts.length} 项，影响选股页概念过滤。</span>
+            </div>
+            <span className="settings-list-item-value">编辑</span>
+          </button>
+
+          <button className="settings-list-item" type="button" onClick={openStSetting}>
+            <div className="settings-list-item-main">
+              <strong>ST 排除</strong>
+              <span>控制主板筛选是否自动排除 ST 板块。</span>
+            </div>
+            <span className="settings-list-item-value">{excludeStBoard ? '已开启' : '未开启'}</span>
+          </button>
+
+          <button className="settings-list-item" type="button" onClick={openChartLayoutSetting}>
+            <div className="settings-list-item-main">
+              <strong>图表高度</strong>
+              <span>主图区可切换固定高度与百分比高度，指标区仍使用固定比例。</span>
+            </div>
+            <span className="settings-list-item-value">
+              {currentChartMainHeightMode === 'percent'
+                ? `主 ${currentChartMainPercentPixels}px / 1%`
+                : `主 ${currentChartMainWidthRatio.toFixed(2)}`}
+              {' / '}指标 {currentChartIndicatorWidthRatio.toFixed(2)}
+            </span>
+          </button>
+
+          <button className="settings-list-item" type="button" onClick={openChartDefaultVisibleBarsSetting}>
+            <div className="settings-list-item-main">
+              <strong>主图默认根数</strong>
+              <span>控制新打开个股详情时，主图默认展示的 K 线根数。</span>
+            </div>
+            <span className="settings-list-item-value">{readStoredChartDefaultVisibleBars()} 根</span>
+          </button>
+
+          <button className="settings-list-item" type="button" onClick={openDefaultBoardFilterSetting}>
+            <div className="settings-list-item-main">
+              <strong>默认板块筛选</strong>
+              <span>作为排名展示和选股页面没有当前会话筛选时的默认板块。</span>
+            </div>
+            <span className="settings-list-item-value">{defaultBoardFilter}</span>
+          </button>
+
+          <button className="settings-list-item" type="button" onClick={openChartIndicatorSetting}>
+            <div className="settings-list-item-main">
+              <strong>自定义图表指标</strong>
+              <span>编辑详情页 K 线、指标、量能、砖型图等图表面板。</span>
+            </div>
+            <span className="settings-list-item-value">
+              {chartIndicatorSettingsPayload ? getChartIndicatorSettingsStatus(chartIndicatorSettingsPayload) : chartIndicatorSettingsStatus}
+            </span>
+          </button>
+
+          <button className="settings-list-item" type="button" onClick={openDetailCyqModelSetting}>
+            <div className="settings-list-item-main">
+              <strong>详情筹码模型</strong>
+              <span>控制个股详情页筹码分布使用旧筹码库还是新筹码库。</span>
+            </div>
+            <span className="settings-list-item-value">{getDetailCyqModelLabel(detailCyqModel)}</span>
+          </button>
+
+          <button className="settings-list-item" type="button" onClick={openRealtimeProviderSetting}>
+            <div className="settings-list-item-main">
+              <strong>实时行情源</strong>
+              <span>控制实时监控及详情日 K 刷新使用的股票行情源；指数表现会自动使用另一个行情源。</span>
+            </div>
+            <span className="settings-list-item-value">{getRealtimeQuoteProviderLabel(realtimeQuoteProvider)}</span>
+          </button>
+
+          <button className="settings-list-item" type="button" onClick={openDetailsNavLongPressSetting}>
+            <div className="settings-list-item-main">
+              <strong>详情长按切换间隔</strong>
+              <span>长按详情页上一条/下一条时，按该秒数自动切换。</span>
+            </div>
+            <span className="settings-list-item-value">{currentDetailsNavLongPressInterval} 秒</span>
+          </button>
+
+          <button className="settings-list-item" type="button" onClick={openBacktestHighlightSetting}>
+            <div className="settings-list-item-main">
+              <strong>回测指标高亮阈值</strong>
+              <span>配置残差均值 / IC / IR / t 的阈值，以及是否按绝对值比较。</span>
+            </div>
+            <span className="settings-list-item-value">
+              残差 {currentBacktestHighlightSettings.residualThreshold} · IC {currentBacktestHighlightSettings.icThreshold} · IR {currentBacktestHighlightSettings.irThreshold} · t {currentBacktestHighlightSettings.tThreshold}
+            </span>
+          </button>
+        </div>
+
+        {error && !activeModal ? <div className="settings-error">{error}</div> : null}
+      </section>
+
+      {isStSettingOpen ? (
+        <div
+          className="settings-modal-backdrop"
+          role="presentation"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              closeActiveModal()
+            }
+          }}
+        >
+          <section className="settings-modal settings-modal-narrow" role="dialog" aria-modal="true" aria-label="ST 排除设置">
+            <div className="settings-modal-head">
+              <div>
+                <h3 className="settings-subtitle-head">ST 排除</h3>
+                <p className="settings-section-note">开启后，选股与榜单中的板块筛选会自动排除 ST。</p>
+              </div>
+              <div className="settings-actions">
+                <button
+                  className={excludeStBoard ? 'settings-secondary-btn is-active' : 'settings-secondary-btn'}
+                  type="button"
+                  onClick={() => setExcludeStBoard(!excludeStBoard)}
+                >
+                  {excludeStBoard ? '已开启' : '未开启'}
+                </button>
+                <button className="settings-primary-btn" type="button" onClick={closeActiveModal}>
+                  完成
+                </button>
+              </div>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {isChartLayoutSettingOpen ? (
+        <div
+          className="settings-modal-backdrop"
+          role="presentation"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              closeActiveModal()
+            }
+          }}
+        >
+          <section className="settings-modal settings-modal-narrow" role="dialog" aria-modal="true" aria-label="图表高度设置">
+            <div className="settings-modal-head">
+              <div>
+                <h3 className="settings-subtitle-head">图表高度</h3>
+                <p className="settings-section-note">
+                  固定高度沿用容器宽度比例；百分比高度让主图中相同涨跌幅尽量保持相同像素距离。
+                </p>
+              </div>
+              <div className="settings-actions">
+                <button className="settings-secondary-btn" type="button" onClick={closeActiveModal}>
+                  关闭
+                </button>
+              </div>
+            </div>
+
+            <div className="settings-toggle-row" role="group" aria-label="主图高度模式">
+              <button
+                className={chartMainHeightMode === 'fixed' ? 'settings-secondary-btn is-active' : 'settings-secondary-btn'}
+                type="button"
+                onClick={() => setChartMainHeightMode('fixed')}
+              >
+                固定高度
+              </button>
+              <button
+                className={chartMainHeightMode === 'percent' ? 'settings-secondary-btn is-active' : 'settings-secondary-btn'}
+                type="button"
+                onClick={() => setChartMainHeightMode('percent')}
+              >
+                百分比高度
+              </button>
+            </div>
+
+            {chartMainHeightMode === 'fixed' ? (
+              <div className="settings-field settings-field-textarea">
+                <span>主图区高度 / 容器宽度</span>
+                <input
+                  type="number"
+                  min={CHART_MAIN_WIDTH_RATIO_MIN}
+                  max={CHART_MAIN_WIDTH_RATIO_MAX}
+                  step={RATIO_INPUT_STEP}
+                  value={chartMainRatioInput}
+                  onChange={(event) => setChartMainRatioInput(event.target.value)}
+                />
+                <small>
+                  比例预览：{chartMainWidthRatioPreview === null ? '--' : chartMainWidthRatioPreview.toFixed(2)}
+                </small>
+              </div>
+            ) : (
+              <>
+                <div className="settings-field settings-field-textarea">
+                  <span>每 1% 像素数</span>
+                  <input
+                    type="number"
+                    min={CHART_MAIN_PERCENT_PIXELS_MIN}
+                    max={CHART_MAIN_PERCENT_PIXELS_MAX}
+                    step={0.5}
+                    value={chartMainPercentPixelsInput}
+                    onChange={(event) => setChartMainPercentPixelsInput(event.target.value)}
+                  />
+                  <small>以价格区间中点为基准，与主图现有 10% 分隔线使用同一口径。</small>
+                </div>
+
+                <div className="settings-field settings-field-textarea">
+                  <span>最小高度（px）</span>
+                  <input
+                    type="number"
+                    min={CHART_MAIN_PERCENT_HEIGHT_LIMIT_MIN}
+                    max={CHART_MAIN_PERCENT_HEIGHT_LIMIT_MAX}
+                    step={20}
+                    value={chartMainPercentMinHeightInput}
+                    onChange={(event) => setChartMainPercentMinHeightInput(event.target.value)}
+                  />
+                  <small>小波动区间不会低于此高度，避免主图过扁。</small>
+                </div>
+
+                <div className="settings-field settings-field-textarea">
+                  <span>最大高度（px）</span>
+                  <input
+                    type="number"
+                    min={CHART_MAIN_PERCENT_HEIGHT_LIMIT_MIN}
+                    max={CHART_MAIN_PERCENT_HEIGHT_LIMIT_MAX}
+                    step={20}
+                    value={chartMainPercentMaxHeightInput}
+                    onChange={(event) => setChartMainPercentMaxHeightInput(event.target.value)}
+                  />
+                  <small>大波动区间不会超过此高度，避免极端行情把页面拉得过长。</small>
+                </div>
+              </>
+            )}
+
+            <div className="settings-field settings-field-textarea">
+              <span>指标区总高度 / 容器宽度</span>
+              <input
+                type="number"
+                min={CHART_INDICATOR_WIDTH_RATIO_MIN}
+                max={CHART_INDICATOR_WIDTH_RATIO_MAX}
+                step={RATIO_INPUT_STEP}
+                value={chartIndicatorRatioInput}
+                onChange={(event) => setChartIndicatorRatioInput(event.target.value)}
+              />
+              <small>
+                指标区预览：{chartIndicatorWidthRatioPreview === null ? '--' : chartIndicatorWidthRatioPreview.toFixed(2)}
+              </small>
+            </div>
+
+            {chartLayoutSettingError ? <div className="settings-error">{chartLayoutSettingError}</div> : null}
+            {chartLayoutSettingNotice ? <div className="settings-notice">{chartLayoutSettingNotice}</div> : null}
+
+            <div className="settings-actions">
+              <button className="settings-primary-btn" type="button" onClick={onSaveChartLayoutRatios}>
+                保存
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {isChartDefaultVisibleBarsSettingOpen ? (
+        <div
+          className="settings-modal-backdrop"
+          role="presentation"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              closeActiveModal()
+            }
+          }}
+        >
+          <section className="settings-modal settings-modal-narrow" role="dialog" aria-modal="true" aria-label="主图默认根数设置">
+            <div className="settings-modal-head">
+              <div>
+                <h3 className="settings-subtitle-head">主图默认根数</h3>
+                <p className="settings-section-note">设置新打开个股详情时主图默认显示多少根 K 线，当前默认值为 90。</p>
+              </div>
+              <button className="settings-secondary-btn" type="button" onClick={closeActiveModal}>
+                关闭
+              </button>
+            </div>
+
+            <div className="settings-field settings-field-textarea">
+              <span>K 线根数</span>
+              <input
+                type="number"
+                min={CHART_DEFAULT_VISIBLE_BARS_MIN}
+                max={CHART_DEFAULT_VISIBLE_BARS_MAX}
+                step={1}
+                value={chartDefaultVisibleBarsInput}
+                onChange={(event) => setChartDefaultVisibleBarsInput(event.target.value)}
+              />
+              <small>预览：{chartDefaultVisibleBarsPreview === null ? '--' : `${chartDefaultVisibleBarsPreview} 根`}</small>
+            </div>
+
+            {chartDefaultVisibleBarsError ? <div className="settings-error">{chartDefaultVisibleBarsError}</div> : null}
+            {chartDefaultVisibleBarsNotice ? <div className="settings-notice">{chartDefaultVisibleBarsNotice}</div> : null}
+
+            <div className="settings-actions">
+              <button className="settings-primary-btn" type="button" onClick={onSaveChartDefaultVisibleBars}>
+                保存
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {isDefaultBoardFilterSettingOpen ? (
+        <div
+          className="settings-modal-backdrop"
+          role="presentation"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              closeActiveModal()
+            }
+          }}
+        >
+          <section className="settings-modal settings-modal-narrow" role="dialog" aria-modal="true" aria-label="默认板块筛选设置">
+            <div className="settings-modal-head">
+              <div>
+                <h3 className="settings-subtitle-head">默认板块筛选</h3>
+                <p className="settings-section-note">排名展示和选股页面首次进入时会默认选择该板块；页面内临时选择仍会在当前会话保留。</p>
+              </div>
+              <button className="settings-primary-btn" type="button" onClick={closeActiveModal}>
+                完成
+              </button>
+            </div>
+
+            <div className="settings-actions settings-actions-left">
+              {DEFAULT_BOARD_FILTER_OPTIONS.map((board) => (
+                <button
+                  key={board}
+                  className={defaultBoardFilter === board ? 'settings-secondary-btn is-active' : 'settings-secondary-btn'}
+                  type="button"
+                  onClick={() => onSelectDefaultBoardFilter(board)}
+                >
+                  {board}
+                </button>
+              ))}
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      <ChartIndicatorSettingsModal
+        open={isChartIndicatorSettingOpen}
+        onClose={closeActiveModal}
+        onLoaded={onChartIndicatorSettingsLoaded}
+      />
+
+      {isDetailCyqModelSettingOpen ? (
+        <div
+          className="settings-modal-backdrop"
+          role="presentation"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              closeActiveModal()
+            }
+          }}
+        >
+          <section className="settings-modal settings-modal-narrow" role="dialog" aria-modal="true" aria-label="详情筹码模型设置">
+            <div className="settings-modal-head">
+              <div>
+                <h3 className="settings-subtitle-head">详情筹码模型</h3>
+                <p className="settings-section-note">
+                  旧筹码读取 cyq.db；新筹码读取 cyq_chen.db，并在详情页支持混合 / 主力 / 散户展示。
+                </p>
+              </div>
+              <div className="settings-actions">
+                <button className="settings-primary-btn" type="button" onClick={closeActiveModal}>
+                  完成
+                </button>
+              </div>
+            </div>
+
+            <div className="settings-actions settings-actions-left">
+              <button
+                className={detailCyqModel === 'legacy' ? 'settings-secondary-btn is-active' : 'settings-secondary-btn'}
+                type="button"
+                onClick={() => onSelectDetailCyqModel('legacy')}
+              >
+                旧筹码
+              </button>
+              <button
+                className={detailCyqModel === 'chen' ? 'settings-secondary-btn is-active' : 'settings-secondary-btn'}
+                type="button"
+                onClick={() => onSelectDetailCyqModel('chen')}
+              >
+                新筹码
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {isDetailsNavLongPressSettingOpen ? (
+        <div
+          className="settings-modal-backdrop"
+          role="presentation"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              closeActiveModal()
+            }
+          }}
+        >
+          <section className="settings-modal settings-modal-narrow" role="dialog" aria-modal="true" aria-label="详情长按切换间隔设置">
+            <div className="settings-modal-head">
+              <div>
+                <h3 className="settings-subtitle-head">详情长按切换间隔</h3>
+                <p className="settings-section-note">
+                  单位秒。详情页长按“上一条 / 下一条”进入锁定后，会按该间隔自动切换。
+                </p>
+              </div>
+              <div className="settings-actions">
+                <button className="settings-secondary-btn" type="button" onClick={closeActiveModal}>
+                  关闭
+                </button>
+              </div>
+            </div>
+
+            <div className="settings-field settings-field-textarea">
+              <span>DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS</span>
+              <input
+                type="number"
+                min={DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_MIN}
+                max={DETAILS_NAV_LONG_PRESS_INTERVAL_SECONDS_MAX}
+                step={0.1}
+                value={detailsNavLongPressIntervalInput}
+                onChange={(event) => setDetailsNavLongPressIntervalInput(event.target.value)}
+              />
+              <small>
+                预览：{detailsNavLongPressIntervalPreview === null ? '--' : `${detailsNavLongPressIntervalPreview} 秒`}
+              </small>
+            </div>
+
+            {detailsNavLongPressSettingError ? <div className="settings-error">{detailsNavLongPressSettingError}</div> : null}
+            {detailsNavLongPressSettingNotice ? <div className="settings-notice">{detailsNavLongPressSettingNotice}</div> : null}
+
+            <div className="settings-actions">
+              <button className="settings-primary-btn" type="button" onClick={onSaveDetailsNavLongPressInterval}>
+                保存
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {isRealtimeProviderSettingOpen ? (
+        <div
+          className="settings-modal-backdrop"
+          role="presentation"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              closeActiveModal()
+            }
+          }}
+        >
+          <section className="settings-modal settings-modal-narrow" role="dialog" aria-modal="true" aria-label="实时行情源设置">
+            <div className="settings-modal-head">
+              <div>
+                <h3 className="settings-subtitle-head">实时行情源</h3>
+                <p className="settings-section-note">
+                  腾讯行情会返回均价和盘中量比；新浪没有对应字段时实时监控留空。指数表现会与股票行情源交叉使用，股票用腾讯时指数走新浪，股票用新浪时指数走腾讯，减少同一平台请求集中。
+                </p>
+              </div>
+              <div className="settings-actions">
+                <button className="settings-primary-btn" type="button" onClick={closeActiveModal}>
+                  完成
+                </button>
+              </div>
+            </div>
+
+            <div className="settings-actions settings-actions-left">
+              <button
+                className={realtimeQuoteProvider === 'sina' ? 'settings-secondary-btn is-active' : 'settings-secondary-btn'}
+                type="button"
+                onClick={() => onSelectRealtimeQuoteProvider('sina')}
+              >
+                新浪
+              </button>
+              <button
+                className={realtimeQuoteProvider === 'tencent' ? 'settings-secondary-btn is-active' : 'settings-secondary-btn'}
+                type="button"
+                onClick={() => onSelectRealtimeQuoteProvider('tencent')}
+              >
+                腾讯
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {isBacktestHighlightSettingOpen ? (
+        <div
+          className="settings-modal-backdrop"
+          role="presentation"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              closeActiveModal()
+            }
+          }}
+        >
+          <section className="settings-modal settings-modal-narrow" role="dialog" aria-modal="true" aria-label="回测高亮阈值设置">
+            <div className="settings-modal-head">
+              <div>
+                <h3 className="settings-subtitle-head">回测高亮阈值</h3>
+                <p className="settings-section-note">
+                  分别设置残差均值 / IC / IR / t 的高亮阈值，并可单独控制是否按绝对值判断。
+                </p>
+              </div>
+              <div className="settings-actions">
+                <button className="settings-secondary-btn" type="button" onClick={closeActiveModal}>
+                  关闭
+                </button>
+              </div>
+            </div>
+
+            <div className="settings-backtest-highlight-grid">
+              <div className="settings-backtest-highlight-item">
+                <label className="settings-field">
+                  <span>残差均值阈值（默认 {BACKTEST_RESIDUAL_THRESHOLD_DEFAULT}）</span>
+                  <input
+                    type="number"
+                    min={0}
+                    step="any"
+                    value={backtestHighlightResidualThresholdInput}
+                    onChange={(event) => setBacktestHighlightResidualThresholdInput(event.target.value)}
+                  />
+                </label>
+                <label className="settings-checkbox-inline">
+                  <input
+                    type="checkbox"
+                    checked={backtestHighlightResidualUseAbs}
+                    onChange={(event) => setBacktestHighlightResidualUseAbs(event.target.checked)}
+                  />
+                  <span>按绝对值比较</span>
+                </label>
+              </div>
+
+              <div className="settings-backtest-highlight-item">
+                <label className="settings-field">
+                  <span>IC 阈值（默认 {BACKTEST_IC_THRESHOLD_DEFAULT}）</span>
+                  <input
+                    type="number"
+                    min={0}
+                    step="any"
+                    value={backtestHighlightIcThresholdInput}
+                    onChange={(event) => setBacktestHighlightIcThresholdInput(event.target.value)}
+                  />
+                </label>
+                <label className="settings-checkbox-inline">
+                  <input
+                    type="checkbox"
+                    checked={backtestHighlightIcUseAbs}
+                    onChange={(event) => setBacktestHighlightIcUseAbs(event.target.checked)}
+                  />
+                  <span>按绝对值比较</span>
+                </label>
+              </div>
+
+              <div className="settings-backtest-highlight-item">
+                <label className="settings-field">
+                  <span>IR 阈值（默认 {BACKTEST_IR_THRESHOLD_DEFAULT}）</span>
+                  <input
+                    type="number"
+                    min={0}
+                    step="any"
+                    value={backtestHighlightIrThresholdInput}
+                    onChange={(event) => setBacktestHighlightIrThresholdInput(event.target.value)}
+                  />
+                </label>
+                <label className="settings-checkbox-inline">
+                  <input
+                    type="checkbox"
+                    checked={backtestHighlightIrUseAbs}
+                    onChange={(event) => setBacktestHighlightIrUseAbs(event.target.checked)}
+                  />
+                  <span>按绝对值比较</span>
+                </label>
+              </div>
+
+              <div className="settings-backtest-highlight-item">
+                <label className="settings-field">
+                  <span>t 阈值（默认 {BACKTEST_T_THRESHOLD_DEFAULT}）</span>
+                  <input
+                    type="number"
+                    min={0}
+                    step="any"
+                    value={backtestHighlightTThresholdInput}
+                    onChange={(event) => setBacktestHighlightTThresholdInput(event.target.value)}
+                  />
+                </label>
+                <label className="settings-checkbox-inline">
+                  <input
+                    type="checkbox"
+                    checked={backtestHighlightTUseAbs}
+                    onChange={(event) => setBacktestHighlightTUseAbs(event.target.checked)}
+                  />
+                  <span>按绝对值比较</span>
+                </label>
+              </div>
+            </div>
+
+            {backtestHighlightSettingError ? <div className="settings-error">{backtestHighlightSettingError}</div> : null}
+            {backtestHighlightSettingNotice ? <div className="settings-notice">{backtestHighlightSettingNotice}</div> : null}
+
+            <div className="settings-actions">
+              <button className="settings-primary-btn" type="button" onClick={onSaveBacktestHighlightSettings}>
+                保存
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {isConceptEditorOpen ? (
+        <div
+          className="settings-modal-backdrop"
+          role="presentation"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              closeActiveModal()
+            }
+          }}
+        >
+          <section className="settings-modal" role="dialog" aria-modal="true" aria-label="概念筛选">
+            <div className="settings-modal-head">
+              <div>
+                <h3 className="settings-subtitle-head">概念筛选</h3>
+                <p className="settings-section-note">点击概念可加入或移出排除名单，结果会即时保存。</p>
+              </div>
+              <div className="settings-actions">
+                <button
+                  className={excludeStBoard ? 'settings-secondary-btn is-active' : 'settings-secondary-btn'}
+                  type="button"
+                  onClick={() => setExcludeStBoard(!excludeStBoard)}
+                >
+                  {excludeStBoard ? '已排除 ST 板块' : '排除 ST 板块'}
+                </button>
+                <button
+                  className="settings-secondary-btn"
+                  type="button"
+                  onClick={() => {
+                    setConceptKeyword('')
+                    setLookupFocused(false)
+                    void onRefreshOptions()
+                  }}
+                  disabled={loading}
+                >
+                  {loading ? '读取中...' : '刷新概念'}
+                </button>
+                <button
+                  className="settings-danger-btn"
+                  type="button"
+                  onClick={() => setExcludedConcepts([])}
+                  disabled={excludedConcepts.length === 0}
+                >
+                  清空排除
+                </button>
+                <button className="settings-primary-btn" type="button" onClick={closeActiveModal}>
+                  完成
+                </button>
+              </div>
+            </div>
+
+            <div className="settings-summary-grid">
+              <div className="settings-summary-item">
+                <span>已排除条数</span>
+                <strong>{excludedConcepts.length}</strong>
+              </div>
+              <div className="settings-summary-item">
+                <span>当前匹配条数</span>
+                <strong>{filteredConceptOptions.length}</strong>
+              </div>
+              <div className="settings-summary-item">
+                <span>可选概念总数</span>
+                <strong>{conceptOptions.length}</strong>
+              </div>
+              <div className="settings-summary-item">
+                <span>ST 板块过滤</span>
+                <strong>{excludeStBoard ? '已开启' : '未开启'}</strong>
+              </div>
+            </div>
+
+            <div className="stock-pick-concept-panel">
+              <div className="stock-pick-concept-head">
+                <strong>概念排除名单编辑</strong>
+              </div>
+
+              <div className="stock-pick-concept-toolbar">
+                <div className="details-autocomplete">
+                  <input
+                    type="text"
+                    value={conceptKeyword}
+                    onChange={(event) => setConceptKeyword(event.target.value)}
+                    onFocus={() => setLookupFocused(true)}
+                    onBlur={() => setLookupFocused(false)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' && autocompleteOptions.length > 0) {
+                        event.preventDefault()
+                        onSelectAutocomplete(autocompleteOptions[0])
+                      }
+                    }}
+                    placeholder="搜索概念"
+                    className="stock-pick-concept-search"
+                  />
+                  {showAutocomplete ? (
+                    <div className="details-autocomplete-menu">
+                      {autocompleteOptions.map((item) => (
+                        <button
+                          className="details-autocomplete-option"
+                          key={item}
+                          type="button"
+                          onMouseDown={(event) => {
+                            event.preventDefault()
+                            onSelectAutocomplete(item)
+                          }}
+                        >
+                          <strong>{item}</strong>
+                          <span>{excludedConcepts.includes(item) ? '已在排除名单' : '加入排除名单'}</span>
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+
+              {error ? <div className="settings-error">{error}</div> : null}
+
+              <div className="settings-section-head">
+                <div>
+                  <h3 className="settings-subtitle-head">已排除概念</h3>
+                </div>
+              </div>
+              {excludedConcepts.length === 0 ? (
+                <div className="settings-empty-soft">当前还没有排除任何概念。</div>
+              ) : (
+                <div className="settings-chip-list">
+                  {excludedConcepts.map((item) => (
+                    <button
+                      key={item}
+                      type="button"
+                      className="stock-pick-chip-btn is-active"
+                      onClick={() => toggleConcept(item)}
+                    >
+                      {item}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              <div className="settings-section-head settings-section-head-loose">
+                <div>
+                  <h3 className="settings-subtitle-head">概念选择</h3>
+                </div>
+              </div>
+              {loading ? (
+                <div className="stock-pick-empty">读取概念列表中...</div>
+              ) : filteredConceptOptions.length === 0 ? (
+                <div className="stock-pick-empty">没有匹配的概念。</div>
+              ) : (
+                <div className="stock-pick-concept-list">
+                  {filteredConceptOptions.map((item) => {
+                    const active = excludedConcepts.includes(item)
+                    return (
+                      <button
+                        key={item}
+                        type="button"
+                        className={active ? 'stock-pick-chip-btn is-active' : 'stock-pick-chip-btn'}
+                        onClick={() => toggleConcept(item)}
+                      >
+                        {item}
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      <StrategySyntaxGuideModal
+        open={isSyntaxGuideOpen}
+        onClose={() => setIsSyntaxGuideOpen(false)}
+      />
+      <AlgorithmGuideModal
+        open={isAlgorithmGuideOpen}
+        onClose={() => setIsAlgorithmGuideOpen(false)}
+      />
+    </div>
+  )
+}

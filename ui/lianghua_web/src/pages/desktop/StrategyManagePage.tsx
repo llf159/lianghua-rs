@@ -1,0 +1,2842 @@
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { ensureManagedSourcePath } from '../../apis/managedSource'
+import {
+  autoBackupCyqChenStrategyFileOnEntry,
+  checkCyqChenStrategyFileDraft,
+  getCyqChenStrategyPage,
+  saveCyqChenStrategyFile,
+  type CyqChenStrategyDraft,
+  type CyqChenStrategyPageData,
+} from '../../apis/cyqChen'
+import {
+  checkStrategyManageSceneDraft,
+  checkStrategyManageRuleDraft,
+  createStrategyManageScene,
+  createStrategyManageRule,
+  getStrategyManagePage,
+  removeStrategyManageScene,
+  removeStrategyManageRules,
+  saveStrategyManageRefactorFile,
+  updateStrategyManageScene,
+  updateStrategyManageRule,
+  type StrategyManageDistPoint,
+  type StrategyManagePageData,
+  type StrategyManageRuleDraft,
+  type StrategyManageRuleItem,
+  type StrategyManageSceneDraft,
+  type StrategyManageSceneItem,
+} from '../../apis/strategyManage'
+import { autoBackupManagedActiveStrategyOnEntry } from '../../apis/strategyAssets'
+import StrategyAssetModal from './StrategyAssetModal'
+import './css/StrategyManagePage.css'
+
+const SCOPE_OPTIONS = ['LAST', 'ANY', 'EACH', 'RECENT', 'CONSEC>=2'] as const
+const COMBINATION_SCOPE_OPTIONS = ['LAST', 'ANY', 'EACH', 'CONSEC>=2'] as const
+const STAGE_OPTIONS = ['base', 'trigger', 'confirm', 'risk', 'fail'] as const
+const RULE_KIND_OPTIONS = [
+  { value: 'single', label: '单语句策略' },
+  { value: 'combination', label: '组合策略' },
+] as const
+const SCENE_DIRECTION_OPTIONS = ['long', 'short'] as const
+const CHIP_HOLDER_OPTIONS = ['main', 'retail'] as const
+const CHIP_DIRECTION_OPTIONS = ['buy', 'sell'] as const
+const CHIP_STRATEGY_GROUPS = [
+  { key: 'main-buy', holder: 'main', direction: 'buy', title: '主力买入' },
+  { key: 'main-sell', holder: 'main', direction: 'sell', title: '主力卖出' },
+  { key: 'retail-buy', holder: 'retail', direction: 'buy', title: '散户买入' },
+  { key: 'retail-sell', holder: 'retail', direction: 'sell', title: '散户卖出' },
+] as const
+const STRATEGY_RULE_FILE_NAME = 'score_rule.toml'
+const BULK_BOARD_GAP = 14
+const BULK_POOL_SIDE_MIN_WIDTH = 360
+const BULK_SCENE_SIDE_MIN_WIDTH = 1120
+const BULK_SCENE_DOUBLE_MIN_WIDTH = 640
+const BULK_STACK_BREAKPOINT =
+  BULK_POOL_SIDE_MIN_WIDTH + BULK_SCENE_SIDE_MIN_WIDTH + BULK_BOARD_GAP
+const BULK_STACK_SINGLE_SCENE_BREAKPOINT = BULK_SCENE_DOUBLE_MIN_WIDTH
+const BULK_SCENE_BOX_MIN_HEIGHT = 180
+const BULK_SCENE_GAP = 10
+
+type BusyAction = 'idle' | 'loading' | 'saving' | 'deleting'
+type EditorMode = 'create' | 'edit'
+type SceneEditorMode = 'create' | 'edit'
+type DeleteSceneTarget = Pick<StrategyManageSceneItem, 'name' | 'rule_count'>
+type ChipStrategyDeleteTarget = { index: number; name: string }
+type ChipStrategyEditorDraft = Omit<CyqChenStrategyDraft, 'bias'> & { bias: string }
+type RefactorSceneDraft = StrategyManageSceneDraft & { id: string }
+type RefactorRuleDraft = StrategyManageRuleDraft
+type StrategyManageView = 'rules' | 'chip'
+
+function formatNumber(value: number, digits = 2) {
+  if (!Number.isFinite(value)) {
+    return '--'
+  }
+  return Number.isInteger(value) ? String(value) : value.toFixed(digits)
+}
+
+type DistScoreSummary = {
+  segmentCount: number
+  intervalMin: number
+  intervalMax: number
+  pointsMin: number
+  pointsMax: number
+}
+
+function buildDistScoreSummary(items?: StrategyManageDistPoint[] | null): DistScoreSummary | null {
+  if (!items || items.length === 0) {
+    return null
+  }
+
+  let intervalMin = items[0].min
+  let intervalMax = items[0].max
+  let pointsMin = items[0].points
+  let pointsMax = items[0].points
+
+  for (const item of items) {
+    if (item.min < intervalMin) {
+      intervalMin = item.min
+    }
+    if (item.max > intervalMax) {
+      intervalMax = item.max
+    }
+    if (item.points < pointsMin) {
+      pointsMin = item.points
+    }
+    if (item.points > pointsMax) {
+      pointsMax = item.points
+    }
+  }
+
+  return {
+    segmentCount: items.length,
+    intervalMin,
+    intervalMax,
+    pointsMin,
+    pointsMax,
+  }
+}
+
+function hasDistPoints(items?: StrategyManageDistPoint[] | null) {
+  return Boolean(items && items.length > 0)
+}
+
+function scopeWaySupportsDistPoints(scopeWay: string) {
+  const normalized = scopeWay.trim().toUpperCase()
+  return normalized === 'EACH' || normalized === 'RECENT'
+}
+
+function buildEmptyDraft(sceneName = ''): StrategyManageRuleDraft {
+  return {
+    name: '',
+    scene_name: sceneName,
+    kind: 'single',
+    stage: 'base',
+    scope_way: 'LAST',
+    scope_windows: 1,
+    when: '',
+    points: 0,
+    dist_points: null,
+    conditions: [],
+    points_by_hits: null,
+    max_points: null,
+    max_bonus_points: null,
+    explain: '',
+  }
+}
+
+function buildEmptySceneDraft(): StrategyManageSceneDraft {
+  return {
+    name: '',
+    direction: 'long',
+    observe_threshold: 1,
+    trigger_threshold: 2,
+    confirm_threshold: 3,
+    fail_threshold: 1,
+  }
+}
+
+function buildSceneDraftFromScene(scene: StrategyManageSceneItem): StrategyManageSceneDraft {
+  return {
+    name: scene.name,
+    direction: scene.direction,
+    observe_threshold: scene.observe_threshold,
+    trigger_threshold: scene.trigger_threshold,
+    confirm_threshold: scene.confirm_threshold,
+    fail_threshold: scene.fail_threshold,
+  }
+}
+
+function buildDraftFromRule(rule: StrategyManageRuleItem): StrategyManageRuleDraft {
+  return {
+    name: rule.name,
+    scene_name: rule.scene_name,
+    kind: rule.kind ?? 'single',
+    stage: rule.stage,
+    scope_way: rule.scope_way,
+    scope_windows: rule.scope_windows,
+    when: rule.when,
+    points: rule.points,
+    dist_points: rule.dist_points ?? null,
+    conditions: (rule.conditions ?? []).map((condition) => ({ ...condition })),
+    points_by_hits: rule.points_by_hits ? [...rule.points_by_hits] : null,
+    max_points: rule.max_points ?? null,
+    max_bonus_points: rule.max_bonus_points ?? null,
+    explain: rule.explain,
+  }
+}
+
+function buildPreparedSceneDraft(draft: StrategyManageSceneDraft): StrategyManageSceneDraft {
+  return {
+    ...draft,
+    name: draft.name.trim(),
+    direction: draft.direction.trim().toLowerCase(),
+  }
+}
+
+function createRefactorSceneId() {
+  return `${Date.now()}-${Math.random()}`
+}
+
+function createRefactorSceneDraft(name = ''): RefactorSceneDraft {
+  return {
+    id: createRefactorSceneId(),
+    name,
+    direction: 'long',
+    observe_threshold: 1,
+    trigger_threshold: 2,
+    confirm_threshold: 3,
+    fail_threshold: 1,
+  }
+}
+
+function buildRefactorSceneDraftFromScene(scene: StrategyManageSceneItem): RefactorSceneDraft {
+  return {
+    id: createRefactorSceneId(),
+    name: scene.name,
+    direction: scene.direction,
+    observe_threshold: scene.observe_threshold,
+    trigger_threshold: scene.trigger_threshold,
+    confirm_threshold: scene.confirm_threshold,
+    fail_threshold: scene.fail_threshold,
+  }
+}
+
+function parseRequiredNumber(value: string, label: string) {
+  const trimmed = value.trim()
+  if (!trimmed) {
+    throw new Error(`${label} 不能为空`)
+  }
+  const parsed = Number(trimmed)
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`${label} 必须是合法数字`)
+  }
+  return parsed
+}
+
+function parseRequiredInteger(value: string, label: string, min?: number) {
+  const parsed = parseRequiredNumber(value, label)
+  if (!Number.isInteger(parsed)) {
+    throw new Error(`${label} 必须是整数`)
+  }
+  if (typeof min === 'number' && parsed < min) {
+    throw new Error(`${label} 必须 >= ${min}`)
+  }
+  return parsed
+}
+
+function parseOptionalPositiveNumber(value: string, label: string) {
+  const trimmed = value.trim()
+  if (!trimmed) {
+    return null
+  }
+  const parsed = Number(trimmed)
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`${label} 必须是大于 0 的合法数字，留空表示不限`)
+  }
+  return parsed
+}
+
+function distPointsToText(items?: StrategyManageDistPoint[] | null) {
+  if (!items || items.length === 0) {
+    return ''
+  }
+  return items.map((item) => `${item.min},${item.max},${item.points}`).join('\n')
+}
+
+function parseDistPointsText(raw: string) {
+  const trimmed = raw.trim()
+  if (!trimmed) {
+    return null
+  }
+
+  const items = trimmed.split('\n').map((line, index) => {
+    const parts = line
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean)
+    if (parts.length !== 3) {
+      throw new Error(`字典得分第 ${index + 1} 行格式错误，应为 min,max,points`)
+    }
+
+    const min = Number(parts[0])
+    const max = Number(parts[1])
+    const points = Number(parts[2])
+    if (!Number.isInteger(min) || !Number.isInteger(max) || !Number.isFinite(points)) {
+      throw new Error(`字典得分第 ${index + 1} 行存在非法数值`)
+    }
+    if (min > max) {
+      throw new Error(`字典得分第 ${index + 1} 行 min 不能大于 max`)
+    }
+    return { min, max, points }
+  })
+  const sorted = [...items].sort((left, right) => left.min - right.min)
+  for (let index = 1; index < sorted.length; index += 1) {
+    const prev = sorted[index - 1]!
+    const current = sorted[index]!
+    if (prev.max >= current.min) {
+      throw new Error(`字典得分区间重叠: ${prev.min}-${prev.max} 与 ${current.min}-${current.max}`)
+    }
+  }
+  return items
+}
+
+function buildPreparedDraft(
+  draft: StrategyManageRuleDraft,
+  scoreMode: 'fixed' | 'dist',
+  fixedPointsText: string,
+  distPointsText: string,
+  maxPointsText: string,
+  maxBonusPointsText: string,
+  combinationBonusPointTexts: string[],
+  combinationHitPointTexts: string[],
+) {
+  const nextDraft: StrategyManageRuleDraft = {
+    ...draft,
+    name: draft.name.trim(),
+    scene_name: draft.scene_name.trim(),
+    stage: draft.stage.trim(),
+    scope_way: draft.scope_way.trim(),
+    when: draft.when.trim(),
+    explain: draft.explain.trim(),
+    conditions: draft.conditions.map((condition) => ({
+      name: condition.name.trim(),
+      when: condition.when.trim(),
+      bonus_points: condition.bonus_points,
+    })),
+  }
+
+  if (nextDraft.kind === 'combination') {
+    if (nextDraft.conditions.length === 0) {
+      throw new Error('组合策略至少需要一条条件')
+    }
+    if (nextDraft.scope_way.toUpperCase() === 'RECENT') {
+      throw new Error('组合策略不支持 RECENT scope_way')
+    }
+    if (combinationBonusPointTexts.length !== nextDraft.conditions.length) {
+      throw new Error('条件额外加分数量与条件数量不一致')
+    }
+    nextDraft.conditions = nextDraft.conditions.map((condition, index) => ({
+      ...condition,
+      bonus_points: parseRequiredNumber(
+        combinationBonusPointTexts[index] ?? '',
+        `条件 ${index + 1} 的额外加分`,
+      ),
+    }))
+    nextDraft.conditions.forEach((condition, index) => {
+      if (!condition.name || !condition.when) {
+        throw new Error(`条件 ${index + 1} 的名称和表达式不能为空`)
+      }
+      if (!Number.isFinite(condition.bonus_points)) {
+        throw new Error(`条件 ${index + 1} 的额外加分必须是合法数字`)
+      }
+    })
+    if (combinationHitPointTexts.length !== nextDraft.conditions.length) {
+      throw new Error('命中数得分档位必须与条件数量一致')
+    }
+    const pointsByHits = [
+      0,
+      ...combinationHitPointTexts.map((points, index) =>
+        parseRequiredNumber(points, `命中 ${index + 1} 条的分数`),
+      ),
+    ]
+    nextDraft.points_by_hits = pointsByHits
+    if (pointsByHits.length !== nextDraft.conditions.length + 1) {
+      throw new Error('命中数得分档位必须与条件数量一致')
+    }
+    if (pointsByHits[0] !== 0) {
+      throw new Error('命中 0 条的分数必须为 0')
+    }
+    if (pointsByHits.some((points) => !Number.isFinite(points))) {
+      throw new Error('命中数得分包含非法数字')
+    }
+    nextDraft.when = ''
+    nextDraft.points = 0
+    nextDraft.dist_points = null
+    nextDraft.max_points = parseOptionalPositiveNumber(maxPointsText, '最终总分的正负限制值')
+    nextDraft.max_bonus_points = parseOptionalPositiveNumber(
+      maxBonusPointsText,
+      '额外分的正负限制值',
+    )
+  } else {
+    if (scoreMode === 'dist') {
+      if (!scopeWaySupportsDistPoints(nextDraft.scope_way)) {
+        throw new Error('当前 scope_way 不支持区间字典，仅 EACH/RECENT 支持')
+      }
+      const parsedDistPoints = parseDistPointsText(distPointsText)
+      if (!parsedDistPoints || parsedDistPoints.length === 0) {
+        throw new Error('区间字典不能为空')
+      }
+      nextDraft.dist_points = parsedDistPoints
+    } else {
+      const parsed = Number(fixedPointsText.trim())
+      if (!Number.isFinite(parsed)) {
+        throw new Error('固定分值必须是合法数字')
+      }
+      nextDraft.points = parsed
+      nextDraft.dist_points = null
+    }
+    nextDraft.conditions = []
+    nextDraft.points_by_hits = null
+    nextDraft.max_points =
+      nextDraft.scope_way.toUpperCase() === 'EACH'
+        ? parseOptionalPositiveNumber(maxPointsText, '窗口累计得分的正负限制值')
+        : null
+    nextDraft.max_bonus_points = null
+  }
+
+  return nextDraft
+}
+
+function sceneStageSummary(rules: StrategyManageRuleItem[]) {
+  const counts = new Map<string, number>()
+  for (const rule of rules) {
+    counts.set(rule.stage, (counts.get(rule.stage) ?? 0) + 1)
+  }
+  return Array.from(counts.entries())
+    .map(([stage, count]) => `${stage} ${count}`)
+    .join(' / ')
+}
+
+function buildRuleSearchText(rule: StrategyManageRuleItem) {
+  const conditions = (rule.conditions ?? [])
+    .map((condition) => `${condition.name} ${condition.when} ${condition.bonus_points}`)
+    .join(' ')
+  return `${rule.name} ${rule.scene_name} ${rule.kind ?? 'single'} ${rule.stage} ${rule.scope_way} ${rule.explain} ${rule.when} ${conditions}`.toLowerCase()
+}
+
+function buildRuleExpressionPreview(rule: StrategyManageRuleItem) {
+  if ((rule.kind ?? 'single') === 'single') {
+    return rule.when
+  }
+  return (rule.conditions ?? [])
+    .flatMap((condition, index) => [
+      `条件 ${index + 1} · ${condition.name} · 额外分 ${condition.bonus_points >= 0 ? '+' : ''}${formatNumber(condition.bonus_points)}`,
+      condition.when,
+    ])
+    .join('\n')
+}
+
+function buildSceneSearchText(scene: StrategyManageSceneItem) {
+  return `${scene.name} ${scene.direction}`.toLowerCase()
+}
+
+function buildChipStrategyEditorDraft(strategy: CyqChenStrategyDraft): ChipStrategyEditorDraft {
+  return {
+    ...strategy,
+    bias: String(strategy.bias),
+  }
+}
+
+function buildEmptyChipStrategyDraft(): ChipStrategyEditorDraft {
+  return {
+    name: '',
+    holder: 'main',
+    direction: 'buy',
+    when: '',
+    bias: '',
+  }
+}
+
+function buildChipStrategySearchText(strategy: CyqChenStrategyDraft) {
+  return `${strategy.name} ${strategy.holder} ${strategy.direction} ${strategy.bias} ${strategy.when}`.toLowerCase()
+}
+
+function formatChipHolder(holder: CyqChenStrategyDraft['holder']) {
+  return holder === 'main' ? '主力' : '散户'
+}
+
+function formatChipDirection(direction: CyqChenStrategyDraft['direction']) {
+  return direction === 'buy' ? '买入' : '卖出'
+}
+
+export default function StrategyManagePage({ view = 'rules' }: { view?: StrategyManageView }) {
+  const bulkModalRef = useRef<HTMLDivElement | null>(null)
+  const bulkBoardRef = useRef<HTMLDivElement | null>(null)
+  const bulkSceneStripRef = useRef<HTMLDivElement | null>(null)
+  const bulkRulePoolRef = useRef<HTMLDivElement | null>(null)
+  const [sourcePath, setSourcePath] = useState('')
+  const [scenes, setScenes] = useState<StrategyManageSceneItem[]>([])
+  const [rules, setRules] = useState<StrategyManageRuleItem[]>([])
+  const [searchKeyword, setSearchKeyword] = useState('')
+  const [selectedSceneName, setSelectedSceneName] = useState('')
+  const [busyAction, setBusyAction] = useState<BusyAction>('loading')
+  const [notice, setNotice] = useState('')
+  const [error, setError] = useState('')
+  const [editorError, setEditorError] = useState('')
+  const [checkNotice, setCheckNotice] = useState('')
+  const [sceneEditorError, setSceneEditorError] = useState('')
+  const [editorMode, setEditorMode] = useState<EditorMode>('create')
+  const [sceneEditorMode, setSceneEditorMode] = useState<SceneEditorMode>('create')
+  const [editingOriginalName, setEditingOriginalName] = useState('')
+  const [editingSceneOriginalName, setEditingSceneOriginalName] = useState('')
+  const [draft, setDraft] = useState<StrategyManageRuleDraft | null>(null)
+  const [sceneDraft, setSceneDraft] = useState<StrategyManageSceneDraft | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<StrategyManageRuleItem | null>(null)
+  const [deleteSceneTarget, setDeleteSceneTarget] = useState<DeleteSceneTarget | null>(null)
+  const [chipStrategies, setChipStrategies] = useState<CyqChenStrategyDraft[]>([])
+  const [chipStrategyFilePath, setChipStrategyFilePath] = useState('')
+  const [chipStrategyFileExists, setChipStrategyFileExists] = useState(false)
+  const [chipStrategySearchKeyword, setChipStrategySearchKeyword] = useState('')
+  const [chipStrategyDraft, setChipStrategyDraft] = useState<ChipStrategyEditorDraft | null>(null)
+  const [chipStrategyEditorMode, setChipStrategyEditorMode] = useState<EditorMode>('create')
+  const [chipStrategyEditingIndex, setChipStrategyEditingIndex] = useState<number | null>(null)
+  const [chipStrategyDeleteTarget, setChipStrategyDeleteTarget] = useState<ChipStrategyDeleteTarget | null>(null)
+  const [chipStrategySaving, setChipStrategySaving] = useState(false)
+  const [chipStrategyError, setChipStrategyError] = useState('')
+  const [chipStrategyNotice, setChipStrategyNotice] = useState('')
+  const [scoreMode, setScoreMode] = useState<'fixed' | 'dist'>('fixed')
+  const [scopeWindowsText, setScopeWindowsText] = useState('1')
+  const [fixedPointsText, setFixedPointsText] = useState('0')
+  const [distPointsText, setDistPointsText] = useState('')
+  const [maxPointsText, setMaxPointsText] = useState('')
+  const [maxBonusPointsText, setMaxBonusPointsText] = useState('')
+  const [combinationBonusPointTexts, setCombinationBonusPointTexts] = useState<string[]>([])
+  const [combinationHitPointTexts, setCombinationHitPointTexts] = useState<string[]>([])
+  const [observeThresholdText, setObserveThresholdText] = useState('1')
+  const [triggerThresholdText, setTriggerThresholdText] = useState('2')
+  const [confirmThresholdText, setConfirmThresholdText] = useState('3')
+  const [failThresholdText, setFailThresholdText] = useState('1')
+  const [sceneDirectionText, setSceneDirectionText] = useState('long')
+  const [isBulkEditorOpen, setIsBulkEditorOpen] = useState(false)
+  const [refactorFileName, setRefactorFileName] = useState('score_rule_refactor.toml')
+  const [refactorScenes, setRefactorScenes] = useState<RefactorSceneDraft[]>([])
+  const [refactorRules, setRefactorRules] = useState<RefactorRuleDraft[]>([])
+  const [bulkRuleSceneFilter, setBulkRuleSceneFilter] = useState('ALL')
+  const [bulkRuleKeyword, setBulkRuleKeyword] = useState('')
+  const [bulkActiveSceneName, setBulkActiveSceneName] = useState('')
+  const [bulkNewSceneId, setBulkNewSceneId] = useState('')
+  const [bulkError, setBulkError] = useState('')
+  const [isAssetModalOpen, setIsAssetModalOpen] = useState(false)
+  const [bulkBoardWidth, setBulkBoardWidth] = useState(0)
+  const [bulkSceneStripHeight, setBulkSceneStripHeight] = useState(0)
+  const [bulkStackRulePoolMaxHeight, setBulkStackRulePoolMaxHeight] = useState(0)
+
+  const selectedScene = useMemo(
+    () => scenes.find((item) => item.name === selectedSceneName) ?? null,
+    [scenes, selectedSceneName],
+  )
+  const selectedSceneRules = useMemo(
+    () => rules.filter((item) => item.scene_name === selectedSceneName),
+    [rules, selectedSceneName],
+  )
+  const normalizedSearchKeyword = searchKeyword.trim().toLowerCase()
+  const filteredScenes = useMemo(() => {
+    if (!normalizedSearchKeyword) {
+      return scenes
+    }
+
+    return scenes.filter((scene) => {
+      if (buildSceneSearchText(scene).includes(normalizedSearchKeyword)) {
+        return true
+      }
+
+      return rules.some(
+        (rule) =>
+          rule.scene_name === scene.name &&
+          buildRuleSearchText(rule).includes(normalizedSearchKeyword),
+      )
+    })
+  }, [normalizedSearchKeyword, rules, scenes])
+  const selectedSceneFilteredRules = useMemo(() => {
+    if (!normalizedSearchKeyword) {
+      return selectedSceneRules
+    }
+
+    return selectedSceneRules.filter((rule) =>
+      buildRuleSearchText(rule).includes(normalizedSearchKeyword),
+    )
+  }, [normalizedSearchKeyword, selectedSceneRules])
+  const recentRules = useMemo(() => rules.slice(-4).reverse(), [rules])
+  const normalizedChipStrategySearchKeyword = chipStrategySearchKeyword.trim().toLowerCase()
+  const filteredChipStrategies = useMemo(() => {
+    if (!normalizedChipStrategySearchKeyword) {
+      return chipStrategies.map((strategy, index) => ({ strategy, index }))
+    }
+    return chipStrategies
+      .map((strategy, index) => ({ strategy, index }))
+      .filter(({ strategy }) =>
+        buildChipStrategySearchText(strategy).includes(normalizedChipStrategySearchKeyword),
+      )
+  }, [chipStrategies, normalizedChipStrategySearchKeyword])
+  const groupedChipStrategies = useMemo(
+    () =>
+      CHIP_STRATEGY_GROUPS.map((group) => ({
+        ...group,
+        items: filteredChipStrategies.filter(
+          ({ strategy }) =>
+            strategy.holder === group.holder && strategy.direction === group.direction,
+        ),
+      })),
+    [filteredChipStrategies],
+  )
+  const bulkFilteredRules = useMemo(() => {
+    const chosenRuleNames = new Set(refactorRules.map((item) => item.name))
+    const sceneFiltered =
+      bulkRuleSceneFilter === 'ALL'
+        ? rules
+        : rules.filter((item) => item.scene_name === bulkRuleSceneFilter)
+
+    const notChosen = sceneFiltered.filter((item) => !chosenRuleNames.has(item.name))
+    const keyword = bulkRuleKeyword.trim().toLowerCase()
+    if (!keyword) {
+      return notChosen
+    }
+
+    return notChosen.filter((item) => buildRuleSearchText(item).includes(keyword))
+  }, [rules, bulkRuleSceneFilter, bulkRuleKeyword, refactorRules])
+
+  const bulkCandidateRuleCount = useMemo(() => {
+    const chosenRuleNames = new Set(refactorRules.map((item) => item.name))
+    return rules.filter((item) => !chosenRuleNames.has(item.name)).length
+  }, [rules, refactorRules])
+
+  const bulkValidationIssues = useMemo(() => {
+    const issues: string[] = []
+
+    const fileName = refactorFileName.trim()
+    if (!fileName) {
+      issues.push('输出文件名不能为空')
+    }
+    if (fileName !== STRATEGY_RULE_FILE_NAME) {
+      issues.push(`输出文件名必须为 ${STRATEGY_RULE_FILE_NAME}（覆盖策略文件）`)
+    }
+
+    if (refactorScenes.length === 0) {
+      issues.push('至少需要一个 Scene')
+    }
+
+    if (refactorRules.length === 0) {
+      issues.push('至少需要一条 Rule')
+    }
+
+    const sceneNameSet = new Set<string>()
+    for (const scene of refactorScenes) {
+      const name = scene.name.trim()
+      if (!name) {
+        issues.push('存在空 Scene 名称')
+        continue
+      }
+      const normalizedDirection = scene.direction.trim().toLowerCase()
+      if (!SCENE_DIRECTION_OPTIONS.includes(normalizedDirection as (typeof SCENE_DIRECTION_OPTIONS)[number])) {
+        issues.push(`Scene ${name} 的 direction 非法（仅支持 long/short）`)
+      }
+      if (sceneNameSet.has(name)) {
+        issues.push(`Scene 名称重复: ${name}`)
+      }
+      sceneNameSet.add(name)
+    }
+
+    const ruleNameSet = new Set<string>()
+    for (const rule of refactorRules) {
+      const ruleName = rule.name.trim()
+      if (!ruleName) {
+        issues.push('存在空 Rule 名称')
+      } else if (ruleNameSet.has(ruleName)) {
+        issues.push(`Rule 名称重复: ${ruleName}`)
+      }
+      ruleNameSet.add(ruleName)
+
+      if (!rule.scene_name.trim()) {
+        issues.push(`Rule ${rule.name || '(未命名)'} 未设置 Scene`)
+      } else if (!sceneNameSet.has(rule.scene_name.trim())) {
+        issues.push(`Rule ${rule.name || '(未命名)'} 关联的 Scene 不存在: ${rule.scene_name}`)
+      }
+
+      if (rule.kind === 'combination') {
+        if (rule.conditions.length === 0) {
+          issues.push(`组合 Rule ${rule.name || '(未命名)'} 至少需要一条条件`)
+        }
+        if (rule.scope_way.trim().toUpperCase() === 'RECENT') {
+          issues.push(`组合 Rule ${rule.name || '(未命名)'} 不支持 RECENT scope_way`)
+        }
+        rule.conditions.forEach((condition, index) => {
+          if (!condition.name.trim() || !condition.when.trim()) {
+            issues.push(`组合 Rule ${rule.name || '(未命名)'} 的条件 ${index + 1} 不完整`)
+          }
+          if (!Number.isFinite(condition.bonus_points)) {
+            issues.push(`组合 Rule ${rule.name || '(未命名)'} 的条件 ${index + 1} 额外加分非法`)
+          }
+        })
+        if ((rule.points_by_hits?.length ?? 0) !== rule.conditions.length + 1) {
+          issues.push(`组合 Rule ${rule.name || '(未命名)'} 的命中分档位数量不正确`)
+        }
+        if (rule.points_by_hits?.[0] !== 0) {
+          issues.push(`组合 Rule ${rule.name || '(未命名)'} 命中 0 条的分数必须为 0`)
+        }
+      } else if (!rule.when.trim()) {
+        issues.push(`Rule ${rule.name || '(未命名)'} 的表达式不能为空`)
+      }
+
+      if (
+        rule.kind === 'single' &&
+        rule.max_points != null &&
+        rule.scope_way.trim().toUpperCase() !== 'EACH'
+      ) {
+        issues.push(`普通 Rule ${rule.name || '(未命名)'} 仅 EACH 支持窗口累计得分限制`)
+      }
+      if (
+        rule.max_points != null &&
+        (!Number.isFinite(rule.max_points) || rule.max_points <= 0)
+      ) {
+        issues.push(`Rule ${rule.name || '(未命名)'} 的分数正负限制值必须为正数`)
+      }
+
+      if (!Number.isInteger(rule.scope_windows) || rule.scope_windows < 1) {
+        issues.push(`Rule ${rule.name || '(未命名)'} 的 scope_windows 必须是 >= 1 的整数`)
+      }
+    }
+
+    if (bulkCandidateRuleCount > 0) {
+      issues.push(`候选池还有 ${bulkCandidateRuleCount} 条 Rule，必须全部归入 Scene 篮子后才能保存`)
+    }
+
+    return Array.from(new Set(issues))
+  }, [bulkCandidateRuleCount, refactorFileName, refactorScenes, refactorRules])
+
+  const refactorSceneNames = useMemo(
+    () => refactorScenes.map((item) => item.name.trim()).filter(Boolean),
+    [refactorScenes],
+  )
+
+  const refactorRulesByScene = useMemo(() => {
+    const grouped = new Map<string, Array<{ rule: RefactorRuleDraft; index: number }>>()
+    refactorSceneNames.forEach((name) => grouped.set(name, []))
+    refactorRules.forEach((rule, index) => {
+      const sceneName = rule.scene_name.trim()
+      const list = grouped.get(sceneName)
+      if (list) {
+        list.push({ rule, index })
+      }
+    })
+    return grouped
+  }, [refactorRules, refactorSceneNames])
+  const draftScopeSupportsDistPoints = draft
+    ? scopeWaySupportsDistPoints(draft.scope_way)
+    : false
+  const draftScopeOptions = draft?.kind === 'combination' ? COMBINATION_SCOPE_OPTIONS : SCOPE_OPTIONS
+
+  function applyChipStrategyPage(page: CyqChenStrategyPageData) {
+    setChipStrategies(page.strategies ?? [])
+    setChipStrategyFilePath(page.filePath)
+    setChipStrategyFileExists(page.exists)
+  }
+
+  async function loadPage() {
+    setBusyAction('loading')
+    setError('')
+    try {
+      const resolvedSourcePath = await ensureManagedSourcePath()
+      const data = await getStrategyManagePage(resolvedSourcePath)
+      setSourcePath(resolvedSourcePath)
+      setScenes(data.scenes ?? [])
+      setRules(data.rules ?? [])
+      setSelectedSceneName((current) =>
+        data.scenes.some((item) => item.name === current) ? current : '',
+      )
+      try {
+        const chipPage = await getCyqChenStrategyPage(resolvedSourcePath)
+        applyChipStrategyPage(chipPage)
+        setChipStrategyError('')
+        setChipStrategyNotice(chipPage.exists ? '' : 'chip_change_rule.toml 不存在，已载入默认筹码策略草稿。')
+      } catch (chipLoadError) {
+        setChipStrategies([])
+        setChipStrategyError(`读取筹码变动策略失败: ${String(chipLoadError)}`)
+        setChipStrategyNotice('')
+      }
+      try {
+        if (view === 'chip') {
+          const backupPage = await autoBackupCyqChenStrategyFileOnEntry(resolvedSourcePath)
+          if (backupPage) {
+            applyChipStrategyPage(backupPage)
+            setNotice('已自动备份当前筹码策略')
+          } else {
+            setNotice('')
+          }
+        } else {
+          const backup = await autoBackupManagedActiveStrategyOnEntry()
+          if (backup) {
+            setNotice(`已自动备份当前策略: ${backup.folderName}`)
+          } else {
+            setNotice('')
+          }
+        }
+      } catch (backupError) {
+        setError(`自动备份当前策略失败: ${String(backupError)}`)
+      }
+    } catch (loadError) {
+      setError(`读取策略管理失败: ${String(loadError)}`)
+      setNotice('')
+    } finally {
+      setBusyAction('idle')
+    }
+  }
+
+  useEffect(() => {
+    void loadPage()
+    // loadPage intentionally runs only on first mount; later refreshes call it directly.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  function applyPageData(data: StrategyManagePageData, preferSceneName?: string) {
+    setScenes(data.scenes ?? [])
+    setRules(data.rules ?? [])
+    setSelectedSceneName((current) => {
+      const nextName = preferSceneName || current || ''
+      return data.scenes.some((item) => item.name === nextName)
+        ? nextName
+        : ''
+    })
+  }
+
+  function openCreateEditor(sceneName: string) {
+    const nextDraft = buildEmptyDraft(sceneName)
+    setEditorMode('create')
+    setEditingOriginalName('')
+    setDraft(nextDraft)
+    setScoreMode('fixed')
+    setScopeWindowsText(String(nextDraft.scope_windows))
+    setFixedPointsText('0')
+    setDistPointsText('')
+    setMaxPointsText('')
+    setMaxBonusPointsText('')
+    setCombinationBonusPointTexts([])
+    setCombinationHitPointTexts([])
+    setEditorError('')
+    setCheckNotice('')
+    setError('')
+    setNotice('')
+  }
+
+  function updateDraftScopeWay(scopeWay: string) {
+    if (!draft) {
+      return
+    }
+    setDraft({ ...draft, scope_way: scopeWay })
+    if (!scopeWaySupportsDistPoints(scopeWay)) {
+      setScoreMode('fixed')
+    }
+  }
+
+  function updateDraftKind(kind: StrategyManageRuleDraft['kind']) {
+    if (!draft) {
+      return
+    }
+    if (kind === 'combination') {
+      const conditions =
+        draft.conditions.length > 0 ? draft.conditions : [{ name: '', when: '', bonus_points: 0 }]
+      const currentPoints = draft.points_by_hits ?? []
+      const pointsByHits = Array.from({ length: conditions.length + 1 }, (_, index) => {
+        if (index === 0) {
+          return 0
+        }
+        return currentPoints[index] ?? index
+      })
+      setDraft({
+        ...draft,
+        kind,
+        scope_way: draft.scope_way.trim().toUpperCase() === 'RECENT' ? 'LAST' : draft.scope_way,
+        conditions,
+        points_by_hits: pointsByHits,
+      })
+      setCombinationBonusPointTexts(conditions.map((condition) => String(condition.bonus_points)))
+      setCombinationHitPointTexts(pointsByHits.slice(1).map(String))
+      setScoreMode('fixed')
+      return
+    }
+    setDraft({ ...draft, kind })
+  }
+
+  function addCombinationCondition() {
+    if (!draft) {
+      return
+    }
+    const conditions = [...draft.conditions, { name: '', when: '', bonus_points: 0 }]
+    const currentPoints = draft.points_by_hits ?? [0]
+    const lastPoints = currentPoints[currentPoints.length - 1] ?? 0
+    setDraft({
+      ...draft,
+      conditions,
+      points_by_hits: [...currentPoints.slice(0, conditions.length), lastPoints + 1],
+    })
+    setCombinationBonusPointTexts((current) => [...current, '0'])
+    setCombinationHitPointTexts((current) => [...current, String(conditions.length)])
+  }
+
+  function updateCombinationCondition(
+    index: number,
+    field: 'name' | 'when' | 'bonus_points',
+    value: string,
+  ) {
+    if (!draft) {
+      return
+    }
+    if (field === 'bonus_points') {
+      setCombinationBonusPointTexts((current) =>
+        current.map((points, conditionIndex) => (conditionIndex === index ? value : points)),
+      )
+      return
+    }
+    setDraft({
+      ...draft,
+      conditions: draft.conditions.map((condition, conditionIndex) =>
+        conditionIndex === index
+          ? { ...condition, [field]: value }
+          : condition,
+      ),
+    })
+  }
+
+  function removeCombinationCondition(index: number) {
+    if (!draft || draft.conditions.length <= 1) {
+      return
+    }
+    const conditions = draft.conditions.filter((_, conditionIndex) => conditionIndex !== index)
+    setDraft({
+      ...draft,
+      conditions,
+      points_by_hits: (draft.points_by_hits ?? [0]).slice(0, conditions.length + 1),
+    })
+    setCombinationBonusPointTexts((current) =>
+      current.filter((_, conditionIndex) => conditionIndex !== index),
+    )
+    setCombinationHitPointTexts((current) => current.slice(0, conditions.length))
+  }
+
+  function updateCombinationHitPoints(index: number, value: string) {
+    if (!draft || index === 0) {
+      return
+    }
+    setCombinationHitPointTexts((current) =>
+      current.map((points, pointIndex) => (pointIndex === index - 1 ? value : points)),
+    )
+  }
+
+  function openCreateSceneEditor() {
+    const nextDraft = buildEmptySceneDraft()
+    setSceneEditorMode('create')
+    setEditingSceneOriginalName('')
+    setSceneDraft(nextDraft)
+    setSceneDirectionText(nextDraft.direction)
+    setObserveThresholdText(String(nextDraft.observe_threshold))
+    setTriggerThresholdText(String(nextDraft.trigger_threshold))
+    setConfirmThresholdText(String(nextDraft.confirm_threshold))
+    setFailThresholdText(String(nextDraft.fail_threshold))
+    setSceneEditorError('')
+    setError('')
+    setNotice('')
+  }
+
+  function openBulkEditor() {
+    const nextScenes = scenes.map((scene) => buildRefactorSceneDraftFromScene(scene))
+    const initialSceneName =
+      nextScenes.find((scene) => scene.name === selectedSceneName)?.name ??
+      nextScenes[0]?.name ??
+      ''
+    setRefactorFileName(STRATEGY_RULE_FILE_NAME)
+    setRefactorScenes(nextScenes)
+    setRefactorRules(rules.map((rule) => buildDraftFromRule(rule)))
+    setBulkRuleSceneFilter('ALL')
+    setBulkRuleKeyword('')
+    setBulkActiveSceneName(initialSceneName)
+    setBulkNewSceneId('')
+    setBulkError('')
+    setIsBulkEditorOpen(true)
+    setError('')
+    setNotice('')
+  }
+
+  function closeBulkEditor() {
+    setIsBulkEditorOpen(false)
+    setBulkError('')
+    setBulkRuleKeyword('')
+    setBulkActiveSceneName('')
+    setBulkNewSceneId('')
+  }
+
+  function clearBulkEditor() {
+    setRefactorScenes([])
+    setRefactorRules([])
+    setBulkRuleSceneFilter('ALL')
+    setBulkRuleKeyword('')
+    setBulkActiveSceneName('')
+    setBulkNewSceneId('')
+    setBulkError('')
+  }
+
+  function addRefactorScene() {
+    setRefactorScenes((current) => {
+      const nextName = `scene_${current.length + 1}`
+      const nextScene = createRefactorSceneDraft(nextName)
+      setBulkActiveSceneName(nextName)
+      setBulkNewSceneId(nextScene.id)
+      return [...current, nextScene]
+    })
+  }
+
+  function updateRefactorScene(sceneId: string, key: keyof RefactorSceneDraft, value: string) {
+    setRefactorScenes((current) =>
+      current.map((item) => {
+        if (item.id !== sceneId) {
+          return item
+        }
+        if (key === 'name') {
+          return { ...item, name: value }
+        }
+        if (key === 'direction') {
+          return { ...item, direction: value }
+        }
+        return { ...item, [key]: Number(value) }
+      }),
+    )
+    setBulkNewSceneId((current) => (current === sceneId ? sceneId : current))
+  }
+
+  function removeRefactorScene(sceneId: string) {
+    const removingScene = refactorScenes.find((item) => item.id === sceneId)
+    const fallbackSceneName = refactorScenes.find((item) => item.id !== sceneId)?.name ?? ''
+    setRefactorScenes((current) => current.filter((item) => item.id !== sceneId))
+    if (removingScene) {
+      setRefactorRules((current) => current.filter((item) => item.scene_name !== removingScene.name))
+      if (bulkActiveSceneName === removingScene.name) {
+        setBulkActiveSceneName(fallbackSceneName)
+      }
+      if (bulkNewSceneId === removingScene.id) {
+        setBulkNewSceneId('')
+      }
+    }
+  }
+
+  function addRuleToRefactor(rule: StrategyManageRuleItem) {
+    if (!bulkActiveSceneName.trim()) {
+      setBulkError('请先点击一个 Scene 篮子')
+      return
+    }
+    setRefactorRules((current) => {
+      const exists = current.some((item) => item.name === rule.name)
+      const uniqueName = exists ? `${rule.name}_${current.length + 1}` : rule.name
+      return [
+        ...current,
+        {
+          ...buildDraftFromRule(rule),
+          name: uniqueName,
+          scene_name: bulkActiveSceneName,
+        },
+      ]
+    })
+    setBulkError('')
+  }
+
+  function removeRuleFromScene(ruleIndex: number) {
+    setRefactorRules((current) => current.filter((_, idx) => idx !== ruleIndex))
+  }
+
+  function openEditSceneEditor(scene: StrategyManageSceneItem) {
+    const nextDraft = buildSceneDraftFromScene(scene)
+    setSceneEditorMode('edit')
+    setEditingSceneOriginalName(scene.name)
+    setSceneDraft(nextDraft)
+    setSceneDirectionText(nextDraft.direction)
+    setObserveThresholdText(String(nextDraft.observe_threshold))
+    setTriggerThresholdText(String(nextDraft.trigger_threshold))
+    setConfirmThresholdText(String(nextDraft.confirm_threshold))
+    setFailThresholdText(String(nextDraft.fail_threshold))
+    setSceneEditorError('')
+    setError('')
+    setNotice('')
+  }
+
+  function openEditEditor(rule: StrategyManageRuleItem) {
+    const nextDraft = buildDraftFromRule(rule)
+    setEditorMode('edit')
+    setEditingOriginalName(rule.name)
+    setDraft(nextDraft)
+    setScopeWindowsText(String(nextDraft.scope_windows))
+    if (hasDistPoints(rule.dist_points)) {
+      setScoreMode('dist')
+      setDistPointsText(distPointsToText(rule.dist_points))
+      setFixedPointsText(String(rule.points))
+    } else {
+      setScoreMode('fixed')
+      setFixedPointsText(String(rule.points))
+      setDistPointsText('')
+    }
+    setMaxPointsText(rule.max_points == null ? '' : String(rule.max_points))
+    setMaxBonusPointsText(
+      rule.max_bonus_points == null ? '' : String(rule.max_bonus_points),
+    )
+    setCombinationBonusPointTexts(
+      nextDraft.conditions.map((condition) => String(condition.bonus_points)),
+    )
+    setCombinationHitPointTexts((nextDraft.points_by_hits ?? []).slice(1).map(String))
+    setEditorError('')
+    setCheckNotice('')
+    setError('')
+    setNotice('')
+  }
+
+  function openCreateChipStrategyEditor() {
+    setChipStrategyEditorMode('create')
+    setChipStrategyEditingIndex(null)
+    setChipStrategyDraft(buildEmptyChipStrategyDraft())
+    setChipStrategyError('')
+    setChipStrategyNotice('')
+  }
+
+  function openEditChipStrategy(index: number) {
+    const strategy = chipStrategies[index]
+    if (!strategy) {
+      return
+    }
+    setChipStrategyEditorMode('edit')
+    setChipStrategyEditingIndex(index)
+    setChipStrategyDraft(buildChipStrategyEditorDraft(strategy))
+    setChipStrategyError('')
+    setChipStrategyNotice('')
+  }
+
+  function buildPreparedChipStrategyDraft() {
+    if (!chipStrategyDraft) {
+      throw new Error('没有可保存的筹码策略草稿')
+    }
+    const biasText = chipStrategyDraft.bias.trim()
+    const prepared: CyqChenStrategyDraft = {
+      ...chipStrategyDraft,
+      name: chipStrategyDraft.name.trim(),
+      when: chipStrategyDraft.when.trim(),
+      bias: biasText === '' ? Number.NaN : Number(biasText),
+    }
+    if (!prepared.name) {
+      throw new Error('策略名称不能为空')
+    }
+    if (!prepared.when) {
+      throw new Error('表达式不能为空')
+    }
+    if (!Number.isFinite(prepared.bias)) {
+      throw new Error('bias 必须是合法数字')
+    }
+    const delay = prepared.confirm_after ?? 0
+    if (!Number.isSafeInteger(delay) || delay < 0) throw new Error('确认延迟必须是非负整数')
+    if (delay > 0 && (prepared.direction !== 'buy' || prepared.bias < 0 || prepared.bias > 1)) {
+      throw new Error('后验规则使用买入方向，归属修正比例必须在 0～1 之间')
+    }
+    return prepared
+  }
+
+  function buildNextChipStrategies(preparedDraft: CyqChenStrategyDraft) {
+    if (chipStrategyEditorMode === 'edit' && chipStrategyEditingIndex !== null) {
+      return chipStrategies.map((item, index) =>
+        index === chipStrategyEditingIndex ? preparedDraft : item,
+      )
+    }
+    return [...chipStrategies, preparedDraft]
+  }
+
+  async function onCheckChipStrategyDraft() {
+    try {
+      const preparedDraft = buildPreparedChipStrategyDraft()
+      const message = await checkCyqChenStrategyFileDraft(buildNextChipStrategies(preparedDraft))
+      setChipStrategyNotice(message)
+      setChipStrategyError('')
+    } catch (checkError) {
+      setChipStrategyError(`检查筹码策略失败: ${String(checkError)}`)
+      setChipStrategyNotice('')
+    }
+  }
+
+  async function saveChipStrategies(nextStrategies: CyqChenStrategyDraft[], message: string) {
+    if (!sourcePath.trim()) {
+      setChipStrategyError('当前数据目录为空，请先到数据管理页确认目录。')
+      return
+    }
+    setChipStrategySaving(true)
+    setChipStrategyError('')
+    try {
+      const page = await saveCyqChenStrategyFile(sourcePath, nextStrategies)
+      applyChipStrategyPage(page)
+      setChipStrategyDraft(null)
+      setChipStrategyEditingIndex(null)
+      setChipStrategyNotice(message)
+    } catch (saveError) {
+      setChipStrategyError(`保存筹码变动策略失败: ${String(saveError)}`)
+      setChipStrategyNotice('')
+    } finally {
+      setChipStrategySaving(false)
+    }
+  }
+
+  async function onSaveChipStrategyDraft() {
+    try {
+      const preparedDraft = buildPreparedChipStrategyDraft()
+      const nextStrategies = buildNextChipStrategies(preparedDraft)
+      await checkCyqChenStrategyFileDraft(nextStrategies)
+      await saveChipStrategies(
+        nextStrategies,
+        chipStrategyEditorMode === 'create' ? '筹码策略已新增。' : '筹码策略已更新。',
+      )
+    } catch (saveError) {
+      setChipStrategyError(`筹码策略校验失败: ${String(saveError)}`)
+      setChipStrategyNotice('')
+    }
+  }
+
+  async function onConfirmDeleteChipStrategy() {
+    if (!chipStrategyDeleteTarget) {
+      return
+    }
+    const nextStrategies = chipStrategies.filter((_, index) => index !== chipStrategyDeleteTarget.index)
+    setChipStrategyDeleteTarget(null)
+    await saveChipStrategies(nextStrategies, `已删除筹码策略: ${chipStrategyDeleteTarget.name}`)
+  }
+
+  async function onSaveDraft() {
+    if (!draft) {
+      return
+    }
+    if (!sourcePath.trim()) {
+      setEditorError('当前数据目录为空，请先到数据管理页确认目录。')
+      return
+    }
+
+    let preparedDraft: StrategyManageRuleDraft
+    try {
+      preparedDraft = buildPreparedDraft(
+        {
+          ...draft,
+          scope_windows: parseRequiredInteger(scopeWindowsText, '窗口', 1),
+        },
+        scoreMode,
+        fixedPointsText,
+        distPointsText,
+        maxPointsText,
+        maxBonusPointsText,
+        combinationBonusPointTexts,
+        combinationHitPointTexts,
+      )
+      const message = await checkStrategyManageRuleDraft(
+        sourcePath,
+        preparedDraft,
+        editorMode === 'edit' ? editingOriginalName : undefined,
+      )
+      setNotice(message)
+      setEditorError('')
+      setCheckNotice(message)
+    } catch (checkError) {
+      setEditorError(`策略校验失败: ${String(checkError)}`)
+      return
+    }
+
+    setBusyAction('saving')
+    setEditorError('')
+    try {
+      const data =
+        editorMode === 'create'
+          ? await createStrategyManageRule(sourcePath, preparedDraft)
+          : await updateStrategyManageRule(sourcePath, editingOriginalName, preparedDraft)
+      applyPageData(data, preparedDraft.scene_name)
+      setDraft(null)
+      setEditingOriginalName('')
+      setNotice(editorMode === 'create' ? '规则已创建。' : '规则已更新。')
+    } catch (saveError) {
+      setEditorError(`保存策略失败: ${String(saveError)}`)
+      setNotice('')
+    } finally {
+      setBusyAction('idle')
+    }
+  }
+
+  async function onCheckDraft() {
+    if (!draft) {
+      return
+    }
+    if (!sourcePath.trim()) {
+      setEditorError('当前数据目录为空，无法检查草稿。')
+      return
+    }
+    try {
+      const preparedDraft = buildPreparedDraft(
+        {
+          ...draft,
+          scope_windows: parseRequiredInteger(scopeWindowsText, '窗口', 1),
+        },
+        scoreMode,
+        fixedPointsText,
+        distPointsText,
+        maxPointsText,
+        maxBonusPointsText,
+        combinationBonusPointTexts,
+        combinationHitPointTexts,
+      )
+      const message = await checkStrategyManageRuleDraft(
+        sourcePath,
+        preparedDraft,
+        editorMode === 'edit' ? editingOriginalName : undefined,
+      )
+      setCheckNotice(message)
+      setEditorError('')
+    } catch (checkError) {
+      setEditorError(`检查策略失败: ${String(checkError)}`)
+      setCheckNotice('')
+    }
+  }
+
+  async function onSaveSceneDraft() {
+    if (!sceneDraft) {
+      return
+    }
+    if (!sourcePath.trim()) {
+      setSceneEditorError('当前数据目录为空，请先到数据管理页确认目录。')
+      return
+    }
+
+    let preparedSceneDraft: StrategyManageSceneDraft
+    try {
+      preparedSceneDraft = buildPreparedSceneDraft({
+        ...sceneDraft,
+        direction: sceneDirectionText,
+        observe_threshold: parseRequiredNumber(observeThresholdText, 'observe_threshold'),
+        trigger_threshold: parseRequiredNumber(triggerThresholdText, 'trigger_threshold'),
+        confirm_threshold: parseRequiredNumber(confirmThresholdText, 'confirm_threshold'),
+        fail_threshold: parseRequiredNumber(failThresholdText, 'fail_threshold'),
+      })
+    } catch (parseError) {
+      setSceneEditorError(String(parseError))
+      return
+    }
+    try {
+      const message = await checkStrategyManageSceneDraft(
+        sourcePath,
+        preparedSceneDraft,
+        sceneEditorMode === 'edit' ? editingSceneOriginalName : undefined,
+      )
+      setNotice(message)
+      setSceneEditorError('')
+    } catch (checkError) {
+      setSceneEditorError(`scene 校验失败: ${String(checkError)}`)
+      return
+    }
+
+    setBusyAction('saving')
+    try {
+      const data =
+        sceneEditorMode === 'create'
+          ? await createStrategyManageScene(sourcePath, preparedSceneDraft)
+          : await updateStrategyManageScene(sourcePath, editingSceneOriginalName, preparedSceneDraft)
+      applyPageData(data, preparedSceneDraft.name)
+      setSceneDraft(null)
+      setEditingSceneOriginalName('')
+      setNotice(sceneEditorMode === 'create' ? 'scene 已创建。' : 'scene 已更新。')
+    } catch (saveError) {
+      setSceneEditorError(`保存 scene 失败: ${String(saveError)}`)
+    } finally {
+      setBusyAction('idle')
+    }
+  }
+
+  async function onSaveBulkScene() {
+    if (!sourcePath.trim()) {
+      setBulkError('当前数据目录为空，请先到数据管理页确认目录。')
+      return
+    }
+
+    if (bulkValidationIssues.length > 0) {
+      setBulkError(`请先修正后再保存：${bulkValidationIssues[0]}`)
+      return
+    }
+
+    setBusyAction('saving')
+    setBulkError('')
+    setError('')
+    try {
+      const preferredSceneName = bulkActiveSceneName
+      const outputPath = await saveStrategyManageRefactorFile(sourcePath, refactorFileName.trim(), {
+        scenes: refactorScenes.map((scene) => ({
+          name: scene.name.trim(),
+          direction: scene.direction.trim().toLowerCase(),
+          observe_threshold: scene.observe_threshold,
+          trigger_threshold: scene.trigger_threshold,
+          confirm_threshold: scene.confirm_threshold,
+          fail_threshold: scene.fail_threshold,
+        })),
+        rules: refactorRules.map((rule) => ({
+          ...rule,
+          name: rule.name.trim(),
+          scene_name: rule.scene_name.trim(),
+          stage: rule.stage.trim(),
+          scope_way: rule.scope_way.trim(),
+          when: rule.when.trim(),
+          explain: rule.explain.trim(),
+          conditions: rule.conditions.map((condition) => ({
+            name: condition.name.trim(),
+            when: condition.when.trim(),
+            bonus_points: condition.bonus_points,
+          })),
+        })),
+      })
+      const refreshedData = await getStrategyManagePage(sourcePath)
+      applyPageData(refreshedData, preferredSceneName)
+      closeBulkEditor()
+      setNotice(`当前策略已保存: ${outputPath}`)
+    } catch (bulkSaveError) {
+      setBulkError(`整体编辑保存失败: ${String(bulkSaveError)}`)
+      setNotice('')
+    } finally {
+      setBusyAction('idle')
+    }
+  }
+
+  async function onConfirmDeleteScene() {
+    if (!deleteSceneTarget) {
+      return
+    }
+    if (!sourcePath.trim()) {
+      setError('当前数据目录为空，请先到数据管理页确认目录。')
+      return
+    }
+    setBusyAction('deleting')
+    setError('')
+    try {
+      const data = await removeStrategyManageScene(sourcePath, deleteSceneTarget.name)
+      applyPageData(data)
+      if (editingSceneOriginalName === deleteSceneTarget.name) {
+        setSceneDraft(null)
+        setEditingSceneOriginalName('')
+      }
+      if (selectedSceneName === deleteSceneTarget.name) {
+        setSelectedSceneName('')
+      }
+      setNotice(`已删除 scene: ${deleteSceneTarget.name}`)
+      setDeleteSceneTarget(null)
+    } catch (deleteError) {
+      setError(`删除 scene 失败: ${String(deleteError)}`)
+      setNotice('')
+    } finally {
+      setBusyAction('idle')
+    }
+  }
+
+  async function onConfirmDelete() {
+    if (!deleteTarget) {
+      return
+    }
+    if (!sourcePath.trim()) {
+      setError('当前数据目录为空，请先到数据管理页确认目录。')
+      return
+    }
+    setBusyAction('deleting')
+    setError('')
+    try {
+      const data = await removeStrategyManageRules(sourcePath, [deleteTarget.name])
+      applyPageData(data, deleteTarget.scene_name)
+      if (editingOriginalName === deleteTarget.name) {
+        setDraft(null)
+        setEditingOriginalName('')
+      }
+      setNotice(`已删除规则: ${deleteTarget.name}`)
+      setDeleteTarget(null)
+    } catch (deleteError) {
+      setError(`删除规则失败: ${String(deleteError)}`)
+      setNotice('')
+    } finally {
+      setBusyAction('idle')
+    }
+  }
+
+  const isBusy = busyAction !== 'idle'
+  const isEditing = draft !== null
+  const isChipView = view === 'chip'
+  const isDeleteSceneBlocked = Boolean(deleteSceneTarget && deleteSceneTarget.rule_count > 0)
+  const bulkTotalRuleCount = rules.length
+  const bulkBucketRuleCount = refactorRules.length
+  const bulkPendingCount = bulkCandidateRuleCount
+  const bulkSceneStripMinHeight = BULK_SCENE_BOX_MIN_HEIGHT * 2 + BULK_SCENE_GAP
+  const bulkResolvedSceneStripHeight = Math.max(bulkSceneStripHeight, bulkSceneStripMinHeight)
+  const bulkResolvedStackRulePoolMaxHeight = Math.max(bulkStackRulePoolMaxHeight, 240)
+  const bulkLayoutMode =
+    bulkBoardWidth > 0 && bulkBoardWidth <= BULK_STACK_SINGLE_SCENE_BREAKPOINT
+      ? 'stack-single'
+      : bulkBoardWidth > 0 && bulkBoardWidth <= BULK_STACK_BREAKPOINT
+        ? 'stack-double'
+        : 'split'
+  const bulkBoardStyle = useMemo(
+    () =>
+      ({
+        '--strategy-manage-bulk-board-gap': `${BULK_BOARD_GAP}px`,
+        '--strategy-manage-bulk-pool-side-min-width': `${BULK_POOL_SIDE_MIN_WIDTH}px`,
+        '--strategy-manage-bulk-scene-side-min-width': `${BULK_SCENE_SIDE_MIN_WIDTH}px`,
+        '--strategy-manage-bulk-scene-box-min-height': `${BULK_SCENE_BOX_MIN_HEIGHT}px`,
+        '--strategy-manage-bulk-scene-gap': `${BULK_SCENE_GAP}px`,
+        '--strategy-manage-bulk-scene-strip-min-height': `${bulkSceneStripMinHeight}px`,
+        '--strategy-manage-bulk-scene-strip-height': `${bulkResolvedSceneStripHeight}px`,
+        '--strategy-manage-bulk-stack-rule-pool-max-height': `${bulkResolvedStackRulePoolMaxHeight}px`,
+      }) as CSSProperties,
+    [
+      bulkResolvedSceneStripHeight,
+      bulkResolvedStackRulePoolMaxHeight,
+      bulkSceneStripMinHeight,
+    ],
+  )
+
+  useEffect(() => {
+    if (!isBulkEditorOpen) {
+      setBulkBoardWidth(0)
+      setBulkSceneStripHeight(0)
+      setBulkStackRulePoolMaxHeight(0)
+      return
+    }
+
+    const modalElement = bulkModalRef.current
+    const boardElement = bulkBoardRef.current
+    const sceneStripElement = bulkSceneStripRef.current
+    const rulePoolElement = bulkRulePoolRef.current
+    if (
+      !modalElement ||
+      !boardElement ||
+      !sceneStripElement ||
+      !rulePoolElement ||
+      typeof ResizeObserver === 'undefined'
+    ) {
+      return
+    }
+
+    let frameId = 0
+    const syncLayoutMetrics = () => {
+      if (frameId) {
+        window.cancelAnimationFrame(frameId)
+      }
+      frameId = window.requestAnimationFrame(() => {
+        const nextBoardWidth = Math.round(boardElement.getBoundingClientRect().width)
+        const nextSceneStripHeight = Math.round(sceneStripElement.getBoundingClientRect().height)
+        const modalRect = modalElement.getBoundingClientRect()
+        const rulePoolRect = rulePoolElement.getBoundingClientRect()
+        const nextStackRulePoolMaxHeight = Math.max(
+          240,
+          Math.round(modalRect.bottom - rulePoolRect.top - 24),
+        )
+        setBulkBoardWidth((current) => (current === nextBoardWidth ? current : nextBoardWidth))
+        setBulkSceneStripHeight((current) =>
+          current === nextSceneStripHeight ? current : nextSceneStripHeight,
+        )
+        setBulkStackRulePoolMaxHeight((current) =>
+          current === nextStackRulePoolMaxHeight ? current : nextStackRulePoolMaxHeight,
+        )
+      })
+    }
+
+    syncLayoutMetrics()
+    const observer = new ResizeObserver(syncLayoutMetrics)
+    observer.observe(modalElement)
+    observer.observe(boardElement)
+    observer.observe(sceneStripElement)
+    observer.observe(rulePoolElement)
+    modalElement.addEventListener('scroll', syncLayoutMetrics, { passive: true })
+    window.addEventListener('resize', syncLayoutMetrics)
+
+    return () => {
+      observer.disconnect()
+      modalElement.removeEventListener('scroll', syncLayoutMetrics)
+      window.removeEventListener('resize', syncLayoutMetrics)
+      if (frameId) {
+        window.cancelAnimationFrame(frameId)
+      }
+    }
+  }, [isBulkEditorOpen, refactorScenes.length, refactorRules.length, bulkNewSceneId])
+
+  return (
+    <div className="strategy-manage-page">
+      <section className="strategy-manage-card">
+        <div className="strategy-manage-section-head">
+          <div>
+            <h2 className="strategy-manage-title">{isChipView ? '筹码变动策略' : '打分策略管理'}</h2>
+            <p className="strategy-manage-note">
+              {isChipView
+                ? '管理筹码变动策略，供筹码计算和筹码测试使用。'
+                : '管理当前生效的打分策略，导入和备份可在策略资产中心处理。'}
+            </p>
+          </div>
+          <span className="strategy-manage-tip">
+            {isChipView
+              ? (chipStrategyFileExists ? chipStrategyFilePath : 'chip_change_rule.toml 未落盘')
+              : `当前共 ${rules.length} 条 rule`}
+          </span>
+        </div>
+
+        <div className="strategy-manage-toolbar">
+          <div className="strategy-manage-toolbar-left">
+            <button
+              className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-accent"
+              type="button"
+              onClick={() => setIsAssetModalOpen(true)}
+            >
+              策略资产中心
+            </button>
+            {isChipView ? (
+              <button
+                className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-primary"
+                type="button"
+                onClick={openCreateChipStrategyEditor}
+                disabled={chipStrategySaving}
+              >
+                新建筹码策略
+              </button>
+            ) : (
+              <>
+                <button
+                  className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-primary"
+                  type="button"
+                  onClick={openCreateSceneEditor}
+                >
+                  新建 Scene
+                </button>
+                <button
+                  className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-secondary"
+                  type="button"
+                  onClick={openBulkEditor}
+                >
+                  策略整体编辑
+                </button>
+              </>
+            )}
+            {isEditing || chipStrategyDraft ? <span className="strategy-manage-tip">当前有未提交草稿</span> : null}
+          </div>
+        </div>
+
+        <div className="strategy-manage-summary">
+          {isChipView ? (
+            <>
+              <div className="strategy-manage-summary-item">
+                <span>筹码策略</span>
+                <strong>{chipStrategies.length}</strong>
+              </div>
+              <div className="strategy-manage-summary-item">
+                <span>主力策略</span>
+                <strong>{chipStrategies.filter((item) => item.holder === 'main').length}</strong>
+              </div>
+              <div className="strategy-manage-summary-item">
+                <span>散户策略</span>
+                <strong>{chipStrategies.filter((item) => item.holder === 'retail').length}</strong>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="strategy-manage-summary-item">
+                <span>Scene 数量</span>
+                <strong>{scenes.length}</strong>
+              </div>
+              <div className="strategy-manage-summary-item">
+                <span>Rule 数量</span>
+                <strong>{rules.length}</strong>
+              </div>
+              <div className="strategy-manage-summary-item">
+                <span>组合 Rule</span>
+                <strong>{rules.filter((rule) => (rule.kind ?? 'single') === 'combination').length}</strong>
+              </div>
+              <div className="strategy-manage-summary-item">
+                <span>组合条件</span>
+                <strong>
+                  {rules.reduce((total, rule) => total + (rule.conditions?.length ?? 0), 0)}
+                </strong>
+              </div>
+            </>
+          )}
+        </div>
+
+        <div className="strategy-manage-filter-grid">
+          <label className="strategy-manage-field strategy-manage-field-span-full">
+            <span>{isChipView ? '筹码策略搜索' : '策略搜索'}</span>
+            <input
+              value={isChipView ? chipStrategySearchKeyword : searchKeyword}
+              onChange={(event) =>
+                isChipView
+                  ? setChipStrategySearchKeyword(event.target.value)
+                  : setSearchKeyword(event.target.value)
+              }
+              placeholder={
+                isChipView
+                  ? '搜索筹码策略名称 / 表达式 / 主力 / 散户 / 买卖方向'
+                  : '搜索 scene / rule 名称 / 表达式 / 说明 / stage / scope'
+              }
+            />
+          </label>
+        </div>
+
+        {notice ? <div className="strategy-manage-message strategy-manage-message-notice">{notice}</div> : null}
+        {error ? <div className="strategy-manage-message strategy-manage-message-error">{error}</div> : null}
+        {isChipView && chipStrategyNotice ? <div className="strategy-manage-message strategy-manage-message-notice">{chipStrategyNotice}</div> : null}
+        {isChipView && chipStrategyError ? <div className="strategy-manage-message strategy-manage-message-error">{chipStrategyError}</div> : null}
+      </section>
+
+      {view === 'rules' ? (
+        <>
+      <section className="strategy-manage-card">
+        <div className="strategy-manage-list-head">
+          <strong>Scene 总览</strong>
+          <span>
+            {normalizedSearchKeyword
+              ? `匹配 ${filteredScenes.length} / ${scenes.length} 个 scene`
+              : '点击 scene 打开浮窗'}
+          </span>
+        </div>
+        {filteredScenes.length === 0 ? (
+          <div className="strategy-manage-empty">没有匹配当前搜索条件的 scene / rule。</div>
+        ) : scenes.length === 0 ? (
+          <div className="strategy-manage-empty">当前规则文件里没有 scene。</div>
+        ) : (
+          <div className="strategy-manage-scene-grid">
+            {filteredScenes.map((scene) => {
+              const sceneRules = rules.filter((item) => item.scene_name === scene.name)
+              const matchedRuleCount = normalizedSearchKeyword
+                ? sceneRules.filter((item) =>
+                    buildRuleSearchText(item).includes(normalizedSearchKeyword),
+                  ).length
+                : sceneRules.length
+              return (
+                <button
+                  key={scene.name}
+                  type="button"
+                  className="strategy-manage-scene-card"
+                  onClick={() => setSelectedSceneName(scene.name)}
+                >
+                  <div className="strategy-manage-scene-card-head">
+                    <strong>{scene.name}</strong>
+                    <div className="strategy-manage-rule-card-actions">
+                      <span>
+                        {normalizedSearchKeyword
+                          ? `命中 ${matchedRuleCount} / ${scene.rule_count} 条`
+                          : `${scene.rule_count} 条规则`}
+                      </span>
+                      <button
+                        type="button"
+                        className="strategy-manage-inline-btn"
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          openEditSceneEditor(scene)
+                        }}
+                      >
+                        配置
+                      </button>
+                      <button
+                        type="button"
+                        className="strategy-manage-inline-btn is-danger"
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          setDeleteSceneTarget({ name: scene.name, rule_count: scene.rule_count })
+                        }}
+                        disabled={isBusy}
+                      >
+                        删除
+                      </button>
+                    </div>
+                  </div>
+                  <div className="strategy-manage-scene-metrics">
+                    <span>direction {scene.direction}</span>
+                    <span>observe {formatNumber(scene.observe_threshold)}</span>
+                    <span>trigger {formatNumber(scene.trigger_threshold)}</span>
+                    <span>confirm {formatNumber(scene.confirm_threshold)}</span>
+                    <span>fail {formatNumber(scene.fail_threshold)}</span>
+                  </div>
+                  <p className="strategy-manage-note">{sceneStageSummary(sceneRules) || '暂无规则'}</p>
+                </button>
+              )
+            })}
+          </div>
+        )}
+      </section>
+
+      <section className="strategy-manage-card">
+        <div className="strategy-manage-list-head">
+          <strong>近期新增</strong>
+          <span>策略文件末尾 {recentRules.length} 条 rule</span>
+        </div>
+        {recentRules.length === 0 ? (
+          <div className="strategy-manage-empty">当前规则文件里没有 rule。</div>
+        ) : (
+          <div className="strategy-manage-recent-rule-grid">
+            {recentRules.map((rule) => {
+              const distScoreSummary = buildDistScoreSummary(rule.dist_points)
+              const isCombination = (rule.kind ?? 'single') === 'combination'
+
+              return (
+                <article className="strategy-manage-rule-card strategy-manage-rule-card-compact strategy-manage-rule-card-recent" key={rule.name}>
+                  <div className="strategy-manage-rule-card-head">
+                    <div>
+                      <div className="strategy-manage-rule-card-name">{rule.name}</div>
+                      <div className="strategy-manage-rule-card-source">
+                        {rule.scene_name} · #{rule.index + 1} · {isCombination ? '组合策略' : '单语句'}
+                      </div>
+                    </div>
+                    <div className="strategy-manage-rule-card-actions">
+                      <button className="strategy-manage-inline-btn" type="button" onClick={() => openEditEditor(rule)}>
+                        编辑
+                      </button>
+                      <button className="strategy-manage-inline-btn is-danger" type="button" onClick={() => setDeleteTarget(rule)} disabled={isBusy}>
+                        删除
+                      </button>
+                    </div>
+                  </div>
+                  <p className="strategy-manage-note">{rule.explain}</p>
+                  <div className="strategy-manage-rule-metrics strategy-manage-rule-metrics-recent">
+                    {isCombination ? (
+                      <div className="strategy-manage-summary-item strategy-manage-summary-item-dist-score">
+                        <span>命中数得分</span>
+                        <strong>{(rule.points_by_hits ?? []).map((points) => formatNumber(points)).join(' / ')}</strong>
+                        <small>
+                          {rule.conditions?.length ?? 0} 条条件
+                        </small>
+                      </div>
+                    ) : distScoreSummary ? (
+                      <div className="strategy-manage-summary-item strategy-manage-summary-item-dist-score">
+                        <span>得分</span>
+                        <strong>{formatNumber(distScoreSummary.pointsMin)} ~ {formatNumber(distScoreSummary.pointsMax)}</strong>
+                        <small>
+                          字典分 · {distScoreSummary.segmentCount} 段 ·
+                          区间 {formatNumber(distScoreSummary.intervalMin)} ~ {formatNumber(distScoreSummary.intervalMax)}
+                        </small>
+                      </div>
+                    ) : (
+                      <div className="strategy-manage-summary-item">
+                        <span>得分</span>
+                        <strong>{formatNumber(rule.points)}</strong>
+                      </div>
+                    )}
+                    <div className="strategy-manage-summary-item">
+                      <span>Stage</span>
+                      <strong>{rule.stage}</strong>
+                    </div>
+                    <div className="strategy-manage-summary-item">
+                      <span>Scope</span>
+                      <strong>{rule.scope_way}</strong>
+                    </div>
+                    <div className="strategy-manage-summary-item">
+                      <span>Windows</span>
+                      <strong>{rule.scope_windows}</strong>
+                    </div>
+                  </div>
+                  <pre className="strategy-manage-expression-preview">{buildRuleExpressionPreview(rule)}</pre>
+                </article>
+              )
+            })}
+          </div>
+        )}
+      </section>
+        </>
+      ) : null}
+
+      {view === 'chip' ? (
+      <section className="strategy-manage-card strategy-manage-chip-card">
+        <div className="strategy-manage-section-head">
+          <div>
+            <h3 className="strategy-manage-subtitle">策略列表</h3>
+          </div>
+          <span className="strategy-manage-tip">
+            {normalizedChipStrategySearchKeyword
+              ? `命中 ${filteredChipStrategies.length} / ${chipStrategies.length} 条`
+              : `${chipStrategies.length} 条`}
+          </span>
+        </div>
+
+        {filteredChipStrategies.length === 0 ? (
+          <div className="strategy-manage-empty">没有匹配当前搜索条件的筹码策略。</div>
+        ) : (
+          <div className="strategy-manage-chip-group-grid">
+            {groupedChipStrategies.map((group) => (
+              <section className="strategy-manage-chip-group" key={group.key}>
+                <div className="strategy-manage-chip-group-head">
+                  <strong>{group.title}</strong>
+                  <span>{group.items.length} 条</span>
+                </div>
+                {group.items.length === 0 ? (
+                  <div className="strategy-manage-chip-group-empty">暂无策略</div>
+                ) : (
+                  <div className="strategy-manage-chip-rule-grid">
+                    {group.items.map(({ strategy, index }) => (
+                      <article className="strategy-manage-rule-card strategy-manage-rule-card-compact" key={`${index}-${strategy.name}`}>
+                        <div className="strategy-manage-rule-card-head">
+                          <div>
+                            <div className="strategy-manage-rule-card-name">{strategy.name}</div>
+                            <div className="strategy-manage-rule-card-source">
+                              #{index + 1} · {formatChipHolder(strategy.holder)} · {formatChipDirection(strategy.direction)}
+                            </div>
+                          </div>
+                          <div className="strategy-manage-rule-card-actions">
+                            <button className="strategy-manage-inline-btn" type="button" onClick={() => openEditChipStrategy(index)}>
+                              编辑
+                            </button>
+                            <button
+                              className="strategy-manage-inline-btn is-danger"
+                              type="button"
+                              onClick={() => setChipStrategyDeleteTarget({ index, name: strategy.name })}
+                              disabled={chipStrategySaving}
+                            >
+                              删除
+                            </button>
+                          </div>
+                        </div>
+                        <div className="strategy-manage-rule-metrics strategy-manage-rule-metrics-recent">
+                          <div className="strategy-manage-summary-item">
+                            <span>持有人</span>
+                            <strong>{formatChipHolder(strategy.holder)}</strong>
+                          </div>
+                          <div className="strategy-manage-summary-item">
+                            <span>方向</span>
+                            <strong>{formatChipDirection(strategy.direction)}</strong>
+                          </div>
+                          <div className="strategy-manage-summary-item">
+                            <span>{strategy.confirm_after ? `后验修正（${strategy.confirm_after} 根后）` : 'Bias'}</span>
+                            <strong>{formatNumber(Number(strategy.bias))}</strong>
+                          </div>
+                        </div>
+                        <pre className="strategy-manage-expression-preview">{strategy.when}</pre>
+                      </article>
+                    ))}
+                  </div>
+                )}
+              </section>
+            ))}
+          </div>
+        )}
+
+      </section>
+      ) : null}
+
+      {chipStrategyDeleteTarget ? (
+        <div className="strategy-manage-modal-backdrop strategy-manage-modal-backdrop-confirm" role="presentation">
+          <div className="strategy-manage-modal" role="dialog" aria-modal="true">
+            <h3>删除筹码策略</h3>
+            <p>
+              即将删除筹码策略：<strong>{chipStrategyDeleteTarget.name}</strong>
+            </p>
+            <div className="strategy-manage-modal-actions">
+              <button
+                className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-danger"
+                type="button"
+                onClick={() => void onConfirmDeleteChipStrategy()}
+                disabled={chipStrategySaving}
+              >
+                {chipStrategySaving ? '删除中...' : '确认删除'}
+              </button>
+              <button
+                className="strategy-manage-toolbar-btn"
+                type="button"
+                onClick={() => setChipStrategyDeleteTarget(null)}
+                disabled={chipStrategySaving}
+              >
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {chipStrategyDraft ? (
+        <div className="strategy-manage-modal-backdrop strategy-manage-modal-backdrop-top" role="presentation">
+          <div className="strategy-manage-modal strategy-manage-editor-modal" role="dialog" aria-modal="true">
+            <div className="strategy-manage-list-head">
+              <strong>
+                {chipStrategyEditorMode === 'create'
+                  ? '新建筹码策略'
+                  : `编辑筹码策略 · ${chipStrategyDraft.name}`}
+              </strong>
+              <span>{chipStrategyDraft.holder} · {chipStrategyDraft.direction}</span>
+            </div>
+            {chipStrategyError ? <div className="strategy-manage-message strategy-manage-message-error">{chipStrategyError}</div> : null}
+            {chipStrategyNotice ? <div className="strategy-manage-message strategy-manage-message-notice">{chipStrategyNotice}</div> : null}
+            <div className="strategy-manage-editor-grid">
+              <label className="strategy-manage-field">
+                <span>名称</span>
+                <input
+                  value={chipStrategyDraft.name}
+                  onChange={(event) =>
+                    setChipStrategyDraft((current) =>
+                      current ? { ...current, name: event.target.value } : current,
+                    )
+                  }
+                />
+              </label>
+              <label className="strategy-manage-field">
+                <span>持有人</span>
+                <select
+                  value={chipStrategyDraft.holder}
+                  onChange={(event) =>
+                    setChipStrategyDraft((current) =>
+                      current ? { ...current, holder: event.target.value as CyqChenStrategyDraft['holder'] } : current,
+                    )
+                  }
+                >
+                  {CHIP_HOLDER_OPTIONS.map((item) => (
+                    <option key={item} value={item}>
+                      {item === 'main' ? '主力' : '散户'}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="strategy-manage-field">
+                <span>方向</span>
+                <select
+                  value={chipStrategyDraft.direction}
+                  onChange={(event) =>
+                    setChipStrategyDraft((current) =>
+                      current ? { ...current, direction: event.target.value as CyqChenStrategyDraft['direction'] } : current,
+                    )
+                  }
+                >
+                  {CHIP_DIRECTION_OPTIONS.map((item) => (
+                    <option key={item} value={item}>
+                      {item === 'buy' ? '买入' : '卖出'}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="strategy-manage-field">
+                <span>确认延迟（0 为当天规则）</span>
+                <input type="number" min={0} step={1} value={chipStrategyDraft.confirm_after ?? 0}
+                  onChange={(event) => setChipStrategyDraft((current) => current ? { ...current, confirm_after: Number(event.target.value) } : current)} />
+              </label>
+              <label className="strategy-manage-field">
+                <span>{chipStrategyDraft.confirm_after ? '归属修正比例（0～1，仅买入方向）' : 'Bias'}</span>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  value={chipStrategyDraft.bias}
+                  onChange={(event) =>
+                    setChipStrategyDraft((current) =>
+                      current ? { ...current, bias: event.target.value } : current,
+                    )
+                  }
+                />
+              </label>
+              <label className="strategy-manage-field strategy-manage-field-span-full">
+                <span>表达式</span>
+                <textarea
+                  rows={8}
+                  value={chipStrategyDraft.when}
+                  onChange={(event) =>
+                    setChipStrategyDraft((current) =>
+                      current ? { ...current, when: event.target.value } : current,
+                    )
+                  }
+                />
+              </label>
+            </div>
+            <div className="strategy-manage-editor-actions">
+              <button
+                className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-secondary"
+                type="button"
+                onClick={() => void onCheckChipStrategyDraft()}
+                disabled={chipStrategySaving}
+              >
+                检查草稿
+              </button>
+              <button
+                className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-primary"
+                type="button"
+                onClick={() => void onSaveChipStrategyDraft()}
+                disabled={chipStrategySaving}
+              >
+                {chipStrategySaving ? '保存中...' : '保存'}
+              </button>
+              <button
+                className="strategy-manage-toolbar-btn"
+                type="button"
+                onClick={() => {
+                  setChipStrategyDraft(null)
+                  setChipStrategyEditingIndex(null)
+                  setChipStrategyError('')
+                }}
+                disabled={chipStrategySaving}
+              >
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {deleteTarget ? (
+        <div className="strategy-manage-modal-backdrop strategy-manage-modal-backdrop-confirm" role="presentation">
+          <div className="strategy-manage-modal" role="dialog" aria-modal="true">
+            <h3>删除 Rule</h3>
+            <p>
+              即将删除规则：<strong>{deleteTarget.name}</strong>
+            </p>
+            <div className="strategy-manage-modal-actions">
+              <button
+                className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-danger"
+                type="button"
+                onClick={() => void onConfirmDelete()}
+                disabled={isBusy}
+              >
+                {busyAction === 'deleting' ? '删除中...' : '确认删除'}
+              </button>
+              <button className="strategy-manage-toolbar-btn" type="button" onClick={() => setDeleteTarget(null)} disabled={isBusy}>
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {deleteSceneTarget ? (
+        <div className="strategy-manage-modal-backdrop strategy-manage-modal-backdrop-confirm" role="presentation">
+          <div className="strategy-manage-modal" role="dialog" aria-modal="true">
+            <h3>删除 Scene</h3>
+            <p>
+              即将删除 scene：<strong>{deleteSceneTarget.name}</strong>
+            </p>
+            {deleteSceneTarget.rule_count > 0 ? (
+              <p className="strategy-manage-note">当前 scene 下还有 {deleteSceneTarget.rule_count} 条 rule，请先删除这些 rule 后再删除 scene。</p>
+            ) : null}
+            <div className="strategy-manage-modal-actions">
+              <button
+                className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-danger"
+                type="button"
+                onClick={() => void onConfirmDeleteScene()}
+                disabled={isBusy || isDeleteSceneBlocked}
+              >
+                {isDeleteSceneBlocked ? '请先清空 Rule' : busyAction === 'deleting' ? '删除中...' : '确认删除'}
+              </button>
+              <button
+                className="strategy-manage-toolbar-btn"
+                type="button"
+                onClick={() => setDeleteSceneTarget(null)}
+                disabled={isBusy}
+              >
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {selectedScene ? (
+        <div className="strategy-manage-modal-backdrop" role="presentation">
+          <div className="strategy-manage-modal strategy-manage-editor-modal" role="dialog" aria-modal="true">
+            <div className="strategy-manage-section-head strategy-manage-scene-modal-head">
+              <div>
+                <h3 className="strategy-manage-subtitle">{selectedScene.name}</h3>
+                <p className="strategy-manage-note">当前 scene 下共 {selectedSceneRules.length} 条规则。</p>
+              </div>
+              <div className="strategy-manage-toolbar-right">
+                <button
+                  className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-primary"
+                  type="button"
+                  onClick={() => openCreateEditor(selectedScene.name)}
+                >
+                  新建 Rule
+                </button>
+                <button className="strategy-manage-toolbar-btn" type="button" onClick={() => setSelectedSceneName('')}>
+                  关闭
+                </button>
+              </div>
+            </div>
+
+            <div className="strategy-manage-scene-metrics-panel">
+              <span>direction {selectedScene.direction}</span>
+              <span>observe {formatNumber(selectedScene.observe_threshold)}</span>
+              <span>trigger {formatNumber(selectedScene.trigger_threshold)}</span>
+              <span>confirm {formatNumber(selectedScene.confirm_threshold)}</span>
+              <span>fail {formatNumber(selectedScene.fail_threshold)}</span>
+            </div>
+
+            <div className="strategy-manage-list-panel strategy-manage-list-panel-full">
+              <div className="strategy-manage-list-head">
+                <strong>Rule 列表</strong>
+                <span>
+                  {normalizedSearchKeyword
+                    ? `命中 ${selectedSceneFilteredRules.length} / ${selectedSceneRules.length} 条`
+                    : `${selectedSceneRules.length} 条`}
+                </span>
+              </div>
+              {selectedSceneFilteredRules.length === 0 ? (
+                <div className="strategy-manage-empty">当前 scene 下没有匹配搜索条件的规则。</div>
+              ) : selectedSceneRules.length === 0 ? (
+                <div className="strategy-manage-empty">当前 scene 下还没有规则。</div>
+              ) : (
+                <div className="strategy-manage-scene-rule-list">
+                  {selectedSceneFilteredRules.map((rule) => {
+                    const distScoreSummary = buildDistScoreSummary(rule.dist_points)
+                    const isCombination = (rule.kind ?? 'single') === 'combination'
+
+                    return (
+                      <article className="strategy-manage-rule-card strategy-manage-rule-card-compact" key={rule.name}>
+                        <div className="strategy-manage-rule-card-head">
+                          <div>
+                            <div className="strategy-manage-rule-card-name">
+                              {rule.name}
+                              <span className="strategy-manage-rule-kind-badge">
+                                {isCombination ? '组合' : '单语句'}
+                              </span>
+                            </div>
+                          </div>
+                          <div className="strategy-manage-rule-card-actions">
+                            <button className="strategy-manage-inline-btn" type="button" onClick={() => openEditEditor(rule)}>
+                              编辑
+                            </button>
+                            <button className="strategy-manage-inline-btn is-danger" type="button" onClick={() => setDeleteTarget(rule)} disabled={isBusy}>
+                              删除
+                            </button>
+                          </div>
+                        </div>
+                        <div className="strategy-manage-rule-metrics">
+                          {isCombination ? (
+                            <div className="strategy-manage-summary-item strategy-manage-summary-item-dist-score">
+                              <span>命中数得分</span>
+                              <strong>{(rule.points_by_hits ?? []).map((points) => formatNumber(points)).join(' / ')}</strong>
+                              <small>
+                                {rule.conditions?.length ?? 0} 条条件
+                              </small>
+                            </div>
+                          ) : distScoreSummary ? (
+                            <div className="strategy-manage-summary-item strategy-manage-summary-item-dist-score">
+                              <span>得分</span>
+                              <strong>{formatNumber(distScoreSummary.pointsMin)} ~ {formatNumber(distScoreSummary.pointsMax)}</strong>
+                              <small>
+                                字典分 · {distScoreSummary.segmentCount} 段 ·
+                                区间 {formatNumber(distScoreSummary.intervalMin)} ~ {formatNumber(distScoreSummary.intervalMax)}
+                              </small>
+                            </div>
+                          ) : (
+                            <div className="strategy-manage-summary-item">
+                              <span>得分</span>
+                              <strong>{formatNumber(rule.points)}</strong>
+                            </div>
+                          )}
+                          <div className="strategy-manage-summary-item">
+                            <span>Stage</span>
+                            <strong>{rule.stage}</strong>
+                          </div>
+                          <div className="strategy-manage-summary-item">
+                            <span>Scope</span>
+                            <strong>{rule.scope_way}</strong>
+                          </div>
+                          <div className="strategy-manage-summary-item">
+                            <span>Windows</span>
+                            <strong>{rule.scope_windows}</strong>
+                          </div>
+                        </div>
+                        <pre className="strategy-manage-expression-preview">{buildRuleExpressionPreview(rule)}</pre>
+                      </article>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {draft ? (
+        <div className="strategy-manage-modal-backdrop strategy-manage-modal-backdrop-top" role="presentation">
+          <div className="strategy-manage-modal strategy-manage-editor-modal" role="dialog" aria-modal="true">
+            <div className="strategy-manage-list-head">
+              <strong>{editorMode === 'create' ? '新建 Rule' : `编辑 Rule · ${editingOriginalName}`}</strong>
+              <span>{draft.scene_name || '未选择 scene'}</span>
+            </div>
+            {editorError ? <div className="strategy-manage-message strategy-manage-message-error">{editorError}</div> : null}
+            {checkNotice ? <div className="strategy-manage-message strategy-manage-message-notice">{checkNotice}</div> : null}
+            <div className="strategy-manage-editor-grid">
+              <label className="strategy-manage-field">
+                <span>名称</span>
+                <input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} />
+              </label>
+              <label className="strategy-manage-field">
+                <span>策略类型</span>
+                <select
+                  value={draft.kind}
+                  onChange={(event) =>
+                    updateDraftKind(event.target.value as StrategyManageRuleDraft['kind'])
+                  }
+                >
+                  {RULE_KIND_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="strategy-manage-field">
+                <span>Scene</span>
+                <select value={draft.scene_name} onChange={(event) => setDraft({ ...draft, scene_name: event.target.value })}>
+                  {scenes.map((scene) => (
+                    <option key={scene.name} value={scene.name}>
+                      {scene.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="strategy-manage-field">
+                <span>Stage</span>
+                <select value={draft.stage} onChange={(event) => setDraft({ ...draft, stage: event.target.value })}>
+                  {STAGE_OPTIONS.map((item) => (
+                    <option key={item} value={item}>
+                      {item}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="strategy-manage-field">
+                <span>Scope</span>
+                <select value={draft.scope_way} onChange={(event) => updateDraftScopeWay(event.target.value)}>
+                  {draftScopeOptions.map((item) => (
+                    <option key={item} value={item}>
+                      {item}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="strategy-manage-field">
+                <span>窗口</span>
+                <input
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={scopeWindowsText}
+                  onChange={(event) => setScopeWindowsText(event.target.value)}
+                />
+              </label>
+              <label className="strategy-manage-field strategy-manage-field-span-full">
+                <span>说明</span>
+                <input value={draft.explain} onChange={(event) => setDraft({ ...draft, explain: event.target.value })} />
+              </label>
+              {draft.kind === 'single' ? (
+                <>
+                  <label className="strategy-manage-field strategy-manage-field-span-full">
+                    <span>表达式</span>
+                    <textarea rows={8} value={draft.when} onChange={(event) => setDraft({ ...draft, when: event.target.value })} />
+                  </label>
+                  <div className="strategy-manage-field strategy-manage-field-span-full">
+                    <span>得分方式</span>
+                    <div className="strategy-manage-score-mode">
+                      <button
+                        type="button"
+                        className={scoreMode === 'fixed' ? 'strategy-manage-score-mode-btn is-active' : 'strategy-manage-score-mode-btn'}
+                        onClick={() => setScoreMode('fixed')}
+                      >
+                        固定分
+                      </button>
+                      <button
+                        type="button"
+                        className={scoreMode === 'dist' ? 'strategy-manage-score-mode-btn is-active' : 'strategy-manage-score-mode-btn'}
+                        onClick={() => setScoreMode('dist')}
+                        disabled={!draftScopeSupportsDistPoints}
+                      >
+                        区间字典
+                      </button>
+                    </div>
+                  </div>
+                  {scoreMode === 'fixed' ? (
+                    <label className="strategy-manage-field strategy-manage-field-span-full">
+                      <span>固定分值</span>
+                      <input value={fixedPointsText} onChange={(event) => setFixedPointsText(event.target.value)} />
+                    </label>
+                  ) : (
+                    <label className="strategy-manage-field strategy-manage-field-span-full">
+                      <span>区间字典，每行 `min,max,points`</span>
+                      <textarea rows={6} value={distPointsText} onChange={(event) => setDistPointsText(event.target.value)} />
+                    </label>
+                  )}
+                  {draft.scope_way.toUpperCase() === 'EACH' ? (
+                    <label className="strategy-manage-field strategy-manage-field-span-full">
+                      <span>窗口累计得分的正负限制值</span>
+                      <input
+                        type="number"
+                        min="0"
+                        step="any"
+                        value={maxPointsText}
+                        onChange={(event) => setMaxPointsText(event.target.value)}
+                        placeholder="例如 5：得分限制在 -5～5"
+                      />
+                    </label>
+                  ) : null}
+                </>
+              ) : (
+                <div className="strategy-manage-combination-editor strategy-manage-field-span-full">
+                  <div className="strategy-manage-combination-intro">
+                    <div>
+                      <strong>组合计分</strong>
+                      <p>先按命中条件数量得到基础分；基础分不为 0 时，直接累加所有命中条件的额外分。</p>
+                    </div>
+                    <span>{draft.conditions.length} 条条件</span>
+                  </div>
+
+                  <section className="strategy-manage-combination-section">
+                    <div className="strategy-manage-combination-section-head">
+                      <div>
+                        <strong>基础条件</strong>
+                        <span>每条条件最多计一次命中</span>
+                      </div>
+                      <button className="strategy-manage-inline-btn" type="button" onClick={addCombinationCondition}>
+                        添加条件
+                      </button>
+                    </div>
+                    <div className="strategy-manage-combination-list">
+                      {draft.conditions.map((condition, index) => (
+                        <article className="strategy-manage-combination-row" key={`condition-${index}`}>
+                          <div className="strategy-manage-combination-row-head">
+                            <strong>条件 {index + 1}</strong>
+                            <button
+                              className="strategy-manage-inline-btn is-danger"
+                              type="button"
+                              onClick={() => removeCombinationCondition(index)}
+                              disabled={draft.conditions.length <= 1}
+                            >
+                              删除
+                            </button>
+                          </div>
+                          <label className="strategy-manage-field">
+                            <span>条件名称</span>
+                            <input
+                              value={condition.name}
+                              onChange={(event) =>
+                                updateCombinationCondition(index, 'name', event.target.value)
+                              }
+                              placeholder="例如：价格突破"
+                            />
+                          </label>
+                          <label className="strategy-manage-field">
+                            <span>触发表达式</span>
+                            <textarea
+                              rows={4}
+                              value={condition.when}
+                              onChange={(event) =>
+                                updateCombinationCondition(index, 'when', event.target.value)
+                              }
+                              placeholder="例如：C > HHV(REF(H, 1), 20)"
+                            />
+                          </label>
+                          <label className="strategy-manage-field">
+                            <span>满足此条件额外加分</span>
+                            <input
+                              type="number"
+                              step="any"
+                              value={combinationBonusPointTexts[index] ?? ''}
+                              onChange={(event) =>
+                                updateCombinationCondition(
+                                  index,
+                                  'bonus_points',
+                                  event.target.value,
+                                )
+                              }
+                            />
+                          </label>
+                        </article>
+                      ))}
+                    </div>
+                  </section>
+
+                  <section className="strategy-manage-combination-section">
+                    <div className="strategy-manage-combination-section-head">
+                      <div>
+                        <strong>命中数得分</strong>
+                        <span>配置命中 1 条及以上的得分档位</span>
+                      </div>
+                    </div>
+                    <div className="strategy-manage-hit-score-grid">
+                      {combinationHitPointTexts.map((points, index) => {
+                        const hitCount = index + 1
+                        return (
+                          <label className="strategy-manage-hit-score-item" key={`hit-score-${hitCount}`}>
+                            <span>命中 {hitCount} 条</span>
+                            <input
+                              type="number"
+                              step="any"
+                              value={points}
+                              onChange={(event) => updateCombinationHitPoints(hitCount, event.target.value)}
+                            />
+                          </label>
+                        )
+                      })}
+                    </div>
+                  </section>
+
+                  <section className="strategy-manage-combination-section">
+                    <div className="strategy-manage-combination-section-head">
+                      <div>
+                        <strong>分数范围限制</strong>
+                        <span>填写 5 表示分数最高为 5、最低为 -5；留空表示不限制</span>
+                      </div>
+                    </div>
+                    <div className="strategy-manage-combination-cap-grid">
+                      <label className="strategy-manage-field">
+                        <span>额外分的正负限制值</span>
+                        <input
+                          type="number"
+                          min="0"
+                          step="any"
+                          value={maxBonusPointsText}
+                          onChange={(event) => setMaxBonusPointsText(event.target.value)}
+                          placeholder="例如 5：限制在 -5～5"
+                        />
+                      </label>
+                      <label className="strategy-manage-field">
+                        <span>最终总分的正负限制值</span>
+                        <input
+                          type="number"
+                          min="0"
+                          step="any"
+                          value={maxPointsText}
+                          onChange={(event) => setMaxPointsText(event.target.value)}
+                          placeholder="例如 5：限制在 -5～5"
+                        />
+                      </label>
+                    </div>
+                  </section>
+                </div>
+              )}
+            </div>
+            <div className="strategy-manage-editor-actions">
+              <button
+                className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-secondary"
+                type="button"
+                onClick={() => void onCheckDraft()}
+                disabled={isBusy}
+              >
+                检查草稿
+              </button>
+              <button className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-primary" type="button" onClick={() => void onSaveDraft()} disabled={isBusy}>
+                {busyAction === 'saving' ? '保存中...' : '保存'}
+              </button>
+              <button
+                className="strategy-manage-toolbar-btn"
+                type="button"
+                onClick={() => {
+                  setDraft(null)
+                  setEditingOriginalName('')
+                  setEditorError('')
+                }}
+                disabled={isBusy}
+              >
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {sceneDraft ? (
+        <div className="strategy-manage-modal-backdrop" role="presentation">
+          <div className="strategy-manage-modal" role="dialog" aria-modal="true">
+            <div className="strategy-manage-list-head">
+              <strong>{sceneEditorMode === 'create' ? '新建 Scene' : `配置 Scene · ${editingSceneOriginalName}`}</strong>
+              <span>scene 方向、阈值与证据分</span>
+            </div>
+            {sceneEditorError ? <div className="strategy-manage-message strategy-manage-message-error">{sceneEditorError}</div> : null}
+            <div className="strategy-manage-editor-grid strategy-manage-editor-grid-scene">
+              <label className="strategy-manage-field strategy-manage-field-span-full">
+                <span>名称</span>
+                <input value={sceneDraft.name} onChange={(event) => setSceneDraft({ ...sceneDraft, name: event.target.value })} />
+              </label>
+              <label className="strategy-manage-field">
+                <span>direction</span>
+                <select value={sceneDirectionText} onChange={(event) => setSceneDirectionText(event.target.value)}>
+                  {SCENE_DIRECTION_OPTIONS.map((item) => (
+                    <option key={item} value={item}>
+                      {item}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="strategy-manage-field">
+                <span>observe_threshold</span>
+                <input
+                  type="number"
+                  step="0.1"
+                  value={observeThresholdText}
+                  onChange={(event) => setObserveThresholdText(event.target.value)}
+                />
+              </label>
+              <label className="strategy-manage-field">
+                <span>trigger_threshold</span>
+                <input
+                  type="number"
+                  step="0.1"
+                  value={triggerThresholdText}
+                  onChange={(event) => setTriggerThresholdText(event.target.value)}
+                />
+              </label>
+              <label className="strategy-manage-field">
+                <span>confirm_threshold</span>
+                <input
+                  type="number"
+                  step="0.1"
+                  value={confirmThresholdText}
+                  onChange={(event) => setConfirmThresholdText(event.target.value)}
+                />
+              </label>
+              <label className="strategy-manage-field">
+                <span>fail_threshold</span>
+                <input
+                  type="number"
+                  step="0.1"
+                  value={failThresholdText}
+                  onChange={(event) => setFailThresholdText(event.target.value)}
+                />
+              </label>
+            </div>
+            <div className="strategy-manage-editor-actions">
+              <button className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-primary" type="button" onClick={() => void onSaveSceneDraft()} disabled={isBusy}>
+                {busyAction === 'saving' ? '保存中...' : '保存'}
+              </button>
+              <button
+                className="strategy-manage-toolbar-btn"
+                type="button"
+                onClick={() => {
+                  setSceneDraft(null)
+                  setEditingSceneOriginalName('')
+                  setSceneEditorError('')
+                }}
+                disabled={isBusy}
+              >
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {isBulkEditorOpen ? (
+        <div className="strategy-manage-modal-backdrop" role="presentation">
+          <div
+            ref={bulkModalRef}
+            className="strategy-manage-modal strategy-manage-editor-modal"
+            role="dialog"
+            aria-modal="true"
+          >
+            <div className="strategy-manage-list-head strategy-manage-bulk-head">
+              <strong>策略整体编辑</strong>
+              <span>候选池点选加入；Scene 方块内点 Rule 即移出；保存前只改临时草稿</span>
+            </div>
+
+            <div className="strategy-manage-bulk-top-inline">
+              <span className="strategy-manage-tip">将直接覆盖：{refactorFileName}</span>
+              <div className="strategy-manage-bulk-kpi">
+                <div className="strategy-manage-summary-item">
+                  <span>原始 Rule</span>
+                  <strong>{bulkTotalRuleCount}</strong>
+                </div>
+                <div className="strategy-manage-summary-item">
+                  <span>篮子内</span>
+                  <strong>{bulkBucketRuleCount}</strong>
+                </div>
+                <div className="strategy-manage-summary-item">
+                  <span>候选池</span>
+                  <strong>{bulkPendingCount}</strong>
+                </div>
+              </div>
+            </div>
+
+            <div className="strategy-manage-list-head">
+              <div className="strategy-manage-bulk-row-actions">
+                <span className="strategy-manage-tip">当前放入目标：{bulkActiveSceneName || '未选择'}</span>
+                <button className="strategy-manage-inline-btn" type="button" onClick={addRefactorScene}>新增 Scene</button>
+                <button
+                  className="strategy-manage-inline-btn is-danger"
+                  type="button"
+                  onClick={clearBulkEditor}
+                  disabled={isBusy || (refactorScenes.length === 0 && refactorRules.length === 0)}
+                >
+                  全部清空
+                </button>
+              </div>
+            </div>
+
+            <div
+              ref={bulkBoardRef}
+              className={`strategy-manage-bulk-simple-board strategy-manage-bulk-simple-board-${bulkLayoutMode}`}
+              style={bulkBoardStyle}
+            >
+              <section className="strategy-manage-bulk-board-col strategy-manage-bulk-board-col-pool">
+                <div className="strategy-manage-list-head">
+                  <strong>候选 Rule 池（点击放入当前目标 Scene）</strong>
+                  <span>{bulkFilteredRules.length} / {bulkCandidateRuleCount} 条候选</span>
+                </div>
+                <div className="strategy-manage-bulk-filter-bar strategy-manage-bulk-filter-bar-simple strategy-manage-bulk-filter-bar-compact">
+                  <label className="strategy-manage-field">
+                    <span>按 scene 过滤</span>
+                    <select value={bulkRuleSceneFilter} onChange={(event) => setBulkRuleSceneFilter(event.target.value)}>
+                      <option value="ALL">全部</option>
+                      {scenes.map((scene) => (
+                        <option key={scene.name} value={scene.name}>{scene.name}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="strategy-manage-field strategy-manage-field-grow">
+                    <span>关键词</span>
+                    <input
+                      value={bulkRuleKeyword}
+                      onChange={(event) => setBulkRuleKeyword(event.target.value)}
+                      placeholder="名称 / 表达式 / 说明"
+                    />
+                  </label>
+                </div>
+                <div
+                  ref={bulkRulePoolRef}
+                  className="strategy-manage-bulk-rule-list strategy-manage-bulk-rule-pool"
+                >
+                  {bulkFilteredRules.map((rule) => (
+                    <button
+                      key={rule.name}
+                      type="button"
+                      className="strategy-manage-bulk-rule-item strategy-manage-bulk-rule-click"
+                      onClick={() => addRuleToRefactor(rule)}
+                    >
+                      <div>
+                        <div className="strategy-manage-rule-card-name">{rule.name}</div>
+                        <div className="strategy-manage-tip">{rule.scene_name} · {rule.stage} · {rule.scope_way}</div>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </section>
+
+              <section className="strategy-manage-bulk-board-col strategy-manage-bulk-board-col-center strategy-manage-bulk-board-col-scenes">
+                <div className="strategy-manage-list-head">
+                  <strong>Scene 篮子区（点击 Scene 设为放入目标）</strong>
+                  <span>{refactorRules.length} 条在篮子内</span>
+                </div>
+                <div className="strategy-manage-bulk-validation">
+                  <div className="strategy-manage-bulk-validation-head">
+                    <strong>校验</strong>
+                    <span>{bulkValidationIssues.length === 0 ? '通过' : `${bulkValidationIssues.length} 个问题`}</span>
+                  </div>
+                  {bulkValidationIssues.length > 0 ? (
+                    <ul className="strategy-manage-bulk-issue-list">
+                      {bulkValidationIssues.slice(0, 6).map((issue) => (
+                        <li key={issue}>{issue}</li>
+                      ))}
+                      {bulkValidationIssues.length > 6 ? <li key="__more">... 另有 {bulkValidationIssues.length - 6} 项</li> : null}
+                    </ul>
+                  ) : (
+                    <p className="strategy-manage-note">当前临时策略结构合法，可直接保存覆盖策略文件。</p>
+                  )}
+                </div>
+                <div className="strategy-manage-bulk-scene-strip" ref={bulkSceneStripRef}>
+                  {refactorScenes.map((scene) => {
+                    const sceneName = scene.name.trim()
+                    const bucket = sceneName ? (refactorRulesByScene.get(sceneName) ?? []) : []
+                    const active = bulkActiveSceneName === sceneName
+                    const isNewScene = bulkNewSceneId === scene.id
+                    return (
+                      <article key={scene.id} className={active ? 'strategy-manage-bulk-scene-box is-active' : 'strategy-manage-bulk-scene-box'}>
+                        <button
+                          type="button"
+                          className="strategy-manage-bulk-scene-anchor"
+                          onClick={() => setBulkActiveSceneName(sceneName)}
+                        >
+                          <div className="strategy-manage-bulk-row-head">
+                            <strong>{sceneName || '未命名 Scene'}</strong>
+                            <span>{bucket.length} 条</span>
+                          </div>
+                        </button>
+
+                        {isNewScene ? (
+                          <div className="strategy-manage-editor-grid strategy-manage-editor-grid-scene">
+                            <label className="strategy-manage-field strategy-manage-field-span-full">
+                              <span>Scene 名称</span>
+                              <input value={scene.name} onChange={(event) => updateRefactorScene(scene.id, 'name', event.target.value)} />
+                            </label>
+                            <label className="strategy-manage-field">
+                              <span>direction</span>
+                              <select value={scene.direction} onChange={(event) => updateRefactorScene(scene.id, 'direction', event.target.value)}>
+                                {SCENE_DIRECTION_OPTIONS.map((item) => (
+                                  <option key={item} value={item}>
+                                    {item}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                            <label className="strategy-manage-field"><span>observe</span><input type="number" step="0.1" value={scene.observe_threshold} onChange={(event) => updateRefactorScene(scene.id, 'observe_threshold', event.target.value)} /></label>
+                            <label className="strategy-manage-field"><span>trigger</span><input type="number" step="0.1" value={scene.trigger_threshold} onChange={(event) => updateRefactorScene(scene.id, 'trigger_threshold', event.target.value)} /></label>
+                            <label className="strategy-manage-field"><span>confirm</span><input type="number" step="0.1" value={scene.confirm_threshold} onChange={(event) => updateRefactorScene(scene.id, 'confirm_threshold', event.target.value)} /></label>
+                            <label className="strategy-manage-field"><span>fail</span><input type="number" step="0.1" value={scene.fail_threshold} onChange={(event) => updateRefactorScene(scene.id, 'fail_threshold', event.target.value)} /></label>
+                          </div>
+                        ) : (
+                          <div className="strategy-manage-bulk-scene-metrics">
+                            <span>direction {scene.direction}</span>
+                            <span>observe {formatNumber(scene.observe_threshold)}</span>
+                            <span>trigger {formatNumber(scene.trigger_threshold)}</span>
+                            <span>confirm {formatNumber(scene.confirm_threshold)}</span>
+                            <span>fail {formatNumber(scene.fail_threshold)}</span>
+                          </div>
+                        )}
+
+                        <div className="strategy-manage-bulk-row-actions">
+                          {isNewScene ? (
+                            <button className="strategy-manage-inline-btn" type="button" onClick={() => setBulkNewSceneId('')}>
+                              完成配置
+                            </button>
+                          ) : (
+                            <button className="strategy-manage-inline-btn" type="button" onClick={() => setBulkNewSceneId(scene.id)}>
+                              编辑配置
+                            </button>
+                          )}
+                          <button className="strategy-manage-inline-btn is-danger" type="button" onClick={() => removeRefactorScene(scene.id)}>
+                            删除 Scene
+                          </button>
+                        </div>
+
+                        <div className="strategy-manage-bulk-scene-rules">
+                          {bucket.length === 0 ? <div className="strategy-manage-empty">篮子内暂无 Rule</div> : null}
+                          {bucket.map(({ rule, index }) => (
+                            <button
+                              key={`${rule.name}-${index}`}
+                              type="button"
+                              className="strategy-manage-bulk-bucket-item strategy-manage-bulk-rule-click"
+                              onClick={() => removeRuleFromScene(index)}
+                            >
+                              <div className="strategy-manage-rule-card-name">{rule.name || '未命名 Rule'}</div>
+                              <div className="strategy-manage-tip">{rule.stage} · {rule.scope_way} · 点击移出</div>
+                            </button>
+                          ))}
+                        </div>
+                      </article>
+                    )
+                  })}
+                </div>
+              </section>
+            </div>
+
+            {bulkError ? <div className="strategy-manage-message strategy-manage-message-error">{bulkError}</div> : null}
+            <div className="strategy-manage-editor-actions">
+              <button className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-primary" type="button" onClick={() => void onSaveBulkScene()} disabled={isBusy}>
+                {busyAction === 'saving' ? '保存中...' : '保存当前策略'}
+              </button>
+              <button className="strategy-manage-toolbar-btn" type="button" onClick={closeBulkEditor} disabled={isBusy}>
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      <StrategyAssetModal
+        open={isAssetModalOpen}
+        sourcePath={sourcePath}
+        initialAssetKind={isChipView ? 'chip' : 'rank'}
+        onClose={() => setIsAssetModalOpen(false)}
+        onActivated={() => {
+          void loadPage()
+        }}
+      />
+    </div>
+  )
+}
