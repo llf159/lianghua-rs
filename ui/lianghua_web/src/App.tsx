@@ -25,6 +25,9 @@ const pages = {
   ExpressionStockPick: lazy(
     () => import("./pages/desktop/ExpressionStockPickPage"),
   ),
+  ExpressionBacktest: lazy(
+    () => import("./pages/desktop/ExpressionBacktestPage"),
+  ),
   ExpressionValidationSamples: lazy(
     () => import("./pages/desktop/ExpressionValidationSamplesPage"),
   ),
@@ -191,6 +194,10 @@ function AppRoutes() {
               <Route
                 path="scene-layer"
                 element={<pages.SceneLayerBacktest />}
+              />
+              <Route
+                path="expression-backtest"
+                element={<pages.ExpressionBacktest />}
               />
               <Route
                 path="correlation-orthogonality"
