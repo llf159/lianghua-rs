@@ -16,6 +16,7 @@ import {
 import DataTaskProgress from '../../shared/DataTaskProgress'
 import {
   calcProgressPercent,
+  formatProgressDuration,
   getCurrentObjectText,
   getPhaseStep,
   getProgressCounterText,
@@ -24,6 +25,7 @@ import {
   normalizeProgressPhase,
   type ProgressWorkflowStep,
   useAnimatedProgressPercent,
+  useProgressTiming,
 } from '../../shared/dataTaskProgressUtils'
 import ConfirmDialog from '../../shared/ConfirmDialog'
 import { readStoredDetailCyqModel } from '../../shared/chartSettings'
@@ -500,6 +502,7 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
   const isFirstDownload = status?.plannedAction === 'first-download'
   const latestDbTradeDate = formatTradeDate(status?.sourceDb.maxTradeDate)
   const deferredProgress = useDeferredValue(progress)
+  const progressTiming = useProgressTiming(busyAction === 'running', progress)
   const resolvedIncrementalStartDate =
     inputDateToCompact(startDateInput) || status?.sourceDb.minTradeDate || '20240101'
   const progressPercent =
@@ -1219,7 +1222,8 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
             elapsedText={formatElapsedMs(deferredProgress?.elapsedMs ?? 0)}
             shownProgressPercent={shownProgressPercent}
             progressCounterText={progressCounterText}
-            currentObjectText={getCurrentObjectText(deferredProgress)}
+            estimatedRemainingText={formatProgressDuration(progressTiming.estimatedRemainingMs)}
+            estimatedTotalText={formatProgressDuration(progressTiming.estimatedTotalMs)}
             message={deferredProgress?.message}
             fallbackMessage="下载已经启动，正在等待后端返回当前状态。安卓端长时间无响应时，可以先看这里的阶段提示和耗时。"
           />

@@ -1744,24 +1744,117 @@ async fn run_ranking_score_calculation(
     strategy_path: Option<String>,
     start_date: String,
     end_date: String,
+    download_id: Option<String>,
 ) -> Result<RankComputeRunResult, String> {
+    let download_id = download_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
     tauri::async_runtime::spawn_blocking(move || {
-        let strategy_file_path =
-            lianghua_data::data::resolve_strategy_path(&source_path, strategy_path.as_deref());
-        let snapshot_strategy_path = snapshot_rank_compute_strategy(
-            &warehouse::warehouse_root(&app)?,
-            "source",
-            &strategy_file_path,
-            Some(&start_date),
-            Some(&end_date),
-        )?;
-        let snapshot_strategy_path = snapshot_strategy_path.display().to_string();
-        core_run_ranking_score_calculation(
-            &source_path,
-            Some(snapshot_strategy_path.as_str()),
-            &start_date,
-            &end_date,
-        )
+        let started_at = Instant::now();
+        let action = "score".to_string();
+        let action_label = "排名计算".to_string();
+        if let Some(download_id) = download_id.as_deref() {
+            emit_ranking_compute_progress_event(
+                &app,
+                RankingComputeProgressEventPayload {
+                    download_id: download_id.to_string(),
+                    phase: "started".to_string(),
+                    action: action.clone(),
+                    action_label: action_label.clone(),
+                    elapsed_ms: 0,
+                    finished: 0,
+                    total: 0,
+                    current_label: None,
+                    message: "排名计算已启动，正在准备评分数据。".to_string(),
+                },
+            );
+        }
+
+        let result = (|| -> Result<RankComputeRunResult, String> {
+            let strategy_file_path =
+                lianghua_data::data::resolve_strategy_path(&source_path, strategy_path.as_deref());
+            let snapshot_strategy_path = snapshot_rank_compute_strategy(
+                &warehouse::warehouse_root(&app)?,
+                "source",
+                &strategy_file_path,
+                Some(&start_date),
+                Some(&end_date),
+            )?;
+            let snapshot_strategy_path = snapshot_strategy_path.display().to_string();
+
+            let progress_app = app.clone();
+            let progress_download_id = download_id.clone();
+            let progress_action = action.clone();
+            let progress_action_label = action_label.clone();
+            let progress_cb =
+                move |progress: lianghua_download::download::runner::DownloadProgress| {
+                    if let Some(download_id) = progress_download_id.as_deref() {
+                        emit_ranking_compute_progress_event(
+                            &progress_app,
+                            RankingComputeProgressEventPayload {
+                                download_id: download_id.to_string(),
+                                phase: progress.phase,
+                                action: progress_action.clone(),
+                                action_label: progress_action_label.clone(),
+                                elapsed_ms: started_at.elapsed().as_millis() as u64,
+                                finished: progress.finished as u64,
+                                total: progress.total as u64,
+                                current_label: progress.current_label,
+                                message: progress.message,
+                            },
+                        );
+                    }
+                };
+
+            core_run_ranking_score_calculation(
+                &source_path,
+                Some(snapshot_strategy_path.as_str()),
+                &start_date,
+                &end_date,
+                download_id.as_ref().map(|_| {
+                    &progress_cb
+                        as &lianghua_download::download::runner::DownloadProgressCallback<'_>
+                }),
+            )
+        })();
+
+        match (&result, download_id.as_deref()) {
+            (Ok(run_result), Some(download_id)) => emit_ranking_compute_progress_event(
+                &app,
+                RankingComputeProgressEventPayload {
+                    download_id: download_id.to_string(),
+                    phase: "completed".to_string(),
+                    action,
+                    action_label,
+                    elapsed_ms: started_at.elapsed().as_millis() as u64,
+                    finished: 1,
+                    total: 1,
+                    current_label: None,
+                    message: format!(
+                        "排名计算完成，区间 {} 至 {}。",
+                        run_result.start_date.as_deref().unwrap_or(""),
+                        run_result.end_date.as_deref().unwrap_or("")
+                    ),
+                },
+            ),
+            (Err(error), Some(download_id)) => emit_ranking_compute_progress_event(
+                &app,
+                RankingComputeProgressEventPayload {
+                    download_id: download_id.to_string(),
+                    phase: "failed".to_string(),
+                    action,
+                    action_label,
+                    elapsed_ms: started_at.elapsed().as_millis() as u64,
+                    finished: 0,
+                    total: 0,
+                    current_label: None,
+                    message: format!("排名计算失败: {error}"),
+                },
+            ),
+            _ => {}
+        }
+
+        result
     })
     .await
     .map_err(|error| error.to_string())?

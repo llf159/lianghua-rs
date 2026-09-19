@@ -33,7 +33,7 @@ import sys
 import time
 from pathlib import Path
 
-DEFAULT_SOURCE = "/home/lmingyuanl/.local/share/com.mingyuan.lianghua/source"
+DEFAULT_SOURCE = "/run/media/lmingyuanl/mingyuan-512sk/lianghua-data/source"
 DEFAULT_BIN = str(Path(__file__).resolve().parent.parent / "target" / "debug" / "strategy_dimension_research")
 DEFAULT_OUT = os.path.expanduser("~/.local/share/lianghua-dim-research")
 DEFAULT_START = "20260105"

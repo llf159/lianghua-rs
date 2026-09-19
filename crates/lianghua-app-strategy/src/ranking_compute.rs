@@ -616,6 +616,7 @@ pub fn run_ranking_score_calculation(
     strategy_path: Option<&str>,
     start_date: &str,
     end_date: &str,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<RankComputeRunResult, String> {
     let source_path = source_path.trim().to_string();
     if source_path.is_empty() {
@@ -629,7 +630,14 @@ pub fn run_ranking_score_calculation(
     }
 
     let started_at = Instant::now();
-    let profile = scoring_all_to_db(&source_path, strategy_path, "qfq", &start_date, &end_date)?;
+    let profile = scoring_all_to_db(
+        &source_path,
+        strategy_path,
+        "qfq",
+        &start_date,
+        &end_date,
+        progress_cb,
+    )?;
     let status = get_rank_compute_status_inner(&source_path, strategy_path)?;
     Ok(RankComputeRunResult {
         action: "score".to_string(),

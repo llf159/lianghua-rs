@@ -2,9 +2,11 @@ use lianghua_model::scoring::{
     CompactRuleScore, SceneBacktestRow, SceneDetails, ScoreBatch, ScoreDetails, ScoreSummary,
     ScoreWriteMessage, ScoreWriteProfile, TieBreakWay,
 };
+use lianghua_model::{DownloadProgress, DownloadProgressCallback};
 use rayon::prelude::*;
 use std::{
     collections::{HashMap, HashSet},
+    sync::Mutex,
     sync::mpsc::sync_channel,
     thread, time,
 };
@@ -36,6 +38,24 @@ use crate::scoring::{
 };
 
 const SCORING_MEMORY_GROUP_SIZE: usize = 32;
+
+fn emit_scoring_progress(
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
+    phase: &str,
+    finished: usize,
+    total: usize,
+    message: impl Into<String>,
+) {
+    if let Some(cb) = progress_cb {
+        cb(DownloadProgress {
+            phase: phase.to_string(),
+            finished,
+            total,
+            current_label: None,
+            message: message.into(),
+        });
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub enum ScoringMemoryMode {
@@ -363,12 +383,20 @@ pub fn scoring_all_to_db(
     adj_type: &str,
     start_date: &str,
     end_date: &str,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<ScoringRunProfile, String> {
     let total_started_at = time::Instant::now();
     let out_db = result_db_path(source_dir);
     let init_result_db_started_at = time::Instant::now();
     init_result_db(&out_db)?;
     let init_result_db_ms = init_result_db_started_at.elapsed().as_millis() as u64;
+    emit_scoring_progress(
+        progress_cb,
+        "score_prepare",
+        0,
+        0,
+        "结果库初始化完成，正在准备评分数据。",
+    );
 
     let prepare_started_at = time::Instant::now();
     let st_list = load_st_list(source_dir)?;
@@ -428,6 +456,15 @@ pub fn scoring_all_to_db(
     });
 
     let compute_started_at = time::Instant::now();
+    let progress_counter = Mutex::new(0_usize);
+    let total_stock_count = tc_list.len();
+    emit_scoring_progress(
+        progress_cb,
+        "score_compute",
+        0,
+        total_stock_count,
+        format!("评分数据准备完成，开始计算 {total_stock_count} 只股票。"),
+    );
     let compute_result = tc_list
         .par_chunks(SCORING_MEMORY_GROUP_SIZE)
         .try_for_each_init(
@@ -467,10 +504,27 @@ pub fn scoring_all_to_db(
                 sender
                     .send(ScoreWriteMessage::Batch(batch))
                     .map_err(|e| format!("发送评分批次失败:{e}"))?;
+                let mut processed = progress_counter.lock().expect("评分进度锁被污染");
+                *processed += ts_group.len();
+                let processed = *processed;
+                emit_scoring_progress(
+                    progress_cb,
+                    "score_compute",
+                    processed,
+                    total_stock_count,
+                    format!("已完成 {processed}/{total_stock_count} 只股票评分。"),
+                );
                 Ok(())
             },
         );
     let compute_and_send_batches_ms = compute_started_at.elapsed().as_millis() as u64;
+    emit_scoring_progress(
+        progress_cb,
+        "score_write",
+        0,
+        0,
+        "评分计算完成，正在写入结果库。",
+    );
 
     if let Err(err) = &compute_result {
         let _ = abort_tx.send(ScoreWriteMessage::Abort(err.clone()));

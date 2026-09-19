@@ -43,11 +43,13 @@ import {
 import DataTaskProgress from '../../shared/DataTaskProgress'
 import {
   calcProgressPercent,
+  formatProgressDuration,
   getCurrentObjectText,
   getPhaseStep,
   getProgressCounterText,
   normalizeProgressPhase,
   useAnimatedProgressPercent,
+  useProgressTiming,
 } from '../../shared/dataTaskProgressUtils'
 import ConfirmDialog from '../../shared/ConfirmDialog'
 import './css/DataDownloadPage.css'
@@ -151,16 +153,6 @@ function formatElapsedMs(value: number) {
   }
 
   return `${(value / 1000).toFixed(value >= 10_000 ? 1 : 2)} s`
-}
-
-function formatProgressDuration(value: number | null) {
-  if (value === null || !Number.isFinite(value)) return '估算中'
-  const seconds = Math.ceil(Math.max(0, value) / 1000)
-  const hours = Math.floor(seconds / 3600)
-  const minutes = Math.floor((seconds % 3600) / 60)
-  if (hours > 0) return `${hours}小时 ${minutes}分 ${seconds % 60}秒`
-  if (minutes > 0) return `${minutes}分 ${seconds % 60}秒`
-  return `${seconds}秒`
 }
 
 function describeDbRange(range: RankComputeDbRange | null | undefined) {
@@ -282,6 +274,8 @@ function getProgressWorkflow(action: string | null | undefined) {
       return ['compute_cyq'] as string[]
     case 'cyq-chen':
       return ['compute_cyq_chen'] as string[]
+    case 'score':
+      return ['score_prepare', 'score_compute', 'score_write'] as string[]
     default:
       return null
   }
@@ -374,6 +368,9 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
     busyAction === 'indicator-running' ||
     busyAction === 'cyq-computing' ||
     busyAction === 'cyq-chen-computing'
+  const showRankingComputeProgress =
+    busyAction === 'computing' || busyAction === 'recomputing-result-db'
+  const showTaskProgress = showComputeProgress || showRankingComputeProgress
   const showSimilarityProgress = busyAction === 'similarity-ranking-computing'
   const similarityPhaseIndex = SIMILARITY_PHASES.findIndex((phase) => phase.key === similarityProgress?.phase)
   const similarityPhaseLabel = similarityProgress?.phase === 'completed'
@@ -397,8 +394,9 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
     ? null
     : Math.max(0, similarityEstimatedTotalMs - similarityPhaseElapsedMs)
   const deferredProgress = useDeferredValue(progress)
+  const progressTiming = useProgressTiming(showTaskProgress, progress)
   const progressPercent = calcProgressPercent(deferredProgress, getProgressWorkflow, ['done'])
-  const shownProgressPercent = useAnimatedProgressPercent(showComputeProgress, progressPercent)
+  const shownProgressPercent = useAnimatedProgressPercent(showTaskProgress, progressPercent)
   const phaseStep = getPhaseStep(deferredProgress?.action, deferredProgress?.phase, getProgressWorkflow)
   const progressCounterText = getProgressCounterText(deferredProgress, formatPhaseLabel)
   const sourceLatestTradeDate = status?.sourceDb.maxTradeDate
@@ -770,7 +768,7 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
     )
   }
 
-  function renderProgressCard(fallbackMessage: string) {
+  function renderProgressCard(fallbackMessage: string, showEstimatedTime = false) {
     return (
       <DataTaskProgress
         phaseLabel={formatPhaseLabel(deferredProgress?.phase)}
@@ -781,7 +779,13 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
         elapsedText={formatElapsedMs(deferredProgress?.elapsedMs ?? 0)}
         shownProgressPercent={shownProgressPercent}
         progressCounterText={progressCounterText}
-        currentObjectText={getCurrentObjectText(deferredProgress)}
+        currentObjectText={showEstimatedTime ? undefined : getCurrentObjectText(deferredProgress)}
+        estimatedRemainingText={
+          showEstimatedTime ? formatProgressDuration(progressTiming.estimatedRemainingMs) : undefined
+        }
+        estimatedTotalText={
+          showEstimatedTime ? formatProgressDuration(progressTiming.estimatedTotalMs) : undefined
+        }
         message={deferredProgress?.message}
         fallbackMessage={fallbackMessage}
       />
@@ -984,15 +988,21 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
     if (previewWarnings.length > 0) {
       setFeedbackNotice('rank', `提示：${previewWarnings.join('\n')}`)
     }
-    const scoreResult = await runRankingScoreCalculation(sourcePath, startDate, endDate)
-    setStatus(scoreResult.status)
-    const warningText = scoreResult.warnings?.length
-      ? `\n\n提示：${scoreResult.warnings.join('\n')}`
-      : ''
-    setFeedbackNotice(
-      'rank',
-      `${successPrefix}（含J值同分排序），区间 ${formatTradeDate(scoreResult.startDate ?? null)} 至 ${formatTradeDate(scoreResult.endDate ?? null)}，耗时 ${formatElapsedMs(scoreResult.elapsedMs)}。${warningText}`,
-    )
+    setProgress(null)
+    const downloadId = await startProgressListener('score')
+    try {
+      const scoreResult = await runRankingScoreCalculation(sourcePath, startDate, endDate, undefined, downloadId)
+      setStatus(scoreResult.status)
+      const warningText = scoreResult.warnings?.length
+        ? `\n\n提示：${scoreResult.warnings.join('\n')}`
+        : ''
+      setFeedbackNotice(
+        'rank',
+        `${successPrefix}（含J值同分排序），区间 ${formatTradeDate(scoreResult.startDate ?? null)} 至 ${formatTradeDate(scoreResult.endDate ?? null)}，耗时 ${formatElapsedMs(scoreResult.elapsedMs)}。${warningText}`,
+      )
+    } finally {
+      stopProgressListener()
+    }
   }
 
   async function onRecomputeResultDb() {
@@ -1668,6 +1678,10 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
           </section>
         ) : null}
 
+        {showRankingComputeProgress
+          ? renderProgressCard('排名计算已经启动，正在等待后端返回股票评分进度。', true)
+          : null}
+
         {renderCardFeedback('rank')}
       </section>
 
@@ -1910,7 +1924,7 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
         </div>
 
         {busyAction === 'cyq-chen-computing'
-          ? renderProgressCard('新筹码计算已经启动，正在等待后端返回当前股票进度。')
+          ? renderProgressCard('新筹码计算已经启动，正在等待后端返回当前股票进度。', true)
           : null}
 
         {cyqChenStrategyDiff ? (

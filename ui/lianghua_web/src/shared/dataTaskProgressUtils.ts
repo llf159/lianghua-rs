@@ -21,6 +21,30 @@ type TaskProgress = {
   message: string
 }
 
+type ProgressTimingInput = {
+  action: string
+  phase: string
+  finished: number
+  total: number
+  elapsedMs: number
+}
+
+type ProgressTimingSample = {
+  taskPhase: string
+  phaseStartElapsedMs: number
+  sampledElapsedMs: number
+  sampledAtMs: number
+  finished: number
+  total: number
+}
+
+export type ProgressTiming = {
+  elapsedMs: number
+  phaseElapsedMs: number
+  estimatedTotalMs: number | null
+  estimatedRemainingMs: number | null
+}
+
 export function normalizeProgressPhase(phase: string | null | undefined) {
   switch (phase) {
     case 'retry_ths_concept':
@@ -211,6 +235,87 @@ export function getCurrentObjectText(progress: TaskProgress | null) {
   }
 
   return progress.currentLabel ?? progress.message ?? '等待后端分派任务'
+}
+
+export function formatProgressDuration(value: number | null) {
+  if (value === null || !Number.isFinite(value)) return '估算中'
+  const seconds = Math.ceil(Math.max(0, value) / 1000)
+  const hours = Math.floor(seconds / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+  if (hours > 0) return `${hours}小时 ${minutes}分 ${seconds % 60}秒`
+  if (minutes > 0) return `${minutes}分 ${seconds % 60}秒`
+  return `${seconds}秒`
+}
+
+export function useProgressTiming(
+  isRunning: boolean,
+  progress: ProgressTimingInput | null | undefined,
+): ProgressTiming {
+  const [clockMs, setClockMs] = useState(0)
+  const [sample, setSample] = useState<ProgressTimingSample | null>(null)
+
+  useEffect(() => {
+    if (!isRunning) {
+      const frameId = window.requestAnimationFrame(() => setSample(null))
+      return () => window.cancelAnimationFrame(frameId)
+    }
+
+    const timer = window.setInterval(() => setClockMs(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [isRunning])
+
+  useEffect(() => {
+    if (!isRunning || !progress) {
+      return
+    }
+
+    const frameId = window.requestAnimationFrame(() => {
+      const sampledAtMs = Date.now()
+      setSample((current) => {
+        const taskPhase = `${progress.action}::${progress.phase}`
+        const phaseChanged = !current || current.taskPhase !== taskPhase
+        const valuesChanged =
+          phaseChanged || current.finished !== progress.finished || current.total !== progress.total
+        if (!valuesChanged) {
+          return current
+        }
+
+        return {
+          taskPhase,
+          phaseStartElapsedMs: phaseChanged
+            ? progress.elapsedMs
+            : (current as ProgressTimingSample).phaseStartElapsedMs,
+          sampledElapsedMs: progress.elapsedMs,
+          sampledAtMs,
+          finished: progress.finished,
+          total: progress.total,
+        }
+      })
+    })
+    return () => window.cancelAnimationFrame(frameId)
+  }, [isRunning, progress])
+
+  if (!isRunning || !progress || !sample) {
+    return {
+      elapsedMs: 0,
+      phaseElapsedMs: 0,
+      estimatedTotalMs: null,
+      estimatedRemainingMs: null,
+    }
+  }
+
+  const elapsedMs =
+    sample.sampledElapsedMs + Math.max(0, Math.max(clockMs, sample.sampledAtMs) - sample.sampledAtMs)
+  const phaseElapsedMs = Math.max(0, elapsedMs - sample.phaseStartElapsedMs)
+  const estimatedTotalMs =
+    sample.finished > 0 && sample.total > 0
+      ? Math.max(0, sample.sampledElapsedMs - sample.phaseStartElapsedMs) *
+        (sample.total / sample.finished)
+      : null
+  const estimatedRemainingMs =
+    estimatedTotalMs === null ? null : Math.max(0, estimatedTotalMs - phaseElapsedMs)
+
+  return { elapsedMs, phaseElapsedMs, estimatedTotalMs, estimatedRemainingMs }
 }
 
 export function useAnimatedProgressPercent(

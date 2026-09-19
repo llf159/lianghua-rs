@@ -1389,6 +1389,19 @@ pub fn write_score_batches_from_channel(
         })(&mut conn)?;
         profile.summary_rank_ms = summary_rank_started_at.elapsed().as_millis() as u64;
 
+        if full_replace {
+            let shadow_key_started_at = time::Instant::now();
+            conn.execute_batch(&format!(
+                r#"
+        ALTER TABLE {SCORE_SUMMARY_SHADOW_TABLE} ADD PRIMARY KEY (ts_code, trade_date);
+        ALTER TABLE {RULE_DETAILS_SHADOW_TABLE} ADD PRIMARY KEY (ts_code, trade_date, rule_name);
+        ALTER TABLE {SCENE_DETAILS_SHADOW_TABLE} ADD PRIMARY KEY (ts_code, trade_date, scene_name);
+        "#
+            ))
+            .map_err(|e| format!("创建结果库影子表主键失败:{e}"))?;
+            profile.recreate_indexes_ms = shadow_key_started_at.elapsed().as_millis() as u64;
+        }
+
         let tx = conn
             .transaction()
             .map_err(|e| format!("创建数据库事务失败:{e}"))?;
@@ -1397,10 +1410,6 @@ pub fn write_score_batches_from_channel(
             (|tx: &Transaction<'_>| -> Result<(), String> {
                 tx.execute_batch(&format!(
                     r#"
-        ALTER TABLE {SCORE_SUMMARY_SHADOW_TABLE} ADD PRIMARY KEY (ts_code, trade_date);
-        ALTER TABLE {RULE_DETAILS_SHADOW_TABLE} ADD PRIMARY KEY (ts_code, trade_date, rule_name);
-        ALTER TABLE {SCENE_DETAILS_SHADOW_TABLE} ADD PRIMARY KEY (ts_code, trade_date, scene_name);
-
         DROP TABLE {SCORE_SUMMARY_TABLE};
         DROP TABLE {RULE_DETAILS_TABLE};
         DROP TABLE {SCENE_DETAILS_TABLE};
@@ -1436,11 +1445,7 @@ pub fn write_score_batches_from_channel(
         delete_convolution_rank_range(&tx, start_date, end_date)?;
         profile.delete_range_ms = replace_started_at.elapsed().as_millis() as u64;
 
-        if full_replace {
-            let recreate_indexes_started_at = time::Instant::now();
-            ensure_result_db_indexes(&tx)?;
-            profile.recreate_indexes_ms = recreate_indexes_started_at.elapsed().as_millis() as u64;
-        } else {
+        if !full_replace {
             let merge_started_at = time::Instant::now();
             (|tx: &Transaction<'_>| -> Result<(), String> {
                 tx.execute(
@@ -1485,6 +1490,12 @@ pub fn write_score_batches_from_channel(
         let commit_started_at = time::Instant::now();
         tx.commit().map_err(|e| format!("事务提交错误:{e}"))?;
         profile.commit_ms = commit_started_at.elapsed().as_millis() as u64;
+
+        if full_replace {
+            let index_started_at = time::Instant::now();
+            ensure_result_db_indexes(&conn)?;
+            profile.recreate_indexes_ms += index_started_at.elapsed().as_millis() as u64;
+        }
 
         Ok::<(), String>(())
     })();

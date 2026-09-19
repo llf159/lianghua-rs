@@ -131,12 +131,14 @@ export async function runRankingScoreCalculation(
   startDate: string,
   endDate: string,
   strategyPath?: string,
+  downloadId?: string,
 ) {
   return invoke<RankingComputeRunResult>('run_ranking_score_calculation', {
     sourcePath,
     strategyPath,
     startDate,
     endDate,
+    downloadId,
   })
 }
 
