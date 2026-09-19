@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { ensureManagedSourcePath } from "../../apis/managedSource";
 import { getStrategyManagePage, type StrategyManageRuleItem } from "../../apis/strategyManage";
 import {
@@ -1254,17 +1254,24 @@ export default function SceneLayerBacktestPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {rankTopKPeriodSummaries.map((item) => (
-                      <tr key={`${item.period_label}-${item.top_k}`}>
-                        <td>{item.period_label}</td>
-                        <td>Top {item.top_k}</td>
-                        <td>{formatDateLabel(item.start_date)} ~ {formatDateLabel(item.end_date)}</td>
-                        <td>{item.point_count}</td>
-                        <td>{formatPercent(item.avg_daily_residual_return)}</td>
-                        <td>{formatPercent(item.median_daily_residual_return)}</td>
-                        <td>{formatRate(item.positive_day_ratio)}</td>
-                        <td className={metricHighlightClass("t", item.hac_t_value)}>{formatNumber(item.hac_t_value)}</td>
-                      </tr>
+                    {rankTopKPeriodSummaries.map((item, index) => (
+                      <Fragment key={`${item.period_label}-${item.top_k}`}>
+                        {index === 0 || rankTopKPeriodSummaries[index - 1].top_k !== item.top_k ? (
+                          <tr className="scene-layer-contrib-table-group-separator">
+                            <td colSpan={8}>Top {item.top_k}</td>
+                          </tr>
+                        ) : null}
+                        <tr>
+                          <td>{item.period_label}</td>
+                          <td>Top {item.top_k}</td>
+                          <td>{formatDateLabel(item.start_date)} ~ {formatDateLabel(item.end_date)}</td>
+                          <td>{item.point_count}</td>
+                          <td>{formatPercent(item.avg_daily_residual_return)}</td>
+                          <td>{formatPercent(item.median_daily_residual_return)}</td>
+                          <td>{formatRate(item.positive_day_ratio)}</td>
+                          <td className={metricHighlightClass("t", item.hac_t_value)}>{formatNumber(item.hac_t_value)}</td>
+                        </tr>
+                      </Fragment>
                     ))}
                   </tbody>
                 </table>

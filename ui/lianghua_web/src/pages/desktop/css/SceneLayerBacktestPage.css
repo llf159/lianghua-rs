@@ -395,6 +395,19 @@ body .scene-layer-contrib-table-wrap {
   background: #f8fbff;
 }
 
+.scene-layer-contrib-table tbody tr.scene-layer-contrib-table-group-separator td {
+  background: #eaf1fd;
+  border-top: 1px solid #c9daf3;
+  border-bottom: 1px solid #d7e3f7;
+  color: #1e3a8a;
+  font-weight: 600;
+  padding: 5px 9px;
+}
+
+.scene-layer-contrib-table tbody tr.scene-layer-contrib-table-group-separator:hover td {
+  background: #eaf1fd;
+}
+
 .scene-layer-rule-detail-table {
   table-layout: auto;
 }
