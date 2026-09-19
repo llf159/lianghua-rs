@@ -61,3 +61,10 @@ cd ui/lianghua_web/src-tauri
 cargo tauri android build --ci --debug --target aarch64 --apk
 cargo tauri android build --ci --target aarch64 --apk
 ```
+
+## 桌面数据仓库目录与构建方式
+
+- 数据仓库根目录默认仍是 `BaseDirectory::AppData`(未配置时该路径与改动前的 `appDataDir()` 逐字节一致,安卓行为不变),可被 `~/.local/share/com.mingyuan.lianghua/warehouse.json` 的 `root` 或 `LIANGHUA_WAREHOUSE_ROOT` 覆盖;`source/` 子目录挂在根目录下。前端 `managedSource.ts` 与 Rust `warehouse_root` 必须共用这一入口,禁止只改其中一边,否则会出现「页面读 A 目录、后台写 B 目录」。
+- 外接盘路径不能只写进 `capabilities/*.json`:Tauri 的 fs 作用域判定会先 canonicalize 再比对模式(`tauri-2.10.3/src/scope/fs.rs` 的 `try_resolve_symlink_and_canonicalize`),`$APPDATA/**` 覆盖不到外接盘,符号链接目录也会落到 `$APPDATA` 之外而被判 `PathForbidden`。因此仓库根目录由启动时的 `fs_scope().allow_directory` 运行时放开,前端相关文件操作一律传绝对路径,不再用 `baseDir: BaseDirectory.AppData`。
+- 问题:直接 `cargo build -p app` 得到的桌面二进制窗口会去加载 `http://localhost:5173`,没有 vite 时是空白页,且 `frontendDist` 不会内嵌;解决方案选择:凡是要单独运行的桌面二进制(`target/debug/app` 或 release)都必须加 `--features tauri/custom-protocol`;解释:Tauri 的 `cfg(dev) = !custom-protocol`(`tauri/build.rs`),dev 模式下 `get_app_url()` 取 `devUrl`、`tauri-codegen` 也会跳过资源内嵌,而仓库里并没有定义 `custom-protocol` 这个 app 级 feature,只能按依赖 feature 语法传。下次排查空白窗口先跑 `ss -ltnp | grep 5173` 和 `rg -n 'custom-protocol' ui/lianghua_web/src-tauri/Cargo.toml`。
+- 切换数据仓库目录提供「移动现有数据并切换 / 只切换目录 / 取消」三选,移动一律走「复制 → 文件数与总字节校验 → 切根目录」,不删源目录、不用 `rename`:内置盘与外接盘跨文件系统时 `rename` 必然失败或退化成不可控的隐式拷贝,而校验失败时源目录必须保持原样。目标已存在非空 `source/` 时直接拒绝,不做覆盖(残留的未完成副本由用户手动处理)。复制期间 DuckDB 连接仍是打开的,边写边拷可能不一致,这条风险由用户承担,界面只负责提示「复制期间勿操作其它页面」。

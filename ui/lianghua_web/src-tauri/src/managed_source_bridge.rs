@@ -18,7 +18,7 @@ use lianghua_app_data::{
     },
 };
 use serde::{Deserialize, Serialize};
-use tauri::{Emitter, Manager};
+use tauri::Emitter;
 
 fn decode_percent_encoded_path(raw: &str) -> String {
     if !raw.contains('%') {
@@ -618,7 +618,7 @@ fn build_managed_strategy_backup_item(
 }
 
 pub(crate) fn snapshot_rank_compute_strategy(
-    app_data_root: &Path,
+    data_root: &Path,
     source_dir: &str,
     strategy_file_path: &Path,
     start_date: Option<&str>,
@@ -631,7 +631,7 @@ pub(crate) fn snapshot_rank_compute_strategy(
         ));
     }
 
-    let source_root = resolve_source_root(app_data_root, source_dir)?;
+    let source_root = resolve_source_root(data_root, source_dir)?;
     let backup_id = current_strategy_backup_id();
     let backup_dir = managed_rank_compute_snapshot_dir(&source_root, &backup_id);
     std::fs::create_dir_all(&backup_dir).map_err(|error| error.to_string())?;
@@ -712,10 +712,10 @@ pub(crate) fn snapshot_rank_compute_strategy(
 }
 
 fn get_managed_strategy_assets_status_inner(
-    app_data_root: &Path,
+    data_root: &Path,
     source_dir: &str,
 ) -> Result<ManagedStrategyAssetsStatus, String> {
-    let source_root = resolve_source_root(app_data_root, source_dir)?;
+    let source_root = resolve_source_root(data_root, source_dir)?;
     let backup_root = managed_strategy_backup_root(&source_root);
     let mut backups = Vec::new();
 
@@ -814,10 +814,8 @@ fn copy_import_file_to_appdata_inner(
     }
     validate_target_relative_path(&target_relative_path)?;
 
-    let target_path = app
-        .path()
-        .resolve(&target_relative_path, tauri::path::BaseDirectory::AppData)
-        .map_err(|error| error.to_string())?;
+    let target_path = crate::warehouse::warehouse_root(&app)?
+        .join(target_relative_path.trim().replace('\\', "/"));
 
     if let Some(parent) = target_path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
@@ -969,18 +967,9 @@ pub async fn preview_managed_source_stock_data(
     limit: Option<usize>,
 ) -> Result<ManagedSourceDbPreviewResult, String> {
     let limit = limit.unwrap_or(100).clamp(20, 500);
-    let app_data_root = app
-        .path()
-        .resolve("", tauri::path::BaseDirectory::AppData)
-        .map_err(|error| error.to_string())?;
+    let data_root = crate::warehouse::warehouse_root(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        core_preview_managed_source_stock_data(
-            &app_data_root,
-            source_dir,
-            trade_date,
-            ts_code,
-            limit,
-        )
+        core_preview_managed_source_stock_data(&data_root, source_dir, trade_date, ts_code, limit)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -996,18 +985,10 @@ pub async fn preview_managed_source_dataset(
     limit: Option<usize>,
 ) -> Result<ManagedSourceDatasetPreviewResult, String> {
     let limit = limit.unwrap_or(100).clamp(20, 500);
-    let app_data_root = app
-        .path()
-        .resolve("", tauri::path::BaseDirectory::AppData)
-        .map_err(|error| error.to_string())?;
+    let data_root = crate::warehouse::warehouse_root(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
         core_preview_managed_source_dataset(
-            &app_data_root,
-            source_dir,
-            dataset_id,
-            trade_date,
-            ts_code,
-            limit,
+            &data_root, source_dir, dataset_id, trade_date, ts_code, limit,
         )
     })
     .await
@@ -1025,11 +1006,8 @@ pub fn export_managed_source_directory(
         return Err("empty export destination".into());
     }
 
-    let app_data_root = app
-        .path()
-        .resolve("", tauri::path::BaseDirectory::AppData)
-        .map_err(|error| error.to_string())?;
-    let source_path = resolve_source_root(&app_data_root, &source_dir)?;
+    let data_root = crate::warehouse::warehouse_root(&app)?;
+    let source_path = resolve_source_root(&data_root, &source_dir)?;
 
     if !source_path.exists() {
         return Err(format!("当前应用数据目录不存在: {}", source_path.display()));
@@ -1075,11 +1053,8 @@ pub fn export_managed_source_directory_mobile(
         return Err("empty export destination file".into());
     }
 
-    let app_data_root = app
-        .path()
-        .resolve("", tauri::path::BaseDirectory::AppData)
-        .map_err(|error| error.to_string())?;
-    let source_path = resolve_source_root(&app_data_root, &source_dir)?;
+    let data_root = crate::warehouse::warehouse_root(&app)?;
+    let source_path = resolve_source_root(&data_root, &source_dir)?;
 
     if !source_path.exists() {
         return Err(format!("当前应用数据目录不存在: {}", source_path.display()));
@@ -1141,12 +1116,9 @@ pub async fn export_managed_source_file(
                 return Err("empty export destination file".into());
             }
 
-            let app_data_root = app
-                .path()
-                .resolve("", tauri::path::BaseDirectory::AppData)
-                .map_err(|error| error.to_string())?;
+            let data_root = crate::warehouse::warehouse_root(&app)?;
             let (_, source_path) =
-                resolve_managed_source_file_path(&app_data_root, &source_dir, &file_id)?;
+                resolve_managed_source_file_path(&data_root, &source_dir, &file_id)?;
             let normalized_file_id = file_id.trim();
             let file_name = managed_source_file_name(normalized_file_id)
                 .ok_or_else(|| format!("未知文件项: {normalized_file_id}"))?;
@@ -1220,11 +1192,8 @@ pub async fn import_managed_source_zip(
                 return Err("empty import source path".into());
             }
 
-            let app_data_root = app
-                .path()
-                .resolve("", tauri::path::BaseDirectory::AppData)
-                .map_err(|error| error.to_string())?;
-            let source_root = resolve_source_root(&app_data_root, &source_dir)?;
+            let data_root = crate::warehouse::warehouse_root(&app)?;
+            let source_root = resolve_source_root(&data_root, &source_dir)?;
             std::fs::create_dir_all(&source_root).map_err(|error| error.to_string())?;
 
             let mut open_options = tauri_plugin_fs::OpenOptions::new();
@@ -1306,12 +1275,12 @@ pub async fn import_managed_source_zip(
 }
 
 fn backup_active_strategy_with_meta(
-    app_data_root: &Path,
+    data_root: &Path,
     source_dir: String,
     source_kind: &str,
     description: &str,
 ) -> Result<ManagedStrategyBackupItem, String> {
-    let source_root = resolve_source_root(app_data_root, &source_dir)?;
+    let source_root = resolve_source_root(data_root, &source_dir)?;
     let active_file_path = source_root.join(STRATEGY_RULE_FILE_NAME);
     if !active_file_path.exists() || !active_file_path.is_file() {
         return Err("当前没有可备份的生效策略文件".into());
@@ -1353,11 +1322,8 @@ pub fn get_managed_strategy_assets_status(
     app: tauri::AppHandle,
     source_dir: String,
 ) -> Result<ManagedStrategyAssetsStatus, String> {
-    let app_data_root = app
-        .path()
-        .resolve("", tauri::path::BaseDirectory::AppData)
-        .map_err(|error| error.to_string())?;
-    get_managed_strategy_assets_status_inner(&app_data_root, &source_dir)
+    let data_root = crate::warehouse::warehouse_root(&app)?;
+    get_managed_strategy_assets_status_inner(&data_root, &source_dir)
 }
 
 #[tauri::command]
@@ -1386,11 +1352,8 @@ pub async fn import_managed_strategy_backup(
                 return Err("仅支持导入 toml 策略文件".into());
             }
 
-            let app_data_root = app
-                .path()
-                .resolve("", tauri::path::BaseDirectory::AppData)
-                .map_err(|error| error.to_string())?;
-            let source_root = resolve_source_root(&app_data_root, &source_dir)?;
+            let data_root = crate::warehouse::warehouse_root(&app)?;
+            let source_root = resolve_source_root(&data_root, &source_dir)?;
             let backup_id = current_strategy_backup_id();
             let target_relative_path = format!(
                 "{}/{}/{}/{}",
@@ -1511,19 +1474,16 @@ pub async fn backup_managed_active_strategy(
     app: tauri::AppHandle,
     source_dir: String,
 ) -> Result<ManagedStrategyBackupItem, String> {
-    let app_data_root = app
-        .path()
-        .resolve("", tauri::path::BaseDirectory::AppData)
-        .map_err(|error| error.to_string())?;
+    let data_root = crate::warehouse::warehouse_root(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        (|app_data_root: &Path, source_dir: String| -> Result<ManagedStrategyBackupItem, String> {
+        (|data_root: &Path, source_dir: String| -> Result<ManagedStrategyBackupItem, String> {
             backup_active_strategy_with_meta(
-                app_data_root,
+                data_root,
                 source_dir,
                 "backup",
                 "手动备份当前生效策略",
             )
-        })(&app_data_root, source_dir)
+        })(&data_root, source_dir)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1534,15 +1494,12 @@ pub async fn auto_backup_managed_active_strategy_on_entry(
     app: tauri::AppHandle,
     source_dir: String,
 ) -> Result<Option<ManagedStrategyBackupItem>, String> {
-    let app_data_root = app
-        .path()
-        .resolve("", tauri::path::BaseDirectory::AppData)
-        .map_err(|error| error.to_string())?;
+    let data_root = crate::warehouse::warehouse_root(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        (|app_data_root: &Path,
+        (|data_root: &Path,
           source_dir: String|
          -> Result<Option<ManagedStrategyBackupItem>, String> {
-            let source_root = resolve_source_root(app_data_root, &source_dir)?;
+            let source_root = resolve_source_root(data_root, &source_dir)?;
             let active_file_path = source_root.join(STRATEGY_RULE_FILE_NAME);
             if !active_file_path.exists() || !active_file_path.is_file() {
                 return Ok(None);
@@ -1582,13 +1539,13 @@ pub async fn auto_backup_managed_active_strategy_on_entry(
             }
 
             backup_active_strategy_with_meta(
-                app_data_root,
+                data_root,
                 source_dir,
                 "auto_entry",
                 "自动备份：进入策略管理页",
             )
             .map(Some)
-        })(&app_data_root, source_dir)
+        })(&data_root, source_dir)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1600,16 +1557,13 @@ pub async fn get_managed_strategy_backup_diff(
     source_dir: String,
     backup_id: String,
 ) -> Result<ManagedStrategyBackupDiff, String> {
-    let app_data_root = app
-        .path()
-        .resolve("", tauri::path::BaseDirectory::AppData)
-        .map_err(|error| error.to_string())?;
+    let data_root = crate::warehouse::warehouse_root(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        (|app_data_root: &Path,
+        (|data_root: &Path,
           source_dir: String,
           backup_id: String|
          -> Result<ManagedStrategyBackupDiff, String> {
-            let source_root = resolve_source_root(app_data_root, &source_dir)?;
+            let source_root = resolve_source_root(data_root, &source_dir)?;
             let normalized_backup_id = validate_strategy_backup_id(&backup_id)?.to_string();
             let backup_file_path = locate_strategy_asset(&source_root, &normalized_backup_id)
                 .map(|(_, asset_dir)| asset_dir.join(STRATEGY_RULE_FILE_NAME))
@@ -1822,7 +1776,7 @@ pub async fn get_managed_strategy_backup_diff(
                 changed_line_count,
                 lines,
             })
-        })(&app_data_root, source_dir, backup_id)
+        })(&data_root, source_dir, backup_id)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1833,13 +1787,10 @@ pub async fn create_managed_empty_strategy_backup(
     app: tauri::AppHandle,
     source_dir: String,
 ) -> Result<ManagedStrategyBackupItem, String> {
-    let app_data_root = app
-        .path()
-        .resolve("", tauri::path::BaseDirectory::AppData)
-        .map_err(|error| error.to_string())?;
+    let data_root = crate::warehouse::warehouse_root(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        (|app_data_root: &Path, source_dir: String| -> Result<ManagedStrategyBackupItem, String> {
-            let source_root = resolve_source_root(app_data_root, &source_dir)?;
+        (|data_root: &Path, source_dir: String| -> Result<ManagedStrategyBackupItem, String> {
+            let source_root = resolve_source_root(data_root, &source_dir)?;
             let backup_id = current_strategy_backup_id();
             let backup_dir = managed_strategy_backup_dir(&source_root, &backup_id);
             std::fs::create_dir_all(&backup_dir).map_err(|error| error.to_string())?;
@@ -1891,7 +1842,7 @@ explain = "空白模板占位规则，可直接编辑替换"
                 StrategyAssetLocation::Backup,
                 &backup_id,
             )
-        })(&app_data_root, source_dir)
+        })(&data_root, source_dir)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1903,16 +1854,13 @@ pub async fn activate_managed_strategy_backup(
     source_dir: String,
     backup_id: String,
 ) -> Result<ManagedStrategyAssetsStatus, String> {
-    let app_data_root = app
-        .path()
-        .resolve("", tauri::path::BaseDirectory::AppData)
-        .map_err(|error| error.to_string())?;
+    let data_root = crate::warehouse::warehouse_root(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        (|app_data_root: &Path,
+        (|data_root: &Path,
           source_dir: String,
           backup_id: String|
          -> Result<ManagedStrategyAssetsStatus, String> {
-            let source_root = resolve_source_root(app_data_root, &source_dir)?;
+            let source_root = resolve_source_root(data_root, &source_dir)?;
             let normalized_backup_id = validate_strategy_backup_id(&backup_id)?.to_string();
             let backup_file_path = locate_strategy_asset(&source_root, &normalized_backup_id)
                 .map(|(_, asset_dir)| asset_dir.join(STRATEGY_RULE_FILE_NAME))
@@ -1931,8 +1879,8 @@ pub async fn activate_managed_strategy_backup(
                     active_file_path.display()
                 )
             })?;
-            get_managed_strategy_assets_status_inner(app_data_root, &source_dir)
-        })(&app_data_root, source_dir, backup_id)
+            get_managed_strategy_assets_status_inner(data_root, &source_dir)
+        })(&data_root, source_dir, backup_id)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1944,16 +1892,13 @@ pub async fn delete_managed_strategy_backup(
     source_dir: String,
     backup_id: String,
 ) -> Result<ManagedStrategyAssetsStatus, String> {
-    let app_data_root = app
-        .path()
-        .resolve("", tauri::path::BaseDirectory::AppData)
-        .map_err(|error| error.to_string())?;
+    let data_root = crate::warehouse::warehouse_root(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        (|app_data_root: &Path,
+        (|data_root: &Path,
           source_dir: String,
           backup_id: String|
          -> Result<ManagedStrategyAssetsStatus, String> {
-            let source_root = resolve_source_root(app_data_root, &source_dir)?;
+            let source_root = resolve_source_root(data_root, &source_dir)?;
             let normalized_backup_id = validate_strategy_backup_id(&backup_id)?.to_string();
             let backup_dir = locate_strategy_asset(&source_root, &normalized_backup_id)
                 .map(|(_, asset_dir)| asset_dir)
@@ -1968,8 +1913,8 @@ pub async fn delete_managed_strategy_backup(
                     )
                 })?;
             }
-            get_managed_strategy_assets_status_inner(app_data_root, &source_dir)
-        })(&app_data_root, source_dir, backup_id)
+            get_managed_strategy_assets_status_inner(data_root, &source_dir)
+        })(&data_root, source_dir, backup_id)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1982,17 +1927,14 @@ pub async fn update_managed_strategy_backup_description(
     backup_id: String,
     description: String,
 ) -> Result<ManagedStrategyAssetsStatus, String> {
-    let app_data_root = app
-        .path()
-        .resolve("", tauri::path::BaseDirectory::AppData)
-        .map_err(|error| error.to_string())?;
+    let data_root = crate::warehouse::warehouse_root(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        (|app_data_root: &Path,
+        (|data_root: &Path,
           source_dir: String,
           backup_id: String,
           description: String|
          -> Result<ManagedStrategyAssetsStatus, String> {
-            let source_root = resolve_source_root(app_data_root, &source_dir)?;
+            let source_root = resolve_source_root(data_root, &source_dir)?;
             let normalized_backup_id = validate_strategy_backup_id(&backup_id)?.to_string();
             let normalized_description = (|description: &str| -> Result<Option<String>, String> {
                 let trimmed = description.trim();
@@ -2011,8 +1953,8 @@ pub async fn update_managed_strategy_backup_description(
             meta.description = normalized_description;
             write_strategy_backup_meta(&source_root, &normalized_backup_id, &meta)?;
 
-            get_managed_strategy_assets_status_inner(app_data_root, &source_dir)
-        })(&app_data_root, source_dir, backup_id, description)
+            get_managed_strategy_assets_status_inner(data_root, &source_dir)
+        })(&data_root, source_dir, backup_id, description)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -2036,11 +1978,8 @@ pub async fn export_managed_strategy_backup_file(
                 return Err("empty export destination file".into());
             }
 
-            let app_data_root = app
-                .path()
-                .resolve("", tauri::path::BaseDirectory::AppData)
-                .map_err(|error| error.to_string())?;
-            let source_root = resolve_source_root(&app_data_root, &source_dir)?;
+            let data_root = crate::warehouse::warehouse_root(&app)?;
+            let source_root = resolve_source_root(&data_root, &source_dir)?;
             let normalized_backup_id = validate_strategy_backup_id(&backup_id)?.to_string();
             let source_path = locate_strategy_asset(&source_root, &normalized_backup_id)
                 .map(|(_, asset_dir)| asset_dir.join(STRATEGY_RULE_FILE_NAME))
@@ -2103,11 +2042,8 @@ pub async fn export_managed_strategy_bundle(
                 return Err("empty export destination file".into());
             }
 
-            let app_data_root = app
-                .path()
-                .resolve("", tauri::path::BaseDirectory::AppData)
-                .map_err(|error| error.to_string())?;
-            let source_root = resolve_source_root(&app_data_root, &source_dir)?;
+            let data_root = crate::warehouse::warehouse_root(&app)?;
+            let source_root = resolve_source_root(&data_root, &source_dir)?;
             let active_file_path = source_root.join(STRATEGY_RULE_FILE_NAME);
             let backup_root = managed_strategy_backup_root(&source_root);
 

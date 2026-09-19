@@ -3,7 +3,14 @@ import {
   getChartIndicatorSettings,
   type ChartIndicatorSettingsPayload,
 } from '../../apis/chartIndicatorSettings'
-import { ensureManagedSourcePath } from '../../apis/managedSource'
+import {
+  ensureManagedSourcePath,
+  getWarehouseRoot,
+  isDirectoryImportSupported,
+  moveWarehouseSource,
+  setWarehouseRoot,
+} from '../../apis/managedSource'
+import { open } from '@tauri-apps/plugin-dialog'
 import { getStockPickOptions } from '../../apis/stockPick'
 import { filterConceptItems, useConceptExclusions } from '../../shared/conceptExclusions'
 import ChartIndicatorSettingsModal from './components/ChartIndicatorSettingsModal'
@@ -98,6 +105,7 @@ type SettingsModalType =
   | 'details-nav-long-press'
   | 'backtest-highlight'
   | 'realtime-provider'
+  | 'warehouse-root'
   | null
 
 function getDetailCyqModelLabel(value: DetailCyqModel) {
@@ -181,6 +189,10 @@ export default function SettingsPage() {
   )
   const [backtestHighlightSettingError, setBacktestHighlightSettingError] = useState('')
   const [backtestHighlightSettingNotice, setBacktestHighlightSettingNotice] = useState('')
+  const [warehouseRoot, setWarehouseRootPath] = useState('')
+  const [warehouseTarget, setWarehouseTargetPath] = useState('')
+  const [warehouseMoveBusy, setWarehouseMoveBusy] = useState(false)
+  const [warehouseRootError, setWarehouseRootError] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const deferredConceptKeyword = useDeferredValue(conceptKeyword)
@@ -194,6 +206,30 @@ export default function SettingsPage() {
   const isDetailsNavLongPressSettingOpen = activeModal === 'details-nav-long-press'
   const isBacktestHighlightSettingOpen = activeModal === 'backtest-highlight'
   const isRealtimeProviderSettingOpen = activeModal === 'realtime-provider'
+  const isWarehouseRootSettingOpen = activeModal === 'warehouse-root'
+
+  useEffect(() => {
+    if (!isDirectoryImportSupported()) {
+      return
+    }
+
+    let cancelled = false
+    void getWarehouseRoot()
+      .then((root) => {
+        if (!cancelled) {
+          setWarehouseRootPath(root)
+        }
+      })
+      .catch((rootError) => {
+        if (!cancelled) {
+          setWarehouseRootError(`读取数据仓库目录失败: ${String(rootError)}`)
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -415,6 +451,45 @@ export default function SettingsPage() {
     setActiveModal(null)
     setConceptKeyword('')
     setLookupFocused(false)
+  }
+
+  function openWarehouseRootSetting() {
+    setWarehouseRootError('')
+    setWarehouseTargetPath('')
+    setActiveModal('warehouse-root')
+  }
+
+  async function onPickWarehouseRoot() {
+    setWarehouseRootError('')
+    const picked = await open({ directory: true, title: '选择数据仓库目录' })
+    if (!picked || Array.isArray(picked)) {
+      return
+    }
+
+    setWarehouseTargetPath(picked)
+  }
+
+  async function onApplyWarehouseRoot(move: boolean) {
+    const target = warehouseTarget.trim()
+    if (target === '') {
+      return
+    }
+
+    setWarehouseRootError('')
+    setWarehouseMoveBusy(move)
+    try {
+      if (move) {
+        await moveWarehouseSource(target)
+      }
+      const resolved = await setWarehouseRoot(target)
+      await ensureManagedSourcePath()
+      setWarehouseRootPath(resolved)
+      window.location.reload()
+    } catch (rootError) {
+      setWarehouseRootError(`${move ? '移动' : '切换'}数据仓库目录失败: ${String(rootError)}`)
+    } finally {
+      setWarehouseMoveBusy(false)
+    }
   }
 
   function onSaveChartLayoutRatios() {
@@ -699,6 +774,16 @@ export default function SettingsPage() {
               残差 {currentBacktestHighlightSettings.residualThreshold} · IC {currentBacktestHighlightSettings.icThreshold} · IR {currentBacktestHighlightSettings.irThreshold} · t {currentBacktestHighlightSettings.tThreshold}
             </span>
           </button>
+
+          {isDirectoryImportSupported() ? (
+            <button className="settings-list-item" type="button" onClick={openWarehouseRootSetting}>
+              <div className="settings-list-item-main">
+                <strong>数据仓库目录</strong>
+                <span>行情、筹码、评分结果等库文件所在目录，默认在应用数据目录下。</span>
+              </div>
+              <span className="settings-list-item-value">编辑</span>
+            </button>
+          ) : null}
         </div>
 
         {error && !activeModal ? <div className="settings-error">{error}</div> : null}
@@ -1379,6 +1464,88 @@ export default function SettingsPage() {
                     )
                   })}
                 </div>
+              )}
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {isWarehouseRootSettingOpen ? (
+        <div
+          className="settings-modal-backdrop"
+          role="presentation"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              closeActiveModal()
+            }
+          }}
+        >
+          <section className="settings-modal settings-modal-narrow" role="dialog" aria-modal="true" aria-label="数据仓库目录">
+            <div className="settings-modal-head">
+              <div>
+                <h3 className="settings-subtitle-head">数据仓库目录</h3>
+                <p className="settings-section-note">
+                  该目录下的 source 子目录存放行情、筹码、评分结果等库文件。移动会先把现有数据复制并校验到新目录再切换，旧目录不会自动删除；复制期间请勿操作其它页面。
+                </p>
+              </div>
+              <div className="settings-actions">
+                <button className="settings-secondary-btn" type="button" onClick={closeActiveModal}>
+                  关闭
+                </button>
+              </div>
+            </div>
+
+            <div className="settings-field settings-field-textarea">
+              <span>当前目录</span>
+              <small className="settings-path-value">{warehouseRoot || '读取中...'}</small>
+            </div>
+
+            {warehouseTarget ? (
+              <div className="settings-field settings-field-textarea">
+                <span>目标目录</span>
+                <small className="settings-path-value">{warehouseTarget}</small>
+              </div>
+            ) : null}
+
+            {warehouseRootError ? <div className="settings-error">{warehouseRootError}</div> : null}
+
+            <div className="settings-actions">
+              {warehouseTarget ? (
+                <>
+                  <button
+                    className="settings-secondary-btn"
+                    type="button"
+                    disabled={warehouseMoveBusy}
+                    onClick={() => setWarehouseTargetPath('')}
+                  >
+                    取消
+                  </button>
+                  <button
+                    className="settings-secondary-btn"
+                    type="button"
+                    disabled={warehouseMoveBusy}
+                    onClick={() => void onApplyWarehouseRoot(false)}
+                  >
+                    只切换目录
+                  </button>
+                  <button
+                    className="settings-primary-btn"
+                    type="button"
+                    disabled={warehouseMoveBusy}
+                    onClick={() => void onApplyWarehouseRoot(true)}
+                  >
+                    {warehouseMoveBusy ? '复制中…' : '移动现有数据并切换'}
+                  </button>
+                </>
+              ) : (
+                <button
+                  className="settings-primary-btn"
+                  type="button"
+                  disabled={warehouseMoveBusy}
+                  onClick={() => void onPickWarehouseRoot()}
+                >
+                  选择目录
+                </button>
               )}
             </div>
           </section>

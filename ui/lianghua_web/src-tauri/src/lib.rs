@@ -1,5 +1,6 @@
 mod data_download_bridge;
 mod managed_source_bridge;
+mod warehouse;
 
 use std::{
     fs,
@@ -1747,12 +1748,8 @@ async fn run_ranking_score_calculation(
     tauri::async_runtime::spawn_blocking(move || {
         let strategy_file_path =
             lianghua_data::data::resolve_strategy_path(&source_path, strategy_path.as_deref());
-        let app_data_root = app
-            .path()
-            .resolve("", tauri::path::BaseDirectory::AppData)
-            .map_err(|error| error.to_string())?;
         let snapshot_strategy_path = snapshot_rank_compute_strategy(
-            &app_data_root,
+            &warehouse::warehouse_root(&app)?,
             "source",
             &strategy_file_path,
             Some(&start_date),
@@ -2610,6 +2607,9 @@ pub fn run() {
                     .build(),
             )?;
         }
+        if let Err(error) = warehouse::allow_warehouse_root(app.handle()) {
+            log::warn!("failed to allow warehouse root in fs scope: {error}");
+        }
         Ok(())
     });
 
@@ -2619,6 +2619,9 @@ pub fn run() {
 
     builder
         .invoke_handler(tauri::generate_handler![
+            warehouse::get_warehouse_root,
+            warehouse::set_warehouse_root,
+            warehouse::move_warehouse_source,
             allow_import_path,
             copy_import_file_to_appdata,
             preview_managed_source_stock_data,

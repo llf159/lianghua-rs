@@ -1,8 +1,8 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import { appDataDir, join } from '@tauri-apps/api/path'
+import { join } from '@tauri-apps/api/path'
 import { open, save } from '@tauri-apps/plugin-dialog'
-import { BaseDirectory, exists, mkdir, readDir, readTextFile, remove, writeTextFile } from '@tauri-apps/plugin-fs'
+import { exists, mkdir, readDir, readTextFile, remove, writeTextFile } from '@tauri-apps/plugin-fs'
 import {
   readStoredSourceImportTimestamp,
   writeStoredSourceImportTimestamp,
@@ -294,6 +294,25 @@ export async function allowImportPath(path: string, directory: boolean, recursiv
   await invoke('allow_import_path', { path, directory, recursive })
 }
 
+export async function getWarehouseRoot() {
+  return invoke<string>('get_warehouse_root')
+}
+
+export async function setWarehouseRoot(path: string) {
+  return invoke<string>('set_warehouse_root', { path })
+}
+
+export type WarehouseMoveResult = {
+  sourceRoot: string
+  targetRoot: string
+  fileCount: number
+  totalBytes: number
+}
+
+export async function moveWarehouseSource(targetRoot: string) {
+  return invoke<WarehouseMoveResult>('move_warehouse_source', { targetRoot })
+}
+
 function createImportId() {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
 }
@@ -436,7 +455,7 @@ function scoreSourceCandidate(sourcePath: string, targetFile: (typeof MANAGED_SO
 }
 
 async function resolveAbsoluteTargetPath(relativePath: string) {
-  const basePath = await appDataDir()
+  const basePath = await getWarehouseRoot()
   return join(basePath, ...relativePath.split('/'))
 }
 
@@ -450,7 +469,7 @@ async function ensureTargetParentDir(relativePath: string) {
   if (segments.length === 0) {
     return
   }
-  await mkdir(segments.join('/'), { baseDir: BaseDirectory.AppData, recursive: true })
+  await mkdir(await resolveAbsoluteTargetPath(segments.join('/')), { recursive: true })
 }
 
 function getTargetRelativePath(targetFile: (typeof MANAGED_SOURCE_FILES)[number], sourceDir: string) {
@@ -562,7 +581,7 @@ export async function inspectManagedSourceStatus(_sourceDirInput?: string): Prom
       const targetRelativePath = getTargetRelativePath(item, sourceDir)
       return {
         ...item,
-        isImported: await exists(targetRelativePath, { baseDir: BaseDirectory.AppData }),
+        isImported: await exists(await resolveAbsoluteTargetPath(targetRelativePath)),
         targetPath: await resolveAbsoluteTargetPath(targetRelativePath),
       }
     }),
@@ -719,8 +738,9 @@ export async function importManagedSourceZip(_sourceDirInput?: string) {
 export async function clearManagedSourceData(_sourceDirInput?: string) {
   const sourceDir = DEFAULT_MANAGED_SOURCE_DIR
   await ensureManagedSourcePath(sourceDir)
-  if (await exists(sourceDir, { baseDir: BaseDirectory.AppData })) {
-    await remove(sourceDir, { baseDir: BaseDirectory.AppData, recursive: true })
+  const sourcePath = await resolveAbsoluteTargetPath(sourceDir)
+  if (await exists(sourcePath)) {
+    await remove(sourcePath, { recursive: true })
   }
   writeStoredSourceImportTimestamp('')
   return inspectManagedSourceStatus(sourceDir)
@@ -738,19 +758,12 @@ export async function removeManagedSourceFile(
   const sourceDir = DEFAULT_MANAGED_SOURCE_DIR
   await ensureManagedSourcePath(sourceDir)
   const targetRelativePath = getTargetRelativePath(targetFile, sourceDir)
-  if (await exists(targetRelativePath, { baseDir: BaseDirectory.AppData })) {
-    await remove(targetRelativePath, { baseDir: BaseDirectory.AppData })
+  if (await exists(await resolveAbsoluteTargetPath(targetRelativePath))) {
+    await remove(await resolveAbsoluteTargetPath(targetRelativePath))
   }
-  if (
-    fileId === 'result-db' &&
-    (await exists(buildRelativePath(sourceDir, 'strategy_snapshots/rank_compute'), {
-      baseDir: BaseDirectory.AppData,
-    }))
-  ) {
-    await remove(buildRelativePath(sourceDir, 'strategy_snapshots/rank_compute'), {
-      baseDir: BaseDirectory.AppData,
-      recursive: true,
-    })
+  const snapshotRelativePath = buildRelativePath(sourceDir, 'strategy_snapshots/rank_compute')
+  if (fileId === 'result-db' && (await exists(await resolveAbsoluteTargetPath(snapshotRelativePath)))) {
+    await remove(await resolveAbsoluteTargetPath(snapshotRelativePath), { recursive: true })
   }
 
   return inspectManagedSourceStatus(sourceDir)
@@ -804,7 +817,7 @@ export async function exportManagedSourceFile(
   await ensureManagedSourcePath(sourceDir)
 
   const targetRelativePath = getTargetRelativePath(targetFile, sourceDir)
-  if (!(await exists(targetRelativePath, { baseDir: BaseDirectory.AppData }))) {
+  if (!(await exists(await resolveAbsoluteTargetPath(targetRelativePath)))) {
     throw new Error(`${targetFile.label} 当前还没导入，无法导出`)
   }
 

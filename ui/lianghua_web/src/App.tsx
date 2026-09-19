@@ -6,8 +6,9 @@ import {
   useLocation,
 } from "react-router-dom";
 import type { Location } from "react-router-dom";
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import PageDesktop from "./PageDesktop.tsx";
+import { ensureManagedSourcePath } from "./apis/managedSource";
 import "./App.css";
 
 const pages = {
@@ -74,6 +75,27 @@ function LegacyDetailsRedirect() {
 
 function AppRoutes() {
   const location = useLocation();
+  const [sourcePathReady, setSourcePathReady] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void ensureManagedSourcePath()
+      .catch((error) => console.error("解析数据仓库路径失败", error))
+      .finally(() => {
+        if (!cancelled) {
+          setSourcePathReady(true);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (!sourcePathReady) {
+    return <div>正在加载…</div>;
+  }
+
   const locationState =
     location.state && typeof location.state === "object"
       ? (location.state as BackgroundLocationState)
