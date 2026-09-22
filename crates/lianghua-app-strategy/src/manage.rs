@@ -53,6 +53,7 @@ pub struct StrategyManageRuleBonus {
 pub struct StrategyManageSceneItem {
     pub index: usize,
     pub name: String,
+    pub enabled: bool,
     pub direction: String,
     pub observe_threshold: f64,
     pub trigger_threshold: f64,
@@ -64,6 +65,8 @@ pub struct StrategyManageSceneItem {
 #[derive(Debug, Clone, Deserialize)]
 pub struct StrategyManageSceneDraft {
     pub name: String,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
     pub direction: String,
     pub observe_threshold: f64,
     pub trigger_threshold: f64,
@@ -75,6 +78,7 @@ pub struct StrategyManageSceneDraft {
 pub struct StrategyManageRuleItem {
     pub index: usize,
     pub name: String,
+    pub enabled: bool,
     pub scene_name: String,
     pub kind: RuleKind,
     pub stage: String,
@@ -93,6 +97,8 @@ pub struct StrategyManageRuleItem {
 #[derive(Debug, Clone, Deserialize)]
 pub struct StrategyManageRuleDraft {
     pub name: String,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
     pub scene_name: String,
     #[serde(default)]
     pub kind: RuleKind,
@@ -134,6 +140,8 @@ struct StrategyRuleFile {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct StrategyRuleFileScene {
     name: String,
+    #[serde(default = "default_enabled", skip_serializing_if = "is_enabled")]
+    enabled: bool,
     direction: SceneDirection,
     observe_threshold: f64,
     trigger_threshold: f64,
@@ -152,6 +160,8 @@ struct StrategyRuleFileCondition {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct StrategyRuleFileRule {
     name: String,
+    #[serde(default = "default_enabled", skip_serializing_if = "is_enabled")]
+    enabled: bool,
     #[serde(rename = "scene")]
     scene_name: String,
     #[serde(default)]
@@ -187,6 +197,14 @@ enum StrategyScopeWay {
     Consec(usize),
 }
 
+fn default_enabled() -> bool {
+    true
+}
+
+fn is_enabled(enabled: &bool) -> bool {
+    *enabled
+}
+
 fn load_rule_file(source_path: &str) -> Result<StrategyRuleFile, String> {
     let path = score_rule_path(source_path);
     let text = fs::read_to_string(&path)
@@ -212,8 +230,15 @@ fn parse_rule_file_text(text: &str) -> Result<StrategyRuleFile, toml::de::Error>
 fn save_rule_file(source_path: &str, file: &StrategyRuleFile) -> Result<(), String> {
     let path = score_rule_path(source_path);
     let text = toml::to_string_pretty(file).map_err(|e| format!("序列化策略规则文件失败: {e}"))?;
-    fs::write(&path, text)
-        .map_err(|e| format!("写入策略规则文件失败: path={}, err={e}", path.display()))
+    let temp_path = path.with_extension("toml.tmp");
+    fs::write(&temp_path, text).map_err(|e| {
+        format!(
+            "写入策略规则临时文件失败: path={}, err={e}",
+            temp_path.display()
+        )
+    })?;
+    fs::rename(&temp_path, &path)
+        .map_err(|e| format!("替换策略规则文件失败: path={}, err={e}", path.display()))
 }
 
 fn parse_scope_way(scope_way: &str) -> Result<StrategyScopeWay, String> {
@@ -615,6 +640,7 @@ fn load_validation_context(
 fn draft_to_rule(draft: StrategyManageRuleDraft) -> Result<StrategyRuleFileRule, String> {
     Ok(StrategyRuleFileRule {
         name: draft.name.trim().to_string(),
+        enabled: draft.enabled,
         scene_name: draft.scene_name.trim().to_string(),
         kind: draft.kind,
         stage: (|stage : & str| -> Result < RuleStage , String > {
@@ -663,6 +689,7 @@ fn draft_to_rule(draft: StrategyManageRuleDraft) -> Result<StrategyRuleFileRule,
 fn scene_draft_to_file(draft: StrategyManageSceneDraft) -> Result<StrategyRuleFileScene, String> {
     Ok(StrategyRuleFileScene {
         name: draft.name.trim().to_string(),
+        enabled: draft.enabled,
         direction: parse_scene_direction(&draft.direction)?,
         observe_threshold: draft.observe_threshold,
         trigger_threshold: draft.trigger_threshold,
@@ -686,6 +713,7 @@ pub fn get_strategy_manage_page(source_path: &str) -> Result<StrategyManagePageD
             .map(|(index, scene)| StrategyManageSceneItem {
                 index,
                 name: scene.name.clone(),
+                enabled: scene.enabled,
                 direction: scene.direction.as_str().to_string(),
                 observe_threshold: scene.observe_threshold,
                 trigger_threshold: scene.trigger_threshold,
@@ -702,6 +730,7 @@ pub fn get_strategy_manage_page(source_path: &str) -> Result<StrategyManagePageD
             .map(|(index, rule)| StrategyManageRuleItem {
                 index,
                 name: rule.name.clone(),
+                enabled: rule.enabled,
                 scene_name: rule.scene_name.clone(),
                 kind: rule.kind,
                 stage: (|stage: RuleStage| -> String {
@@ -737,6 +766,38 @@ pub fn get_strategy_manage_page(source_path: &str) -> Result<StrategyManagePageD
 
         StrategyManagePageData { scenes, rules }
     })(&config))
+}
+
+pub fn set_strategy_manage_scene_enabled(
+    source_path: &str,
+    name: &str,
+    enabled: bool,
+) -> Result<StrategyManagePageData, String> {
+    let mut config = load_rule_file(source_path)?;
+    let scene = config
+        .scene
+        .iter_mut()
+        .find(|scene| scene.name == name)
+        .ok_or_else(|| format!("scene 不存在: {name}"))?;
+    scene.enabled = enabled;
+    save_rule_file(source_path, &config)?;
+    get_strategy_manage_page(source_path)
+}
+
+pub fn set_strategy_manage_rule_enabled(
+    source_path: &str,
+    name: &str,
+    enabled: bool,
+) -> Result<StrategyManagePageData, String> {
+    let mut config = load_rule_file(source_path)?;
+    let rule = config
+        .rule
+        .iter_mut()
+        .find(|rule| rule.name == name)
+        .ok_or_else(|| format!("规则不存在: {name}"))?;
+    rule.enabled = enabled;
+    save_rule_file(source_path, &config)?;
+    get_strategy_manage_page(source_path)
 }
 
 pub fn check_strategy_manage_scene_draft(
@@ -775,6 +836,7 @@ pub fn update_strategy_manage_scene(
 
     let new_name = draft.name.trim().to_string();
     scene.name = new_name.clone();
+    scene.enabled = draft.enabled;
     scene.direction = parse_scene_direction(&draft.direction)?;
     scene.observe_threshold = draft.observe_threshold;
     scene.trigger_threshold = draft.trigger_threshold;
@@ -927,6 +989,7 @@ pub fn save_strategy_manage_refactor_file(
     for scene in draft.scenes {
         let checked = StrategyManageSceneDraft {
             name: scene.name.trim().to_string(),
+            enabled: scene.enabled,
             direction: scene.direction.trim().to_string(),
             observe_threshold: scene.observe_threshold,
             trigger_threshold: scene.trigger_threshold,
@@ -988,7 +1051,10 @@ mod tests {
 
     use duckdb::{Connection, params};
 
-    use super::{StrategyManageRuleDraft, check_strategy_manage_rule_draft, parse_rule_file_text};
+    use super::{
+        StrategyManageRuleDraft, check_strategy_manage_rule_draft, parse_rule_file_text,
+        set_strategy_manage_rule_enabled, set_strategy_manage_scene_enabled,
+    };
     use crate::data::source_db_path;
 
     fn temp_source_dir() -> std::path::PathBuf {
@@ -1027,6 +1093,84 @@ explain = "test"
         assert_eq!(file.scene.len(), 1);
         assert_eq!(file.rule.len(), 1);
         assert_eq!(file.rule[0].name, "启动测试");
+    }
+
+    #[test]
+    fn scene_and_rule_exclusion_skip_scoring_inputs_and_restore_independent_state() {
+        let source_dir = temp_source_dir();
+        create_dir_all(&source_dir).expect("create temp source");
+        write(
+            source_dir.join("score_rule.toml"),
+            r#"
+version = 1
+
+[[scene]]
+name = "趋势启动"
+direction = "long"
+observe_threshold = 1.0
+trigger_threshold = 2.0
+confirm_threshold = 3.0
+fail_threshold = 1.0
+
+[[rule]]
+name = "启动测试"
+scene = "趋势启动"
+stage = "base"
+scope_windows = 1
+scope_way = "LAST"
+when = "C > O"
+points = 2.0
+explain = "test"
+"#,
+        )
+        .expect("write strategy");
+        let path = source_dir.to_str().expect("utf8");
+        assert_eq!(
+            crate::data::ScoreRule::load_rules(path)
+                .expect("load")
+                .len(),
+            1
+        );
+        set_strategy_manage_rule_enabled(path, "启动测试", false).expect("disable rule");
+        assert!(
+            crate::data::ScoreRule::load_rules(path)
+                .expect("load")
+                .is_empty()
+        );
+        assert!(
+            crate::scoring::rule_cache::cache_rule_build(path, None)
+                .expect("build cache")
+                .is_empty()
+        );
+        assert_eq!(
+            crate::scoring::tools::warmup_rows_estimate(path, None).expect("warmup"),
+            0
+        );
+        set_strategy_manage_scene_enabled(path, "趋势启动", false).expect("disable scene");
+        set_strategy_manage_rule_enabled(path, "启动测试", true).expect("enable rule");
+        assert!(
+            crate::data::ScoreRule::load_rules(path)
+                .expect("load")
+                .is_empty()
+        );
+        assert!(
+            crate::data::ScoreScene::load_scenes(path)
+                .expect("load")
+                .is_empty()
+        );
+        assert!(
+            crate::scoring::rule_cache::cache_rule_build(path, None)
+                .expect("build cache")
+                .is_empty()
+        );
+        set_strategy_manage_scene_enabled(path, "趋势启动", true).expect("enable scene");
+        assert_eq!(
+            crate::data::ScoreRule::load_rules(path)
+                .expect("load")
+                .len(),
+            1
+        );
+        remove_dir_all(source_dir).expect("remove temp source");
     }
 
     #[test]
@@ -1184,6 +1328,7 @@ explain = "test"
             None,
             StrategyManageRuleDraft {
                 name: "攻击K".to_string(),
+                enabled: true,
                 scene_name: "趋势启动".to_string(),
                 kind: crate::data::RuleKind::Single,
                 stage: "trigger".to_string(),

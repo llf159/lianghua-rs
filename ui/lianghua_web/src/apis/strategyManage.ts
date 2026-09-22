@@ -17,6 +17,7 @@ export type StrategyManageRuleCondition = {
 export type StrategyManageSceneItem = {
   index: number
   name: string
+  enabled: boolean
   direction: string
   observe_threshold: number
   trigger_threshold: number
@@ -27,6 +28,7 @@ export type StrategyManageSceneItem = {
 
 export type StrategyManageSceneDraft = {
   name: string
+  enabled: boolean
   direction: string
   observe_threshold: number
   trigger_threshold: number
@@ -37,6 +39,7 @@ export type StrategyManageSceneDraft = {
 export type StrategyManageRuleItem = {
   index: number
   name: string
+  enabled: boolean
   scene_name: string
   kind: StrategyManageRuleKind
   stage: string
@@ -54,6 +57,7 @@ export type StrategyManageRuleItem = {
 
 export type StrategyManageRuleDraft = {
   name: string
+  enabled: boolean
   scene_name: string
   kind: StrategyManageRuleKind
   stage: string
@@ -81,6 +85,14 @@ export type StrategyManageRefactorDraft = {
 
 export async function getStrategyManagePage(sourcePath: string) {
   return invoke<StrategyManagePageData>('get_strategy_manage_page', { sourcePath })
+}
+
+export async function setStrategyManageSceneEnabled(sourcePath: string, name: string, enabled: boolean) {
+  return invoke<StrategyManagePageData>('set_strategy_manage_scene_enabled', { sourcePath, name, enabled })
+}
+
+export async function setStrategyManageRuleEnabled(sourcePath: string, name: string, enabled: boolean) {
+  return invoke<StrategyManagePageData>('set_strategy_manage_rule_enabled', { sourcePath, name, enabled })
 }
 
 export async function checkStrategyManageSceneDraft(

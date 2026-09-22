@@ -444,6 +444,17 @@
   cursor: pointer;
 }
 
+.strategy-manage-scene-card.is-excluded,
+.strategy-manage-rule-card.is-excluded {
+  border-color: #bdc9d6;
+  background: #f4f6f8;
+}
+
+.strategy-manage-rule-status {
+  color: #607286;
+  font-size: 12px;
+}
+
 .strategy-manage-scene-card-head {
   display: flex;
   justify-content: space-between;

@@ -921,6 +921,10 @@ pub struct ScoreConfig {
     pub rule: Vec<ScoreRule>,
 }
 
+fn default_enabled() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum ScopeWay {
     Any,
@@ -972,6 +976,8 @@ impl SceneDirection {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ScoreScene {
     pub name: String,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
     pub direction: SceneDirection,
     pub observe_threshold: f64,
     pub trigger_threshold: f64,
@@ -1016,6 +1022,8 @@ pub struct ScoreRuleBonus {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ScoreRule {
     pub name: String,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
     #[serde(rename = "scene")]
     pub scene_name: String,
     #[serde(default)]
@@ -1312,27 +1320,44 @@ fn parse_and_validate_score_rule_expression(
 
 impl ScoreScene {
     pub fn load_scenes(source_dir: &str) -> Result<Vec<ScoreScene>, String> {
-        Ok(ScoreConfig::load(source_dir)?.scene)
+        Self::load_scenes_with_strategy_path(source_dir, None)
     }
 
     pub fn load_scenes_with_strategy_path(
         source_dir: &str,
         strategy_path: Option<&str>,
     ) -> Result<Vec<ScoreScene>, String> {
-        Ok(ScoreConfig::load_with_strategy_path(source_dir, strategy_path)?.scene)
+        Ok(
+            ScoreConfig::load_with_strategy_path(source_dir, strategy_path)?
+                .scene
+                .into_iter()
+                .filter(|scene| scene.enabled)
+                .collect(),
+        )
     }
 }
 
 impl ScoreRule {
     pub fn load_rules(source_dir: &str) -> Result<Vec<ScoreRule>, String> {
-        Ok(ScoreConfig::load(source_dir)?.rule)
+        Self::load_rules_with_strategy_path(source_dir, None)
     }
 
     pub fn load_rules_with_strategy_path(
         source_dir: &str,
         strategy_path: Option<&str>,
     ) -> Result<Vec<ScoreRule>, String> {
-        Ok(ScoreConfig::load_with_strategy_path(source_dir, strategy_path)?.rule)
+        let config = ScoreConfig::load_with_strategy_path(source_dir, strategy_path)?;
+        let enabled_scenes: HashSet<String> = config
+            .scene
+            .into_iter()
+            .filter(|scene| scene.enabled)
+            .map(|scene| scene.name)
+            .collect();
+        Ok(config
+            .rule
+            .into_iter()
+            .filter(|rule| rule.enabled && enabled_scenes.contains(&rule.scene_name))
+            .collect())
     }
 
     pub fn representative_points(&self) -> f64 {

@@ -17,6 +17,8 @@ import {
   removeStrategyManageScene,
   removeStrategyManageRules,
   saveStrategyManageRefactorFile,
+  setStrategyManageRuleEnabled,
+  setStrategyManageSceneEnabled,
   updateStrategyManageScene,
   updateStrategyManageRule,
   type StrategyManageDistPoint,
@@ -128,6 +130,7 @@ function scopeWaySupportsDistPoints(scopeWay: string) {
 function buildEmptyDraft(sceneName = ''): StrategyManageRuleDraft {
   return {
     name: '',
+    enabled: true,
     scene_name: sceneName,
     kind: 'single',
     stage: 'base',
@@ -147,6 +150,7 @@ function buildEmptyDraft(sceneName = ''): StrategyManageRuleDraft {
 function buildEmptySceneDraft(): StrategyManageSceneDraft {
   return {
     name: '',
+    enabled: true,
     direction: 'long',
     observe_threshold: 1,
     trigger_threshold: 2,
@@ -158,6 +162,7 @@ function buildEmptySceneDraft(): StrategyManageSceneDraft {
 function buildSceneDraftFromScene(scene: StrategyManageSceneItem): StrategyManageSceneDraft {
   return {
     name: scene.name,
+    enabled: scene.enabled,
     direction: scene.direction,
     observe_threshold: scene.observe_threshold,
     trigger_threshold: scene.trigger_threshold,
@@ -169,6 +174,7 @@ function buildSceneDraftFromScene(scene: StrategyManageSceneItem): StrategyManag
 function buildDraftFromRule(rule: StrategyManageRuleItem): StrategyManageRuleDraft {
   return {
     name: rule.name,
+    enabled: rule.enabled,
     scene_name: rule.scene_name,
     kind: rule.kind ?? 'single',
     stage: rule.stage,
@@ -201,6 +207,7 @@ function createRefactorSceneDraft(name = ''): RefactorSceneDraft {
   return {
     id: createRefactorSceneId(),
     name,
+    enabled: true,
     direction: 'long',
     observe_threshold: 1,
     trigger_threshold: 2,
@@ -213,6 +220,7 @@ function buildRefactorSceneDraftFromScene(scene: StrategyManageSceneItem): Refac
   return {
     id: createRefactorSceneId(),
     name: scene.name,
+    enabled: scene.enabled,
     direction: scene.direction,
     observe_threshold: scene.observe_threshold,
     trigger_threshold: scene.trigger_threshold,
@@ -807,6 +815,33 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
     })
   }
 
+  async function onToggleScene(scene: StrategyManageSceneItem) {
+    setBusyAction('saving')
+    setError('')
+    try {
+      applyPageData(await setStrategyManageSceneEnabled(sourcePath, scene.name, !scene.enabled))
+      setNotice(`${scene.name}已${scene.enabled ? '暂停' : '启用'}；历史榜单和回测请重新运行 Ranking Compute。`)
+    } catch (toggleError) {
+      setError(`切换场景失败: ${String(toggleError)}`)
+    } finally {
+      setBusyAction('idle')
+    }
+  }
+
+  async function onToggleRule(rule: StrategyManageRuleItem) {
+    setBusyAction('saving')
+    setError('')
+    try {
+      applyPageData(await setStrategyManageRuleEnabled(sourcePath, rule.name, !rule.enabled))
+      const parentEnabled = scenes.find((scene) => scene.name === rule.scene_name)?.enabled
+      setNotice(`${rule.name}已${rule.enabled ? '暂停' : '设为启用'}${!rule.enabled && !parentEnabled ? '，当前仍随场景暂停' : ''}；历史榜单和回测请重新运行 Ranking Compute。`)
+    } catch (toggleError) {
+      setError(`切换策略失败: ${String(toggleError)}`)
+    } finally {
+      setBusyAction('idle')
+    }
+  }
+
   function openCreateEditor(sceneName: string) {
     const nextDraft = buildEmptyDraft(sceneName)
     setEditorMode('create')
@@ -1340,7 +1375,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
         sceneEditorMode === 'create'
           ? await createStrategyManageScene(sourcePath, preparedSceneDraft)
           : await updateStrategyManageScene(sourcePath, editingSceneOriginalName, preparedSceneDraft)
-      applyPageData(data, preparedSceneDraft.name)
+      applyPageData(data)
       setSceneDraft(null)
       setEditingSceneOriginalName('')
       setNotice(sceneEditorMode === 'create' ? 'scene 已创建。' : 'scene 已更新。')
@@ -1370,6 +1405,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
       const outputPath = await saveStrategyManageRefactorFile(sourcePath, refactorFileName.trim(), {
         scenes: refactorScenes.map((scene) => ({
           name: scene.name.trim(),
+          enabled: scene.enabled,
           direction: scene.direction.trim().toLowerCase(),
           observe_threshold: scene.observe_threshold,
           trigger_threshold: scene.trigger_threshold,
@@ -1709,11 +1745,18 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
                   ).length
                 : sceneRules.length
               return (
-                <button
+                <div
                   key={scene.name}
-                  type="button"
-                  className="strategy-manage-scene-card"
+                  role="button"
+                  tabIndex={0}
+                  className={`strategy-manage-scene-card${scene.enabled ? '' : ' is-excluded'}`}
                   onClick={() => setSelectedSceneName(scene.name)}
+                  onKeyDown={(event) => {
+                    if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) {
+                      event.preventDefault()
+                      setSelectedSceneName(scene.name)
+                    }
+                  }}
                 >
                   <div className="strategy-manage-scene-card-head">
                     <strong>{scene.name}</strong>
@@ -1721,8 +1764,17 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
                       <span>
                         {normalizedSearchKeyword
                           ? `命中 ${matchedRuleCount} / ${scene.rule_count} 条`
-                          : `${scene.rule_count} 条规则`}
+                          : `${sceneRules.filter((rule) => rule.enabled && scene.enabled).length} / ${scene.rule_count} 条生效`}
                       </span>
+                      <button
+                        type="button"
+                        className="strategy-manage-inline-btn"
+                        onClick={(event) => { event.stopPropagation(); void onToggleScene(scene) }}
+                        disabled={isBusy}
+                        aria-label={`${scene.enabled ? '暂停' : '启用'}场景 ${scene.name}`}
+                      >
+                        {scene.enabled ? '暂停场景' : '启用场景'}
+                      </button>
                       <button
                         type="button"
                         className="strategy-manage-inline-btn"
@@ -1754,7 +1806,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
                     <span>fail {formatNumber(scene.fail_threshold)}</span>
                   </div>
                   <p className="strategy-manage-note">{sceneStageSummary(sceneRules) || '暂无规则'}</p>
-                </button>
+                </div>
               )
             })}
           </div>
@@ -1775,7 +1827,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
               const isCombination = (rule.kind ?? 'single') === 'combination'
 
               return (
-                <article className="strategy-manage-rule-card strategy-manage-rule-card-compact strategy-manage-rule-card-recent" key={rule.name}>
+                <article className={`strategy-manage-rule-card strategy-manage-rule-card-compact strategy-manage-rule-card-recent${rule.enabled && scenes.find((scene) => scene.name === rule.scene_name)?.enabled ? '' : ' is-excluded'}`} key={rule.name}>
                   <div className="strategy-manage-rule-card-head">
                     <div>
                       <div className="strategy-manage-rule-card-name">{rule.name}</div>
@@ -1784,6 +1836,9 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
                       </div>
                     </div>
                     <div className="strategy-manage-rule-card-actions">
+                      <button className="strategy-manage-inline-btn" type="button" onClick={() => void onToggleRule(rule)} disabled={isBusy}>
+                        {rule.enabled ? '暂停' : '启用'}
+                      </button>
                       <button className="strategy-manage-inline-btn" type="button" onClick={() => openEditEditor(rule)}>
                         编辑
                       </button>
@@ -2132,9 +2187,12 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
             <div className="strategy-manage-section-head strategy-manage-scene-modal-head">
               <div>
                 <h3 className="strategy-manage-subtitle">{selectedScene.name}</h3>
-                <p className="strategy-manage-note">当前 scene 下共 {selectedSceneRules.length} 条规则。</p>
+                <p className="strategy-manage-note">当前 scene 下共 {selectedSceneRules.length} 条规则，{selectedScene.enabled ? '场景启用中' : '场景已暂停，全部规则不参与计算'}。</p>
               </div>
               <div className="strategy-manage-toolbar-right">
+                <button className="strategy-manage-toolbar-btn" type="button" onClick={() => void onToggleScene(selectedScene)} disabled={isBusy}>
+                  {selectedScene.enabled ? '暂停场景' : '启用场景'}
+                </button>
                 <button
                   className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-primary"
                   type="button"
@@ -2176,7 +2234,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
                     const isCombination = (rule.kind ?? 'single') === 'combination'
 
                     return (
-                      <article className="strategy-manage-rule-card strategy-manage-rule-card-compact" key={rule.name}>
+                      <article className={`strategy-manage-rule-card strategy-manage-rule-card-compact${rule.enabled && selectedScene.enabled ? '' : ' is-excluded'}`} key={rule.name}>
                         <div className="strategy-manage-rule-card-head">
                           <div>
                             <div className="strategy-manage-rule-card-name">
@@ -2187,6 +2245,10 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
                             </div>
                           </div>
                           <div className="strategy-manage-rule-card-actions">
+                            <span className="strategy-manage-rule-status">{selectedScene.enabled ? (rule.enabled ? '已启用' : '已暂停') : '随场景暂停'}</span>
+                            <button className="strategy-manage-inline-btn" type="button" onClick={() => void onToggleRule(rule)} disabled={isBusy}>
+                              {rule.enabled ? '暂停' : '启用'}
+                            </button>
                             <button className="strategy-manage-inline-btn" type="button" onClick={() => openEditEditor(rule)}>
                               编辑
                             </button>

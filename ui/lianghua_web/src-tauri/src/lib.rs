@@ -151,6 +151,8 @@ use {
         remove_strategy_manage_rules as core_remove_strategy_manage_rules,
         remove_strategy_manage_scene as core_remove_strategy_manage_scene,
         save_strategy_manage_refactor_file as core_save_strategy_manage_refactor_file,
+        set_strategy_manage_rule_enabled as core_set_strategy_manage_rule_enabled,
+        set_strategy_manage_scene_enabled as core_set_strategy_manage_scene_enabled,
         update_strategy_manage_rule as core_update_strategy_manage_rule,
         update_strategy_manage_scene as core_update_strategy_manage_scene, StrategyManagePageData,
         StrategyManageRefactorDraft, StrategyManageRuleDraft, StrategyManageSceneDraft,
@@ -818,6 +820,24 @@ async fn get_all_market_monitor_snapshot(
 #[tauri::command]
 fn get_strategy_manage_page(source_path: String) -> Result<StrategyManagePageData, String> {
     core_get_strategy_manage_page(&source_path)
+}
+
+#[tauri::command]
+fn set_strategy_manage_scene_enabled(
+    source_path: String,
+    name: String,
+    enabled: bool,
+) -> Result<StrategyManagePageData, String> {
+    core_set_strategy_manage_scene_enabled(&source_path, &name, enabled)
+}
+
+#[tauri::command]
+fn set_strategy_manage_rule_enabled(
+    source_path: String,
+    name: String,
+    enabled: bool,
+) -> Result<StrategyManagePageData, String> {
+    core_set_strategy_manage_rule_enabled(&source_path, &name, enabled)
 }
 
 #[tauri::command]
@@ -2822,6 +2842,8 @@ pub fn run() {
             activate_cyq_chen_strategy_backup,
             run_ranking_tiebreak_fill,
             get_strategy_manage_page,
+            set_strategy_manage_scene_enabled,
+            set_strategy_manage_rule_enabled,
             check_strategy_manage_scene_draft,
             create_strategy_manage_scene,
             update_strategy_manage_scene,
