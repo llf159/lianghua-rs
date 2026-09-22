@@ -757,13 +757,14 @@ export async function removeManagedSourceFile(
 
   const sourceDir = DEFAULT_MANAGED_SOURCE_DIR
   await ensureManagedSourcePath(sourceDir)
+  if (fileId === 'result-db') {
+    await invoke('delete_managed_result_db', { sourceDir })
+    return inspectManagedSourceStatus(sourceDir)
+  }
+
   const targetRelativePath = getTargetRelativePath(targetFile, sourceDir)
   if (await exists(await resolveAbsoluteTargetPath(targetRelativePath))) {
     await remove(await resolveAbsoluteTargetPath(targetRelativePath))
-  }
-  const snapshotRelativePath = buildRelativePath(sourceDir, 'strategy_snapshots/rank_compute')
-  if (fileId === 'result-db' && (await exists(await resolveAbsoluteTargetPath(snapshotRelativePath)))) {
-    await remove(await resolveAbsoluteTargetPath(snapshotRelativePath), { recursive: true })
   }
 
   return inspectManagedSourceStatus(sourceDir)

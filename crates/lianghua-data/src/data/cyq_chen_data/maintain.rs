@@ -1150,6 +1150,18 @@ mod tests {
         let incremental_dir = unique_temp_source_dir();
         prepare_source_db(&incremental_dir);
         let incremental_path = incremental_dir.to_str().expect("utf8 path");
+        let ratio_strategy = r#"
+[[strategy]]
+name = "历史主力比例减仓"
+holder = "main"
+direction = "sell"
+when = "REF(MAIN_CHIP_RATIO, 1) > 0"
+bias = 0.5
+"#;
+        let incremental_strategy_path = chip_change_rule_path(incremental_path);
+        let mut incremental_strategy = fs::read_to_string(&incremental_strategy_path).unwrap();
+        incremental_strategy.push_str(ratio_strategy);
+        fs::write(incremental_strategy_path, incremental_strategy).unwrap();
         let config = ChenChipConfig {
             warmup_days: 1,
             bucket_pct: 5.0,
@@ -1167,6 +1179,10 @@ mod tests {
 
         let full_dir = unique_temp_source_dir();
         prepare_source_db(&full_dir);
+        let full_strategy_path = chip_change_rule_path(full_dir.to_str().expect("utf8 path"));
+        let mut full_strategy = fs::read_to_string(&full_strategy_path).unwrap();
+        full_strategy.push_str(ratio_strategy);
+        fs::write(full_strategy_path, full_strategy).unwrap();
         insert_paused_stock_resume_row(&full_dir);
         let full_path = full_dir.to_str().expect("utf8 path");
         rebuild_cyq_chen_all(full_path, config, None, None).expect("full rebuild cyq chen");

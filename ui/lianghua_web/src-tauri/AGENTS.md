@@ -2,6 +2,8 @@
 
 后续 agents 修改本组件时请继续维护本文件。
 
+- 问题：管理页删除结果库时，前端文件插件处理数据库，而计算策略快照由 Rust 后端创建在同一数据仓库目录；快照未随结果库清理。解决方案选择：删除结果库及 `strategy_snapshots/rank_compute` 统一交给后端，使用与快照创建相同的数据仓库路径解析，并保留普通策略备份。解释：两个产物属于同一次排名计算，按同一根目录执行删除可避免前后端路径或文件权限口径不一致；下次可执行 `cargo test -p app deleting_result_db_removes_compute_snapshots_and_keeps_strategy_backups` 检查联动。
+
 - 筹码策略导入与数据管理导入统一通过 `FilePath` 和 `app.fs().open` 读取选择器结果，并在 `spawn_blocking` 内执行；Android 返回的是 URI，不能直接交给 `std::fs`，否则会报路径不存在。百分号解码仅用于展示文件名，不改写读取 URI；业务层接收文本后继续完成 TOML 校验和备份。
 
 - Android 的 `MainActivity` 必须先调用 `super.onCreate`，再通过自定义 JNI 方法初始化 `rustls-platform-verifier`。Wry 0.54.4 会在加载 `WryActivity` 类时加载 Tauri 原生库，曾掩盖 JNI 调用过早的问题；Wry 0.55.1 改为在 `WryActivity.onCreate` 首次访问惰性的 `Rust` 对象时才执行 `System.loadLibrary`，因此禁止依赖类加载副作用，也禁止吞掉 `UnsatisfiedLinkError` 后继续启动，否则 verifier 实际未初始化，后续 HTTPS 请求会表现为证书验证失败。

@@ -13,3 +13,5 @@ __pycache__
 .sisyphus
 /docs/
 /strategies
+market*
+/src/bin

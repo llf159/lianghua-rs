@@ -255,7 +255,7 @@ export default function OverviewSimilarityRankingPage() {
         <tr>
           <th>排名</th>
           <th>股票</th>
-          <th>板块</th>
+          <th>三日优排名</th>
           <th>总市值(亿)</th>
           <th>预测分</th>
           <th>收缩超额</th>
@@ -264,7 +264,6 @@ export default function OverviewSimilarityRankingPage() {
           <th>MFE / MAE</th>
           <th>置信度</th>
           <th>相似度</th>
-          <th>三日优排名</th>
           <th>最相似成功模板</th>
           <th>最相似失败模板</th>
           <th>概念</th>
@@ -472,7 +471,7 @@ export default function OverviewSimilarityRankingPage() {
                           <span>{row.tsCode}</span>
                         </DetailsLink>
                       </td>
-                      <td>{row.board || '--'}</td>
+                      <td>{row.bestRank3d ?? '--'}</td>
                       <td>{formatNumber(row.totalMvYi, 2)}</td>
                       <td>{formatNumber(row.rankingScore)}</td>
                       <td className={outcomeTone(row.shrunkExcessReturnPct)}>
@@ -489,7 +488,6 @@ export default function OverviewSimilarityRankingPage() {
                       <td>
                         {formatNumber(row.averageSimilarity)} / {formatNumber(row.bestSimilarity)}
                       </td>
-                      <td>{row.bestRank3d ?? '--'}</td>
                       <td className="trigger-sim-template-cell">
                         {renderTemplateMatch('成功', successMatch)}
                       </td>

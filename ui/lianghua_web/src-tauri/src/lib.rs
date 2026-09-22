@@ -291,7 +291,7 @@ use data_download_bridge::{
 use managed_source_bridge::{
     activate_managed_strategy_backup, allow_import_path,
     auto_backup_managed_active_strategy_on_entry, backup_managed_active_strategy,
-    copy_import_file_to_appdata, create_managed_empty_strategy_backup,
+    copy_import_file_to_appdata, create_managed_empty_strategy_backup, delete_managed_result_db,
     delete_managed_strategy_backup, export_managed_source_directory,
     export_managed_source_directory_mobile, export_managed_source_file,
     export_managed_strategy_backup_file, export_managed_strategy_bundle,
@@ -2723,6 +2723,7 @@ pub fn run() {
             export_managed_source_directory_mobile,
             export_managed_source_file,
             import_managed_source_zip,
+            delete_managed_result_db,
             get_managed_strategy_assets_status,
             import_managed_strategy_backup,
             auto_backup_managed_active_strategy_on_entry,

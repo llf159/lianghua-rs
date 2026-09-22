@@ -320,6 +320,37 @@ fn managed_rank_compute_snapshot_root(source_root: &Path) -> PathBuf {
         .join(RANK_COMPUTE_SNAPSHOT_DIR_NAME)
 }
 
+fn delete_managed_result_db_inner(data_root: &Path, source_dir: &str) -> Result<(), String> {
+    let source_root = resolve_source_root(data_root, source_dir)?;
+    let result_db_path = source_root.join("scoring_result.db");
+    match std::fs::remove_file(&result_db_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "删除结果库失败: path={}, err={error}",
+                result_db_path.display()
+            ));
+        }
+    }
+
+    let snapshot_root = managed_rank_compute_snapshot_root(&source_root);
+    match std::fs::remove_dir_all(&snapshot_root) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "删除计算策略快照失败: path={}, err={error}",
+            snapshot_root.display()
+        )),
+    }
+}
+
+#[tauri::command]
+pub fn delete_managed_result_db(app: tauri::AppHandle, source_dir: String) -> Result<(), String> {
+    let data_root = crate::warehouse::warehouse_root(&app)?;
+    delete_managed_result_db_inner(&data_root, &source_dir)
+}
+
 fn managed_strategy_backup_dir(source_root: &Path, backup_id: &str) -> PathBuf {
     managed_strategy_backup_root(source_root).join(backup_id)
 }
@@ -1393,8 +1424,8 @@ pub async fn import_managed_strategy_backup(
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_archive_root, strip_archive_root, write_strategy_backup_meta_atomically,
-        StrategyBackupMeta,
+        delete_managed_result_db_inner, normalize_archive_root, strip_archive_root,
+        write_strategy_backup_meta_atomically, StrategyBackupMeta,
     };
     use std::{
         path::Path,
@@ -1429,6 +1460,37 @@ mod tests {
         assert_eq!(normalize_archive_root(""), "source");
         assert_eq!(normalize_archive_root("source"), "source");
         assert_eq!(normalize_archive_root("/nested/source/"), "nested/source");
+    }
+
+    #[test]
+    fn deleting_result_db_removes_compute_snapshots_and_keeps_strategy_backups() {
+        let unique_suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let data_root = std::env::temp_dir().join(format!(
+            "lianghua-result-db-delete-test-{}-{unique_suffix}",
+            std::process::id()
+        ));
+        let source_root = data_root.join("source");
+        let snapshot_dir = source_root.join("strategy_snapshots/rank_compute/20260920");
+        let backup_dir = source_root.join("strategy_backups/20260920");
+        std::fs::create_dir_all(&snapshot_dir).unwrap();
+        std::fs::create_dir_all(&backup_dir).unwrap();
+        std::fs::write(source_root.join("scoring_result.db"), "result").unwrap();
+        std::fs::write(snapshot_dir.join("score_rule.toml"), "snapshot").unwrap();
+        std::fs::write(backup_dir.join("score_rule.toml"), "backup").unwrap();
+
+        delete_managed_result_db_inner(&data_root, "source").unwrap();
+        assert!(!source_root.join("scoring_result.db").exists());
+        assert!(!source_root.join("strategy_snapshots/rank_compute").exists());
+        assert!(backup_dir.join("score_rule.toml").exists());
+
+        std::fs::create_dir_all(&snapshot_dir).unwrap();
+        delete_managed_result_db_inner(&data_root, "source").unwrap();
+        assert!(!source_root.join("strategy_snapshots/rank_compute").exists());
+
+        std::fs::remove_dir_all(data_root).unwrap();
     }
 
     #[test]

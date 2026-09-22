@@ -10,12 +10,14 @@ use crate::data::DataReader;
 use crate::data::RowData;
 use crate::data::cyq_chen::ChenChipBin;
 use crate::data::cyq_chen::ChenChipConfig;
+use crate::data::cyq_chen::ChipDirection;
 use crate::data::cyq_chen::CompiledChipChangeConfig;
 use crate::data::cyq_chen::compute_chen_chip_snapshots_from_initial_bins_with_compiled_config;
 use crate::data::cyq_chen::compute_chen_chip_snapshots_with_compiled_config;
 use crate::data::cyq_chen::estimate_chen_chip_expression_warmup;
 use crate::data::cyq_chen::round_chen_chip_snapshot;
 use crate::data::cyq_chen::round_chen_chip_value;
+use crate::data::expr_program_uses_runtime_key;
 use crate::data::extras::inject_stock_extra_fields;
 use crate::data::load_trade_date_list;
 use duckdb::Appender;
@@ -180,6 +182,10 @@ pub(super) fn compute_cyq_chen_stock_group_batch(
     let lookback = config
         .warmup_days
         .max(estimate_chen_chip_expression_warmup(chip_config)?);
+    let needs_main_ratio_history = chip_config.strategies.iter().any(|strategy| {
+        strategy.direction == ChipDirection::Sell
+            && expr_program_uses_runtime_key(&strategy.when_ast, "MAIN_CHIP_RATIO")
+    });
     let mut rows_map =
         worker_reader.load_batch(ts_group, DEFAULT_ADJ_TYPE, load_start_date, end_date)?;
     let mut batch = CyqChenWriteBatch::default();
@@ -309,72 +315,76 @@ pub(super) fn compute_cyq_chen_stock_group_batch(
                         return Ok(None);
                     };
 
-                    let mut stmt = conn
-                        .prepare(
-                            r#"
-            SELECT bin_index, price, price_low, price_high, main_chip, retail_chip, total_chip
-            FROM cyq_chen_bin
-            WHERE ts_code = ? AND adj_type = ? AND trade_date = ?
-            ORDER BY bin_index ASC
-            "#,
-                        )
-                        .map_err(|e| {
-                            format!("预编译新筹码状态分桶查询失败, ts_code={ts_code}: {e}")
-                        })?;
-                    let mut rows = stmt
-                        .query(params![
-                            ts_code,
-                            DEFAULT_ADJ_TYPE,
-                            state_trade_date.as_str()
-                        ])
-                        .map_err(|e| format!("查询新筹码状态分桶失败, ts_code={ts_code}: {e}"))?;
-                    let mut bins = Vec::new();
-                    while let Some(row) = rows
-                        .next()
-                        .map_err(|e| format!("读取新筹码状态分桶失败, ts_code={ts_code}: {e}"))?
-                    {
-                        let index_i64: i64 = row.get(0).map_err(|e| {
-                            format!("读取新筹码分桶序号失败, ts_code={ts_code}: {e}")
-                        })?;
-                        bins.push(ChenChipBin {
-                            pending: Vec::new(),
-                            index: index_i64.max(0) as usize,
-                            price: row.get(1).map_err(|e| {
-                                format!("读取新筹码分桶价格失败, ts_code={ts_code}: {e}")
-                            })?,
-                            price_low: row.get(2).map_err(|e| {
-                                format!("读取新筹码分桶下沿失败, ts_code={ts_code}: {e}")
-                            })?,
-                            price_high: row.get(3).map_err(|e| {
-                                format!("读取新筹码分桶上沿失败, ts_code={ts_code}: {e}")
-                            })?,
-                            main_chip: row.get(4).map_err(|e| {
-                                format!("读取新筹码主力筹码失败, ts_code={ts_code}: {e}")
-                            })?,
-                            retail_chip: row.get(5).map_err(|e| {
-                                format!("读取新筹码散户筹码失败, ts_code={ts_code}: {e}")
-                            })?,
-                            total_chip: row.get(6).map_err(|e| {
-                                format!("读取新筹码总筹码失败, ts_code={ts_code}: {e}")
-                            })?,
-                        });
-                    }
                     let checkpoint = conn.query_row(
                         "SELECT bins FROM cyq_chen_checkpoint WHERE ts_code = ? AND adj_type = ? AND trade_date = ?",
                         params![ts_code, DEFAULT_ADJ_TYPE, state_trade_date.as_str()],
                         |row| row.get::<_, String>(0),
                     ).map(Some).or_else(|e| match e { duckdb::Error::QueryReturnedNoRows => Ok(None), other => Err(other) })
                         .map_err(|e| format!("读取新筹码续算检查点失败: {e}"))?;
-                    if let Some(checkpoint) = checkpoint {
-                        bins = serde_json::from_str(&checkpoint)
-                            .map_err(|e| format!("新筹码检查点损坏: {e}"))?;
-                    } else if chip_config
-                        .strategies
-                        .iter()
-                        .any(|rule| rule.confirm_after > 0)
-                    {
-                        return Err(format!("{ts_code} 缺少后验续算检查点，请重建该股票筹码"));
-                    }
+                    let bins = if let Some(checkpoint) = checkpoint {
+                        serde_json::from_str(&checkpoint)
+                            .map_err(|e| format!("新筹码检查点损坏: {e}"))?
+                    } else {
+                        if chip_config
+                            .strategies
+                            .iter()
+                            .any(|rule| rule.confirm_after > 0)
+                        {
+                            return Err(format!("{ts_code} 缺少后验续算检查点，请重建该股票筹码"));
+                        }
+                        let mut stmt = conn
+                            .prepare(
+                                r#"
+            SELECT bin_index, price, price_low, price_high, main_chip, retail_chip, total_chip
+            FROM cyq_chen_bin
+            WHERE ts_code = ? AND adj_type = ? AND trade_date = ?
+            ORDER BY bin_index ASC
+            "#,
+                            )
+                            .map_err(|e| {
+                                format!("预编译新筹码状态分桶查询失败, ts_code={ts_code}: {e}")
+                            })?;
+                        let mut rows = stmt
+                            .query(params![
+                                ts_code,
+                                DEFAULT_ADJ_TYPE,
+                                state_trade_date.as_str()
+                            ])
+                            .map_err(|e| {
+                                format!("查询新筹码状态分桶失败, ts_code={ts_code}: {e}")
+                            })?;
+                        let mut bins = Vec::new();
+                        while let Some(row) = rows.next().map_err(|e| {
+                            format!("读取新筹码状态分桶失败, ts_code={ts_code}: {e}")
+                        })? {
+                            let index_i64: i64 = row.get(0).map_err(|e| {
+                                format!("读取新筹码分桶序号失败, ts_code={ts_code}: {e}")
+                            })?;
+                            bins.push(ChenChipBin {
+                                pending: Vec::new(),
+                                index: index_i64.max(0) as usize,
+                                price: row.get(1).map_err(|e| {
+                                    format!("读取新筹码分桶价格失败, ts_code={ts_code}: {e}")
+                                })?,
+                                price_low: row.get(2).map_err(|e| {
+                                    format!("读取新筹码分桶下沿失败, ts_code={ts_code}: {e}")
+                                })?,
+                                price_high: row.get(3).map_err(|e| {
+                                    format!("读取新筹码分桶上沿失败, ts_code={ts_code}: {e}")
+                                })?,
+                                main_chip: row.get(4).map_err(|e| {
+                                    format!("读取新筹码主力筹码失败, ts_code={ts_code}: {e}")
+                                })?,
+                                retail_chip: row.get(5).map_err(|e| {
+                                    format!("读取新筹码散户筹码失败, ts_code={ts_code}: {e}")
+                                })?,
+                                total_chip: row.get(6).map_err(|e| {
+                                    format!("读取新筹码总筹码失败, ts_code={ts_code}: {e}")
+                                })?,
+                            });
+                        }
+                        bins
+                    };
                     if bins.is_empty() {
                         return Ok(None);
                     }
@@ -388,7 +398,7 @@ pub(super) fn compute_cyq_chen_stock_group_batch(
                     let mut main_ratio_history: Vec<Arc<Vec<Option<f64>>>> = (0..bins.len())
                         .map(|_| Arc::new(vec![None; row_trade_dates.len()]))
                         .collect();
-                    if output_start_index > 0 {
+                    if needs_main_ratio_history && output_start_index > 0 {
                         let history_start_date = row_trade_dates
                             .first()
                             .map(String::as_str)
