@@ -1440,7 +1440,6 @@ pub fn run_prepared_data_download(
         effective_trade_date.as_str(),
         Some(&stock_progress_cb),
     )?;
-    let stock_recovered_stock_count = summary.recovered_stock_count;
     let index_config = DownloadRuntimeConfig {
         source_dir: prepared.source_path.clone(),
         adj_type: AdjType::Ind,
@@ -1473,7 +1472,33 @@ pub fn run_prepared_data_download(
 
     let mut completion_details = Vec::new();
     if prepared.action == "incremental-download" {
-        let recovered_stock_codes = summary.recovered_stock_codes.clone();
+        let source_conn = Connection::open(source_db_path(&prepared.source_path))
+            .map_err(|e| format!("打开原始库待修复记录失败: {e}"))?;
+        let pending_table_exists: bool = source_conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name = 'pending_chip_repair')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("检查筹码待修复记录失败: {e}"))?;
+        let mut recovered_stock_codes = Vec::new();
+        if pending_table_exists {
+            let mut stmt = source_conn
+                .prepare("SELECT ts_code FROM pending_chip_repair ORDER BY ts_code")
+                .map_err(|e| format!("准备筹码待修复记录查询失败: {e}"))?;
+            let mut rows = stmt
+                .query([])
+                .map_err(|e| format!("查询筹码待修复记录失败: {e}"))?;
+            while let Some(row) = rows
+                .next()
+                .map_err(|e| format!("读取筹码待修复记录失败: {e}"))?
+            {
+                recovered_stock_codes.push(
+                    row.get::<_, String>(0)
+                        .map_err(|e| format!("读取筹码待修复股票失败: {e}"))?,
+                );
+            }
+        }
         let has_recovered_stocks = !recovered_stock_codes.is_empty();
         if let Some(cb) = progress_cb {
             cb(lianghua_download::download::runner::DownloadProgress {
@@ -1483,8 +1508,8 @@ pub fn run_prepared_data_download(
                 current_label: None,
                 message: if has_recovered_stocks {
                     format!(
-                        "本轮有 {} 只股票发生整段补救重下，开始局部修复对应筹码并维护增量数据。",
-                        stock_recovered_stock_count
+                        "有 {} 只股票待局部修复筹码，随后维护增量数据。",
+                        recovered_stock_codes.len()
                     )
                 } else {
                     "开始按设置检查筹码库并维护增量筹码数据。".to_string()
@@ -1591,6 +1616,11 @@ pub fn run_prepared_data_download(
                                 .as_ref()
                                 .and_then(|summary| summary.end_date.as_deref())
                         });
+                    if pending_table_exists {
+                        source_conn
+                            .execute("DELETE FROM pending_chip_repair", [])
+                            .map_err(|e| format!("清除已完成的筹码待修复记录失败: {e}"))?;
+                    }
                     Ok(Some(
                         if repair_summary.is_none() && incremental_summary.is_none() {
                             "未发现新筹码库 cyq_chen.db，已跳过筹码数据维护。".to_string()
@@ -1658,6 +1688,11 @@ pub fn run_prepared_data_download(
                                 .as_ref()
                                 .and_then(|summary| summary.end_date.as_deref())
                         });
+                    if pending_table_exists {
+                        source_conn
+                            .execute("DELETE FROM pending_chip_repair", [])
+                            .map_err(|e| format!("清除已完成的筹码待修复记录失败: {e}"))?;
+                    }
                     Ok(Some(
                         if repair_summary.is_none() && incremental_summary.is_none() {
                             "未发现筹码库 cyq.db，已跳过筹码数据维护。".to_string()

@@ -6,9 +6,9 @@ use crate::data::cyq_chen_data::compute::{
 };
 use crate::data::cyq_chen_data::store::replace_cyq_chen_db;
 use crate::data::cyq_chen_data::store::{
-    clear_cyq_chen_tables, current_chip_change_strategy_hash, drop_cyq_chen_db_indexes,
-    ensure_cyq_chen_db_indexes, init_cyq_chen_db, query_cyq_chen_meta_value,
-    query_latest_cyq_chen_metadata, remove_cyq_chen_db_artifacts, write_cyq_chen_meta,
+    clear_cyq_chen_tables, current_chip_change_strategy_hash, init_cyq_chen_db,
+    query_cyq_chen_meta_value, query_latest_cyq_chen_metadata, remove_cyq_chen_db_artifacts,
+    write_cyq_chen_meta,
 };
 use crate::data::cyq_chen_data::{
     CYQ_CHEN_BIN_TABLE, CYQ_CHEN_FLUSH_BATCH_SIZE, CYQ_CHEN_GROUP_SIZE, CYQ_CHEN_QUEUE_BOUND,
@@ -483,13 +483,11 @@ pub fn repair_cyq_chen_stocks_if_db_exists(
           strategy_hash: String|
          -> Result<(usize, usize), String> {
             let mut conn = Connection::open(db_path).map_err(|e| format!("打开筹码库失败:{e}"))?;
-            ensure_cyq_chen_db_indexes(&conn)?;
 
             let write_result = (|| -> Result<(usize, usize), String> {
                 let tx = conn
                     .transaction()
                     .map_err(|e| format!("创建筹码库事务失败:{e}"))?;
-                drop_cyq_chen_db_indexes(&tx)?;
 
                 for ts_code in ts_codes {
                     tx.execute(
@@ -572,12 +570,7 @@ pub fn repair_cyq_chen_stocks_if_db_exists(
                 Ok((snapshot_rows, bin_rows))
             })();
 
-            let recreate_result = ensure_cyq_chen_db_indexes(&conn);
-            match (write_result, recreate_result) {
-                (Ok(rows), Ok(())) => Ok(rows),
-                (Err(write_error), _) => Err(write_error),
-                (Ok(_), Err(index_error)) => Err(index_error),
-            }
+            write_result
         })(
             &cyq_chen_db_str,
             rx,
@@ -1169,6 +1162,10 @@ bias = 0.5
 
         rebuild_cyq_chen_all(incremental_path, config, Some("20260401"), Some("20260403"))
             .expect("seed incremental cyq chen");
+        let conn = Connection::open(cyq_chen_db_path(incremental_path)).unwrap();
+        conn.execute("DROP INDEX idx_cyq_chen_snapshot_stock_date", [])
+            .unwrap();
+        drop(conn);
         insert_paused_stock_resume_row(&incremental_dir);
 
         let summary = maintain_cyq_chen_incremental_if_db_exists(incremental_path, false, None)
@@ -1176,6 +1173,7 @@ bias = 0.5
             .expect("cyq chen db exists");
         assert_eq!(summary.start_date.as_deref(), Some("20260407"));
         assert_eq!(summary.end_date.as_deref(), Some("20260408"));
+        assert!(index_names_for_compare(incremental_path).is_empty());
 
         let full_dir = unique_temp_source_dir();
         prepare_source_db(&full_dir);

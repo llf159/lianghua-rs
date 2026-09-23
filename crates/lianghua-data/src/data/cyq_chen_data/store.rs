@@ -132,7 +132,16 @@ pub fn init_cyq_chen_db(db_path: &Path) -> Result<(), String> {
     })(&conn)?;
     conn.execute("CREATE TABLE IF NOT EXISTS cyq_chen_checkpoint (ts_code VARCHAR, adj_type VARCHAR, trade_date VARCHAR, bins VARCHAR, PRIMARY KEY(ts_code, adj_type))", [])
         .map_err(|e| format!("创建新筹码续算状态表失败: {e}"))?;
-    ensure_cyq_chen_snapshot_index(&conn)?;
+    let has_snapshots: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM cyq_chen_snapshot LIMIT 1)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("检查新筹码摘要数据失败:{e}"))?;
+    if !has_snapshots {
+        ensure_cyq_chen_snapshot_index(&conn)?;
+    }
 
     Ok(())
 }

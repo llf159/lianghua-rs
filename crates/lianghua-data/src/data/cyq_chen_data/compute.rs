@@ -300,8 +300,25 @@ pub(super) fn compute_cyq_chen_stock_group_batch(
                                 row_trade_dates: &[String],
                                 output_start_index: usize|
                  -> Result<Option<CyqChenInitialState>, String> {
-                    let latest_state_date = conn
+                    let checkpoint_state_date = conn
                         .query_row(
+                            "SELECT trade_date FROM cyq_chen_checkpoint WHERE ts_code = ? AND adj_type = ?",
+                            params![ts_code, DEFAULT_ADJ_TYPE],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .map(Some)
+                        .or_else(|e| match e {
+                            duckdb::Error::QueryReturnedNoRows => Ok(None),
+                            other => Err(other),
+                        })
+                        .map_err(|e| format!("查询新筹码检查点日期失败, ts_code={ts_code}: {e}"))?;
+                    let latest_state_date = if checkpoint_state_date
+                        .as_deref()
+                        .is_some_and(|date| date < output_start_date)
+                    {
+                        checkpoint_state_date
+                    } else {
+                        conn.query_row(
                             r#"
             SELECT MAX(trade_date)
             FROM cyq_chen_snapshot
@@ -310,7 +327,8 @@ pub(super) fn compute_cyq_chen_stock_group_batch(
                             params![ts_code, DEFAULT_ADJ_TYPE, output_start_date],
                             |row| row.get::<_, Option<String>>(0),
                         )
-                        .map_err(|e| format!("查询新筹码最新状态失败, ts_code={ts_code}: {e}"))?;
+                        .map_err(|e| format!("查询新筹码最新状态失败, ts_code={ts_code}: {e}"))?
+                    };
                     let Some(state_trade_date) = latest_state_date else {
                         return Ok(None);
                     };
@@ -949,13 +967,10 @@ pub(super) fn write_cyq_chen_incremental_batches_from_channel(
     strategy_hash: String,
 ) -> Result<(usize, usize), String> {
     let mut conn = Connection::open(db_path).map_err(|e| format!("打开筹码库失败:{e}"))?;
-    ensure_cyq_chen_db_indexes(&conn)?;
-
     let write_result = (|| -> Result<(usize, usize), String> {
         let tx = conn
             .transaction()
             .map_err(|e| format!("创建新筹码增量事务失败:{e}"))?;
-        drop_cyq_chen_db_indexes(&tx)?;
         tx.execute(
             "DELETE FROM cyq_chen_bin WHERE adj_type = ? AND trade_date >= ? AND trade_date <= ?",
             params![DEFAULT_ADJ_TYPE, start_date, end_date],
@@ -1031,12 +1046,7 @@ pub(super) fn write_cyq_chen_incremental_batches_from_channel(
         Ok((snapshot_rows, bin_rows))
     })();
 
-    let index_result = ensure_cyq_chen_db_indexes(&conn);
-    match (write_result, index_result) {
-        (Ok(rows), Ok(())) => Ok(rows),
-        (Err(error), _) => Err(error),
-        (Ok(_), Err(error)) => Err(error),
-    }
+    write_result
 }
 
 #[cfg(test)]

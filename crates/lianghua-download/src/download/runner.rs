@@ -1060,12 +1060,20 @@ fn merge_summary(total: &mut DownloadSummary, batch: DownloadSummary) {
 fn write_prepared_stock_batch(
     conn: &Connection,
     prepared_items: &[PreparedStockDownload],
+    mark_chip_repair: bool,
 ) -> Result<(), String> {
     if prepared_items.is_empty() {
         return Ok(());
     }
 
     with_transaction(conn, |tx| {
+        if mark_chip_repair {
+            tx.execute(
+                "CREATE TABLE IF NOT EXISTS pending_chip_repair (ts_code VARCHAR PRIMARY KEY)",
+                [],
+            )
+            .map_err(|e| format!("创建筹码待修复记录失败: {e}"))?;
+        }
         let indicator_names = (|prepared_items: &[PreparedStockDownload]| -> Vec<String> {
             let mut names = HashSet::new();
             let mut ordered = Vec::new();
@@ -1092,6 +1100,13 @@ fn write_prepared_stock_batch(
                 item.end_date.as_str(),
             )?;
             append_stage_pro_bar_rows(tx, item.adj_type, &item.rows, &item.indicators)?;
+            if mark_chip_repair {
+                tx.execute(
+                    "INSERT OR REPLACE INTO pending_chip_repair VALUES (?)",
+                    [item.ts_code.as_str()],
+                )
+                .map_err(|e| format!("记录筹码待修复股票失败: {e}"))?;
+            }
         }
 
         flush_stock_data_stage_table(tx)
@@ -1323,7 +1338,7 @@ fn download_selected_stocks_with_context(
                 batch.len()
             ),
         );
-        write_prepared_stock_batch(conn, &prepared_batch.prepared_items)?;
+        write_prepared_stock_batch(conn, &prepared_batch.prepared_items, false)?;
         merge_summary(&mut total, batch_summary);
         processed_tasks += batch.len();
         emit_progress(
@@ -1426,7 +1441,7 @@ fn download_selected_stocks_with_context(
                 retry_batch.prepared_items.len()
             ),
         );
-        write_prepared_stock_batch(conn, &retry_batch.prepared_items)?;
+        write_prepared_stock_batch(conn, &retry_batch.prepared_items, false)?;
 
         total.success_count += retry_summary.success_count;
         total.saved_rows += retry_summary.saved_rows;
@@ -1594,7 +1609,7 @@ fn download_indices_with_context(
                 batch.len()
             ),
         );
-        write_prepared_stock_batch(&conn, &prepared_batch.prepared_items)?;
+        write_prepared_stock_batch(&conn, &prepared_batch.prepared_items, false)?;
         merge_summary(&mut total, batch_summary);
         processed_tasks += batch.len();
         emit_progress(
@@ -2235,7 +2250,7 @@ fn download_pending_all_market_after_basic_data(
                 let one_success_count = one_summary.success_count;
                 let one_failed_count = one_summary.failed_count;
                 if !one_batch.prepared_items.is_empty() {
-                    write_prepared_stock_batch(conn, &one_batch.prepared_items)?;
+                    write_prepared_stock_batch(conn, &one_batch.prepared_items, true)?;
                     total.recovered_stock_count += one_batch.prepared_items.len();
                     total.recovered_stock_codes.extend(
                         one_batch
@@ -2610,8 +2625,18 @@ mod tests {
             }],
             indicators: HashMap::from([("MA5".to_string(), Vec::new())]),
         };
-        write_prepared_stock_batch(&conn, &[invalid_repair])
+        let mut valid_repair = invalid_repair.clone();
+        valid_repair.indicators.clear();
+        write_prepared_stock_batch(&conn, &[invalid_repair], true)
             .expect_err("repair write should fail independently");
+        let pending_table_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'pending_chip_repair'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("check pending repair rollback");
+        assert_eq!(pending_table_count, 0);
 
         let committed_daily_rows = conn
             .query_row(
@@ -2629,6 +2654,15 @@ mod tests {
             .expect("count failed repair rows");
         assert_eq!(committed_daily_rows, 1);
         assert_eq!(broken_stock_rows, 0);
+
+        write_prepared_stock_batch(&conn, &[valid_repair], true)
+            .expect("commit stock repair and pending marker");
+        let pending_code: String = conn
+            .query_row("SELECT ts_code FROM pending_chip_repair", [], |row| {
+                row.get(0)
+            })
+            .expect("read pending repair marker");
+        assert_eq!(pending_code, "000001.SZ");
 
         fs::remove_dir_all(source_dir).ok();
     }
@@ -2678,7 +2712,7 @@ mod tests {
             indicators: HashMap::from([("MA5".to_string(), Vec::new())]),
         };
 
-        let error = write_prepared_stock_batch(&conn, &[prepared])
+        let error = write_prepared_stock_batch(&conn, &[prepared], false)
             .expect_err("invalid indicator length should fail");
         assert!(error.contains("数据库事务已回滚"));
 
