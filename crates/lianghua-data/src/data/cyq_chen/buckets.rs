@@ -287,6 +287,11 @@ pub(super) fn build_snapshot(
         .ok_or_else(|| "价格分桶为空，无法输出快照".to_string())?;
 
     Ok(ChenChipSnapshot {
+        trap_coef: None,
+        real_loss20: None,
+        feature_version: None,
+        feature_days: None,
+        unknown_trapped: None,
         trade_date: Some(bar.trade_date.clone()),
         close: finite_value(bar.close)?,
         min_price: finite_value(min_price)?,

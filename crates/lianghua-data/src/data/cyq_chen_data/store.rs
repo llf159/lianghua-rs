@@ -105,6 +105,11 @@ pub fn init_cyq_chen_db(db_path: &Path) -> Result<(), String> {
             ("percent_90_concentration", "DOUBLE"),
             ("main_profit_ratio", "DOUBLE"),
             ("main_trapped_ratio", "DOUBLE"),
+            ("trap_coef", "DOUBLE"),
+            ("real_loss20", "DOUBLE"),
+            ("feature_version", "INTEGER"),
+            ("feature_days", "INTEGER"),
+            ("unknown_trapped", "DOUBLE"),
         ] {
             let exists = conn
                 .query_row(
@@ -132,6 +137,17 @@ pub fn init_cyq_chen_db(db_path: &Path) -> Result<(), String> {
     })(&conn)?;
     conn.execute("CREATE TABLE IF NOT EXISTS cyq_chen_checkpoint (ts_code VARCHAR, adj_type VARCHAR, trade_date VARCHAR, bins VARCHAR, PRIMARY KEY(ts_code, adj_type))", [])
         .map_err(|e| format!("创建新筹码续算状态表失败: {e}"))?;
+    let feature_state_exists: bool = conn.query_row(
+        "SELECT COUNT(*) > 0 FROM information_schema.columns WHERE table_name = 'cyq_chen_checkpoint' AND column_name = 'feature_state'",
+        [], |row| row.get(0),
+    ).map_err(|e| format!("检查筹码特征续算字段失败: {e}"))?;
+    if !feature_state_exists {
+        conn.execute(
+            "ALTER TABLE cyq_chen_checkpoint ADD COLUMN feature_state VARCHAR",
+            [],
+        )
+        .map_err(|e| format!("创建筹码特征续算字段失败: {e}"))?;
+    }
     let has_snapshots: bool = conn
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM cyq_chen_snapshot LIMIT 1)",
@@ -317,6 +333,10 @@ pub(super) fn write_cyq_chen_meta(
             round_chen_chip_value(config.bucket_pct).to_string(),
         ),
         ("strategy_hash", strategy_hash.to_string()),
+        (
+            "feature_version",
+            crate::data::cyq_chen::CYQ_CHEN_FEATURE_VERSION.to_string(),
+        ),
     ] {
         tx.execute(
             &format!("INSERT INTO {CYQ_CHEN_META_TABLE} (key, value) VALUES (?, ?)"),
@@ -418,6 +438,12 @@ pub fn query_cyq_chen_strategy_maintenance_status(
         }
     };
     let strategy_changed = stored_hash.as_deref() != Some(current_hash.as_str());
+    let feature_changed = query_cyq_chen_meta_value(&cyq_chen_db, "feature_version")?.as_deref()
+        != Some(
+            crate::data::cyq_chen::CYQ_CHEN_FEATURE_VERSION
+                .to_string()
+                .as_str(),
+        );
 
     Ok(CyqChenStrategyMaintenanceStatus {
         db_exists: true,
@@ -426,6 +452,8 @@ pub fn query_cyq_chen_strategy_maintenance_status(
         detail: if strategy_changed {
             "检测到 chip_change_rule.toml 与新筹码库记录的策略快照不一致，增量维护会触发全量重建。"
                 .to_string()
+        } else if feature_changed {
+            "筹码时长与20日模拟亏损特征缺少当前版本，下一次维护会从原历史起点重放。".to_string()
         } else {
             "新筹码策略与当前库记录一致，下载后可按增量维护。".to_string()
         },

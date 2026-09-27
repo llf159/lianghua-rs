@@ -97,6 +97,8 @@ const SYNTAX_GUIDE_FIELD_SECTIONS: SyntaxGuideFieldSection[] = [
     title: '7. 新筹码库字段',
     note: '这些字段来自 cyq_chen.db 的 cyq_chen_snapshot，会按股票代码和交易日对齐注入；排名计算、表达式选股、统计验证、模拟盘和实时监控都可使用。库、表、列或日期缺失时按空值处理。',
     fields: [
+      { name: 'CYQ_TRAP_COEF', scope: '通用', description: '逐批汇总：筹码份额×正的(成本价/现价−1)×连续套牢日数/120，时间120日封顶；表示按时间加权的浮亏占当前流通市值比例，可超过1。解套归零，覆盖不足时为空。版本2需重建历史，旧阈值不适用。', example: 'CYQ_TRAP_COEF > 0.2' },
+      { name: 'CYQ_REAL_LOSS20', scope: '通用', description: '20个交易日的有界模拟实现亏损日均：卖出份额×正的(成本−成交代表价)/(成本＋成交代表价)。不是账户亏损或累计亏损百分比；不足20日为空。', example: 'CYQ_REAL_LOSS20 < 0.005' },
       { name: 'CYQ_TPR / CYQ_TTR', scope: '通用', description: '新筹码整体获利 / 套牢筹码比例。', example: 'CYQ_TPR > 0.6 AND CYQ_TTR < 0.35' },
       { name: 'CYQ_MPR / CYQ_MTR', scope: '通用', description: '新筹码主力获利 / 套牢筹码比例。', example: 'CYQ_MPR > 0.6 AND CYQ_MTR < 0.35' },
       { name: 'CYQ_MAC', scope: '通用', description: '新筹码主力平均成本，按价格分桶的主力筹码加权计算。', example: 'C > CYQ_MAC' },

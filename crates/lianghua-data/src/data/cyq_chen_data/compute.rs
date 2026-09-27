@@ -10,10 +10,11 @@ use crate::data::DataReader;
 use crate::data::RowData;
 use crate::data::cyq_chen::ChenChipBin;
 use crate::data::cyq_chen::ChenChipConfig;
+use crate::data::cyq_chen::ChenChipFeatureState;
 use crate::data::cyq_chen::ChipDirection;
 use crate::data::cyq_chen::CompiledChipChangeConfig;
-use crate::data::cyq_chen::compute_chen_chip_snapshots_from_initial_bins_with_compiled_config;
-use crate::data::cyq_chen::compute_chen_chip_snapshots_with_compiled_config;
+use crate::data::cyq_chen::compute_chen_chip_snapshots_from_initial_bins_with_compiled_config_with_features;
+use crate::data::cyq_chen::compute_chen_chip_snapshots_with_compiled_config_with_features;
 use crate::data::cyq_chen::estimate_chen_chip_expression_warmup;
 use crate::data::cyq_chen::round_chen_chip_snapshot;
 use crate::data::cyq_chen::round_chen_chip_value;
@@ -269,6 +270,7 @@ pub(super) fn compute_cyq_chen_stock_group_batch(
                 return Ok(ComputedCyqChenStock {
                     ts_code: ts_code.to_string(),
                     snapshots: Vec::new(),
+                    feature_state: None,
                 });
             }
 
@@ -285,6 +287,7 @@ pub(super) fn compute_cyq_chen_stock_group_batch(
                 return Ok(ComputedCyqChenStock {
                     ts_code: ts_code.to_string(),
                     snapshots: Vec::new(),
+                    feature_state: None,
                 });
             };
 
@@ -407,6 +410,25 @@ pub(super) fn compute_cyq_chen_stock_group_batch(
                         return Ok(None);
                     }
 
+                    let feature_json: Option<String> = conn.query_row(
+                        "SELECT feature_state FROM cyq_chen_checkpoint WHERE ts_code = ? AND adj_type = ? AND trade_date = ?",
+                        params![ts_code, DEFAULT_ADJ_TYPE, state_trade_date],
+                        |row| row.get(0),
+                    ).map_err(|e| format!("读取筹码特征检查点失败: {e}"))?;
+                    let feature_state: ChenChipFeatureState =
+                        serde_json::from_str(feature_json.as_deref().ok_or_else(|| {
+                            format!("{ts_code} 缺少筹码特征检查点，请重建该股票筹码")
+                        })?)
+                        .map_err(|e| format!("筹码特征检查点损坏，请重建该股票筹码: {e}"))?;
+                    feature_state.validate(&state_trade_date, &bins)?;
+                    if output_start_index == 0
+                        || row_trade_dates[output_start_index - 1] != state_trade_date
+                    {
+                        return Err(format!(
+                            "{ts_code} 筹码检查点与行情日期不衔接，请重建该股票筹码"
+                        ));
+                    }
+
                     let mut bin_index_by_key = HashMap::new();
                     for (index, bin) in bins.iter().enumerate() {
                         bin_index_by_key
@@ -494,6 +516,7 @@ pub(super) fn compute_cyq_chen_stock_group_batch(
 
                     Ok(Some(CyqChenInitialState {
                         state_trade_date,
+                        feature_state,
                         bins,
                         main_ratio_history,
                     }))
@@ -507,7 +530,9 @@ pub(super) fn compute_cyq_chen_stock_group_batch(
                 None => None,
             };
 
+            let mut feature_state = ChenChipFeatureState::default();
             let snapshots = if let Some(initial_state) = initial_state {
+                feature_state = initial_state.feature_state;
                 let Some(continuation_start_date) = row_data
                     .trade_dates
                     .iter()
@@ -519,15 +544,17 @@ pub(super) fn compute_cyq_chen_stock_group_batch(
                     return Ok(ComputedCyqChenStock {
                         ts_code: ts_code.to_string(),
                         snapshots: Vec::new(),
+                        feature_state: None,
                     });
                 };
-                compute_chen_chip_snapshots_from_initial_bins_with_compiled_config(
+                compute_chen_chip_snapshots_from_initial_bins_with_compiled_config_with_features(
                     &row_data,
                     &continuation_start_date,
                     &initial_state.bins,
                     &initial_state.main_ratio_history,
                     chip_config,
                     config,
+                    &mut feature_state,
                 )?
             } else {
                 let Some(output_start_date) = resolve_first_computable_output_date(
@@ -539,13 +566,15 @@ pub(super) fn compute_cyq_chen_stock_group_batch(
                     return Ok(ComputedCyqChenStock {
                         ts_code: ts_code.to_string(),
                         snapshots: Vec::new(),
+                        feature_state: None,
                     });
                 };
-                compute_chen_chip_snapshots_with_compiled_config(
+                compute_chen_chip_snapshots_with_compiled_config_with_features(
                     &row_data,
                     &output_start_date,
                     chip_config,
                     config,
+                    &mut feature_state,
                 )?
             };
             let snapshots = snapshots
@@ -560,6 +589,7 @@ pub(super) fn compute_cyq_chen_stock_group_batch(
             Ok(ComputedCyqChenStock {
                 ts_code: ts_code.to_string(),
                 snapshots,
+                feature_state: Some(feature_state),
             })
         })(
             row_data,
@@ -630,6 +660,11 @@ pub(super) fn append_cyq_chen_batch_rows(
     let mut snapshot_percent_90_concentration = Vec::with_capacity(snapshot_rows);
     let mut snapshot_main_profit_ratio = Vec::with_capacity(snapshot_rows);
     let mut snapshot_main_trapped_ratio = Vec::with_capacity(snapshot_rows);
+    let mut snapshot_unknown_trapped = Vec::with_capacity(snapshot_rows);
+    let mut snapshot_feature_days = Vec::with_capacity(snapshot_rows);
+    let mut snapshot_feature_version = Vec::with_capacity(snapshot_rows);
+    let mut snapshot_real_loss20 = Vec::with_capacity(snapshot_rows);
+    let mut snapshot_trap_coef = Vec::with_capacity(snapshot_rows);
 
     let mut bin_ts_code = StringBuilder::with_capacity(bin_rows, bin_rows.saturating_mul(12));
     let mut bin_trade_date = StringBuilder::with_capacity(bin_rows, bin_rows.saturating_mul(8));
@@ -644,7 +679,7 @@ pub(super) fn append_cyq_chen_batch_rows(
     let mut bin_total_chip = Vec::with_capacity(bin_rows);
 
     let mut checkpoint_stmt = conn
-        .prepare_cached("INSERT OR REPLACE INTO cyq_chen_checkpoint VALUES (?, ?, ?, ?)")
+        .prepare_cached("INSERT OR REPLACE INTO cyq_chen_checkpoint (ts_code, adj_type, trade_date, bins, feature_state) VALUES (?, ?, ?, ?, ?)")
         .map_err(|e| format!("准备新筹码续算检查点写入失败:{e}"))?;
     for stock in batch.stocks {
         let ts_code = stock.ts_code;
@@ -655,6 +690,12 @@ pub(super) fn append_cyq_chen_batch_rows(
                     DEFAULT_ADJ_TYPE,
                     last.trade_date.as_deref(),
                     serde_json::to_string(&last.bins).map_err(|e| e.to_string())?,
+                    stock
+                        .feature_state
+                        .as_ref()
+                        .map(serde_json::to_string)
+                        .transpose()
+                        .map_err(|e| e.to_string())?,
                 ])
                 .map_err(|e| format!("写入新筹码续算检查点失败: {e}"))?;
         }
@@ -687,6 +728,11 @@ pub(super) fn append_cyq_chen_batch_rows(
             snapshot_percent_90_concentration.push(snapshot.percent_90.concentration);
             snapshot_main_profit_ratio.push(snapshot.main_profit_ratio);
             snapshot_main_trapped_ratio.push(snapshot.main_trapped_ratio);
+            snapshot_unknown_trapped.push(snapshot.unknown_trapped);
+            snapshot_feature_days.push(snapshot.feature_days.map(|value| value as i32));
+            snapshot_feature_version.push(snapshot.feature_version.map(|value| value as i32));
+            snapshot_real_loss20.push(snapshot.real_loss20);
+            snapshot_trap_coef.push(snapshot.trap_coef);
 
             for bin in snapshot.bins {
                 bin_ts_code.append_value(&ts_code);
@@ -727,7 +773,12 @@ pub(super) fn append_cyq_chen_batch_rows(
                                    percent_90_price_high: Vec<f64>,
                                    percent_90_concentration: Vec<f64>,
                                    main_profit_ratio: Vec<f64>,
-                                   main_trapped_ratio: Vec<f64>|
+                                   main_trapped_ratio: Vec<f64>,
+                                   trap_coef: Vec<Option<f64>>,
+                                   real_loss20: Vec<Option<f64>>,
+                                   feature_version: Vec<Option<i32>>,
+                                   feature_days: Vec<Option<i32>>,
+                                   unknown_trapped: Vec<Option<f64>>|
              -> Result<RecordBatch, String> {
                 let schema = Schema::new(vec![
                     Field::new("ts_code", DataType::Utf8, false),
@@ -753,6 +804,11 @@ pub(super) fn append_cyq_chen_batch_rows(
                     Field::new("percent_90_concentration", DataType::Float64, false),
                     Field::new("main_profit_ratio", DataType::Float64, false),
                     Field::new("main_trapped_ratio", DataType::Float64, false),
+                    Field::new("trap_coef", DataType::Float64, true),
+                    Field::new("real_loss20", DataType::Float64, true),
+                    Field::new("feature_version", DataType::Int32, true),
+                    Field::new("feature_days", DataType::Int32, true),
+                    Field::new("unknown_trapped", DataType::Float64, true),
                 ]);
                 RecordBatch::try_new(
                     Arc::new(schema),
@@ -780,6 +836,11 @@ pub(super) fn append_cyq_chen_batch_rows(
                         float64_array(percent_90_concentration),
                         float64_array(main_profit_ratio),
                         float64_array(main_trapped_ratio),
+                        Arc::new(Float64Array::from(trap_coef)),
+                        Arc::new(Float64Array::from(real_loss20)),
+                        Arc::new(Int32Array::from(feature_version)),
+                        Arc::new(Int32Array::from(feature_days)),
+                        Arc::new(Float64Array::from(unknown_trapped)),
                     ],
                 )
                 .map_err(|e| format!("创建cyq_chen_snapshot批次失败:{e}"))
@@ -807,6 +868,11 @@ pub(super) fn append_cyq_chen_batch_rows(
                 snapshot_percent_90_concentration,
                 snapshot_main_profit_ratio,
                 snapshot_main_trapped_ratio,
+                snapshot_trap_coef,
+                snapshot_real_loss20,
+                snapshot_feature_version,
+                snapshot_feature_days,
+                snapshot_unknown_trapped,
             )?)
             .map_err(|e| format!("批量写入cyq_chen_snapshot失败:{e}"))?;
     }

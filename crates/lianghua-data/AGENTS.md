@@ -25,3 +25,5 @@
 - 问题：指数字段与指标列若用连字符连接，会与表达式减法冲突；解决方案选择：使用 `I_列名`、`I300_列名` 等下划线写法，原 `I` 等简写仍表示指数涨跌幅；解释：表达式词法原生支持下划线标识符，读取时按指数代码和交易日取 `stock_data` 的原始列值，避免改变减法语义。
 - 新增或改名 `STOCK_DATA_RUNTIME_FIELDS`、`RUNTIME_INDEX_COLS` 与指标列（`ind.toml`）时必须同步前端 `ui/lianghua_web/src/shared/expressionValidation.ts` 的 `KNOWN_EXPRESSION_IDENTIFIERS`：表达式回测“参数研究”的自动识别只能靠这份白名单区分“可用字段”与“待扫描参数”，漏同步的字段会被替换成常数。
 - 数据层文件按功能拆分并保持“测试跟随被测文件”：`data/cyq_chen/{mod,config,bars,simulate,buckets,test_support}`、`data/cyq_chen_data/{mod,store,compute,maintain,test_support}`；测试写在各自文件的 `#[cfg(test)] mod tests` 内，跨文件共用的夹具放同目录 `test_support.rs`，公共 API 仍由各 `mod.rs` 汇总导出，禁止再恢复单一 `tests.rs`。
+
+- 问题：筹码特征检查点的 JSON 默认浮点解析可能将未舍入桶边界改变一个最小精度单位，恢复后以原始边界匹配桶身份时失败；解决方案选择：为 serde_json 启用 float_roundtrip，检查点边界和库存保持原始 f64 精度，拒绝不守恒或日期不兼容的状态；解释：展示精度或放宽边界匹配不能保证恢复同一个成本桶，精确往返解析保留序列化时的二进制浮点值。下次可运行 `cargo test -p lianghua-data feature_checkpoint_resume_matches_replay_with_expansion_and_zero_turnover` 定位序列化、扩容和续算差异。

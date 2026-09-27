@@ -113,6 +113,58 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
         return rebuild_cyq_chen_all_with_progress(source_dir, config, None, None, progress_cb)
             .map(Some);
     }
+    if latest_metadata.is_some()
+        && query_cyq_chen_meta_value(&cyq_chen_db, "feature_version")?.as_deref()
+            != Some(
+                crate::data::cyq_chen::CYQ_CHEN_FEATURE_VERSION
+                    .to_string()
+                    .as_str(),
+            )
+    {
+        let conn = Connection::open(&cyq_chen_db).map_err(|e| e.to_string())?;
+        let first_date: String = conn
+            .query_row(
+                "SELECT MIN(trade_date) FROM cyq_chen_snapshot WHERE adj_type = ?",
+                [DEFAULT_ADJ_TYPE],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("读取筹码特征重放起点失败: {e}"))?;
+        drop(conn);
+        return rebuild_cyq_chen_all_with_progress(
+            source_dir,
+            config,
+            Some(&first_date),
+            None,
+            progress_cb,
+        )
+        .map(Some);
+    }
+    if latest_metadata.is_some() {
+        let conn = Connection::open(&cyq_chen_db).map_err(|e| e.to_string())?;
+        let mut statement = conn.prepare(
+            "SELECT history.ts_code FROM
+             (SELECT ts_code, MAX(trade_date) AS latest FROM cyq_chen_snapshot WHERE adj_type = ? GROUP BY ts_code) history
+             LEFT JOIN cyq_chen_checkpoint checkpoint ON checkpoint.ts_code = history.ts_code AND checkpoint.adj_type = ?
+             WHERE checkpoint.feature_state IS NULL OR checkpoint.trade_date != history.latest",
+        ).map_err(|e| format!("检查筹码特征缺失状态失败: {e}"))?;
+        let repairs = statement
+            .query_map(params![DEFAULT_ADJ_TYPE, DEFAULT_ADJ_TYPE], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        drop(statement);
+        drop(conn);
+        if !repairs.is_empty() {
+            repair_cyq_chen_stocks_if_db_exists(
+                source_dir,
+                &repairs,
+                allow_strategy_rebuild,
+                progress_cb,
+            )?;
+        }
+    }
     let start_date = match latest_metadata.as_ref() {
         Some((latest_trade_date, _)) if latest_trade_date >= &source_max_trade_date => {
             return Ok(Some(CyqChenRebuildSummary {
@@ -338,6 +390,20 @@ pub fn repair_cyq_chen_stocks_if_db_exists(
         }
         return rebuild_cyq_chen_all_with_progress(source_dir, config, None, None, progress_cb)
             .map(Some);
+    }
+
+    if query_cyq_chen_meta_value(&cyq_chen_db, "feature_version")?.as_deref()
+        != Some(
+            crate::data::cyq_chen::CYQ_CHEN_FEATURE_VERSION
+                .to_string()
+                .as_str(),
+        )
+    {
+        return maintain_cyq_chen_incremental_if_db_exists(
+            source_dir,
+            allow_strategy_rebuild,
+            progress_cb,
+        );
     }
 
     let Some((existing_start_date, existing_end_date)) = (|db_path: &Path| -> Result<
@@ -908,6 +974,125 @@ mod tests {
     use std::sync::mpsc::sync_channel;
 
     #[test]
+    fn feature_database_upgrade_resume_and_repair_match_rebuild() {
+        let incremental_dir = unique_temp_source_dir();
+        let full_dir = unique_temp_source_dir();
+        let dates = (0..150)
+            .map(|day| {
+                (chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap() + chrono::Duration::days(day))
+                    .format("%Y%m%d")
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        for directory in [&incremental_dir, &full_dir] {
+            prepare_source_db(directory);
+            fs::write(
+                crate::data::trade_calendar_path(directory.to_str().unwrap()),
+                format!("cal_date\n{}\n", dates.join("\n")),
+            )
+            .unwrap();
+            let conn =
+                Connection::open(crate::data::source_db_path(directory.to_str().unwrap())).unwrap();
+            conn.execute("DELETE FROM stock_data", []).unwrap();
+            for (day, date) in dates.iter().enumerate() {
+                let price = if day < 125 {
+                    12.0
+                } else if day < 140 {
+                    8.0
+                } else {
+                    15.0
+                };
+                insert_stock_row(
+                    &conn,
+                    "000001.SZ",
+                    date,
+                    price,
+                    price,
+                    price,
+                    price,
+                    if day == 130 { 0.0 } else { 10.0 },
+                );
+            }
+        }
+        let config = ChenChipConfig {
+            warmup_days: 120,
+            bucket_pct: 0.3,
+        };
+        let incremental = incremental_dir.to_str().unwrap();
+        let full = full_dir.to_str().unwrap();
+        rebuild_cyq_chen_all(incremental, config, Some(&dates[120]), Some(&dates[132])).unwrap();
+        maintain_cyq_chen_incremental_if_db_exists(incremental, false, None).unwrap();
+        rebuild_cyq_chen_all(full, config, Some(&dates[120]), None).unwrap();
+        let features = |source: &str| {
+            let conn = Connection::open(crate::data::cyq_chen_db_path(source)).unwrap();
+            let mut stmt = conn.prepare("SELECT trade_date, trap_coef, real_loss20, feature_days, unknown_trapped FROM cyq_chen_snapshot ORDER BY trade_date").unwrap();
+            stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<f64>>(1)?,
+                    row.get::<_, Option<f64>>(2)?,
+                    row.get::<_, Option<i32>>(3)?,
+                    row.get::<_, Option<f64>>(4)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+        };
+        let expected = features(full);
+        assert_eq!(features(incremental), expected);
+        assert_eq!(
+            snapshot_rows_for_compare(incremental),
+            snapshot_rows_for_compare(full)
+        );
+        let db = crate::data::cyq_chen_db_path(incremental);
+        let conn = Connection::open(&db).unwrap();
+        conn.execute("UPDATE cyq_chen_checkpoint SET feature_state = NULL", [])
+            .unwrap();
+        drop(conn);
+        maintain_cyq_chen_incremental_if_db_exists(incremental, false, None).unwrap();
+        assert_eq!(features(incremental), expected);
+        let conn = Connection::open(&db).unwrap();
+        conn.execute(
+            "DELETE FROM cyq_chen_meta WHERE key = 'feature_version'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        maintain_cyq_chen_incremental_if_db_exists(incremental, false, None).unwrap();
+        assert_eq!(features(incremental), expected);
+        let conn = Connection::open(&db).unwrap();
+        conn.execute(
+            "UPDATE cyq_chen_meta SET value = '1' WHERE key = 'feature_version'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE cyq_chen_snapshot SET trap_coef = 999, feature_version = 1",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        maintain_cyq_chen_incremental_if_db_exists(incremental, false, None).unwrap();
+        assert_eq!(features(incremental), expected);
+        let conn = Connection::open(crate::data::source_db_path(incremental)).unwrap();
+        conn.execute(
+            "UPDATE stock_data SET open=9, high=9, low=9, close=9 WHERE trade_date = ?",
+            [&dates[138]],
+        )
+        .unwrap();
+        drop(conn);
+        repair_cyq_chen_stocks_if_db_exists(incremental, &["000001.SZ".to_string()], false, None)
+            .unwrap();
+        let repaired = features(incremental);
+        assert_ne!(repaired, expected);
+        rebuild_cyq_chen_all(incremental, config, Some(&dates[120]), None).unwrap();
+        assert_eq!(features(incremental), repaired);
+        fs::remove_dir_all(incremental_dir).unwrap();
+        fs::remove_dir_all(full_dir).unwrap();
+    }
+
+    #[test]
     fn posterior_database_resume_matches_rebuild_after_pause() {
         let incremental_dir = unique_temp_source_dir();
         let full_dir = unique_temp_source_dir();
@@ -1253,7 +1438,52 @@ bias = 0.5
         let bins_before = bin_rows_for_compare(source_path);
         let meta_before = meta_rows_for_compare(source_path);
         let cyq_chen_db = cyq_chen_db_path(source_path);
-        let (tx, rx) = sync_channel(1);
+        let checkpoint_rows = |source: &str| {
+            let conn = Connection::open(cyq_chen_db_path(source)).unwrap();
+            let mut stmt = conn.prepare("SELECT ts_code, trade_date, bins, feature_state FROM cyq_chen_checkpoint ORDER BY ts_code").unwrap();
+            stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+        };
+        let checkpoint_before = checkpoint_rows(source_path);
+        let reader = super::DataReader::new(source_path).unwrap();
+        let row = reader
+            .load_one("000001.SZ", "qfq", "20260401", "20260408")
+            .unwrap();
+        let mut state = crate::data::cyq_chen::ChenChipFeatureState::default();
+        let chip = crate::data::cyq_chen::ChipChangeConfig {
+            version: 1,
+            strategy: Vec::new(),
+        }
+        .compile()
+        .unwrap();
+        let snapshots =
+            crate::data::cyq_chen::compute_chen_chip_snapshots_with_compiled_config_with_features(
+                &row, "20260402", &chip, config, &mut state,
+            )
+            .unwrap()
+            .into_iter()
+            .filter(|snapshot| snapshot.trade_date.as_deref().unwrap() >= "20260407")
+            .collect();
+        let (tx, rx) = sync_channel(2);
+        tx.send(CyqChenWriteMessage::Batch(
+            crate::data::cyq_chen_data::CyqChenWriteBatch {
+                stocks: vec![crate::data::cyq_chen_data::ComputedCyqChenStock {
+                    ts_code: "000001.SZ".into(),
+                    snapshots,
+                    feature_state: Some(state),
+                }],
+            },
+        ))
+        .unwrap();
         tx.send(CyqChenWriteMessage::Abort("test interrupt".to_string()))
             .expect("send abort");
         drop(tx);
@@ -1273,6 +1503,8 @@ bias = 0.5
         assert_eq!(bin_rows_for_compare(source_path), bins_before);
         assert_eq!(meta_rows_for_compare(source_path), meta_before);
 
+        assert_eq!(checkpoint_rows(source_path), checkpoint_before);
+        drop(reader);
         fs::remove_dir_all(source_dir).expect("cleanup temp dir");
     }
 
@@ -1312,6 +1544,7 @@ bias = 0.5
                     stocks: vec![crate::data::cyq_chen_data::ComputedCyqChenStock {
                         ts_code: "000001.SZ".to_string(),
                         snapshots: vec![snapshot],
+                        feature_state: None,
                     }],
                 },
             ))

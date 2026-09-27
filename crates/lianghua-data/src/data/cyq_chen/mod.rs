@@ -1,6 +1,7 @@
 mod bars;
 mod buckets;
 mod config;
+mod features;
 mod simulate;
 use crate::data::cyq_chen::bars::{
     bucket_step, build_validated_bars, ensure_bucket_rate_series, expand_buckets_for_bar,
@@ -15,6 +16,8 @@ use crate::data::cyq_chen::simulate::{
 };
 #[cfg(test)]
 mod test_support;
+
+pub use features::{CYQ_CHEN_FEATURE_VERSION, ChenChipFeatureState};
 
 pub use config::{
     collect_chen_chip_runtime_keys, estimate_chen_chip_expression_warmup,
@@ -131,6 +134,11 @@ pub struct ChenChipPercentRange {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChenChipSnapshot {
+    pub trap_coef: Option<f64>,
+    pub real_loss20: Option<f64>,
+    pub feature_version: Option<u32>,
+    pub feature_days: Option<usize>,
+    pub unknown_trapped: Option<f64>,
     pub trade_date: Option<String>,
     pub close: f64,
     pub min_price: f64,
@@ -252,6 +260,22 @@ pub fn compute_chen_chip_snapshots_with_compiled_config(
     chip_config: &CompiledChipChangeConfig,
     config: ChenChipConfig,
 ) -> Result<Vec<ChenChipSnapshot>, String> {
+    compute_chen_chip_snapshots_with_compiled_config_with_features(
+        row_data,
+        output_start_date,
+        chip_config,
+        config,
+        &mut ChenChipFeatureState::default(),
+    )
+}
+
+pub fn compute_chen_chip_snapshots_with_compiled_config_with_features(
+    row_data: &RowData,
+    output_start_date: &str,
+    chip_config: &CompiledChipChangeConfig,
+    config: ChenChipConfig,
+    feature_state: &mut ChenChipFeatureState,
+) -> Result<Vec<ChenChipSnapshot>, String> {
     validate_compute_config(config)?;
     if chip_config.version != 1 {
         return Err(format!(
@@ -372,6 +396,11 @@ pub fn compute_chen_chip_snapshots_with_compiled_config(
             &bars,
             chip_config.sell_uses_bucket_rate_series,
         )?;
+        feature_state.align(&buckets)?;
+        let before = buckets
+            .iter()
+            .map(ChipBucket::total_chip)
+            .collect::<Vec<_>>();
         write_main_ratio_for_day(&buckets, &mut main_ratio_history, day_index);
 
         apply_sell_for_day(
@@ -384,6 +413,10 @@ pub fn compute_chen_chip_snapshots_with_compiled_config(
             bar.turnover_rate,
         )?;
         sanitize_buckets(&mut buckets)?;
+        let after_sell = buckets
+            .iter()
+            .map(ChipBucket::total_chip)
+            .collect::<Vec<_>>();
 
         apply_buy_for_day(
             &mut buckets,
@@ -394,6 +427,10 @@ pub fn compute_chen_chip_snapshots_with_compiled_config(
             day_index,
             bar.turnover_rate,
         )?;
+        let after_buy = buckets
+            .iter()
+            .map(ChipBucket::total_chip)
+            .collect::<Vec<_>>();
         apply_posterior_for_day(
             &mut buckets,
             bar,
@@ -403,9 +440,12 @@ pub fn compute_chen_chip_snapshots_with_compiled_config(
             day_index,
         )?;
         normalize_buckets(&mut buckets)?;
+        feature_state.observe(bar, &buckets, &before, &after_sell, &after_buy)?;
 
         if day_index >= output_start_index {
-            snapshots.push(build_snapshot(bar, &buckets)?);
+            let mut snapshot = build_snapshot(bar, &buckets)?;
+            feature_state.fill_snapshot(&mut snapshot);
+            snapshots.push(snapshot);
         }
     }
 
@@ -419,6 +459,26 @@ pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config(
     initial_main_ratio_history: &[Arc<Vec<Option<f64>>>],
     chip_config: &CompiledChipChangeConfig,
     config: ChenChipConfig,
+) -> Result<Vec<ChenChipSnapshot>, String> {
+    compute_chen_chip_snapshots_from_initial_bins_with_compiled_config_with_features(
+        row_data,
+        output_start_date,
+        initial_bins,
+        initial_main_ratio_history,
+        chip_config,
+        config,
+        &mut ChenChipFeatureState::default(),
+    )
+}
+
+pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config_with_features(
+    row_data: &RowData,
+    output_start_date: &str,
+    initial_bins: &[ChenChipBin],
+    initial_main_ratio_history: &[Arc<Vec<Option<f64>>>],
+    chip_config: &CompiledChipChangeConfig,
+    config: ChenChipConfig,
+    feature_state: &mut ChenChipFeatureState,
 ) -> Result<Vec<ChenChipSnapshot>, String> {
     validate_compute_config(config)?;
     if chip_config.version != 1 {
@@ -544,6 +604,11 @@ pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config(
             &bars,
             chip_config.sell_uses_bucket_rate_series,
         )?;
+        feature_state.align(&buckets)?;
+        let before = buckets
+            .iter()
+            .map(ChipBucket::total_chip)
+            .collect::<Vec<_>>();
         write_main_ratio_for_day(&buckets, &mut main_ratio_history, day_index);
 
         apply_sell_for_day(
@@ -556,6 +621,10 @@ pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config(
             bar.turnover_rate,
         )?;
         sanitize_buckets(&mut buckets)?;
+        let after_sell = buckets
+            .iter()
+            .map(ChipBucket::total_chip)
+            .collect::<Vec<_>>();
 
         apply_buy_for_day(
             &mut buckets,
@@ -566,6 +635,10 @@ pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config(
             day_index,
             bar.turnover_rate,
         )?;
+        let after_buy = buckets
+            .iter()
+            .map(ChipBucket::total_chip)
+            .collect::<Vec<_>>();
         apply_posterior_for_day(
             &mut buckets,
             bar,
@@ -575,8 +648,11 @@ pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config(
             day_index,
         )?;
         normalize_buckets(&mut buckets)?;
+        feature_state.observe(bar, &buckets, &before, &after_sell, &after_buy)?;
 
-        snapshots.push(build_snapshot(bar, &buckets)?);
+        let mut snapshot = build_snapshot(bar, &buckets)?;
+        feature_state.fill_snapshot(&mut snapshot);
+        snapshots.push(snapshot);
     }
 
     Ok(snapshots)

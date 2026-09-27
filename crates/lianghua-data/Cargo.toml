@@ -16,7 +16,7 @@ csv = "1.4.0"
 chrono = "0.4.44"
 rand = "0.9.2"
 
-serde_json = "1.0.149"
+serde_json = { version = "1.0.149", features = ["float_roundtrip"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 libc = "0.2"

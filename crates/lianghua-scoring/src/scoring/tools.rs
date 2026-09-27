@@ -17,13 +17,15 @@ use crate::expr::{
     },
 };
 
-pub const CYQ_CHEN_RUNTIME_FIELDS: [(&str, &str); 16] = [
+pub const CYQ_CHEN_RUNTIME_FIELDS: [(&str, &str); 18] = [
     ("CYQ_MIN", "min_price"),
     ("CYQ_MAX", "max_price"),
     ("CYQ_MT", "main_total"),
     ("CYQ_RT", "retail_total"),
     ("CYQ_TPR", "total_profit_ratio"),
     ("CYQ_TTR", "total_trapped_ratio"),
+    ("CYQ_TRAP_COEF", "trap_coef"),
+    ("CYQ_REAL_LOSS20", "real_loss20"),
     ("CYQ_MPR", "main_profit_ratio"),
     ("CYQ_MTR", "main_trapped_ratio"),
     ("CYQ_MAC", "main_avg_cost"),
@@ -362,15 +364,35 @@ impl CyqChenFieldInjector {
                 return Self::unavailable(fields, format!("{error}；新筹码字段已按空值注入。"));
             }
         };
+        let feature_current = !fields
+            .iter()
+            .any(|(key, _)| matches!(*key, "CYQ_TRAP_COEF" | "CYQ_REAL_LOSS20"))
+            || conn
+                .query_row(
+                    "SELECT value FROM cyq_chen_meta WHERE key = 'feature_version'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .ok()
+                .as_deref()
+                == Some(
+                    crate::data::cyq_chen::CYQ_CHEN_FEATURE_VERSION
+                        .to_string()
+                        .as_str(),
+                );
         let available_fields = fields
             .iter()
             .copied()
-            .filter(|(_, db_col)| existing_columns.contains(&db_col.to_ascii_lowercase()))
+            .filter(|(runtime_key, db_col)| {
+                existing_columns.contains(&db_col.to_ascii_lowercase())
+                    && (!matches!(*runtime_key, "CYQ_TRAP_COEF" | "CYQ_REAL_LOSS20")
+                        || (feature_current && existing_columns.contains("feature_version")))
+            })
             .collect::<Vec<_>>();
         if available_fields.is_empty() {
             return Self::unavailable(
                 fields,
-                "cyq_chen_snapshot 缺少请求的新筹码字段，已按空值注入。",
+                "cyq_chen_snapshot 缺少请求字段或特征版本过期，已按空值注入；请运行新筹码计算。",
             );
         }
 
@@ -380,6 +402,10 @@ impl CyqChenFieldInjector {
                 for (runtime_key, db_col) in available_fields {
                     select_cols.push((|runtime_key : & str, db_col : & str| -> String {
     match runtime_key {
+        "CYQ_TRAP_COEF" | "CYQ_REAL_LOSS20" => format!(
+            "CASE WHEN snap.feature_version = {} THEN TRY_CAST(snap.\"{db_col}\" AS DOUBLE) ELSE NULL END AS \"{db_col}\"",
+            crate::data::cyq_chen::CYQ_CHEN_FEATURE_VERSION
+        ),
         "CYQ_MPR" => format!(
             "COALESCE(TRY_CAST(snap.\"{db_col}\" AS DOUBLE), {}) AS \"{db_col}\"",
             cyq_chen_main_profit_ratio_expr()
@@ -718,6 +744,31 @@ pub fn preview_optional_cyq_chen_injection_warnings(
         )),
     }
 
+    if fields
+        .iter()
+        .any(|(key, _)| matches!(*key, "CYQ_TRAP_COEF" | "CYQ_REAL_LOSS20"))
+    {
+        let version = conn
+            .query_row(
+                "SELECT value FROM cyq_chen_meta WHERE key = 'feature_version'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .ok();
+        if version.as_deref()
+            != Some(
+                crate::data::cyq_chen::CYQ_CHEN_FEATURE_VERSION
+                    .to_string()
+                    .as_str(),
+            )
+        {
+            warnings.push(
+                "筹码时长特征尚未完成当前版本的历史重建，缺失或过期值保持为空；请运行新筹码计算。"
+                    .to_string(),
+            );
+        }
+    }
+
     let load_start_date = load_trade_date_list(source_dir)
         .ok()
         .and_then(|trade_dates| {
@@ -910,6 +961,60 @@ mod tests {
             Some([Some(0.4), None].as_slice())
         );
         std::fs::remove_dir_all(source_dir).expect("remove temp source directory");
+    }
+
+    #[test]
+    fn chip_features_inject_nulls_versions_and_batch_alignment() {
+        let directory =
+            std::env::temp_dir().join(format!("lianghua-chip-features-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let conn = duckdb::Connection::open(directory.join("cyq_chen.db")).unwrap();
+        conn.execute_batch("CREATE TABLE cyq_chen_meta(key VARCHAR, value VARCHAR); INSERT INTO cyq_chen_meta VALUES('feature_version', '2');
+            CREATE TABLE cyq_chen_snapshot(ts_code VARCHAR, trade_date VARCHAR, adj_type VARCHAR, trap_coef DOUBLE, real_loss20 DOUBLE, feature_version INTEGER);
+            INSERT INTO cyq_chen_snapshot VALUES('000001.SZ','20240102','qfq',2.5,NULL,2), ('000001.SZ','20240103','qfq',0.8,0.4,1), ('000002.SZ','20240103','qfq',0.5,0.01,2);").unwrap();
+        drop(conn);
+        let keys = HashSet::from(["CYQ_TRAP_COEF".to_string(), "CYQ_REAL_LOSS20".to_string()]);
+        let row = || RowData {
+            trade_dates: vec![
+                "20240102".to_string(),
+                "20240103".to_string(),
+                "20240104".to_string(),
+            ],
+            cols: HashMap::new(),
+        };
+        let injector = CyqChenFieldInjector::new(directory.to_str().unwrap(), &keys);
+        let mut single = row();
+        assert!(injector.inject(&mut single, "000001.SZ").is_empty());
+        let mut batch = vec![
+            ("000001.SZ".to_string(), row()),
+            ("000002.SZ".to_string(), row()),
+        ];
+        assert!(injector.inject_batch(&mut batch).is_empty());
+        assert_eq!(single.cols, batch[0].1.cols);
+        assert_eq!(single.cols["CYQ_TRAP_COEF"], vec![Some(2.5), None, None]);
+        assert_eq!(single.cols["CYQ_REAL_LOSS20"], vec![None, None, None]);
+        assert_eq!(
+            batch[1].1.cols["CYQ_REAL_LOSS20"],
+            vec![None, Some(0.01), None]
+        );
+        let program = crate::expr::validation::parse_expression_program(
+            "CYQ_TRAP_COEF > 0.2 AND CYQ_REAL_LOSS20 < 0.02",
+        )
+        .unwrap();
+        assert_eq!(super::collect_used_cyq_chen_runtime_keys(&[&program]), keys);
+        drop(injector);
+        let conn = duckdb::Connection::open(directory.join("cyq_chen.db")).unwrap();
+        conn.execute("UPDATE cyq_chen_meta SET value = '1'", [])
+            .unwrap();
+        drop(conn);
+        let mut stale = row();
+        assert!(
+            !CyqChenFieldInjector::new(directory.to_str().unwrap(), &keys)
+                .inject(&mut stale, "000001.SZ")
+                .is_empty()
+        );
+        assert_eq!(stale.cols["CYQ_TRAP_COEF"], vec![None, None, None]);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

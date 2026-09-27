@@ -45,10 +45,12 @@ pub struct CyqChenStrategyMaintenanceStatus {
 pub(super) struct ComputedCyqChenStock {
     ts_code: String,
     snapshots: Vec<ChenChipSnapshot>,
+    feature_state: Option<crate::data::cyq_chen::ChenChipFeatureState>,
 }
 
 pub(super) struct CyqChenInitialState {
     state_trade_date: String,
+    feature_state: crate::data::cyq_chen::ChenChipFeatureState,
     bins: Vec<ChenChipBin>,
     main_ratio_history: Vec<Arc<Vec<Option<f64>>>>,
 }

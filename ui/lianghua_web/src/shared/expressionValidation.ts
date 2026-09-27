@@ -89,6 +89,8 @@ const KNOWN_EXPRESSION_IDENTIFIERS = new Set([
   "CYQ_RT",
   "CYQ_TPR",
   "CYQ_TTR",
+  "CYQ_TRAP_COEF",
+  "CYQ_REAL_LOSS20",
   "CYQ_MPR",
   "CYQ_MTR",
   "CYQ_MAC",

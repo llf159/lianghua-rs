@@ -123,13 +123,23 @@ pub(in crate::data::cyq_chen_data) fn insert_paused_stock_resume_row(source_dir:
 
 pub(in crate::data::cyq_chen_data) fn snapshot_rows_for_compare(
     source_path: &str,
-) -> Vec<(String, String, f64, f64, f64)> {
+) -> Vec<(
+    String,
+    String,
+    f64,
+    f64,
+    f64,
+    Option<f64>,
+    Option<f64>,
+    Option<i32>,
+    Option<f64>,
+)> {
     let cyq_chen_db = cyq_chen_db_path(source_path);
     let conn = Connection::open(&cyq_chen_db).expect("open cyq chen db");
     let mut stmt = conn
         .prepare(
             r#"
-            SELECT ts_code, trade_date, close, main_total, retail_total
+            SELECT ts_code, trade_date, close, main_total, retail_total, trap_coef, real_loss20, feature_days, unknown_trapped
             FROM cyq_chen_snapshot
             ORDER BY ts_code ASC, trade_date ASC
             "#,
@@ -144,6 +154,10 @@ pub(in crate::data::cyq_chen_data) fn snapshot_rows_for_compare(
             row.get(2).expect("close"),
             row.get(3).expect("main_total"),
             row.get(4).expect("retail_total"),
+            row.get(5).expect("trap_coef"),
+            row.get(6).expect("real_loss20"),
+            row.get(7).expect("feature_days"),
+            row.get(8).expect("unknown_trapped"),
         ));
     }
     out
