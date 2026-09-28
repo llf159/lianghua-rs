@@ -397,6 +397,10 @@ struct WatchObserveUpsertPayload {
 
 #[cfg(target_os = "android")]
 fn init_rustls_platform_verifier_impl(mut env: JNIEnv, activity: JObject) -> jboolean {
+    if let Err(error) = warehouse::set_android_activity(&mut env, &activity) {
+        eprintln!("登记 Android Activity 失败: {error}");
+        return 0;
+    }
     match rustls_platform_verifier::android::init_hosted(&mut env, activity) {
         Ok(()) => 1,
         Err(error) => {
@@ -2735,6 +2739,10 @@ pub fn run() {
             warehouse::get_warehouse_root,
             warehouse::set_warehouse_root,
             warehouse::move_warehouse_source,
+            #[cfg(target_os = "android")]
+            warehouse::request_android_warehouse_access,
+            #[cfg(target_os = "android")]
+            warehouse::pick_android_warehouse_directory,
             allow_import_path,
             copy_import_file_to_appdata,
             preview_managed_source_stock_data,

@@ -353,7 +353,7 @@ export default function DataImportPage() {
     }
 
     applyStatus(nextStatus)
-    setNotice('当前应用数据目录下的导入文件已清空。')
+    setNotice('当前数据仓库目录下的导入文件已清空。')
   }
 
   async function onDeleteFile(fileId: ManagedSourceFileId) {
@@ -366,7 +366,7 @@ export default function DataImportPage() {
 
     applyStatus(nextStatus)
     const fileLabel = MANAGED_SOURCE_FILES.find((item) => item.id === fileId)?.label ?? fileId
-    setNotice(`${fileLabel} 已从当前应用数据目录删除。`)
+    setNotice(`${fileLabel} 已从当前数据仓库目录删除。`)
   }
 
   async function onExportFile(fileId: ManagedSourceFileId) {
@@ -484,7 +484,7 @@ export default function DataImportPage() {
             </div>
             <small>
               {directoryImportSupported
-                ? '程序固定写入 `AppData/source/`；压缩包导入适用于“导出当前目录 ZIP”生成的文件'
+                ? '程序写入当前数据仓库目录的 source 子目录；压缩包导入适用于“导出当前目录 ZIP”生成的文件'
                 : '当前平台不支持文件夹选择，可使用压缩包导入或下方逐个导入。'}
             </small>
           </div>

@@ -205,6 +205,9 @@ pub(super) fn apply_sell_for_day(
         }
     }
 
+    bucket_runtime.vars.remove("MAIN_CHIP_RATIO");
+    bucket_runtime.vars.remove("main_chip_ratio");
+
     let mut remaining = if entries.is_empty() {
         let retail_entries = holder_chip_entries(buckets, ChipHolder::Retail);
         apply_weighted_sell(buckets, retail_entries, turnover_rate)?
@@ -627,6 +630,57 @@ mod tests {
     use crate::data::cyq_chen::test_support::*;
     use crate::data::runtime::row_into_rt;
     use std::collections::HashMap;
+
+    #[test]
+    fn sell_releases_history_before_next_day_update() {
+        let compiled = ChipChangeConfig::from_toml_str(
+            r#"
+version = 1
+[[strategy]]
+name = "sell"
+holder = "main"
+direction = "sell"
+when = "MAIN_CHIP_RATIO > 0"
+bias = 1.0
+"#,
+        )
+        .unwrap()
+        .compile()
+        .unwrap();
+        let row = sample_row_data();
+        let bars = super::super::bars::build_validated_bars(&row, 0).unwrap();
+        let mut runtime = row_into_rt(row).unwrap();
+        let mut buckets = vec![ChipBucket {
+            price_low: 9.0,
+            price_high: 12.0,
+            main_chip: 50.0,
+            retail_chip: 50.0,
+            pending: Vec::new(),
+            rateo: None,
+            rateh: None,
+            ratel: None,
+            ratec: None,
+        }];
+        let mut history = vec![std::sync::Arc::new(vec![None; bars.len()])];
+        super::write_main_ratio_for_day(&buckets, &mut history, 0);
+        let original = std::sync::Arc::as_ptr(&history[0]);
+        super::apply_sell_for_day(
+            &mut buckets,
+            &bars,
+            &mut runtime,
+            &compiled,
+            &history,
+            0,
+            10.0,
+        )
+        .unwrap();
+        assert_close(buckets[0].main_chip, 40.0);
+        assert_eq!(std::sync::Arc::strong_count(&history[0]), 1);
+        super::write_main_ratio_for_day(&buckets, &mut history, 1);
+        assert_eq!(std::sync::Arc::as_ptr(&history[0]), original);
+        assert_eq!(history[0][0], Some(0.5));
+        assert_close(history[0][1].unwrap(), 40.0 / 90.0);
+    }
 
     #[test]
     fn posterior_is_causal_conserves_mass_and_resumes() {

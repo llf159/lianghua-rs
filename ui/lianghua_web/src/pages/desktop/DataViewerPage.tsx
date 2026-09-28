@@ -349,7 +349,7 @@ export default function DataViewerPage() {
           <div>
             <h2 className="settings-title">数据查看</h2>
             <p className="settings-subtitle">
-              单独查看当前应用数据目录里的原始库、结果库和 CSV。
+              单独查看当前数据仓库目录里的原始库、结果库和 CSV。
             </p>
           </div>
 

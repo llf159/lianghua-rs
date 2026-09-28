@@ -290,6 +290,18 @@ export function isDirectoryImportSupported() {
   return !isMobileClient()
 }
 
+export function isAndroidClient() {
+  return typeof navigator !== 'undefined' && /android/i.test(navigator.userAgent)
+}
+
+export async function requestAndroidWarehouseAccess() {
+  return invoke<boolean>('request_android_warehouse_access')
+}
+
+export async function pickAndroidWarehouseDirectory() {
+  return invoke<string | null>('pick_android_warehouse_directory')
+}
+
 export async function allowImportPath(path: string, directory: boolean, recursive: boolean) {
   await invoke('allow_import_path', { path, directory, recursive })
 }

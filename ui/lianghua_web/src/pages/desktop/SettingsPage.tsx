@@ -6,8 +6,11 @@ import {
 import {
   ensureManagedSourcePath,
   getWarehouseRoot,
+  isAndroidClient,
   isDirectoryImportSupported,
   moveWarehouseSource,
+  pickAndroidWarehouseDirectory,
+  requestAndroidWarehouseAccess,
   setWarehouseRoot,
 } from '../../apis/managedSource'
 import { open } from '@tauri-apps/plugin-dialog'
@@ -209,7 +212,7 @@ export default function SettingsPage() {
   const isWarehouseRootSettingOpen = activeModal === 'warehouse-root'
 
   useEffect(() => {
-    if (!isDirectoryImportSupported()) {
+    if (!isDirectoryImportSupported() && !isAndroidClient()) {
       return
     }
 
@@ -461,12 +464,21 @@ export default function SettingsPage() {
 
   async function onPickWarehouseRoot() {
     setWarehouseRootError('')
-    const picked = await open({ directory: true, title: '选择数据仓库目录' })
-    if (!picked || Array.isArray(picked)) {
-      return
+    try {
+      if (isAndroidClient()) {
+        if (!await requestAndroidWarehouseAccess()) {
+          setWarehouseRootError('请在打开的系统设置中授予文件读写权限，返回后再次点击选择目录。')
+          return
+        }
+        const picked = await pickAndroidWarehouseDirectory()
+        if (picked) setWarehouseTargetPath(picked)
+      } else {
+        const picked = await open({ directory: true, title: '选择数据仓库目录' })
+        if (picked && !Array.isArray(picked)) setWarehouseTargetPath(picked)
+      }
+    } catch (rootError) {
+      setWarehouseRootError(`选择数据仓库目录失败: ${String(rootError)}`)
     }
-
-    setWarehouseTargetPath(picked)
   }
 
   async function onApplyWarehouseRoot(move: boolean) {
@@ -476,7 +488,7 @@ export default function SettingsPage() {
     }
 
     setWarehouseRootError('')
-    setWarehouseMoveBusy(move)
+    setWarehouseMoveBusy(true)
     try {
       if (move) {
         await moveWarehouseSource(target)
@@ -775,7 +787,7 @@ export default function SettingsPage() {
             </span>
           </button>
 
-          {isDirectoryImportSupported() ? (
+          {isDirectoryImportSupported() || isAndroidClient() ? (
             <button className="settings-list-item" type="button" onClick={openWarehouseRootSetting}>
               <div className="settings-list-item-main">
                 <strong>数据仓库目录</strong>
@@ -1485,7 +1497,7 @@ export default function SettingsPage() {
               <div>
                 <h3 className="settings-subtitle-head">数据仓库目录</h3>
                 <p className="settings-section-note">
-                  该目录下的 source 子目录存放行情、筹码、评分结果等库文件。移动会先把现有数据复制并校验到新目录再切换，旧目录不会自动删除；复制期间请勿操作其它页面。
+                  该目录下的 source 子目录存放行情、筹码、评分结果等库文件。移动会先把现有数据复制并校验到新目录再切换，旧目录不会自动删除；复制期间请勿操作其它页面。{isAndroidClient() ? 'Android 需授予文件读写权限，并选择内部共享存储中的子目录。' : ''}
                 </p>
               </div>
               <div className="settings-actions">

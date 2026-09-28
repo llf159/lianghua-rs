@@ -55,30 +55,39 @@ impl ChenChipFeatureState {
     }
 
     pub(super) fn align(&mut self, buckets: &[ChipBucket]) -> Result<(), String> {
-        let mut previous = std::mem::take(&mut self.buckets)
-            .into_iter()
-            .map(|bucket| ((bucket.low.to_bits(), bucket.high.to_bits()), bucket))
-            .collect::<HashMap<_, _>>();
-        for bucket in buckets {
-            let key = (bucket.price_low.to_bits(), bucket.price_high.to_bits());
-            let state = previous.remove(&key).unwrap_or_else(|| FeatureBucket {
-                low: bucket.price_low,
-                high: bucket.price_high,
-                ages: vec![0.0; 121],
-                initial: bucket.total_chip(),
-                loss_run: 0,
-                recovered: false,
-            });
+        if self.buckets.len() != buckets.len()
+            || self.buckets.iter().zip(buckets).any(|(state, bucket)| {
+                state.low.to_bits() != bucket.price_low.to_bits()
+                    || state.high.to_bits() != bucket.price_high.to_bits()
+            })
+        {
+            let mut previous = std::mem::take(&mut self.buckets)
+                .into_iter()
+                .map(|bucket| ((bucket.low.to_bits(), bucket.high.to_bits()), bucket))
+                .collect::<HashMap<_, _>>();
+            for bucket in buckets {
+                let key = (bucket.price_low.to_bits(), bucket.price_high.to_bits());
+                let state = previous.remove(&key).unwrap_or_else(|| FeatureBucket {
+                    low: bucket.price_low,
+                    high: bucket.price_high,
+                    ages: vec![0.0; 121],
+                    initial: bucket.total_chip(),
+                    loss_run: 0,
+                    recovered: false,
+                });
+                self.buckets.push(state);
+            }
+            if !previous.is_empty() {
+                return Err("筹码扩容丢失了已有特征桶".into());
+            }
+        }
+        for (state, bucket) in self.buckets.iter().zip(buckets) {
             if self.observed_days > 0
                 && (state.ages.iter().sum::<f64>() + state.initial - bucket.total_chip()).abs()
                     > 1e-8
             {
                 return Err("筹码特征库存与引擎库存不一致".into());
             }
-            self.buckets.push(state);
-        }
-        if !previous.is_empty() {
-            return Err("筹码扩容丢失了已有特征桶".into());
         }
         Ok(())
     }

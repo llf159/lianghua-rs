@@ -13,6 +13,7 @@ pub use store::{init_cyq_chen_db, query_cyq_chen_strategy_maintenance_status};
 
 use crate::data::cyq_chen::ChenChipBin;
 use crate::data::cyq_chen::ChenChipSnapshot;
+use duckdb::arrow::record_batch::RecordBatch;
 use std::sync::Arc;
 pub(super) const CYQ_CHEN_SNAPSHOT_TABLE: &str = "cyq_chen_snapshot";
 pub(super) const CYQ_CHEN_BIN_TABLE: &str = "cyq_chen_bin";
@@ -61,7 +62,18 @@ pub(super) struct CyqChenWriteBatch {
 }
 
 #[derive(Debug)]
+pub(super) struct PreparedCyqChenWriteBatch {
+    stock_count: usize,
+    snapshot_rows: usize,
+    bin_rows: usize,
+    checkpoints: Vec<(String, String, String, Option<String>)>,
+    snapshot_batch: Option<RecordBatch>,
+    bin_batch: Option<RecordBatch>,
+}
+
+#[derive(Debug)]
 pub(super) enum CyqChenWriteMessage {
     Batch(CyqChenWriteBatch),
+    PreparedBatch(PreparedCyqChenWriteBatch),
     Abort(String),
 }

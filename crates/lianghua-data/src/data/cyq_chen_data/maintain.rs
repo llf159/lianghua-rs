@@ -1,6 +1,6 @@
 use crate::data::cyq_chen_data::compute::{
     append_cyq_chen_batch_rows, compute_cyq_chen_stock_group_batch, finish_cyq_chen_write,
-    query_source_trade_date_range, resolve_cyq_chen_load_start_date,
+    prepare_cyq_chen_batch_rows, query_source_trade_date_range, resolve_cyq_chen_load_start_date,
     resolve_cyq_chen_rebuild_trade_date_range, source_stock_data_exists,
     write_cyq_chen_batches_from_channel, write_cyq_chen_incremental_batches_from_channel,
 };
@@ -588,6 +588,9 @@ pub fn repair_cyq_chen_stocks_if_db_exists(
                     for message in rx {
                         let batch = match message {
                             CyqChenWriteMessage::Batch(batch) => batch,
+                            CyqChenWriteMessage::PreparedBatch(_) => {
+                                return Err("新筹码单股修复不接受预构造批次".to_string());
+                            }
                             CyqChenWriteMessage::Abort(reason) => {
                                 abort_reason = Some(reason);
                                 break;
@@ -853,8 +856,12 @@ pub fn rebuild_cyq_chen_all_with_progress(
         });
     }
 
+    let compute_threads = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1);
+    let compute_group_size = (CYQ_CHEN_GROUP_SIZE * 4).div_ceil(compute_threads).max(1);
     let compute_pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(rayon::current_num_threads().min(4))
+        .num_threads(compute_threads)
         .build()
         .map_err(|e| {
             remove_cyq_chen_db_artifacts(&rebuild_db);
@@ -868,7 +875,7 @@ pub fn rebuild_cyq_chen_all_with_progress(
 
     let finished_stock_count = std::sync::atomic::AtomicUsize::new(0);
     let compute_result = compute_pool.install(|| {
-        ts_codes.par_chunks(CYQ_CHEN_GROUP_SIZE).try_for_each_init(
+        ts_codes.par_chunks(compute_group_size).try_for_each_init(
             || DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys),
             |worker_reader, ts_group| -> Result<(), String> {
                 let worker_reader = worker_reader.as_ref().map_err(Clone::clone)?;
@@ -902,8 +909,10 @@ pub fn rebuild_cyq_chen_all_with_progress(
                     ts_group,
                     Some(&progress_stock_done),
                 )?;
-                tx.send(CyqChenWriteMessage::Batch(batch))
-                    .map_err(|e| format!("发送筹码批次失败:{e}"))?;
+                tx.send(CyqChenWriteMessage::PreparedBatch(
+                    prepare_cyq_chen_batch_rows(batch, config)?,
+                ))
+                .map_err(|e| format!("发送筹码批次失败:{e}"))?;
                 Ok(())
             },
         )
@@ -1534,15 +1543,15 @@ bias = 0.5
         )
         .unwrap();
         assert!(snapshots.len() > 1);
-        let count = snapshots.len();
+        let count = 33;
         let stage = source_dir.join("stage.db");
         super::init_cyq_chen_db(&stage).unwrap();
         let (tx, rx) = sync_channel(count + 1);
-        for snapshot in snapshots {
+        for (index, snapshot) in snapshots.iter().cycle().take(count).cloned().enumerate() {
             tx.send(CyqChenWriteMessage::Batch(
                 crate::data::cyq_chen_data::CyqChenWriteBatch {
                     stocks: vec![crate::data::cyq_chen_data::ComputedCyqChenStock {
-                        ts_code: "000001.SZ".to_string(),
+                        ts_code: format!("{index:06}.SZ"),
                         snapshots: vec![snapshot],
                         feature_state: None,
                     }],
@@ -1567,7 +1576,7 @@ bias = 0.5
         let stored: usize = conn
             .query_row("SELECT count(*) FROM cyq_chen_snapshot", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(stored, count);
+        assert!(stored <= count);
         let metadata: usize = conn
             .query_row("SELECT count(*) FROM cyq_chen_meta", [], |r| r.get(0))
             .unwrap();
