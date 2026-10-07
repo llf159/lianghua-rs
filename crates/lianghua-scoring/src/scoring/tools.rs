@@ -856,7 +856,7 @@ mod tests {
     use crate::data::RowData;
 
     #[test]
-    fn stock_extra_fields_compute_total_mv_yi_from_total_share_and_close() {
+    fn stock_extra_fields_does_not_estimate_market_cap_without_price_anchor() {
         let mut row_data = RowData {
             trade_dates: vec!["20240102".to_string(), "20240103".to_string()],
             cols: HashMap::from([("C".to_string(), vec![Some(10.0), Some(12.0)])]),
@@ -867,17 +867,18 @@ mod tests {
 
         assert_eq!(
             row_data.cols.get("TOTAL_MV_YI").map(Vec::as_slice),
-            Some([Some(20.0), Some(24.0)].as_slice())
+            Some([None, None].as_slice())
         );
     }
 
     #[test]
-    fn stock_extra_fields_prefers_row_total_share_when_present() {
+    fn stock_extra_fields_preserves_estimated_market_cap_when_share_count_differs() {
         let mut row_data = RowData {
             trade_dates: vec!["20240102".to_string(), "20240103".to_string()],
             cols: HashMap::from([
                 ("C".to_string(), vec![Some(10.0), Some(12.0)]),
                 ("TOTAL_SHARE".to_string(), vec![Some(30_000.0), None]),
+                ("TOTAL_MV_YI".to_string(), vec![Some(100.0), Some(120.0)]),
             ]),
         };
 
@@ -886,7 +887,7 @@ mod tests {
 
         assert_eq!(
             row_data.cols.get("TOTAL_MV_YI").map(Vec::as_slice),
-            Some([Some(30.0), Some(24.0)].as_slice())
+            Some([Some(100.0), Some(120.0)].as_slice())
         );
     }
 

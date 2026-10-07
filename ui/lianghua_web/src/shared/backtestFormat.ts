@@ -59,3 +59,8 @@ export function parseOptionalNumberInput(value: string): number | undefined {
   const parsed = Number(trimmed);
   return Number.isFinite(parsed) ? parsed : undefined;
 }
+
+export function formatBacktestValue(value: number | null | undefined, metric: "residual_return" | "rise_amount" = "residual_return", digits = 2) {
+  if (value === null || value === undefined || !Number.isFinite(value)) return "--";
+  return `${value.toFixed(digits)}${metric === "rise_amount" ? "亿" : "%"}`;
+}

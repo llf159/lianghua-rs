@@ -350,6 +350,8 @@ fn expr_uses_runtime_key(expr: &Expr, locals: &HashSet<String>, target_key: &str
 }
 
 pub struct DataReader {
+    source_dir: String,
+    market_cap_per_price: std::cell::RefCell<HashMap<String, HashMap<String, f64>>>,
     pub conn: Connection,
     pub query_sql: String,
     pub query_tail_rows_sql: String,
@@ -550,6 +552,8 @@ impl DataReader {
         );
 
         Ok(Self {
+            source_dir: source_dir.to_string(),
+            market_cap_per_price: std::cell::RefCell::new(HashMap::new()),
             conn,
             query_sql,
             query_tail_rows_sql,
@@ -593,6 +597,7 @@ impl DataReader {
         }
 
         let mut out = RowData { trade_dates, cols };
+        self.inject_estimated_market_cap(&mut out, ts_code, adj_type)?;
         self.inject_runtime_index(&mut out)?;
         out.validate()?;
         Ok(out)
@@ -642,6 +647,7 @@ impl DataReader {
         }
 
         let mut out = RowData { trade_dates, cols };
+        self.inject_estimated_market_cap(&mut out, ts_code, adj_type)?;
         self.inject_runtime_index(&mut out)?;
         out.validate()?;
         Ok(out)
@@ -721,6 +727,9 @@ impl DataReader {
             }
         }
 
+        for (ts_code, row_data) in &mut result {
+            self.inject_estimated_market_cap(row_data, ts_code, adj_type)?;
+        }
         result.retain(|_, row_data| !row_data.trade_dates.is_empty());
         if !result.is_empty() && !self.runtime_index_cols.is_empty() {
             let index_values_by_key = self.load_runtime_index_values(start_date, end_date)?;
@@ -731,6 +740,39 @@ impl DataReader {
         }
 
         Ok(result)
+    }
+
+    fn inject_estimated_market_cap(
+        &self,
+        row_data: &mut RowData,
+        ts_code: &str,
+        adj_type: &str,
+    ) -> Result<(), String> {
+        let Some(prices) = row_data.cols.get("C") else {
+            return Ok(());
+        };
+        let mut cache = self.market_cap_per_price.borrow_mut();
+        if !cache.contains_key(adj_type) {
+            cache.insert(
+                adj_type.to_string(),
+                extras::load_estimated_market_cap_per_price_map(
+                    &self.conn,
+                    &self.source_dir,
+                    adj_type,
+                )?,
+            );
+        }
+        let per_price = cache.get(adj_type).and_then(|m| m.get(ts_code)).copied();
+        let series = prices
+            .iter()
+            .map(|p| {
+                p.zip(per_price)
+                    .map(|(p, m)| p * m)
+                    .filter(|v| v.is_finite() && *v > 0.0)
+            })
+            .collect();
+        row_data.cols.insert("TOTAL_MV_YI".to_string(), series);
+        Ok(())
     }
 
     pub fn list_ts_code(

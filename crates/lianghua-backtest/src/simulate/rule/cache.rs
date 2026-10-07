@@ -451,6 +451,7 @@ pub(super) fn build_rule_layer_runtime_cache_from_universe_rows(
         &concept_map,
         &industry_map,
         &ResidualCacheInput {
+            target: &layer_config.target,
             stock_adj_type,
             index_ts_code,
             index_beta,
@@ -652,6 +653,7 @@ mod tests {
             .expect("update ER");
 
         let layer_config = RuleLayerConfig {
+            target: Default::default(),
             min_samples_per_day: 1,
             backtest_period: 1,
             min_listed_trade_days: 0,
@@ -699,6 +701,7 @@ mod tests {
             "20240102",
             "20240104",
             &RuleLayerConfig {
+                target: Default::default(),
                 min_samples_per_day: 1,
                 backtest_period: 1,
                 min_listed_trade_days: 0,
@@ -714,6 +717,7 @@ mod tests {
             &runtime_cache,
             &triggered_score_map,
             &RuleLayerConfig {
+                target: Default::default(),
                 min_samples_per_day: 1,
                 backtest_period: 1,
                 min_listed_trade_days: 0,
@@ -724,6 +728,7 @@ mod tests {
             &runtime_cache,
             &triggered_score_map,
             &RuleLayerConfig {
+                target: Default::default(),
                 min_samples_per_day: 1,
                 backtest_period: 1,
                 min_listed_trade_days: 0,
@@ -734,6 +739,7 @@ mod tests {
             &runtime_cache,
             &triggered_score_map,
             &RuleLayerConfig {
+                target: Default::default(),
                 min_samples_per_day: 1,
                 backtest_period: 1,
                 min_listed_trade_days: 0,
@@ -811,6 +817,7 @@ mod tests {
 
         let source_conn = Connection::open(source_db_path(source_dir_str)).expect("open source db");
         let layer_config = RuleLayerConfig {
+            target: Default::default(),
             min_samples_per_day: 1,
             backtest_period: 1,
             min_listed_trade_days: 0,

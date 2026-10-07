@@ -355,6 +355,7 @@ pub fn run_rule_expression_validation(
     min_samples_per_rule_day: Option<usize>,
     min_listed_trade_days: Option<usize>,
     backtest_period: Option<usize>,
+    return_metric: Option<crate::simulate::BacktestReturnMetric>,
     manual_strategy: Option<RuleExpressionValidationManualStrategy>,
     unknown_configs: Option<Vec<RuleValidationUnknownConfig>>,
     sample_limit_per_group: Option<usize>,
@@ -812,6 +813,7 @@ pub fn run_rule_expression_validation(
         min_listed_trade_days: min_listed_trade_days
             .unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
         backtest_period: backtest_period.unwrap_or(1).max(1),
+        return_metric: return_metric.unwrap_or_default(),
         parallel_batch_size: DEFAULT_RULE_WITH_SAMPLES_PARALLEL_BATCH_SIZE,
         resolved_board,
         exclude_st_board,
@@ -828,6 +830,11 @@ pub fn run_rule_expression_validation(
     let source_conn =
         Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
     let layer_config = RuleLayerConfig {
+        target: crate::simulate::BacktestTargetConfig {
+            return_metric: params.return_metric,
+            total_mv_min: params.total_mv_min,
+            total_mv_max: params.total_mv_max,
+        },
         min_samples_per_day: params.min_samples_per_day,
         backtest_period: params.backtest_period,
         min_listed_trade_days: params.min_listed_trade_days,
@@ -1009,8 +1016,10 @@ pub fn run_rule_expression_validation(
                         &metrics_with_samples.samples,
                         layer_config.min_samples_per_day,
                     );
-                    let return_distribution =
-                        build_validation_return_distribution(&metrics_with_samples.samples);
+                    let return_distribution = build_validation_return_distribution(
+                        &metrics_with_samples.samples,
+                        layer_config.target.return_metric,
+                    );
                     let mut sample_accumulator = ValidationSampleAccumulator::new(
                         sample_limit_per_group,
                         stock_meta_map,
@@ -1221,6 +1230,7 @@ mod tests {
             Some(1),
             None,
             None,
+            None,
             Some(1),
             Some("主板".to_string()),
             Some(false),
@@ -1288,6 +1298,7 @@ mod tests {
             Some(0),
             Some(1),
             None,
+            None,
             Some(vec![
                 crate::statistics::validation::RuleValidationUnknownConfig {
                     name: "N".to_string(),
@@ -1330,6 +1341,7 @@ mod tests {
             Some(1),
             Some(0),
             Some(1),
+            None,
             None,
             None,
             Some(1),

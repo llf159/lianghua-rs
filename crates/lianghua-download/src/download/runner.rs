@@ -95,6 +95,7 @@ pub struct ThsConceptDownloadSummary {
 
 fn trade_calendar_needs_refresh(
     source_dir: &str,
+    trade_calendar_start: &str,
     trade_calendar_end: &str,
 ) -> Result<bool, String> {
     let path = trade_calendar_path(source_dir);
@@ -104,9 +105,12 @@ fn trade_calendar_needs_refresh(
 
     let trade_dates = load_trade_date_list(source_dir)?;
     let refresh_cutoff = trade_calendar_refresh_cutoff(trade_calendar_end);
-    Ok(match trade_dates.last() {
-        Some(last_trade_date) => last_trade_date.as_str() < refresh_cutoff.as_str(),
-        None => true,
+    Ok(match (trade_dates.first(), trade_dates.last()) {
+        (Some(first_trade_date), Some(last_trade_date)) => {
+            first_trade_date.get(..4) > trade_calendar_start.get(..4)
+                || last_trade_date.as_str() < refresh_cutoff.as_str()
+        }
+        _ => true,
     })
 }
 
@@ -804,7 +808,11 @@ pub fn init_stock_basic_data(
     let now = Local::now();
     let trade_calendar_end = format!("{:04}1231", now.year());
 
-    if trade_calendar_needs_refresh(source_dir, trade_calendar_end.as_str())? {
+    if trade_calendar_needs_refresh(
+        source_dir,
+        config.start_date.as_str(),
+        trade_calendar_end.as_str(),
+    )? {
         emit_progress(
             progress_cb,
             "prepare_trade_calendar",
@@ -1651,7 +1659,11 @@ pub fn download_indices(
         let now = Local::now();
         let trade_calendar_end = format!("{:04}1231", now.year());
 
-        if trade_calendar_needs_refresh(source_dir, trade_calendar_end.as_str())? {
+        if trade_calendar_needs_refresh(
+            source_dir,
+            config.start_date.as_str(),
+            trade_calendar_end.as_str(),
+        )? {
             emit_progress(
                 progress_cb,
                 "prepare_trade_calendar",
@@ -2400,8 +2412,12 @@ mod tests {
     }
 
     fn needs_refresh(source_dir: &PathBuf, trade_calendar_end: &str) -> bool {
-        trade_calendar_needs_refresh(source_dir.to_str().expect("utf8 path"), trade_calendar_end)
-            .expect("refresh check should succeed")
+        trade_calendar_needs_refresh(
+            source_dir.to_str().expect("utf8 path"),
+            "20220101",
+            trade_calendar_end,
+        )
+        .expect("refresh check should succeed")
     }
 
     fn stock_list_fetch_result(
@@ -2444,6 +2460,23 @@ mod tests {
         write_trade_calendar(&source_dir, &["20221229"]);
 
         assert!(needs_refresh(&source_dir, "20221231"));
+
+        fs::remove_dir_all(source_dir).ok();
+    }
+
+    #[test]
+    fn trade_calendar_refreshes_when_requested_history_starts_earlier() {
+        let source_dir = temp_source_dir("calendar_short_history");
+        write_trade_calendar(&source_dir, &["20210104", "20261231"]);
+
+        assert!(
+            trade_calendar_needs_refresh(
+                source_dir.to_str().expect("utf8 path"),
+                "20100101",
+                "20261231"
+            )
+            .unwrap()
+        );
 
         fs::remove_dir_all(source_dir).ok();
     }

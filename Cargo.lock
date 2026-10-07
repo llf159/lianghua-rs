@@ -102,6 +102,7 @@ dependencies = [
  "lianghua-app-facade",
  "lianghua-app-market",
  "lianghua-app-strategy",
+ "lianghua-backtest",
  "lianghua-data",
  "lianghua-download",
  "lianghua-provider",
@@ -2377,6 +2378,7 @@ dependencies = [
  "lianghua-data",
  "lianghua-model",
  "rayon",
+ "serde",
 ]
 
 [[package]]

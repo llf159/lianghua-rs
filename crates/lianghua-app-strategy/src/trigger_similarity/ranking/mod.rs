@@ -24,7 +24,7 @@ use std::sync::atomic::AtomicUsize;
 use std::time::Instant;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
-pub(super) const ALGORITHM_VERSION: &str = "outcome-reverse-startup-ranking-v11";
+pub(super) const ALGORITHM_VERSION: &str = "outcome-reverse-startup-ranking-v12";
 pub(super) const SUCCESS_QUALITY_THRESHOLD: f64 = 0.80;
 pub(super) const FAILURE_QUALITY_THRESHOLD: f64 = 0.20;
 pub(super) const MARKET_HISTORY_BUCKETS: usize = 8;

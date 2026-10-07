@@ -29,3 +29,4 @@
 - 数据层文件按功能拆分并保持“测试跟随被测文件”：`data/cyq_chen/{mod,config,bars,simulate,buckets,test_support}`、`data/cyq_chen_data/{mod,store,compute,maintain,test_support}`；测试写在各自文件的 `#[cfg(test)] mod tests` 内，跨文件共用的夹具放同目录 `test_support.rs`，公共 API 仍由各 `mod.rs` 汇总导出，禁止再恢复单一 `tests.rs`。
 
 - 问题：筹码特征检查点的 JSON 默认浮点解析可能将未舍入桶边界改变一个最小精度单位，恢复后以原始边界匹配桶身份时失败；解决方案选择：为 serde_json 启用 float_roundtrip，检查点边界和库存保持原始 f64 精度，拒绝不守恒或日期不兼容的状态；解释：展示精度或放宽边界匹配不能保证恢复同一个成本桶，精确往返解析保留序列化时的二进制浮点值。下次可运行 `cargo test -p lianghua-data feature_checkpoint_resume_matches_replay_with_expansion_and_zero_turnover` 定位序列化、扩容和续算差异。
+- 问题：北交所部分历史行情有价格和成交量但缺 `TOR`，全量新筹码重建会在首个缺值日期中断，零换手填充又会虚构筹码未迁移；解决方案选择：全量重建按股票只使用最后一个 `TOR` 缺值之后的连续行情，并重新满足完整预热天数后才生成快照，增量续算继续拒绝缺值，schema 提升为 5 强制旧状态重建；解释：筹码迁移依赖每天的换手率，缺失当日无法可靠地从当前股本推回历史换手率，重新初始化可保持后续快照连续且不伪造数据。下次可用 `SELECT ts_code, trade_date FROM stock_data WHERE adj_type = 'qfq' AND tor IS NULL ORDER BY trade_date, ts_code` 定位源数据缺口。

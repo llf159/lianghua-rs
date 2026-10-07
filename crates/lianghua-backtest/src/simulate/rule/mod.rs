@@ -48,6 +48,7 @@ pub const DEFAULT_RULE_WITH_SAMPLES_PARALLEL_BATCH_SIZE: usize = 4;
 
 #[derive(Debug, Clone)]
 pub struct RuleLayerConfig {
+    pub target: crate::simulate::BacktestTargetConfig,
     pub min_samples_per_day: usize,
     pub backtest_period: usize,
     pub min_listed_trade_days: usize,
@@ -56,6 +57,7 @@ pub struct RuleLayerConfig {
 impl Default for RuleLayerConfig {
     fn default() -> Self {
         Self {
+            target: Default::default(),
             min_samples_per_day: 5,
             backtest_period: 1,
             min_listed_trade_days: DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS,
@@ -300,6 +302,7 @@ impl TriggeredScoreColumn {
 }
 
 pub(super) struct ResidualCacheInput<'a> {
+    target: &'a crate::simulate::BacktestTargetConfig,
     stock_adj_type: &'a str,
     index_ts_code: &'a str,
     index_beta: f64,
@@ -1392,6 +1395,50 @@ mod tests {
     }
 
     #[test]
+    fn rise_amount_uses_signal_date_market_cap_and_daily_market_cap_filter() {
+        let source_dir = temp_source_dir();
+        let source = source_dir.to_str().unwrap();
+        prepare_test_files(source);
+        std::fs::write(crate::data::stock_list_path(source), "ts_code,symbol,name,area,industry,list_date,trade_date,total_share,float_share,total_mv,circ_mv\n000001.SZ,,A,,main,20230001,20240104,0,0,1081500,0\n000002.SZ,,B,,main,20230001,20240104,0,0,19998000,0\n").unwrap();
+        let conn = Connection::open(source_db_path(source)).unwrap();
+        let mut input = RuleLayerFromDbInput {
+            rule_name: "规则A".to_string(),
+            stock_adj_type: "qfq".to_string(),
+            index_ts_code: "000300.SH".to_string(),
+            index_beta: 0.0,
+            concept_beta: 0.0,
+            industry_beta: 0.0,
+            start_date: "20240102".to_string(),
+            end_date: "20240104".to_string(),
+            layer_config: RuleLayerConfig {
+                target: crate::simulate::BacktestTargetConfig {
+                    return_metric: crate::simulate::BacktestReturnMetric::RiseAmount,
+                    ..Default::default()
+                },
+                min_samples_per_day: 1,
+                backtest_period: 1,
+                min_listed_trade_days: 0,
+            },
+        };
+        let amount = calc_rule_layer_metrics_from_db(&conn, source, &input).unwrap();
+        assert_opt_close(amount.points[0].avg_residual_return, Some(11.5));
+        assert_opt_close(amount.points[0].ic, Some(-1.0));
+        input.layer_config.target.total_mv_min = Some(101.0);
+        input.layer_config.target.total_mv_max = Some(105.0);
+        let filtered = calc_rule_layer_metrics_from_db(&conn, source, &input).unwrap();
+        assert_eq!(filtered.points.len(), 1);
+        assert_eq!(filtered.points[0].trade_date, "20240103");
+        assert_eq!(filtered.points[0].sample_count, 1);
+        assert_opt_close(filtered.points[0].avg_residual_return, Some(5.15));
+        input.layer_config.target.return_metric =
+            crate::simulate::BacktestReturnMetric::ResidualReturn;
+        let residual = calc_rule_layer_metrics_from_db(&conn, source, &input).unwrap();
+        assert_opt_close(residual.points[0].avg_residual_return, Some(5.0));
+        drop(conn);
+        std::fs::remove_dir_all(source_dir).unwrap();
+    }
+
+    #[test]
     fn encoded_triggered_scores_match_nested_map_for_zero_missing_and_duplicate_rows() {
         let universe_rows = vec![
             RuleUniverseRow {
@@ -1503,6 +1550,7 @@ mod tests {
             )
             .expect("select benchmark rule");
         let config = RuleLayerConfig {
+            target: Default::default(),
             min_samples_per_day: 1,
             backtest_period: 1,
             min_listed_trade_days: 0,
@@ -1609,6 +1657,7 @@ mod tests {
                 start_date: "20240102".to_string(),
                 end_date: "20240104".to_string(),
                 layer_config: RuleLayerConfig {
+                    target: Default::default(),
                     min_samples_per_day: 1,
                     backtest_period: 1,
                     min_listed_trade_days: 0,
@@ -1683,6 +1732,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let layer_config = RuleLayerConfig {
+            target: Default::default(),
             min_samples_per_day: 1,
             backtest_period: 1,
             min_listed_trade_days: 0,
@@ -1748,6 +1798,7 @@ mod tests {
                 start_date: "20240102".to_string(),
                 end_date: "20240104".to_string(),
                 layer_config: RuleLayerConfig {
+                    target: Default::default(),
                     min_samples_per_day: 1,
                     backtest_period: 1,
                     min_listed_trade_days: 0,
@@ -1785,6 +1836,7 @@ mod tests {
                 start_date: "20240102".to_string(),
                 end_date: "20240104".to_string(),
                 layer_config: RuleLayerConfig {
+                    target: Default::default(),
                     min_samples_per_day: 2,
                     backtest_period: 1,
                     min_listed_trade_days: 0,
@@ -1810,6 +1862,7 @@ mod tests {
         let source_conn = Connection::open(source_db_path(source_dir_str)).expect("open source db");
         let rule_names = vec!["规则A".to_string(), "规则B".to_string()];
         let layer_config = RuleLayerConfig {
+            target: Default::default(),
             min_samples_per_day: 1,
             backtest_period: 1,
             min_listed_trade_days: 0,

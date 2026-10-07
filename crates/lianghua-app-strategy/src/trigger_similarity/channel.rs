@@ -10,15 +10,18 @@ use std::sync::Arc;
 pub(super) fn build_price_volume_channels(
     rows: &[MarketObservation],
     segments: usize,
-    total_mv_yi: Option<f64>,
+    market_cap_per_price: Option<f64>,
     market_categories: [f64; 5],
 ) -> Vec<Option<Vec<f64>>> {
     let mut channels = vec![Vec::new(); 13];
-    let normalized_market_cap = total_mv_yi
-        .filter(|value| value.is_finite() && *value > 0.0)
-        .map(|value| (value.log10() / 5.0).clamp(0.0, 1.0));
     let mut previous_close: Option<f64> = None;
     for row in rows {
+        let normalized_market_cap = row
+            .close
+            .zip(market_cap_per_price)
+            .map(|(p, m)| p * m)
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .map(|value| (value.log10() / 5.0).clamp(0.0, 1.0));
         channels[0].push(row.close.filter(|v| *v > 0.0).map(f64::ln));
         channels[1].push(row.pct_chg);
         channels[2].push(match (row.open, row.close) {
@@ -368,7 +371,7 @@ mod tests {
     use crate::trigger_similarity::ranking::samples::load_outcome_selected_anchors;
     use crate::trigger_similarity::sample::load_benchmark_rows;
     use lianghua_app_shared::build_name_map;
-    use lianghua_app_shared::build_total_mv_map;
+
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -591,7 +594,15 @@ mod tests {
         let benchmark_rows =
             load_benchmark_rows(&conn, &all_trade_dates[0], &target_date, "000001.SH")
                 .expect("load benchmark");
-        let total_mv_map = build_total_mv_map(&source_path).unwrap_or_default();
+        let market_conn =
+            duckdb::Connection::open(crate::data::source_db_path(&source_path)).unwrap();
+        let market_cap_per_price_map =
+            crate::data::extras::load_estimated_market_cap_per_price_map(
+                &market_conn,
+                &source_path,
+                "qfq",
+            )
+            .unwrap();
         let name_map = build_name_map(&source_path).unwrap_or_default();
         let (selected, _) = load_outcome_selected_anchors(
             &conn,
@@ -631,7 +642,7 @@ mod tests {
                 &all_trade_dates,
                 &environment_fingerprints,
                 &benchmark_rows,
-                &total_mv_map,
+                &market_cap_per_price_map,
                 &name_map,
                 5,
                 horizon,

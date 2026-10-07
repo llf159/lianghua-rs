@@ -1,5 +1,5 @@
 import type { RuleValidationComboResult } from "../../../../apis/strategyTrigger";
-import { formatNumber, formatPercent } from "../../../../shared/backtestFormat";
+import { formatNumber, formatBacktestValue } from "../../../../shared/backtestFormat";
 
 export function ExpressionLayerResult({ combo }: { combo: RuleValidationComboResult }) {
   const layerSummaries = combo.backtest.layer_summaries ?? [];
@@ -41,18 +41,18 @@ export function ExpressionLayerResult({ combo }: { combo: RuleValidationComboRes
                       <div
                         className={`expression-backtest-layer-bar expression-backtest-layer-bar-${tone}`}
                         style={{ width: `${barWidth}%` }}
-                        aria-label={`${item.layer_label}: ${formatPercent(value)}`}
+                        aria-label={`${item.layer_label}: ${formatBacktestValue(value, combo.backtest.return_metric)}`}
                       />
                     ) : null}
                   </div>
-                  <span className="expression-backtest-layer-value">{formatPercent(value)}</span>
+                  <span className="expression-backtest-layer-value">{formatBacktestValue(value, combo.backtest.return_metric)}</span>
                 </div>
               );
             })}
           </div>
           <p className="expression-backtest-caption">
-            层级收益为日度原始残差均值（方向盲，与 walk-forward 的方向残差口径不同）；
-            Top-Bottom Spread {formatPercent(combo.backtest.spread_mean)} 按每日最高分层减最低分层计算，
+            层级收益为日度原始指标均值（方向盲，与 walk-forward 的方向残差口径不同）；
+            Top-Bottom Spread {formatBacktestValue(combo.backtest.spread_mean, combo.backtest.return_metric)} 按每日最高分层减最低分层计算，
             由分数排序天然携带方向。
           </p>
           <details className="expression-backtest-fold">
@@ -67,7 +67,7 @@ export function ExpressionLayerResult({ combo }: { combo: RuleValidationComboRes
                     <th>有效交易日</th>
                     <th>样本数</th>
                     <th>分值</th>
-                    <th>层级收益（原始残差均值）</th>
+                    <th>层级收益（原始指标均值）</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -77,7 +77,7 @@ export function ExpressionLayerResult({ combo }: { combo: RuleValidationComboRes
                       <td>{item.point_count}</td>
                       <td>{item.sample_count}</td>
                       <td>{formatNumber(item.avg_score, 4)}</td>
-                      <td>{formatPercent(item.avg_residual_return)}</td>
+                      <td>{formatBacktestValue(item.avg_residual_return, combo.backtest.return_metric)}</td>
                     </tr>
                   ))}
                 </tbody>

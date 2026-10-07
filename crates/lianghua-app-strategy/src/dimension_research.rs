@@ -495,6 +495,7 @@ fn load_return_layer(
     let source_connection = Connection::open_with_flags(database_path_text, config)
         .map_err(|error| format!("打开原始行情库失败:{database_path_text}:{error}"))?;
     let layer_config = RuleLayerConfig {
+        target: Default::default(),
         min_samples_per_day: RETURN_MIN_SAMPLES_PER_DAY,
         backtest_period: holding_period,
         min_listed_trade_days: RETURN_MIN_LISTED_TRADE_DAYS,

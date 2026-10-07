@@ -559,6 +559,18 @@ pub(super) fn compute_cyq_chen_stock_group_batch(
                     &mut feature_state,
                 )?
             } else {
+                if state_conn.is_none() {
+                    if let Some(last_missing_index) = row_data
+                        .cols
+                        .get("TOR")
+                        .and_then(|series| series.iter().rposition(Option::is_none))
+                    {
+                        row_data.trade_dates.drain(..=last_missing_index);
+                        for series in row_data.cols.values_mut() {
+                            series.drain(..=last_missing_index);
+                        }
+                    }
+                }
                 let Some(output_start_date) = resolve_first_computable_output_date(
                     &row_data,
                     start_date,
@@ -603,7 +615,8 @@ pub(super) fn compute_cyq_chen_stock_group_batch(
             config,
             st_list,
             total_share_map,
-        )?;
+        )
+        .map_err(|error| format!("ts_code={ts_code}: {error}"))?;
         if !stock.snapshots.is_empty() {
             batch.stocks.push(stock);
         }

@@ -191,29 +191,12 @@ pub fn rebuild_concept_performance_range(
         Ok(industry_map)
     })(source_dir)?;
 
-    let uivi_map = (|source_dir: &str| -> Result<HashMap<String, f64>, String> {
-        let rows = load_stock_list(source_dir)?;
-        let mut uivi_map = HashMap::with_capacity(rows.len());
-        for cols in rows.iter() {
-            let Some(ts_code) = cols.first().map(|v| v.trim()).filter(|v| !v.is_empty()) else {
-                continue;
-            };
-
-            let Some(total_mv_raw) = cols.get(9).map(|v| v.trim()).filter(|v| !v.is_empty()) else {
-                continue;
-            };
-
-            let Ok(total_mv) = total_mv_raw.parse::<f64>() else {
-                continue;
-            };
-            if total_mv <= 0.0 || !total_mv.is_finite() {
-                continue;
-            }
-            uivi_map.insert(ts_code.to_string(), total_mv);
-        }
-
-        Ok(uivi_map)
-    })(source_dir)?;
+    let market_conn = Connection::open(source_db_path(source_dir)).map_err(|e| e.to_string())?;
+    let uivi_map = crate::data::extras::load_estimated_market_cap_per_price_map(
+        &market_conn,
+        source_dir,
+        MR_FQFS,
+    )?;
 
     let mut bx_rows = Vec::new();
     if !uivi_map.is_empty() && !concept_map.is_empty() {
@@ -335,7 +318,8 @@ fn calc_gdnm_bx_rows(
             SELECT
                 ts_code,
                 trade_date,
-                TRY_CAST(pct_chg AS DOUBLE) AS pct_chg
+                TRY_CAST(pct_chg AS DOUBLE) AS pct_chg,
+                TRY_CAST(close AS DOUBLE) AS close_price
             FROM stock_data
             WHERE adj_type = ?
               AND trade_date >= ?
@@ -364,7 +348,8 @@ fn calc_gdnm_bx_rows(
         let Some(vhfu) = pct_chg.filter(|v| v.is_finite()) else {
             continue;
         };
-        let Some(uivi) = uivi_map.get(&ts_code).copied().filter(|v| *v > 0.0) else {
+        let price: Option<f64> = row.get(3).map_err(|e| format!("读取市值推测价格失败:{e}"))?;
+        let Some(uivi) = price.zip(uivi_map.get(&ts_code)).map(|(p, m)| p * m).filter(|v| v.is_finite() && *v > 0.0) else {
             continue;
         };
         date_has_valid_data.insert(trade_date.clone(), true);
@@ -1022,22 +1007,23 @@ ts_code,concepts_code,concepts_name,stock_name
                 ts_code VARCHAR,
                 trade_date VARCHAR,
                 adj_type VARCHAR,
-                pct_chg DOUBLE
+                pct_chg DOUBLE,
+                close DOUBLE
             )
             "#,
             [],
         )
         .expect("create stock_data");
         let mut app = conn.appender("stock_data").expect("appender");
-        app.append_row(params!["000001.SZ", "20240102", "qfq", 10.0_f64])
+        app.append_row(params!["000001.SZ", "20240102", "qfq", 10.0_f64, 1.0_f64])
             .expect("row1");
-        app.append_row(params!["000002.SZ", "20240102", "qfq", 20.0_f64])
+        app.append_row(params!["000002.SZ", "20240102", "qfq", 20.0_f64, 1.0_f64])
             .expect("row2");
-        app.append_row(params!["000003.SZ", "20240102", "qfq", 30.0_f64])
+        app.append_row(params!["000003.SZ", "20240102", "qfq", 30.0_f64, 1.0_f64])
             .expect("row3");
-        app.append_row(params!["000001.SZ", "20240103", "qfq", -5.0_f64])
+        app.append_row(params!["000001.SZ", "20240103", "qfq", -5.0_f64, 1.0_f64])
             .expect("row4");
-        app.append_row(params!["000002.SZ", "20240103", "qfq", 15.0_f64])
+        app.append_row(params!["000002.SZ", "20240103", "qfq", 15.0_f64, 1.0_f64])
             .expect("row5");
         app.flush().expect("flush");
     }
@@ -1051,25 +1037,50 @@ ts_code,concepts_code,concepts_name,stock_name
                 ts_code VARCHAR,
                 trade_date VARCHAR,
                 adj_type VARCHAR,
-                pct_chg DOUBLE
+                pct_chg DOUBLE,
+                close DOUBLE
             )
             "#,
             [],
         )
         .expect("create stock_data");
         let mut app = conn.appender("stock_data").expect("appender");
-        app.append_row(params!["000001.SZ", "20240102", "qfq", 10.0_f64])
+        app.append_row(params!["000001.SZ", "20240102", "qfq", 10.0_f64, 1.0_f64])
             .expect("row1");
-        app.append_row(params!["000002.SZ", "20240102", "qfq", Option::<f64>::None])
-            .expect("row2");
-        app.append_row(params!["000003.SZ", "20240102", "qfq", 30.0_f64])
+        app.append_row(params![
+            "000002.SZ",
+            "20240102",
+            "qfq",
+            Option::<f64>::None,
+            1.0_f64
+        ])
+        .expect("row2");
+        app.append_row(params!["000003.SZ", "20240102", "qfq", 30.0_f64, 1.0_f64])
             .expect("row3");
-        app.append_row(params!["000001.SZ", "20240103", "qfq", Option::<f64>::None])
-            .expect("row4");
-        app.append_row(params!["000002.SZ", "20240103", "qfq", Option::<f64>::None])
-            .expect("row5");
-        app.append_row(params!["000003.SZ", "20240103", "qfq", Option::<f64>::None])
-            .expect("row6");
+        app.append_row(params![
+            "000001.SZ",
+            "20240103",
+            "qfq",
+            Option::<f64>::None,
+            1.0_f64
+        ])
+        .expect("row4");
+        app.append_row(params![
+            "000002.SZ",
+            "20240103",
+            "qfq",
+            Option::<f64>::None,
+            1.0_f64
+        ])
+        .expect("row5");
+        app.append_row(params![
+            "000003.SZ",
+            "20240103",
+            "qfq",
+            Option::<f64>::None,
+            1.0_f64
+        ])
+        .expect("row6");
         app.flush().expect("flush");
     }
 
@@ -1080,6 +1091,9 @@ ts_code,concepts_code,concepts_name,stock_name
         xieru_stock_list(&source_dir);
         xieru_gdnm_csv(&source_dir);
         xieru_source_db(&source_dir);
+        let source_conn = Connection::open(source_db_path(source_dir.to_str().unwrap())).unwrap();
+        source_conn.execute("UPDATE stock_data SET close=0.5 WHERE ts_code='000001.SZ' AND trade_date='20240102'", []).unwrap();
+        drop(source_conn);
 
         let row_count = rebuild_concept_performance_range(
             source_dir.to_str().expect("utf8 path"),
@@ -1114,7 +1128,7 @@ ts_code,concepts_code,concepts_name,stock_name
                     trade_date: "20240102".to_string(),
                     performance_type: PERFORMANCE_TYPE_CONCEPT.to_string(),
                     concept: "AI".to_string(),
-                    performance_pct: 16.667,
+                    performance_pct: 20.0,
                 },
                 GdNmBXRow {
                     trade_date: "20240102".to_string(),
@@ -1126,7 +1140,7 @@ ts_code,concepts_code,concepts_name,stock_name
                     trade_date: "20240102".to_string(),
                     performance_type: PERFORMANCE_TYPE_CONCEPT.to_string(),
                     concept: "算力".to_string(),
-                    performance_pct: 17.5,
+                    performance_pct: 18.571,
                 },
                 GdNmBXRow {
                     trade_date: "20240102".to_string(),
@@ -1270,6 +1284,11 @@ ts_code,concepts_code,concepts_name,stock_name
         xieru_stock_list(&source_dir);
         xieru_gdnm_csv(&source_dir);
 
+        let list_path = source_dir.join("stock_list.csv");
+        let stock_list = fs::read_to_string(&list_path)
+            .unwrap()
+            .replace(",20240103,0,0,", ",,0,0,");
+        fs::write(list_path, stock_list).unwrap();
         let trade_dates: Vec<String> = (1..=40).map(|day| format!("202402{:02}", day)).collect();
         (|source_dir: &Path, trade_dates: &[String]| {
             let db_path = source_db_path(source_dir.to_str().expect("utf8 path"));
@@ -1280,7 +1299,8 @@ ts_code,concepts_code,concepts_name,stock_name
                 ts_code VARCHAR,
                 trade_date VARCHAR,
                 adj_type VARCHAR,
-                pct_chg DOUBLE
+                pct_chg DOUBLE,
+                close DOUBLE
             )
             "#,
                 [],
@@ -1290,10 +1310,16 @@ ts_code,concepts_code,concepts_name,stock_name
             let mut app = conn.appender("stock_data").expect("appender");
             for (index, trade_date) in trade_dates.iter().enumerate() {
                 let day_pct = (index + 1) as f64;
-                app.append_row(params!["000001.SZ", trade_date, "qfq", day_pct])
+                app.append_row(params!["000001.SZ", trade_date, "qfq", day_pct, 1.0_f64])
                     .expect("row stock1");
-                app.append_row(params!["000002.SZ", trade_date, "qfq", day_pct * 2.0_f64])
-                    .expect("row stock2");
+                app.append_row(params![
+                    "000002.SZ",
+                    trade_date,
+                    "qfq",
+                    day_pct * 2.0_f64,
+                    1.0_f64
+                ])
+                .expect("row stock2");
             }
             app.flush().expect("flush");
         })(&source_dir, &trade_dates);
@@ -1422,17 +1448,24 @@ ts_code,concepts_code,concepts_name,stock_name
                 ts_code VARCHAR,
                 trade_date VARCHAR,
                 adj_type VARCHAR,
-                pct_chg DOUBLE
+                pct_chg DOUBLE,
+                close DOUBLE
             )
             "#,
             [],
         )
         .expect("create stock_data");
         let mut app = conn.appender("stock_data").expect("appender");
-        app.append_row(params!["000001.SZ", "20240102", "qfq", 1.0_f64])
+        app.append_row(params!["000001.SZ", "20240102", "qfq", 1.0_f64, 1.0_f64])
             .expect("row1");
-        app.append_row(params!["000002.SZ", "20240102", "qfq", 1.111111_f64])
-            .expect("row2");
+        app.append_row(params![
+            "000002.SZ",
+            "20240102",
+            "qfq",
+            1.111111_f64,
+            1.0_f64
+        ])
+        .expect("row2");
         app.flush().expect("flush");
 
         rebuild_concept_performance_range(

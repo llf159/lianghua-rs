@@ -1,3 +1,4 @@
+import { formatBacktestValue } from "../../shared/backtestFormat";
 import { useLocation, useNavigate } from "react-router-dom";
 import type {
   RuleExpressionValidationData,
@@ -98,12 +99,7 @@ function formatNumber(value?: number | null, digits = 4) {
   return value.toFixed(digits);
 }
 
-function formatPercentPoint(value?: number | null, digits = 2) {
-  if (value === null || value === undefined || !Number.isFinite(value)) {
-    return "--";
-  }
-  return `${value.toFixed(digits)}%`;
-}
+
 
 function formatExpressionSummary(value: string, combo: RuleValidationComboResult) {
   const trimmed = value.trim();
@@ -366,7 +362,7 @@ export function ExpressionValidationSamplesPanel({
                                 <th>名称</th>
                                 <th>参考日</th>
                                 <th>触发得分</th>
-                                <th>残差收益</th>
+                                <th>回测指标</th>
                               </tr>
                             </thead>
                             <tbody>
@@ -387,7 +383,7 @@ export function ExpressionValidationSamplesPanel({
                                   </td>
                                   <td>{formatDateLabel(row.trade_date)}</td>
                                   <td>{formatNumber(row.rule_score)}</td>
-                                  <td>{formatPercentPoint(row.residual_return)}</td>
+                                  <td>{formatBacktestValue(row.residual_return, data.combo.backtest.return_metric)}</td>
                                 </tr>
                               ))}
                             </tbody>

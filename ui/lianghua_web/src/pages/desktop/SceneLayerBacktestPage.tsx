@@ -41,7 +41,7 @@ import {
   compactDateToInput,
   formatDateLabel,
   formatNumber,
-  formatPercent,
+  formatBacktestValue,
   formatProfitLossRatio,
   formatRate,
   normalizeDateInput,
@@ -113,15 +113,16 @@ function decayStatusClass(status?: string | null) {
 function formatDecayValidationTitle(
   item: RuleDecayValidation,
   valueLabel = "方向超额",
+  metric: "residual_return" | "rise_amount" = "residual_return",
 ) {
   const dateRange = item.recent_start_date && item.recent_end_date
     ? `${formatDateLabel(item.recent_start_date)} ~ ${formatDateLabel(item.recent_end_date)}`
     : "--";
   return [
     `最近窗口：${dateRange}`,
-    `近期${valueLabel}：${formatPercent(item.recent_directional_excess_mean, 4)}`,
-    `此前${valueLabel}：${formatPercent(item.prior_directional_excess_mean, 4)}`,
-    `变化：${formatPercent(item.decay_change, 4)}`,
+    `近期${valueLabel}：${formatBacktestValue(item.recent_directional_excess_mean, metric, 4)}`,
+    `此前${valueLabel}：${formatBacktestValue(item.prior_directional_excess_mean, metric, 4)}`,
+    `变化：${formatBacktestValue(item.decay_change, metric, 4)}`,
     `Welch t值：${formatNumber(item.decay_t_value, 3)}`,
     `有效日：近期${item.recent_day_count} / 此前${item.prior_day_count}`,
   ].join("；");
@@ -131,6 +132,7 @@ function renderDecayValidations(
   validations: RuleDecayValidation[] | undefined,
   keyPrefix: string,
   valueLabel?: string,
+  metric: "residual_return" | "rise_amount" = "residual_return",
 ) {
   const rows = validations ?? [];
   if (rows.length === 0) {
@@ -142,12 +144,12 @@ function renderDecayValidations(
         <div
           key={`${keyPrefix}-decay-${item.window_days}`}
           className={`scene-layer-decay-item ${decayStatusClass(item.status)}`}
-          title={formatDecayValidationTitle(item, valueLabel)}
+          title={formatDecayValidationTitle(item, valueLabel, metric)}
         >
           <span>{item.window_days}日</span>
           <strong>{item.status_label}</strong>
           <em>
-            近 {formatPercent(item.recent_directional_excess_mean, 2)} / Δ {formatPercent(item.decay_change, 2)}
+            近 {formatBacktestValue(item.recent_directional_excess_mean, metric, 2)} / Δ {formatBacktestValue(item.decay_change, metric, 2)}
           </em>
         </div>
       ))}
@@ -155,12 +157,12 @@ function renderDecayValidations(
   );
 }
 
-function renderRuleDecayValidations(row: RuleLayerRuleSummary) {
+function renderRuleDecayValidations(row: RuleLayerRuleSummary, metric: "residual_return" | "rise_amount") {
   const validations = row.decay_validations ?? [];
   if (validations.length === 0) {
     return "--";
   }
-  return renderDecayValidations(validations, row.rule_name);
+  return renderDecayValidations(validations, row.rule_name, undefined, metric);
 }
 
 function formatBacktestBoardLabel(value?: {
@@ -199,6 +201,7 @@ export default function SceneLayerBacktestPage() {
   const [sourcePath, setSourcePath] = useState(() => readStoredSourcePath());
   const [stockAdjType, setStockAdjType] = useState(storedCommonParams.stockAdjType);
   const [indexTsCode, setIndexTsCode] = useState<string>(storedCommonParams.indexTsCode);
+  const [returnMetric, setReturnMetric] = useState(storedCommonParams.returnMetric);
   const [indexBeta, setIndexBeta] = useState(storedCommonParams.indexBeta);
   const [conceptBeta, setConceptBeta] = useState(storedCommonParams.conceptBeta);
   const [industryBeta, setIndustryBeta] = useState(storedCommonParams.industryBeta);
@@ -256,6 +259,7 @@ export default function SceneLayerBacktestPage() {
       stockAdjType,
       indexTsCode,
       indexBeta,
+      returnMetric,
       conceptBeta,
       industryBeta,
       startDateInput,
@@ -274,6 +278,7 @@ export default function SceneLayerBacktestPage() {
     stockAdjType,
     indexTsCode,
     indexBeta,
+    returnMetric,
     conceptBeta,
     industryBeta,
     startDateInput,
@@ -403,13 +408,14 @@ export default function SceneLayerBacktestPage() {
   }
 
   function renderResidualMetric(
-    value?: number | null,
+    value: number | null | undefined,
     direction?: ValidationDirection | null,
   ) {
+    const metric = ruleResult?.return_metric ?? "residual_return";
     const directionLabel = direction === "negative" ? "扣" : direction === "positive" ? "加" : null;
     return (
       <span className="scene-layer-residual-metric">
-        <span>{formatPercent(value)}</span>
+        <span>{formatBacktestValue(value, metric)}</span>
         {directionLabel ? (
           <span className={`scene-layer-residual-badge scene-layer-residual-badge-${direction}`}>
             {directionLabel}
@@ -573,6 +579,7 @@ export default function SceneLayerBacktestPage() {
         stockAdjType: stockAdjType.trim() || "qfq",
         indexTsCode: indexTsCode.trim(),
         indexBeta: Number(indexBeta),
+        returnMetric,
         conceptBeta: Number(conceptBeta),
         industryBeta: Number(industryBeta),
         startDate: normalizedStart,
@@ -627,6 +634,7 @@ export default function SceneLayerBacktestPage() {
         stockAdjType: stockAdjType.trim() || "qfq",
         indexTsCode: indexTsCode.trim(),
         indexBeta: Number(indexBeta),
+        returnMetric,
         conceptBeta: Number(conceptBeta),
         industryBeta: Number(industryBeta),
         startDate: normalizedStart,
@@ -687,6 +695,7 @@ export default function SceneLayerBacktestPage() {
         stockAdjType: stockAdjType.trim() || "qfq",
         indexTsCode: indexTsCode.trim(),
         indexBeta: Number(indexBeta),
+        returnMetric,
         conceptBeta: Number(conceptBeta),
         industryBeta: Number(industryBeta),
         startDate: normalizedStart,
@@ -748,6 +757,7 @@ export default function SceneLayerBacktestPage() {
         stockAdjType: stockAdjType.trim() || "qfq",
         indexTsCode: indexTsCode.trim(),
         indexBeta: Number(indexBeta),
+        returnMetric,
         conceptBeta: Number(conceptBeta),
         industryBeta: Number(industryBeta),
         startDate: normalizedStart,
@@ -803,6 +813,7 @@ export default function SceneLayerBacktestPage() {
         stockAdjType: stockAdjType.trim() || "qfq",
         indexTsCode: indexTsCode.trim(),
         indexBeta: Number(indexBeta),
+        returnMetric,
         conceptBeta: Number(conceptBeta),
         industryBeta: Number(industryBeta),
         startDate: normalizedStart,
@@ -859,6 +870,7 @@ export default function SceneLayerBacktestPage() {
         stockAdjType: stockAdjType.trim() || "qfq",
         indexTsCode: indexTsCode.trim(),
         indexBeta: Number(indexBeta),
+        returnMetric,
         conceptBeta: Number(conceptBeta),
         industryBeta: Number(industryBeta),
         startDate: normalizedStart,
@@ -981,6 +993,7 @@ export default function SceneLayerBacktestPage() {
         min_samples_per_rule_day: rankBacktest.min_samples_per_rank_day,
         min_listed_trade_days: rankBacktest.min_listed_trade_days,
         backtest_period: rankBacktest.backtest_period,
+        return_metric: rankBacktest.return_metric,
         points: [],
         avg_residual_mean: rankBacktest.layer_summaries.find(
           (item) => item.layer_index === group.layer_index,
@@ -1012,7 +1025,15 @@ export default function SceneLayerBacktestPage() {
     <div className="scene-layer-page">
       <section className="scene-layer-card">
         <h2 className="scene-layer-title">回测全局参数</h2>
+        <p className="scene-layer-caption">上涨金额 = 残差收益率 ÷ 100 × 当日推测市值；推测市值 = 当前市值 × 当日股价 ÷ 当前股价。市值筛选与分组按样本当日计算。</p>
         <div className="scene-layer-form-grid">
+          <label className="scene-layer-field">
+            <span>回测指标</span>
+            <select value={returnMetric} onChange={(event) => setReturnMetric(event.target.value as typeof returnMetric)}>
+              <option value="residual_return">残差收益率（%）</option>
+              <option value="rise_amount">上涨金额（亿）</option>
+            </select>
+          </label>
           <label className="scene-layer-field">
             <span>股票复权</span>
             <input value={stockAdjType} onChange={(event) => setStockAdjType(event.target.value)} />
@@ -1064,11 +1085,11 @@ export default function SceneLayerBacktestPage() {
             <input type="number" min="1" value={parallelBatchSize} onChange={(event) => setParallelBatchSize(event.target.value)} />
           </label>
           <label className="scene-layer-field">
-            <span>总市值最小(亿)</span>
+            <span>推测市值最小(亿)</span>
             <input type="number" min="0" step="1" value={totalMvMin} onChange={(event) => setTotalMvMin(event.target.value)} />
           </label>
           <label className="scene-layer-field">
-            <span>总市值最大(亿)</span>
+            <span>推测市值最大(亿)</span>
             <input type="number" min="0" step="1" value={totalMvMax} onChange={(event) => setTotalMvMax(event.target.value)} />
           </label>
           <label className="scene-layer-field">
@@ -1125,6 +1146,7 @@ export default function SceneLayerBacktestPage() {
 
       {rankResult ? (
         <section className="scene-layer-card">
+          <p className="scene-layer-caption">回测指标：{rankResult.return_metric === "rise_amount" ? "上涨金额（亿）" : "残差收益率（%）"}</p>
           <div className="scene-layer-layer-summary">
             <h3>排名整体回测汇总</h3>
             <div className="scene-layer-summary-section">
@@ -1183,7 +1205,7 @@ export default function SceneLayerBacktestPage() {
                   </thead>
                   <tbody>
                     <tr>
-                      <td>{formatPercent(rankResult.spread_mean)}</td>
+                      <td>{formatBacktestValue(rankResult.spread_mean, rankResult.return_metric)}</td>
                       <td>{formatNumber(rankResult.avg_er_change, 4)}</td>
                       <td className={metricHighlightClass("ic", rankResult.ic_mean)}>{formatNumber(rankResult.ic_mean)}</td>
                       <td className={metricHighlightClass("t", rankResult.ic_t_value)}>{formatNumber(rankResult.ic_t_value)}</td>
@@ -1222,10 +1244,10 @@ export default function SceneLayerBacktestPage() {
                         <td>Top {item.top_k}</td>
                         <td>{item.point_count}</td>
                         <td>{item.sample_count}</td>
-                        <td>{formatPercent(item.avg_daily_residual_return)}</td>
-                        <td>{formatPercent(item.median_daily_residual_return)}</td>
+                        <td>{formatBacktestValue(item.avg_daily_residual_return, rankResult.return_metric)}</td>
+                        <td>{formatBacktestValue(item.median_daily_residual_return, rankResult.return_metric)}</td>
                         <td>{formatRate(item.positive_day_ratio)}</td>
-                        <td>{formatPercent(item.daily_std)}</td>
+                        <td>{formatBacktestValue(item.daily_std, rankResult.return_metric)}</td>
                         <td className={metricHighlightClass("t", item.hac_t_value)}>{formatNumber(item.hac_t_value)}</td>
                         <td>{item.hac_lag}</td>
                       </tr>
@@ -1266,8 +1288,8 @@ export default function SceneLayerBacktestPage() {
                           <td>Top {item.top_k}</td>
                           <td>{formatDateLabel(item.start_date)} ~ {formatDateLabel(item.end_date)}</td>
                           <td>{item.point_count}</td>
-                          <td>{formatPercent(item.avg_daily_residual_return)}</td>
-                          <td>{formatPercent(item.median_daily_residual_return)}</td>
+                          <td>{formatBacktestValue(item.avg_daily_residual_return, rankResult.return_metric)}</td>
+                          <td>{formatBacktestValue(item.median_daily_residual_return, rankResult.return_metric)}</td>
                           <td>{formatRate(item.positive_day_ratio)}</td>
                           <td className={metricHighlightClass("t", item.hac_t_value)}>{formatNumber(item.hac_t_value)}</td>
                         </tr>
@@ -1319,7 +1341,7 @@ export default function SceneLayerBacktestPage() {
                           <td>{item.point_count}</td>
                           <td>{item.sample_count}</td>
                           <td>{formatNumber(item.avg_score, 4)}</td>
-                          <td>{formatPercent(item.avg_residual_return)}</td>
+                          <td>{formatBacktestValue(item.avg_residual_return, rankResult.return_metric)}</td>
                           <td>{formatNumber(item.avg_er_change, 4)}</td>
                         </tr>
                       );
@@ -1332,7 +1354,7 @@ export default function SceneLayerBacktestPage() {
 
           {rankResult.market_value_summaries && rankResult.market_value_summaries.length > 0 ? (
             <div className="scene-layer-layer-summary">
-              <h3>市值分组回测表现</h3>
+              <h3>推测市值分组回测表现</h3>
               <div className="scene-layer-contrib-table-wrap">
                 <table className="scene-layer-contrib-table">
                   <thead>
@@ -1354,7 +1376,7 @@ export default function SceneLayerBacktestPage() {
                         <td>{item.point_count}</td>
                         <td>{item.sample_count}</td>
                         <td>{formatNumber(item.avg_er_change, 4)}</td>
-                        <td>{formatPercent(item.spread_mean)}</td>
+                        <td>{formatBacktestValue(item.spread_mean, rankResult.return_metric)}</td>
                         <td className={metricHighlightClass("ic", item.ic_mean)}>{formatNumber(item.ic_mean)}</td>
                         <td className={metricHighlightClass("t", item.ic_t_value)}>{formatNumber(item.ic_t_value)}</td>
                         <td className={metricHighlightClass("ir", item.icir)}>{formatNumber(item.icir)}</td>
@@ -1422,6 +1444,7 @@ export default function SceneLayerBacktestPage() {
 
       {result ? (
         <section className="scene-layer-card">
+          <p className="scene-layer-caption">回测指标：{result.return_metric === "rise_amount" ? "上涨金额（亿）" : "残差收益率（%）"}</p>
           <div className="scene-layer-summary-grid">
             <div className="scene-layer-summary-item">
               <span>场景</span>
@@ -1440,7 +1463,7 @@ export default function SceneLayerBacktestPage() {
               <strong>{formatBacktestBoardLabel(result)}</strong>
             </div>
             <div className="scene-layer-summary-item">
-              <span>总市值范围</span>
+              <span>推测市值范围</span>
               <strong>{formatMarketValueRange(result)}</strong>
             </div>
             <div className="scene-layer-summary-item">
@@ -1469,7 +1492,7 @@ export default function SceneLayerBacktestPage() {
                   <div key={item.scene_name} className="scene-layer-layer-item">
                     <span className="scene-layer-layer-state">{item.scene_name}</span>
                     <span>有效交易日：{item.point_count}</span>
-                    <span>分层差均值：{formatPercent(item.spread_mean)}</span>
+                    <span>分层差均值：{formatBacktestValue(item.spread_mean, result.return_metric)}</span>
                     <span className={metricHighlightClass("ic", item.ic_mean)}>IC 均值：{formatNumber(item.ic_mean)}</span>
                     <span className={metricHighlightClass("ir", item.icir)}>ICIR：{formatNumber(item.icir)}</span>
                     <span className={metricHighlightClass("t", item.ic_t_value)}>IC t值：{formatNumber(item.ic_t_value)}</span>
@@ -1484,7 +1507,7 @@ export default function SceneLayerBacktestPage() {
       <section className="scene-layer-card">
         <h2 className="scene-layer-title">策略回测</h2>
         <p className="scene-layer-caption">
-          使用 rule_details 中的策略得分与次日开盘起算的复合残差收益，按实际触发数过滤有效日期，计算策略日度残差均值、贡献度、IC / ICIR；多日持有的 IC t值使用 HAC 修正。
+          使用 rule_details 中的策略得分与次日开盘起算的复合残差，按所选指标计算收益率或上涨金额，再按实际触发数过滤有效日期，计算策略日度指标均值、贡献度、IC / ICIR；多日持有的 IC t值使用 HAC 修正。
         </p>
 
         <div className="scene-layer-actions">
@@ -1501,6 +1524,7 @@ export default function SceneLayerBacktestPage() {
 
       {ruleResult ? (
         <section className="scene-layer-card">
+          <p className="scene-layer-caption">回测指标：{ruleResult.return_metric === "rise_amount" ? "上涨金额（亿）" : "残差收益率（%）"}</p>
           {allRuleSummaries.length === 0 ? (
             <div className="scene-layer-empty">当前没有可回测的策略。</div>
           ) : null}
@@ -1636,7 +1660,7 @@ export default function SceneLayerBacktestPage() {
                         <td className={residualMetricHighlightClass(item.avg_excess_residual_mean, resolveResidualDirection(item.avg_contribution_score))}>
                           {renderResidualMetric(item.avg_excess_residual_mean, resolveResidualDirection(item.avg_contribution_score))}
                         </td>
-                        <td className="scene-layer-decay-cell">{renderRuleDecayValidations(item)}</td>
+                        <td className="scene-layer-decay-cell">{renderRuleDecayValidations(item, ruleResult.return_metric)}</td>
                         <td>{formatNumber(item.avg_er_change, 4)}</td>
                         <td className={metricHighlightClass("ic", item.ic_mean)}>{formatNumber(item.ic_mean)}</td>
                         <td className={metricHighlightClass("t", item.ic_t_value)}>{formatNumber(item.ic_t_value)}</td>

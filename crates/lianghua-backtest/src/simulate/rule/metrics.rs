@@ -871,6 +871,7 @@ mod tests {
             &runtime_cache,
             &triggered_score_map,
             &RuleLayerConfig {
+                target: Default::default(),
                 min_samples_per_day: 1,
                 backtest_period: 1,
                 min_listed_trade_days: 0,
@@ -914,6 +915,7 @@ mod tests {
         let metrics = calc_rule_layer_metrics(
             &samples,
             &RuleLayerConfig {
+                target: Default::default(),
                 min_samples_per_day: 2,
                 backtest_period: 1,
                 min_listed_trade_days: 0,

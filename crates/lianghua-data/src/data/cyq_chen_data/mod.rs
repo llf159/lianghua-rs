@@ -22,7 +22,7 @@ pub(super) const DEFAULT_ADJ_TYPE: &str = "qfq";
 pub(super) const CYQ_CHEN_GROUP_SIZE: usize = 8;
 pub(super) const CYQ_CHEN_QUEUE_BOUND: usize = 2;
 pub(super) const CYQ_CHEN_FLUSH_BATCH_SIZE: usize = 32;
-pub(super) const CYQ_CHEN_SCHEMA_VERSION: &str = "4";
+pub(super) const CYQ_CHEN_SCHEMA_VERSION: &str = "5";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CyqChenRebuildSummary {

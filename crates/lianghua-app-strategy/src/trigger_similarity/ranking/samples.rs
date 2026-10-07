@@ -28,7 +28,7 @@ pub(in crate::trigger_similarity) fn build_ranking_samples_for_chunk(
     all_trade_dates: &[String],
     environment_fingerprints: &HashMap<String, Arc<ChannelFingerprint>>,
     benchmark_rows: &HashMap<String, BenchmarkObservation>,
-    total_mv_map: &HashMap<String, f64>,
+    market_cap_per_price_map: &HashMap<String, f64>,
     name_map: &HashMap<String, String>,
     pool_segments: usize,
     outcome_trade_days: usize,
@@ -112,7 +112,7 @@ pub(in crate::trigger_similarity) fn build_ranking_samples_for_chunk(
                     price_volume: build_channel_fingerprint(build_price_volume_channels(
                         market_rows,
                         pool_segments,
-                        total_mv_map.get(&anchor.ts_code).copied(),
+                        market_cap_per_price_map.get(&anchor.ts_code).copied(),
                         market_category_features(
                             &anchor.ts_code,
                             name_map.get(&anchor.ts_code).map(String::as_str),
@@ -721,7 +721,7 @@ mod tests {
             all_trade_dates: &dates,
             environment_fingerprints: &environment,
             benchmark_rows: &benchmark,
-            total_mv_map: &market_caps,
+            market_cap_per_price_map: &market_caps,
             name_map: &names,
             pool_segments: 2,
             outcome_trade_days: 1,

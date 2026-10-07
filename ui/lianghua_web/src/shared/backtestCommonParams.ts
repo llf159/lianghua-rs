@@ -1,9 +1,10 @@
-import type { RankLayerMethod } from "../apis/strategyTrigger";
+import type { BacktestReturnMetric, RankLayerMethod } from "../apis/strategyTrigger";
 import { STOCK_PICK_BOARD_OPTIONS } from "./stockPickShared";
 import { readJsonStorage, writeJsonStorage } from "./storage";
 
 export type BacktestCommonParamsDraft = {
   stockAdjType: string;
+  returnMetric: BacktestReturnMetric;
   indexTsCode: string;
   indexBeta: string;
   conceptBeta: string;
@@ -37,6 +38,7 @@ export const INDEX_OPTIONS = [
 
 export const DEFAULT_BACKTEST_COMMON_PARAMS: BacktestCommonParamsDraft = {
   stockAdjType: "qfq",
+  returnMetric: "residual_return",
   indexTsCode: INDEX_OPTIONS[0].value,
   indexBeta: "0.5",
   conceptBeta: "0.1",
@@ -88,6 +90,7 @@ export function readStoredBacktestCommonParams(): BacktestCommonParamsDraft {
         : DEFAULT_BACKTEST_COMMON_PARAMS.backtestBoardFilter;
 
   return {
+    returnMetric: parsed?.returnMetric === "rise_amount" ? "rise_amount" : "residual_return",
     stockAdjType: normalizeStoredString(parsed?.stockAdjType, DEFAULT_BACKTEST_COMMON_PARAMS.stockAdjType),
     indexTsCode: INDEX_OPTIONS.some((item) => item.value === indexTsCode)
       ? indexTsCode
@@ -118,6 +121,7 @@ export function readStoredBacktestCommonParams(): BacktestCommonParamsDraft {
 export function writeStoredBacktestCommonParams(value: BacktestCommonParamsDraft) {
   const storedValue: StoredBacktestCommonParamsDraft = {
     stockAdjType: value.stockAdjType,
+    returnMetric: value.returnMetric,
     indexTsCode: value.indexTsCode,
     indexBeta: value.indexBeta,
     conceptBeta: value.conceptBeta,

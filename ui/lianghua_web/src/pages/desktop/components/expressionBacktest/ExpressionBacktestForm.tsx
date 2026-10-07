@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { StrategyManageRuleItem } from "../../../../apis/strategyManage";
-import type { ValidationCoreRuleOption } from "../../../../apis/strategyTrigger";
+import type { BacktestReturnMetric, ValidationCoreRuleOption } from "../../../../apis/strategyTrigger";
 import { INDEX_OPTIONS } from "../../../../shared/backtestCommonParams";
 import {
   VALIDATION_MAX_SAMPLE_LIMIT,
@@ -34,6 +34,7 @@ export type ExpressionBacktestFormValues = {
   sampleLimitText: string;
   minSamplesPerDayText: string;
   stockAdjType: string;
+  returnMetric: BacktestReturnMetric;
   indexTsCode: string;
   indexBetaText: string;
   conceptBetaText: string;
@@ -201,6 +202,14 @@ export function ExpressionBacktestForm({
       </label>
 
       <h3 className="expression-backtest-form-title">研究设置</h3>
+      <label className="expression-backtest-field">
+        <span>回测指标</span>
+        <select value={values.returnMetric} onChange={(event) => onChange({ returnMetric: event.target.value as BacktestReturnMetric })}>
+          <option value="residual_return">残差收益率（%）</option>
+          <option value="rise_amount">上涨金额（亿）</option>
+        </select>
+        <span>上涨金额 = 残差收益率 ÷ 100 × 当日推测市值；推测市值 = 当前市值 × 当日股价 ÷ 当前股价。</span>
+      </label>
       <div className="expression-backtest-form-row">
         <label className="expression-backtest-field">
           <span>开始日期</span>
@@ -236,7 +245,7 @@ export function ExpressionBacktestForm({
           </select>
         </label>
         <label className="expression-backtest-field">
-          <span>总市值最小(亿)</span>
+          <span>推测市值最小(亿)</span>
           <input
             type="number"
             min={0}
@@ -246,7 +255,7 @@ export function ExpressionBacktestForm({
           />
         </label>
         <label className="expression-backtest-field">
-          <span>总市值最大(亿)</span>
+          <span>推测市值最大(亿)</span>
           <input
             type="number"
             min={0}

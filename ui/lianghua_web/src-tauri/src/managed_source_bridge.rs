@@ -322,25 +322,25 @@ fn managed_rank_compute_snapshot_root(source_root: &Path) -> PathBuf {
 
 fn delete_managed_result_db_inner(data_root: &Path, source_dir: &str) -> Result<(), String> {
     let source_root = resolve_source_root(data_root, source_dir)?;
-    let result_db_path = source_root.join("scoring_result.db");
-    match std::fs::remove_file(&result_db_path) {
+    let snapshot_root = managed_rank_compute_snapshot_root(&source_root);
+    match std::fs::remove_dir_all(&snapshot_root) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
             return Err(format!(
-                "删除结果库失败: path={}, err={error}",
-                result_db_path.display()
+                "删除计算策略快照失败: path={}, err={error}",
+                snapshot_root.display()
             ));
         }
     }
 
-    let snapshot_root = managed_rank_compute_snapshot_root(&source_root);
-    match std::fs::remove_dir_all(&snapshot_root) {
+    let result_db_path = source_root.join("scoring_result.db");
+    match std::fs::remove_file(&result_db_path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(format!(
-            "删除计算策略快照失败: path={}, err={error}",
-            snapshot_root.display()
+            "删除结果库失败: path={}, err={error}",
+            result_db_path.display()
         )),
     }
 }

@@ -1146,6 +1146,38 @@ mod tests {
     }
 
     #[test]
+    fn rebuild_starts_after_last_missing_turnover_with_full_warmup() {
+        let source_dir = unique_temp_source_dir();
+        prepare_source_db(&source_dir);
+        let source_path = source_dir.to_str().unwrap();
+        let source_conn = Connection::open(crate::data::source_db_path(source_path)).unwrap();
+        source_conn
+            .execute(
+                "UPDATE stock_data SET tor = NULL WHERE ts_code = '000001.SZ' AND trade_date = '20260402'",
+                [],
+            )
+            .unwrap();
+        drop(source_conn);
+
+        let summary = rebuild_cyq_chen_all(
+            source_path,
+            ChenChipConfig {
+                warmup_days: 2,
+                bucket_pct: 5.0,
+            },
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(summary.snapshot_rows, 1);
+        let snapshots = snapshot_rows_for_compare(source_path);
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].0, "000001.SZ");
+        assert_eq!(snapshots[0].1, "20260408");
+        fs::remove_dir_all(source_dir).unwrap();
+    }
+
+    #[test]
     fn rebuild_cyq_chen_all_writes_snapshot_and_bin_rows() {
         let source_dir = unique_temp_source_dir();
         prepare_source_db(&source_dir);

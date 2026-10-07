@@ -93,7 +93,28 @@ where
         Ok(None)
     })(source_conn, "ER")?;
 
+    let market_cap_per_price = if input.target.needs_market_cap() {
+        crate::data::extras::load_estimated_market_cap_per_price_map(
+            source_conn,
+            source_dir,
+            input.stock_adj_type,
+        )?
+    } else {
+        HashMap::new()
+    };
     for ts_code_batch in ts_codes.chunks(stock_batch_size.max(1)) {
+        let market_caps = if input.target.needs_market_cap() {
+            crate::data::extras::load_estimated_market_cap_series(
+                source_conn,
+                &market_cap_per_price,
+                ts_code_batch,
+                input.stock_adj_type,
+                input.start_date,
+                input.end_date,
+            )?
+        } else {
+            HashMap::new()
+        };
         let mut stock_series_cache = load_pct_chg_series_cache_for_ts_codes(
             source_conn,
             ts_code_batch,
@@ -284,7 +305,7 @@ where
             ts_code_batch
                 .par_iter()
                 .map(|ts_code| {
-                    let residual_map = build_residual_map_for_ts_code(
+                    let mut residual_map = build_residual_map_for_ts_code(
                         ts_code,
                         &stock_series_cache,
                         &er_series_cache,
@@ -296,6 +317,18 @@ where
                         input,
                         &sample_eligibility,
                     )?;
+                    residual_map.retain(|trade_date, outcome| {
+                        let cap = market_caps
+                            .get(ts_code)
+                            .and_then(|m| m.get(trade_date))
+                            .copied();
+                        if let Some(value) = input.target.apply(outcome.residual_return, cap) {
+                            outcome.residual_return = value;
+                            true
+                        } else {
+                            false
+                        }
+                    });
                     Ok((ts_code.clone(), residual_map))
                 })
                 .collect();

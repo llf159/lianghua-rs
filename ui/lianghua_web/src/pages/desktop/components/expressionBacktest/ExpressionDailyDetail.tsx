@@ -1,5 +1,5 @@
 import type { RuleValidationComboResult } from "../../../../apis/strategyTrigger";
-import { formatDateLabel, formatNumber, formatPercent, formatRate } from "../../../../shared/backtestFormat";
+import { formatDateLabel, formatNumber, formatBacktestValue, formatRate } from "../../../../shared/backtestFormat";
 
 export function ExpressionDailyDetail({ combo }: { combo: RuleValidationComboResult }) {
   const dailyMetrics = combo.daily_metrics ?? [];
@@ -27,7 +27,7 @@ export function ExpressionDailyDetail({ combo }: { combo: RuleValidationComboRes
                 <tr>
                   <th>交易日</th>
                   <th>IC</th>
-                  <th>残差收益（方向）</th>
+                  <th>回测指标（方向）</th>
                 </tr>
               </thead>
               <tbody>
@@ -35,14 +35,14 @@ export function ExpressionDailyDetail({ combo }: { combo: RuleValidationComboRes
                   <tr key={`${combo.combo_key}-daily-${row.trade_date}`}>
                     <td>{formatDateLabel(row.trade_date)}</td>
                     <td>{formatNumber(row.ic, 4)}</td>
-                    <td>{formatPercent(row.avg_residual_return)}</td>
+                    <td>{formatBacktestValue(row.avg_residual_return, combo.backtest.return_metric)}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
           <p className="expression-backtest-caption">
-            日度 IC 由分数秩相关给出（负向规则工作时期望已为正），残差收益按表达式方向调整符号。
+            日度 IC 由分数秩相关给出（负向规则工作时期望已为正），回测指标按表达式方向调整符号。
           </p>
         </details>
       ) : null}
@@ -82,7 +82,7 @@ export function ExpressionDailyDetail({ combo }: { combo: RuleValidationComboRes
             </div>
           </div>
           <p className="expression-backtest-caption">
-            收益分布为触发样本的原始残差收益分桶，不区分方向；只用于看触发样本的收益形状。
+            收益分布为触发样本的原始回测指标分桶，不区分方向；只用于看触发样本的收益形状。
           </p>
         </details>
       ) : null}

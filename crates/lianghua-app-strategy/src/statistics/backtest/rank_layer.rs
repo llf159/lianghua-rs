@@ -12,7 +12,7 @@ use crate::statistics::validation::samples::{
     compare_random_validation_sample, push_limited_random_sample, push_limited_sample,
     sample_board, validation_sample_rows_to_payload,
 };
-use lianghua_app_shared::build_total_mv_map;
+
 use rand::random;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -78,25 +78,26 @@ pub(in crate::statistics) fn rank_top_k_period_summary_data(
         .collect()
 }
 
-pub(in crate::statistics) fn stock_total_mv(
-    total_mv_map: &HashMap<String, f64>,
-    ts_code: &str,
-) -> Option<f64> {
-    let ts_code = ts_code.trim();
-    total_mv_map.get(ts_code).copied().or_else(|| {
-        total_mv_map
-            .get(ts_code.to_ascii_uppercase().as_str())
-            .copied()
-    })
-}
-
 pub(in crate::statistics) fn build_rank_market_value_summaries(
     source_path: &str,
     input: &RankLayerFromDbInput,
     summary_rows: &[ScoreSummary],
     samples: &[crate::simulate::rank::RankLayerSamplePoint],
 ) -> Result<Vec<RankLayerMarketValueSummary>, String> {
-    let total_mv_map = build_total_mv_map(source_path)?;
+    let conn = duckdb::Connection::open(crate::data::source_db_path(source_path))
+        .map_err(|e| e.to_string())?;
+    let per_price = crate::data::extras::load_estimated_market_cap_per_price_map(
+        &conn,
+        source_path,
+        &input.stock_adj_type,
+    )?;
+    let weights = per_price
+        .iter()
+        .map(|(code, value)| format!("('{}', {})", code.replace('\'', "''"), value))
+        .collect::<Vec<_>>();
+    if weights.is_empty() {
+        return Ok(Vec::new());
+    }
     let mut out = Vec::new();
 
     for (group_label, total_mv_min, total_mv_max) in
@@ -108,39 +109,61 @@ pub(in crate::statistics) fn build_rank_market_value_summaries(
             ]
         })()
     {
+        let sql = format!(
+            r#"
+            WITH weights(ts_code, per_price) AS (VALUES {})
+            SELECT s.ts_code, s.trade_date
+            FROM stock_data s JOIN weights w ON s.ts_code = w.ts_code
+            WHERE s.adj_type = ? AND s.trade_date >= ? AND s.trade_date <= ?
+              AND TRY_CAST(s.close AS DOUBLE) > 0 AND isfinite(TRY_CAST(s.close AS DOUBLE) * w.per_price)
+              AND (? IS NULL OR TRY_CAST(s.close AS DOUBLE) * w.per_price >= ?)
+              AND (? IS NULL OR TRY_CAST(s.close AS DOUBLE) * w.per_price < ?)
+        "#,
+            weights.join(",")
+        );
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| format!("预编译历史市值分组失败:{e}"))?;
+        let mut rows = stmt
+            .query(duckdb::params![
+                &input.stock_adj_type,
+                &input.start_date,
+                &input.end_date,
+                total_mv_min,
+                total_mv_min,
+                total_mv_max,
+                total_mv_max
+            ])
+            .map_err(|e| format!("查询历史市值分组失败:{e}"))?;
+        let mut group_pairs = HashSet::new();
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            let ts_code: String = row.get(0).map_err(|e| e.to_string())?;
+            let date: String = row.get(1).map_err(|e| e.to_string())?;
+            group_pairs.insert(
+                crate::statistics::validation::similarity::validation_pair_hash(&ts_code, &date),
+            );
+        }
         let group_rows = summary_rows
             .iter()
             .filter(|row| {
-                (|total_mv_map: &HashMap<String, f64>,
-                  row: &ScoreSummary,
-                  min_value: Option<f64>,
-                  max_value: Option<f64>|
-                 -> bool {
-                    let Some(total_mv) = stock_total_mv(total_mv_map, &row.ts_code) else {
-                        return false;
-                    };
-                    if let Some(min_value) = min_value {
-                        if total_mv < min_value {
-                            return false;
-                        }
-                    }
-                    if let Some(max_value) = max_value {
-                        if total_mv >= max_value {
-                            return false;
-                        }
-                    }
-                    true
-                })(&total_mv_map, row, total_mv_min, total_mv_max)
+                group_pairs.contains(
+                    &crate::statistics::validation::similarity::validation_pair_hash(
+                        &row.ts_code,
+                        &row.trade_date,
+                    ),
+                )
             })
             .cloned()
             .collect::<Vec<_>>();
         let group_samples = samples
             .iter()
             .filter(|sample| {
-                stock_total_mv(&total_mv_map, &sample.ts_code).is_some_and(|total_mv| {
-                    total_mv_min.is_none_or(|min_value| total_mv >= min_value)
-                        && total_mv_max.is_none_or(|max_value| total_mv < max_value)
-                })
+                group_pairs.contains(
+                    &crate::statistics::validation::similarity::validation_pair_hash(
+                        &sample.ts_code,
+                        &sample.trade_date,
+                    ),
+                )
             })
             .cloned()
             .collect::<Vec<_>>();

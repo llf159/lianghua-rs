@@ -25,6 +25,7 @@ const PCT_CHG_BATCH_SIZE: usize = 512;
 
 #[derive(Debug, Clone)]
 pub struct SceneLayerConfig {
+    pub target: crate::simulate::BacktestTargetConfig,
     pub min_samples_per_day: usize,
     pub backtest_period: usize,
     pub min_listed_trade_days: usize,
@@ -33,6 +34,7 @@ pub struct SceneLayerConfig {
 impl Default for SceneLayerConfig {
     fn default() -> Self {
         Self {
+            target: Default::default(),
             min_samples_per_day: 5,
             backtest_period: 1,
             min_listed_trade_days: DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS,
@@ -132,6 +134,7 @@ struct SceneDbRow {
 }
 
 struct ResidualCacheInput<'a> {
+    target: &'a crate::simulate::BacktestTargetConfig,
     stock_adj_type: &'a str,
     index_ts_code: &'a str,
     index_beta: f64,
@@ -190,6 +193,7 @@ pub fn calc_scene_layer_metrics_from_db_with_ts_filter(
         &concept_map,
         &industry_map,
         &ResidualCacheInput {
+            target: &input.layer_config.target,
             stock_adj_type: &input.stock_adj_type,
             index_ts_code: &input.index_ts_code,
             index_beta: input.index_beta,
@@ -290,6 +294,7 @@ pub fn calc_all_scene_layer_metrics_from_db_with_ts_filter(
         &concept_map,
         &industry_map,
         &ResidualCacheInput {
+            target: &layer_config.target,
             stock_adj_type,
             index_ts_code,
             index_beta,
@@ -369,6 +374,7 @@ pub fn calc_all_scene_layer_metrics_from_rows(
         &concept_map,
         &industry_map,
         &ResidualCacheInput {
+            target: &layer_config.target,
             stock_adj_type,
             index_ts_code,
             index_beta,
@@ -694,10 +700,28 @@ fn build_residual_map_cache(
     .remove(input.index_ts_code)
     .unwrap_or_default();
 
+    let market_caps = if input.target.needs_market_cap() {
+        let per_price = crate::data::extras::load_estimated_market_cap_per_price_map(
+            source_conn,
+            source_dir,
+            input.stock_adj_type,
+        )?;
+        crate::data::extras::load_estimated_market_cap_series(
+            source_conn,
+            &per_price,
+            &ts_codes,
+            input.stock_adj_type,
+            input.start_date,
+            input.end_date,
+        )?
+    } else {
+        HashMap::new()
+    };
+
     let grouped_results: Vec<Result<(String, HashMap<String, f64>), String>> = ts_codes
         .into_par_iter()
         .map(|ts_code| {
-            let residual_map = build_residual_map_for_ts_code(
+            let mut residual_map = build_residual_map_for_ts_code(
                 &ts_code,
                 &stock_series_cache,
                 &index_series,
@@ -708,6 +732,18 @@ fn build_residual_map_cache(
                 input,
                 &sample_eligibility,
             )?;
+            residual_map.retain(|trade_date, value| {
+                let cap = market_caps
+                    .get(&ts_code)
+                    .and_then(|m| m.get(trade_date))
+                    .copied();
+                if let Some(result) = input.target.apply(*value, cap) {
+                    *value = result;
+                    true
+                } else {
+                    false
+                }
+            });
             Ok((ts_code, residual_map))
         })
         .collect();
@@ -1241,6 +1277,7 @@ mod tests {
         let source_conn = Connection::open(source_db_path(source_dir_str)).expect("open source db");
         let scene_names = vec!["场景A".to_string(), "场景B".to_string()];
         let layer_config = SceneLayerConfig {
+            target: Default::default(),
             min_samples_per_day: 1,
             backtest_period: 1,
             min_listed_trade_days: 0,

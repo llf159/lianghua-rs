@@ -25,7 +25,7 @@ use duckdb::params;
 use lianghua_app_shared::build_concepts_map;
 use lianghua_app_shared::build_industry_map;
 use lianghua_app_shared::build_name_map;
-use lianghua_app_shared::build_total_mv_map;
+
 use lianghua_app_shared::canonical_ts_code;
 use std::collections::HashMap;
 #[allow(clippy::too_many_arguments)]
@@ -141,7 +141,13 @@ pub fn get_strategy_trigger_similarity_page(
         &resolved_trade_date,
         &benchmark_index_code,
     )?;
-    let total_mv_map = build_total_mv_map(&source_path).unwrap_or_default();
+    let market_conn = duckdb::Connection::open(crate::data::source_db_path(&source_path))
+        .map_err(|e| e.to_string())?;
+    let market_cap_per_price_map = crate::data::extras::load_estimated_market_cap_per_price_map(
+        &market_conn,
+        &source_path,
+        "qfq",
+    )?;
     let name_map = build_name_map(&source_path).unwrap_or_default();
     let target_anchor = Anchor {
         id: 0,
@@ -154,7 +160,7 @@ pub fn get_strategy_trigger_similarity_page(
         all_trade_dates: &all_trade_dates,
         environment_fingerprints: &environment_fingerprints,
         benchmark_rows: &benchmark_rows,
-        total_mv_map: &total_mv_map,
+        market_cap_per_price_map: &market_cap_per_price_map,
         name_map: &name_map,
         pool_segments,
         outcome_trade_days,

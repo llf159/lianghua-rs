@@ -97,6 +97,7 @@ pub struct SceneLayerBacktestData {
     pub min_samples_per_scene_day: usize,
     pub min_listed_trade_days: usize,
     pub backtest_period: usize,
+    pub return_metric: crate::simulate::BacktestReturnMetric,
     pub points: Vec<SceneLayerPointPayload>,
     pub spread_mean: Option<f64>,
     pub ic_mean: Option<f64>,
@@ -191,6 +192,7 @@ pub struct RuleLayerBacktestData {
     pub min_samples_per_rule_day: usize,
     pub min_listed_trade_days: usize,
     pub backtest_period: usize,
+    pub return_metric: crate::simulate::BacktestReturnMetric,
     pub points: Vec<RuleLayerPointPayload>,
     pub avg_residual_mean: Option<f64>,
     pub avg_excess_residual_mean: Option<f64>,
@@ -289,6 +291,7 @@ pub struct RankLayerBacktestData {
     pub min_samples_per_rank_day: usize,
     pub min_listed_trade_days: usize,
     pub backtest_period: usize,
+    pub return_metric: crate::simulate::BacktestReturnMetric,
     pub layer_count: usize,
     pub layer_method: String,
     pub layer_method_label: String,
@@ -454,6 +457,7 @@ pub(super) struct SceneLayerBacktestRunParams {
     min_samples_per_day: usize,
     min_listed_trade_days: usize,
     backtest_period: usize,
+    return_metric: crate::simulate::BacktestReturnMetric,
     resolved_board: Option<String>,
     exclude_st_board: bool,
     total_mv_min: Option<f64>,
@@ -473,6 +477,7 @@ pub(super) struct RuleLayerBacktestRunParams {
     pub(super) min_samples_per_day: usize,
     pub(super) min_listed_trade_days: usize,
     pub(super) backtest_period: usize,
+    pub(super) return_metric: crate::simulate::BacktestReturnMetric,
     pub(in crate::statistics) parallel_batch_size: usize,
     pub(in crate::statistics) resolved_board: Option<String>,
     pub(in crate::statistics) exclude_st_board: bool,
@@ -493,6 +498,7 @@ pub(super) struct RankLayerBacktestRunParams {
     min_samples_per_day: usize,
     min_listed_trade_days: usize,
     backtest_period: usize,
+    return_metric: crate::simulate::BacktestReturnMetric,
     layer_count: usize,
     layer_method: RankLayerMethod,
     resolved_board: Option<String>,
@@ -538,6 +544,7 @@ pub fn run_scene_layer_backtest(
     min_samples_per_scene_day: Option<usize>,
     min_listed_trade_days: Option<usize>,
     backtest_period: Option<usize>,
+    return_metric: Option<crate::simulate::BacktestReturnMetric>,
     board: Option<String>,
     exclude_st_board: Option<bool>,
     total_mv_min: Option<f64>,
@@ -574,6 +581,7 @@ pub fn run_scene_layer_backtest(
         min_listed_trade_days: min_listed_trade_days
             .unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
         backtest_period: backtest_period.unwrap_or(1),
+        return_metric: return_metric.unwrap_or_default(),
         resolved_board,
         exclude_st_board,
         total_mv_min,
@@ -587,6 +595,11 @@ pub fn run_scene_layer_backtest(
       params: &SceneLayerBacktestRunParams|
      -> Result<SceneLayerBacktestData, String> {
         let layer_config = SceneLayerConfig {
+            target: crate::simulate::BacktestTargetConfig {
+                return_metric: params.return_metric,
+                total_mv_min: params.total_mv_min,
+                total_mv_max: params.total_mv_max,
+            },
             min_samples_per_day: params.min_samples_per_day,
             backtest_period: params.backtest_period,
             min_listed_trade_days: params.min_listed_trade_days,
@@ -633,6 +646,7 @@ pub fn run_scene_layer_backtest(
                 min_samples_per_scene_day: input.layer_config.min_samples_per_day,
                 min_listed_trade_days: input.layer_config.min_listed_trade_days,
                 backtest_period: input.layer_config.backtest_period,
+                return_metric: input.layer_config.target.return_metric,
                 points: metrics
                     .points
                     .into_iter()
@@ -716,6 +730,7 @@ pub fn run_scene_layer_backtest(
             min_samples_per_scene_day: params.min_samples_per_day,
             min_listed_trade_days: params.min_listed_trade_days,
             backtest_period: params.backtest_period,
+            return_metric: params.return_metric,
             points: Vec::new(),
             spread_mean: None,
             ic_mean: None,
@@ -740,6 +755,7 @@ pub fn run_rule_layer_backtest(
     min_samples_per_rule_day: Option<usize>,
     min_listed_trade_days: Option<usize>,
     backtest_period: Option<usize>,
+    return_metric: Option<crate::simulate::BacktestReturnMetric>,
     parallel_batch_size: Option<usize>,
     board: Option<String>,
     exclude_st_board: Option<bool>,
@@ -777,6 +793,7 @@ pub fn run_rule_layer_backtest(
         min_listed_trade_days: min_listed_trade_days
             .unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
         backtest_period: backtest_period.unwrap_or(1),
+        return_metric: return_metric.unwrap_or_default(),
         parallel_batch_size: parallel_batch_size
             .unwrap_or(DEFAULT_RULE_WITH_SAMPLES_PARALLEL_BATCH_SIZE)
             .max(1),
@@ -793,6 +810,11 @@ pub fn run_rule_layer_backtest(
       params: &RuleLayerBacktestRunParams|
      -> Result<RuleLayerBacktestData, String> {
         let layer_config = RuleLayerConfig {
+            target: crate::simulate::BacktestTargetConfig {
+                return_metric: params.return_metric,
+                total_mv_min: params.total_mv_min,
+                total_mv_max: params.total_mv_max,
+            },
             min_samples_per_day: params.min_samples_per_day,
             backtest_period: params.backtest_period,
             min_listed_trade_days: params.min_listed_trade_days,
@@ -841,6 +863,7 @@ pub fn run_rule_layer_backtest(
                 min_samples_per_rule_day: input.layer_config.min_samples_per_day,
                 min_listed_trade_days: input.layer_config.min_listed_trade_days,
                 backtest_period: input.layer_config.backtest_period,
+                return_metric: input.layer_config.target.return_metric,
                 points: metrics
                     .points
                     .into_iter()
@@ -992,6 +1015,7 @@ pub fn run_rule_layer_backtest(
             min_samples_per_rule_day: params.min_samples_per_day,
             min_listed_trade_days: params.min_listed_trade_days,
             backtest_period: params.backtest_period,
+            return_metric: params.return_metric,
             points: Vec::new(),
             avg_residual_mean,
             avg_excess_residual_mean,
@@ -1035,6 +1059,7 @@ pub fn run_rank_layer_backtest(
     min_samples_per_rank_day: Option<usize>,
     min_listed_trade_days: Option<usize>,
     backtest_period: Option<usize>,
+    return_metric: Option<crate::simulate::BacktestReturnMetric>,
     layer_count: Option<usize>,
     layer_method: Option<String>,
     board: Option<String>,
@@ -1065,6 +1090,7 @@ pub fn run_rank_layer_backtest(
         min_listed_trade_days: min_listed_trade_days
             .unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
         backtest_period: backtest_period.unwrap_or(1),
+        return_metric: return_metric.unwrap_or_default(),
         layer_count: layer_count.unwrap_or_else(RankLayerConfig::default_layer_count),
         layer_method: match layer_method {
             Some(value) => RankLayerMethod::from_str(&value)?,
@@ -1080,6 +1106,11 @@ pub fn run_rank_layer_backtest(
       params: &RankLayerBacktestRunParams|
      -> Result<RankLayerBacktestData, String> {
         let layer_config = RankLayerConfig {
+            target: crate::simulate::BacktestTargetConfig {
+                return_metric: params.return_metric,
+                total_mv_min: None,
+                total_mv_max: None,
+            },
             min_samples_per_day: params.min_samples_per_day,
             backtest_period: params.backtest_period,
             min_listed_trade_days: params.min_listed_trade_days,
@@ -1134,6 +1165,7 @@ pub fn run_rank_layer_backtest(
             min_samples_per_rank_day: input.layer_config.effective_min_samples_per_day(),
             min_listed_trade_days: input.layer_config.min_listed_trade_days,
             backtest_period: input.layer_config.backtest_period,
+            return_metric: input.layer_config.target.return_metric,
             layer_count: input.layer_config.layer_count,
             layer_method: input.layer_config.layer_method.as_str().to_string(),
             layer_method_label: rank_layer_method_label(input.layer_config.layer_method)
@@ -1179,6 +1211,7 @@ pub fn run_transient_scene_layer_backtest(
     min_samples_per_scene_day: Option<usize>,
     min_listed_trade_days: Option<usize>,
     backtest_period: Option<usize>,
+    return_metric: Option<crate::simulate::BacktestReturnMetric>,
     board: Option<String>,
     exclude_st_board: Option<bool>,
     total_mv_min: Option<f64>,
@@ -1215,6 +1248,7 @@ pub fn run_transient_scene_layer_backtest(
         min_listed_trade_days: min_listed_trade_days
             .unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
         backtest_period: backtest_period.unwrap_or(1),
+        return_metric: return_metric.unwrap_or_default(),
         resolved_board,
         exclude_st_board,
         total_mv_min,
@@ -1222,6 +1256,11 @@ pub fn run_transient_scene_layer_backtest(
         allowed_ts_codes,
     };
     let layer_config = SceneLayerConfig {
+        target: crate::simulate::BacktestTargetConfig {
+            return_metric: params.return_metric,
+            total_mv_min: params.total_mv_min,
+            total_mv_max: params.total_mv_max,
+        },
         min_samples_per_day: params.min_samples_per_day,
         backtest_period: params.backtest_period,
         min_listed_trade_days: params.min_listed_trade_days,
@@ -1299,6 +1338,7 @@ pub fn run_transient_scene_layer_backtest(
         min_samples_per_scene_day: params.min_samples_per_day,
         min_listed_trade_days: params.min_listed_trade_days,
         backtest_period: params.backtest_period,
+        return_metric: params.return_metric,
         points: Vec::new(),
         spread_mean: None,
         ic_mean: None,
@@ -1322,6 +1362,7 @@ pub fn run_transient_rule_layer_backtest(
     min_samples_per_rule_day: Option<usize>,
     min_listed_trade_days: Option<usize>,
     backtest_period: Option<usize>,
+    return_metric: Option<crate::simulate::BacktestReturnMetric>,
     parallel_batch_size: Option<usize>,
     board: Option<String>,
     exclude_st_board: Option<bool>,
@@ -1359,6 +1400,7 @@ pub fn run_transient_rule_layer_backtest(
         min_listed_trade_days: min_listed_trade_days
             .unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
         backtest_period: backtest_period.unwrap_or(1),
+        return_metric: return_metric.unwrap_or_default(),
         parallel_batch_size: parallel_batch_size
             .unwrap_or(DEFAULT_RULE_WITH_SAMPLES_PARALLEL_BATCH_SIZE)
             .max(1),
@@ -1369,6 +1411,11 @@ pub fn run_transient_rule_layer_backtest(
         allowed_ts_codes,
     };
     let layer_config = RuleLayerConfig {
+        target: crate::simulate::BacktestTargetConfig {
+            return_metric: params.return_metric,
+            total_mv_min: params.total_mv_min,
+            total_mv_max: params.total_mv_max,
+        },
         min_samples_per_day: params.min_samples_per_day,
         backtest_period: params.backtest_period,
         min_listed_trade_days: params.min_listed_trade_days,
@@ -1487,6 +1534,7 @@ pub fn run_transient_rule_layer_backtest(
         min_samples_per_rule_day: params.min_samples_per_day,
         min_listed_trade_days: params.min_listed_trade_days,
         backtest_period: params.backtest_period,
+        return_metric: params.return_metric,
         points: Vec::new(),
         avg_residual_mean,
         avg_excess_residual_mean,
@@ -1528,6 +1576,7 @@ pub fn run_transient_rank_layer_backtest(
     min_samples_per_rank_day: Option<usize>,
     min_listed_trade_days: Option<usize>,
     backtest_period: Option<usize>,
+    return_metric: Option<crate::simulate::BacktestReturnMetric>,
     layer_count: Option<usize>,
     layer_method: Option<String>,
     board: Option<String>,
@@ -1558,6 +1607,7 @@ pub fn run_transient_rank_layer_backtest(
         min_listed_trade_days: min_listed_trade_days
             .unwrap_or(DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS),
         backtest_period: backtest_period.unwrap_or(1),
+        return_metric: return_metric.unwrap_or_default(),
         layer_count: layer_count.unwrap_or_else(RankLayerConfig::default_layer_count),
         layer_method: match layer_method {
             Some(value) => RankLayerMethod::from_str(&value)?,
@@ -1568,6 +1618,11 @@ pub fn run_transient_rank_layer_backtest(
         allowed_ts_codes,
     };
     let layer_config = RankLayerConfig {
+        target: crate::simulate::BacktestTargetConfig {
+            return_metric: params.return_metric,
+            total_mv_min: None,
+            total_mv_max: None,
+        },
         min_samples_per_day: params.min_samples_per_day,
         backtest_period: params.backtest_period,
         min_listed_trade_days: params.min_listed_trade_days,
@@ -1624,6 +1679,7 @@ pub fn run_transient_rank_layer_backtest(
         min_samples_per_rank_day: input.layer_config.effective_min_samples_per_day(),
         min_listed_trade_days: input.layer_config.min_listed_trade_days,
         backtest_period: input.layer_config.backtest_period,
+        return_metric: input.layer_config.target.return_metric,
         layer_count: input.layer_config.layer_count,
         layer_method: input.layer_config.layer_method.as_str().to_string(),
         layer_method_label: rank_layer_method_label(input.layer_config.layer_method).to_string(),

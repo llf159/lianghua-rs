@@ -6,7 +6,7 @@ import {
   useTableSort,
   type SortDefinition,
 } from "../../../../shared/tableSort";
-import { formatNumber, formatPercent } from "../../../../shared/backtestFormat";
+import { formatNumber, formatBacktestValue } from "../../../../shared/backtestFormat";
 import {
   formatUnknownValuesForCombo,
   formatValidationInsufficientHint,
@@ -132,7 +132,7 @@ export function ExpressionParameterRobustness({
                   <td>{combo.trigger_samples}</td>
                   <td>{formatNumber(combo.backtest.ic_mean)}</td>
                   <td>{formatNumber(combo.backtest.ic_t_value)}</td>
-                  <td>{formatPercent(combo.backtest.spread_mean)}</td>
+                  <td>{formatBacktestValue(combo.backtest.spread_mean, combo.backtest.return_metric)}</td>
                   <td title={formatValidationInsufficientHint(combo, "walk_forward")}>
                     {formatValidationWindowRatio(combo, "ic")}
                   </td>

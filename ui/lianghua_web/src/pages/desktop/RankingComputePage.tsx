@@ -1011,10 +1011,10 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
       return
     }
 
-    const startDate = status?.resultDb.minTradeDate ?? ''
-    const endDate = status?.resultDb.maxTradeDate ?? ''
+    const startDate = status?.sourceDb.minTradeDate ?? ''
+    const endDate = status?.sourceDb.maxTradeDate ?? ''
     if (!startDate || !endDate) {
-      setFeedbackError('rank', '当前结果库没有可用日期范围，无法一键重算。')
+      setFeedbackError('rank', '当前原始库没有可用日期范围，无法一键重算。')
       return
     }
 
@@ -1601,7 +1601,7 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
               className="ranking-compute-secondary-btn"
               type="button"
               onClick={() => void onViewStrategyDiff()}
-              disabled={isBusy || strategyDiffLoading || sourcePath === ''}
+              disabled={strategyDiffLoading || sourcePath === ''}
             >
               {strategyDiffLoading ? '对比中...' : '显示计算快照 diff'}
             </button>
@@ -1612,13 +1612,13 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
               disabled={
                 isBusy ||
                 sourcePath === '' ||
-                !status?.resultDb.minTradeDate ||
-                !status.resultDb.maxTradeDate
+                !status?.sourceDb.minTradeDate ||
+                !status.sourceDb.maxTradeDate
               }
               title={
-                status?.resultDb.minTradeDate && status.resultDb.maxTradeDate
-                  ? `按原结果库区间 ${formatTradeDate(status.resultDb.minTradeDate)} 至 ${formatTradeDate(status.resultDb.maxTradeDate)} 重算`
-                  : '当前结果库没有可用日期范围'
+                status?.sourceDb.minTradeDate && status.sourceDb.maxTradeDate
+                  ? `按原始库区间 ${formatTradeDate(status.sourceDb.minTradeDate)} 至 ${formatTradeDate(status.sourceDb.maxTradeDate)} 重算`
+                  : '当前原始库没有可用日期范围'
               }
             >
               {busyAction === 'recomputing-result-db' ? '重算中...' : '一键重算'}
@@ -1644,7 +1644,6 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
                 className="ranking-compute-secondary-btn"
                 type="button"
                 onClick={() => setStrategyDiff(null)}
-                disabled={isBusy}
               >
                 关闭 diff
               </button>
@@ -1908,7 +1907,7 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
               className="ranking-compute-secondary-btn"
               type="button"
               onClick={() => void onViewCyqChenStrategyDiff()}
-              disabled={isBusy || cyqChenStrategyDiffLoading || sourcePath === ''}
+              disabled={cyqChenStrategyDiffLoading || sourcePath === ''}
             >
               {cyqChenStrategyDiffLoading ? '对比中...' : '显示筹码策略 diff'}
             </button>
@@ -1945,7 +1944,6 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
                 className="ranking-compute-secondary-btn"
                 type="button"
                 onClick={() => setCyqChenStrategyDiff(null)}
-                disabled={isBusy}
               >
                 关闭 diff
               </button>
@@ -2179,7 +2177,7 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
                 ? '确认删除当前新筹码库 cyq_chen.db 吗？将清空 cyq_chen_snapshot / cyq_chen_bin，删除后需要重新计算新筹码。'
                 : pendingConfirm?.kind === 'run-ranking-with-strategy-change'
                   ? `检测到当前排名策略相对最近计算快照有 ${pendingConfirm.changedLineCount} 行变化。是否仍使用当前策略计算 ${formatTradeDate(pendingConfirm.startDate)} 至 ${formatTradeDate(pendingConfirm.endDate)}？`
-                : `确认先删除当前结果库 scoring_result.db，再按原结果库日期范围 ${formatTradeDate(status?.resultDb.minTradeDate)} 至 ${formatTradeDate(status?.resultDb.maxTradeDate)} 重算排名吗？`
+                : `确认先删除当前结果库 scoring_result.db，再按原始库日期范围 ${formatTradeDate(status?.sourceDb.minTradeDate)} 至 ${formatTradeDate(status?.sourceDb.maxTradeDate)} 重算排名吗？`
         }
         confirmText={
           pendingConfirm?.kind === 'run-ranking-with-strategy-change' ? '仍然继续计算' : '确认'

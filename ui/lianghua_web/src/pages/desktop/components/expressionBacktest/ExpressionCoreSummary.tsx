@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import type { RuleValidationComboResult } from "../../../../apis/strategyTrigger";
 import { readStoredBacktestHighlightSettings } from "../../../../shared/backtestHighlightSettings";
-import { formatNumber, formatPercent } from "../../../../shared/backtestFormat";
+import { formatNumber, formatBacktestValue } from "../../../../shared/backtestFormat";
 import {
   directionAdjustedResidual,
   formatValidationInsufficientHint,
@@ -29,6 +29,7 @@ export function ExpressionCoreSummary({
         核心结果
         <span className="expression-backtest-section-note">· {combo.combo_label}</span>
       </h3>
+      <p className="expression-backtest-caption">回测指标：{combo.backtest.return_metric === "rise_amount" ? "上涨金额（亿）" : "残差收益率（%）"}</p>
       <div className="expression-backtest-summary-grid">
         <div className="expression-backtest-summary-item">
           <span>触发样本</span>
@@ -56,14 +57,14 @@ export function ExpressionCoreSummary({
         </div>
         <div
           className="expression-backtest-summary-item"
-          title={`原始残差收益（方向盲）：${formatPercent(combo.backtest.avg_excess_residual_mean)}`}
+          title={`原始回测指标（方向盲）：${formatBacktestValue(combo.backtest.avg_excess_residual_mean, combo.backtest.return_metric)}`}
         >
-          <span>方向残差收益</span>
+          <span>方向回测指标</span>
           <strong
             className={metricHighlightClass(highlightSettings, "residual", directionResidual)}
           >
             <span className="expression-backtest-residual">
-              <span>{formatPercent(directionResidual)}</span>
+              <span>{formatBacktestValue(directionResidual, combo.backtest.return_metric)}</span>
               <span
                 className={`expression-backtest-residual-badge expression-backtest-residual-badge-${direction}`}
               >
@@ -74,7 +75,7 @@ export function ExpressionCoreSummary({
         </div>
         <div className="expression-backtest-summary-item">
           <span>Top-Bottom Spread</span>
-          <strong>{formatPercent(combo.backtest.spread_mean)}</strong>
+          <strong>{formatBacktestValue(combo.backtest.spread_mean, combo.backtest.return_metric)}</strong>
         </div>
         <div
           className="expression-backtest-summary-item"
@@ -103,12 +104,12 @@ export function ExpressionCoreSummary({
         </div>
         <div className="expression-backtest-summary-item">
           <span>最近衰减（20日）</span>
-          <strong>{formatPercent(decay20?.decay_change)}</strong>
+          <strong>{formatBacktestValue(decay20?.decay_change, combo.backtest.return_metric)}</strong>
         </div>
       </div>
       <p className="expression-backtest-caption">
         这里只展示事实指标，不产出综合得分、评级或推荐。IC 与 Spread 保持原始值；
-        残差收益是方向盲的均值，主摘要按表达式方向换算为方向残差（悬停可看原始值），
+        回测指标是方向盲的均值，主摘要按表达式方向换算为方向残差（悬停可看原始值），
         与 walk-forward 的残差口径保持一致。
         {walkForward && walkForward.folds.length > 0
           ? ` walk-forward 共 ${walkForward.folds.length} 个窗口，样本不足的窗口计入分母但不计为正窗口。`

@@ -1,6 +1,6 @@
 use crate::data::load_stock_list;
 use crate::utils::utils::board_category;
-use lianghua_app_shared::{build_total_mv_map, filter_mv};
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 #[derive(Debug, Clone)]
@@ -263,16 +263,10 @@ pub(in crate::statistics) fn build_backtest_stock_filter(
 
     let (board_options, ts_board_map) = get_or_build_board_maps(source_path)?;
     let resolved_board = resolve_board_filter(requested_board, &board_options);
-    let total_mv_map = if has_mv_filter {
-        build_total_mv_map(source_path)?
-    } else {
-        HashMap::new()
-    };
     let allowed_ts_codes = ts_board_map
         .into_iter()
         .filter_map(|(ts_code, board_list)| {
             if match_board_filter_with_st(&board_list, resolved_board.as_deref(), exclude_st_board)
-                && filter_mv(&total_mv_map, &ts_code, total_mv_min, total_mv_max)
             {
                 Some(ts_code)
             } else {

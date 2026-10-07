@@ -867,8 +867,10 @@ pub(in crate::statistics) fn build_one_rule_backtest_summary_and_detail(
                 daily_score_layers,
                 params.min_samples_per_day,
             );
-            let return_distribution =
-                build_validation_return_distribution_from_counts(return_distribution_counts);
+            let return_distribution = build_validation_return_distribution_from_counts(
+                return_distribution_counts,
+                params.return_metric,
+            );
             let mut sample_accumulator = ValidationSampleAccumulator::new(
                 5,
                 stock_meta_map,

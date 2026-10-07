@@ -742,6 +742,7 @@ pub(in crate::statistics) fn build_validation_score_layer_details_from_daily_lay
 
 pub(in crate::statistics) fn build_validation_return_distribution(
     samples: &[crate::simulate::rule::RuleLayerSamplePoint],
+    metric: crate::simulate::BacktestReturnMetric,
 ) -> Vec<RuleValidationReturnDistributionBucket> {
     let mut counts = [0usize; 7];
     for sample in samples {
@@ -767,11 +768,12 @@ pub(in crate::statistics) fn build_validation_return_distribution(
         counts[bucket_index] += 1;
     }
 
-    build_validation_return_distribution_from_counts(counts)
+    build_validation_return_distribution_from_counts(counts, metric)
 }
 
 pub(in crate::statistics) fn build_validation_return_distribution_from_counts(
     counts: [usize; 7],
+    metric: crate::simulate::BacktestReturnMetric,
 ) -> Vec<RuleValidationReturnDistributionBucket> {
     let total = counts.iter().sum::<usize>();
     ([
@@ -780,7 +782,11 @@ pub(in crate::statistics) fn build_validation_return_distribution_from_counts(
     .into_iter()
     .enumerate()
     .map(|(index, label)| RuleValidationReturnDistributionBucket {
-        bucket_label: label.to_string(),
+        bucket_label: if metric == crate::simulate::BacktestReturnMetric::RiseAmount {
+            label.replace('%', "亿")
+        } else {
+            label.to_string()
+        },
         sample_count: counts[index],
         sample_ratio: if total > 0 {
             Some(counts[index] as f64 / total as f64)
@@ -837,6 +843,7 @@ pub(in crate::statistics) fn build_rule_backtest_payload(
         min_samples_per_rule_day: params.min_samples_per_day,
         min_listed_trade_days: params.min_listed_trade_days,
         backtest_period: params.backtest_period,
+        return_metric: params.return_metric,
         points: Vec::new(),
         avg_residual_mean: metrics.avg_residual_mean,
         avg_excess_residual_mean: metrics.avg_excess_residual_mean,
@@ -898,7 +905,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let buckets = build_validation_return_distribution(&samples);
+        let buckets = build_validation_return_distribution(&samples, Default::default());
 
         assert_eq!(buckets.len(), 7);
         assert_eq!(
@@ -910,7 +917,10 @@ mod tests {
         );
         assert_eq!(buckets[0].sample_ratio, Some(0.2));
 
-        let compressed = build_validation_return_distribution_from_counts([2, 1, 2, 2, 1, 1, 1]);
+        let compressed = build_validation_return_distribution_from_counts(
+            [2, 1, 2, 2, 1, 1, 1],
+            Default::default(),
+        );
         assert_eq!(
             compressed
                 .iter()
@@ -921,6 +931,12 @@ mod tests {
                 .map(|bucket| (bucket.sample_count, bucket.sample_ratio))
                 .collect::<Vec<_>>()
         );
+        let amounts = build_validation_return_distribution(
+            &samples,
+            crate::simulate::BacktestReturnMetric::RiseAmount,
+        );
+        assert_eq!(amounts[0].bucket_label, "<= -10亿");
+        assert_eq!(amounts[0].sample_count, buckets[0].sample_count);
     }
 
     #[test]

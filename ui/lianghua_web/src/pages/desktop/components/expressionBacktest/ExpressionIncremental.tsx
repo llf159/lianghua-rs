@@ -1,5 +1,5 @@
 import type { RuleValidationComboResult } from "../../../../apis/strategyTrigger";
-import { formatDateLabel, formatNumber, formatPercent, formatRate } from "../../../../shared/backtestFormat";
+import { formatDateLabel, formatNumber, formatBacktestValue, formatRate } from "../../../../shared/backtestFormat";
 
 export function ExpressionIncremental({ combo }: { combo: RuleValidationComboResult }) {
   const incremental = combo.incremental ?? null;
@@ -49,7 +49,7 @@ export function ExpressionIncremental({ combo }: { combo: RuleValidationComboRes
                         <span className="expression-backtest-insufficient">样本不足</span>
                       ) : null}
                     </td>
-                    <td>{formatPercent(fold.incremental_mean)}</td>
+                    <td>{formatBacktestValue(fold.incremental_mean, combo.backtest.return_metric)}</td>
                     <td>{formatNumber(fold.incremental_hac_t, 2)}</td>
                     <td>{formatRate(fold.positive_day_ratio)}</td>
                     <td>{fold.test_day_count}</td>

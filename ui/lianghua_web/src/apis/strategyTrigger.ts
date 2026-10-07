@@ -1,3 +1,5 @@
+export type BacktestReturnMetric = "residual_return" | "rise_amount"
+
 import { invoke } from '@tauri-apps/api/core'
 
 export type StrategyHeatmapCell = {
@@ -168,6 +170,7 @@ export type SceneLayerBacktestData = {
   min_samples_per_scene_day: number
   min_listed_trade_days: number
   backtest_period: number
+  return_metric: BacktestReturnMetric
   points: SceneLayerPoint[]
   spread_mean?: number | null
   ic_mean?: number | null
@@ -242,6 +245,7 @@ export type RuleLayerBacktestData = {
   min_samples_per_rule_day: number
   min_listed_trade_days: number
   backtest_period: number
+  return_metric: BacktestReturnMetric
   points: RuleLayerPoint[]
   avg_residual_mean?: number | null
   avg_excess_residual_mean?: number | null
@@ -308,6 +312,7 @@ export type RankLayerBacktestData = {
   min_samples_per_rank_day: number
   min_listed_trade_days: number
   backtest_period: number
+  return_metric: BacktestReturnMetric
   layer_count: number
   layer_method: RankLayerMethod
   layer_method_label: string
@@ -679,6 +684,7 @@ export type SceneLayerBacktestQuery = {
   minSamplesPerSceneDay?: number
   minListedTradeDays?: number
   backtestPeriod?: number
+  returnMetric?: BacktestReturnMetric
   board?: string
   excludeStBoard?: boolean
   totalMvMin?: number
@@ -697,6 +703,7 @@ export type RuleLayerBacktestQuery = {
   minSamplesPerRuleDay?: number
   minListedTradeDays?: number
   backtestPeriod?: number
+  returnMetric?: BacktestReturnMetric
   parallelBatchSize?: number
   board?: string
   excludeStBoard?: boolean
@@ -716,6 +723,7 @@ export type RankLayerBacktestQuery = {
   minSamplesPerRankDay?: number
   minListedTradeDays?: number
   backtestPeriod?: number
+  returnMetric?: BacktestReturnMetric
   layerCount?: number
   layerMethod?: RankLayerMethod
   board?: string
@@ -750,6 +758,7 @@ export type RuleExpressionValidationQuery = {
   minSamplesPerRuleDay?: number
   minListedTradeDays?: number
   backtestPeriod?: number
+  returnMetric?: BacktestReturnMetric
   unknownConfigs?: RuleValidationUnknownConfig[]
   sampleLimitPerGroup?: number
   board?: string

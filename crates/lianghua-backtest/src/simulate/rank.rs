@@ -204,6 +204,7 @@ impl RankLayerMethod {
 
 #[derive(Debug, Clone)]
 pub struct RankLayerConfig {
+    pub target: crate::simulate::BacktestTargetConfig,
     pub min_samples_per_day: usize,
     pub backtest_period: usize,
     pub min_listed_trade_days: usize,
@@ -238,6 +239,7 @@ impl RankLayerConfig {
 
     fn as_rule_layer_config(&self) -> RuleLayerConfig {
         RuleLayerConfig {
+            target: self.target.clone(),
             min_samples_per_day: self.min_samples_per_day,
             backtest_period: self.backtest_period,
             min_listed_trade_days: self.min_listed_trade_days,
@@ -1386,6 +1388,7 @@ mod tests {
         let metrics = calc_rank_layer_metrics(
             &samples,
             &RankLayerConfig {
+                target: Default::default(),
                 min_samples_per_day: 5,
                 backtest_period: 1,
                 min_listed_trade_days: 0,
@@ -1445,6 +1448,7 @@ mod tests {
         let metrics = calc_rank_layer_metrics(
             &samples,
             &RankLayerConfig {
+                target: Default::default(),
                 min_samples_per_day: 1,
                 backtest_period: 1,
                 min_listed_trade_days: 0,
@@ -1499,6 +1503,7 @@ mod tests {
         let metrics = calc_rank_layer_metrics(
             &samples,
             &RankLayerConfig {
+                target: Default::default(),
                 min_samples_per_day: 1,
                 backtest_period: 1,
                 min_listed_trade_days: 0,
@@ -1552,6 +1557,7 @@ mod tests {
         let metrics = calc_rank_layer_metrics_with_lookup(
             &samples,
             &RankLayerConfig {
+                target: Default::default(),
                 min_samples_per_day: 1,
                 backtest_period: 1,
                 min_listed_trade_days: 0,
@@ -1625,6 +1631,7 @@ mod tests {
         let metrics = calc_rank_layer_metrics_with_lookup(
             &samples,
             &RankLayerConfig {
+                target: Default::default(),
                 min_samples_per_day: 1,
                 backtest_period: 1,
                 min_listed_trade_days: 0,
@@ -1686,6 +1693,7 @@ mod tests {
         let metrics = calc_rank_layer_metrics_with_lookup(
             &samples,
             &RankLayerConfig {
+                target: Default::default(),
                 min_samples_per_day: 1,
                 backtest_period: 3,
                 min_listed_trade_days: 0,
@@ -1759,6 +1767,7 @@ mod tests {
         let metrics = calc_rank_layer_metrics_with_lookup(
             &samples,
             &RankLayerConfig {
+                target: Default::default(),
                 min_samples_per_day: 1,
                 backtest_period: 1,
                 min_listed_trade_days: 0,

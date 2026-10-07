@@ -13,6 +13,46 @@ use crate::data::concept_performance_data::{
 };
 use crate::data::{load_trade_date_list, stock_list_path};
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BacktestReturnMetric {
+    #[default]
+    ResidualReturn,
+    RiseAmount,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BacktestTargetConfig {
+    pub return_metric: BacktestReturnMetric,
+    pub total_mv_min: Option<f64>,
+    pub total_mv_max: Option<f64>,
+}
+
+impl BacktestTargetConfig {
+    pub fn needs_market_cap(&self) -> bool {
+        self.return_metric == BacktestReturnMetric::RiseAmount
+            || self.total_mv_min.is_some()
+            || self.total_mv_max.is_some()
+    }
+
+    pub fn apply(&self, residual_return: f64, market_cap: Option<f64>) -> Option<f64> {
+        if !self.needs_market_cap() {
+            return Some(residual_return);
+        }
+        let market_cap = market_cap.filter(|v| v.is_finite() && *v > 0.0)?;
+        if self.total_mv_min.is_some_and(|min| market_cap < min)
+            || self.total_mv_max.is_some_and(|max| market_cap > max)
+        {
+            return None;
+        }
+        let value = match self.return_metric {
+            BacktestReturnMetric::ResidualReturn => residual_return,
+            BacktestReturnMetric::RiseAmount => residual_return / 100.0 * market_cap,
+        };
+        value.is_finite().then_some(value)
+    }
+}
+
 pub const DEFAULT_BACKTEST_MIN_LISTED_TRADE_DAYS: usize = 60;
 
 pub(super) fn build_forward_backtest_residual_map(
