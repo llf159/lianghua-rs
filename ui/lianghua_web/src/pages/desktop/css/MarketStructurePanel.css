@@ -1,0 +1,226 @@
+.market-structure {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+.market-structure h3,
+.market-structure h4,
+.market-structure p {
+  margin: 0;
+}
+.market-structure h3 {
+  font-size: 17px;
+}
+.market-structure h4 {
+  font-size: 15px;
+}
+.market-structure-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.market-structure-summary {
+  display: grid;
+  gap: 7px;
+  padding: 14px;
+  border: 1px solid #dbe5ed;
+  border-radius: 10px;
+  background: #f4f8fb;
+}
+.market-structure-summary span {
+  color: #64748b;
+  font-size: 12px;
+}
+.market-structure-summary strong {
+  color: #1e293b;
+  font-size: 15px;
+  line-height: 1.7;
+}
+.market-structure-degrees,
+.market-structure-indexes {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+.market-structure-degrees button {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  text-align: left;
+  border: 1px solid #dbe5ed;
+  border-radius: 8px;
+  background: #fff;
+  color: #334155;
+  cursor: pointer;
+}
+.market-structure-degrees button.selected {
+  border-color: #3b82f6;
+  background: #eff6ff;
+}
+.market-structure-degrees button:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+.market-structure-degrees strong {
+  font-size: 14px;
+}
+.market-structure-degrees span,
+.market-structure-degrees small {
+  font-size: 12px;
+  line-height: 1.6;
+}
+.market-structure-degrees small {
+  color: #64748b;
+}
+.market-structure-index {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid #e1e7ef;
+  border-radius: 10px;
+}
+.market-structure-index .market-structure-heading {
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+.market-structure-state {
+  font-size: 12px;
+  line-height: 1.6;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: #f1f5f9;
+  color: #64748b;
+}
+.market-structure-state.up {
+  color: #b91c1c;
+  background: #fef2f2;
+}
+.market-structure-state.down {
+  color: #15803d;
+  background: #f0fdf4;
+}
+.market-structure-state.up_broken,
+.market-structure-state.down_broken {
+  color: #92400e;
+  background: #fffbeb;
+}
+.market-structure-phase,
+.market-structure-rule,
+.market-structure-method {
+  font-size: 13px;
+  line-height: 1.8;
+  color: #475569;
+}
+.market-structure-phase span {
+  color: #64748b;
+}
+.market-structure-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0;
+}
+.market-structure-metrics dt {
+  color: #64748b;
+  font-size: 12px;
+}
+.market-structure-metrics dd {
+  margin: 4px 0 0;
+  font-size: 18px;
+  color: #334155;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.market-structure-metrics dd.date {
+  font-size: 14px;
+}
+.market-structure-rule {
+  border-left: 3px solid #cbd5e1;
+  padding-left: 10px;
+}
+.market-structure-chart {
+  margin: 0;
+}
+.market-structure-chart svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+.market-structure-chart text {
+  fill: #64748b;
+  font-size: 10px;
+}
+.chart-baseline {
+  stroke: #e2e8f0;
+}
+.chart-close {
+  fill: none;
+  stroke: #2563eb;
+  stroke-width: 1.6;
+}
+.chart-guard {
+  stroke-width: 1.4;
+  stroke: #94a3b8;
+}
+.chart-guard.up,
+.chart-guard.up_broken {
+  stroke: #dc2626;
+}
+.chart-guard.down,
+.chart-guard.down_broken {
+  stroke: #16a34a;
+}
+.chart-guard.up_broken,
+.chart-guard.down_broken {
+  stroke-dasharray: 4 3;
+}
+.market-structure-chart figcaption {
+  font-size: 11px;
+  line-height: 1.7;
+  color: #64748b;
+}
+.market-structure-events {
+  margin-top: auto;
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.7;
+}
+.market-structure-events summary,
+.market-structure-method summary {
+  cursor: pointer;
+}
+.market-structure-events ol {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0 0;
+}
+.market-structure-events li {
+  display: grid;
+  gap: 2px;
+  padding: 6px 0;
+  border-top: 1px solid #edf1f6;
+}
+.market-structure-events time {
+  color: #64748b;
+}
+.market-structure-method p {
+  margin-top: 8px;
+}
+@media (max-width: 1200px) {
+  .market-structure-indexes {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 650px) {
+  .market-structure-degrees {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .market-structure-heading {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+}

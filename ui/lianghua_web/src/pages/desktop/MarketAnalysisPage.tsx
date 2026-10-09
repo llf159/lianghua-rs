@@ -12,6 +12,7 @@ import { filterBoardItems, isStBoard, useConceptExclusions } from "../../shared/
 import { readJsonStorage, readStoredSourcePath, writeJsonStorage } from "../../shared/storage";
 import { STOCK_PICK_BOARD_OPTIONS } from "../../shared/stockPickShared";
 import DragonTigerMarketPanel from "./components/DragonTigerMarketPanel";
+import MarketStructurePanel from "./components/MarketStructurePanel";
 import "./css/SceneLayerBacktestPage.css";
 
 function formatDateLabel(value?: string | null) {
@@ -194,7 +195,7 @@ export default function MarketAnalysisPage() {
   const [referenceDateInput, setReferenceDateInput] = useState("");
   const [selectedBoard, setSelectedBoard] = useState(persistedParams.selectedBoard);
   const [carryInterval, setCarryInterval] = useState(persistedParams.carryInterval);
-  const [initializing, setInitializing] = useState(false);
+  const [initializing, setInitializing] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState<MarketAnalysisData | null>(null);
@@ -570,6 +571,13 @@ export default function MarketAnalysisPage() {
 
         {error ? <div className="scene-layer-error">{error}</div> : null}
       </section>
+
+      {!initializing && sourcePath ? (
+        <MarketStructurePanel
+          sourcePath={sourcePath}
+          referenceTradeDate={normalizeDateInput(referenceDateInput) || undefined}
+        />
+      ) : null}
 
       {result ? (
         <section className="scene-layer-card scene-layer-market-main-card market-analysis-main-card">

@@ -16,3 +16,4 @@ __pycache__
 market*
 /src/bin
 research
+scripts

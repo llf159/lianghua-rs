@@ -555,6 +555,53 @@ export type MarketAnalysisData = {
   daily: MarketAnalysisSnapshot
 }
 
+export type StructureState = 'up' | 'down' | 'up_broken' | 'down_broken' | 'insufficient'
+
+export type StructureEventKind = 'up_started' | 'down_started' | 'up_renewed' | 'down_renewed' |
+  'up_invalidated' | 'down_invalidated' | 'up_reclaimed' | 'down_reclaimed' |
+  'failed_up_breakout' | 'failed_down_breakout'
+
+export type MarketStructureLevel = {
+  degree: number
+  state: StructureState
+  phase: 'advance' | 'pullback' | 'decline' | 'rebound' | 'transition' | 'unknown'
+  stage: 'started' | 'continued' | 'unresolved'
+  can_restore_previous: boolean
+  state_since: string | null
+  guard: { price: number; trade_date: string; confirmed_date: string; confirmation_bars: number } | null
+  breakout_price: number | null
+  next_trigger_price: number | null
+  guard_distance_pct: number | null
+  child_state: StructureState | null
+  parent_state: StructureState | null
+  pivot_count: number
+  events: { trade_date: string; kind: StructureEventKind; price: number; level_price: number }[]
+}
+
+export type MarketStructureData = {
+  trade_date: string | null
+  latest_trade_date: string | null
+  base_swing_pct: number
+  summary: string
+  consensus: { degree: number; up_count: number; down_count: number; broken_count: number; unavailable_count: number; description: string }[]
+  indexes: {
+    code: string
+    name: string
+    trade_date: string | null
+    close: number | null
+    current: boolean
+    levels: MarketStructureLevel[]
+    chart: { trade_date: string; close: number; guards: (number | null)[]; states: StructureState[] }[]
+  }[]
+}
+
+export async function getMarketStructure(query: {
+  sourcePath: string
+  referenceTradeDate?: string
+}) {
+  return invoke<MarketStructureData>('get_market_structure', query)
+}
+
 export type DragonTigerMarketSummary = {
   top_list_rows: number
   stock_count: number

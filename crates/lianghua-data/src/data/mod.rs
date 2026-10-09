@@ -378,25 +378,33 @@ const RUNTIME_INDEX_COLS: [(&str, &str); 7] = [
 
 impl DataReader {
     pub fn new(source_dir: &str) -> Result<Self, String> {
-        Self::new_inner(source_dir, None)
+        Self::new_inner(source_dir, None, None)
+    }
+
+    pub fn new_with_connection(source_dir: &str, conn: Connection) -> Result<Self, String> {
+        Self::new_inner(source_dir, None, Some(conn))
     }
 
     pub fn new_with_runtime_keys(
         source_dir: &str,
         required_runtime_keys: &HashSet<String>,
     ) -> Result<Self, String> {
-        Self::new_inner(source_dir, Some(required_runtime_keys))
+        Self::new_inner(source_dir, Some(required_runtime_keys), None)
     }
 
     fn new_inner(
         source_dir: &str,
         required_runtime_keys: Option<&HashSet<String>>,
+        conn: Option<Connection>,
     ) -> Result<Self, String> {
         let source_db = source_db_path(source_dir);
         let source_db_str = source_db
             .to_str()
             .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
-        let conn = Connection::open(source_db_str).map_err(|e| format!("数据库连接错误:{e}"))?;
+        let conn = match conn {
+            Some(conn) => conn,
+            None => Connection::open(source_db_str).map_err(|e| format!("数据库连接错误:{e}"))?,
+        };
 
         let mut sql_to_colsname = conn
             .prepare("DESCRIBE stock_data")

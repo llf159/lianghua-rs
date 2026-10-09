@@ -575,10 +575,11 @@ fn list_stock_data_indicator_work_items(
 fn compute_stock_data_indicator_rebuild_batch(
     sender: &SyncSender<StockDataIndicatorRebuildMessage>,
     source_path: &str,
+    conn: Connection,
     inds_cache: &[lianghua_download::download::ind_calc::IndsCache],
     work_group: &[StockDataIndicatorWorkItem],
 ) -> Result<(), String> {
-    let reader = DataReader::new(source_path)?;
+    let reader = DataReader::new_with_connection(source_path, conn)?;
 
     for item in work_group {
         let row_data = reader.load_one(
@@ -2056,19 +2057,27 @@ pub fn run_prepared_stock_data_indicator_columns_rebuild(
     let abort_tx = tx.clone();
     let source_path = prepared.source_path.clone();
     let inds_cache_for_workers = inds_cache.clone();
-    let work_items_for_workers = work_items.clone();
+    let work_items_for_workers = work_items
+        .chunks(256)
+        .map(|group| {
+            conn.try_clone()
+                .map(|reader_conn| (reader_conn, group.to_vec()))
+                .map_err(|err| format!("克隆指标补算读取连接失败: {err}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let compute_handle = thread::spawn(move || {
-        let compute_result =
-            work_items_for_workers
-                .par_chunks(256)
-                .try_for_each_with(tx, |sender, work_group| {
-                    compute_stock_data_indicator_rebuild_batch(
-                        sender,
-                        &source_path,
-                        &inds_cache_for_workers,
-                        work_group,
-                    )
-                });
+        let compute_result = work_items_for_workers.into_par_iter().try_for_each_with(
+            tx,
+            |sender, (reader_conn, work_group)| {
+                compute_stock_data_indicator_rebuild_batch(
+                    sender,
+                    &source_path,
+                    reader_conn,
+                    &inds_cache_for_workers,
+                    &work_group,
+                )
+            },
+        );
 
         match &compute_result {
             Ok(_) => {
@@ -2524,8 +2533,14 @@ mod tests {
         let cache = cache_ind_build(source_path).expect("build indicator cache");
         let work_items = list_stock_data_indicator_work_items(&conn).expect("list work items");
         let (sender, receiver) = sync_channel(1);
-        compute_stock_data_indicator_rebuild_batch(&sender, source_path, &cache, &work_items)
-            .expect("compute rebuilt indicators");
+        compute_stock_data_indicator_rebuild_batch(
+            &sender,
+            source_path,
+            conn.try_clone().expect("clone reader connection"),
+            &cache,
+            &work_items,
+        )
+        .expect("compute rebuilt indicators");
 
         let StockDataIndicatorRebuildMessage::Batch(batch) =
             receiver.recv().expect("receive rebuilt indicators")

@@ -6,6 +6,8 @@
 
 | 想了解 | 先读 | 接着读 |
 |---|---|---|
+| 周末及节假日前下跌是否能改善现有洗盘策略 | [周末与节前下跌报告](research/preholiday_washout/weekend_report.md) | [协议](research/preholiday_washout/protocol.md)、[研究目录](research/preholiday_washout/README.md)、[复跑脚本](scripts/preholiday_washout_research.py) |
+| 用指数、成交量与大小盘风格判断当前市场状态 | [线性市场状态与行业分化](research/market_state_linear/report.md) | [研究目录](research/market_state_linear/README.md)、[协议](research/market_state_linear/protocol.md)、[复跑脚本](scripts/linear_state_research.py) |
 | 此前全部市场行为与筹码研究在2011—2026长历史下哪些有答案 | [长历史总报告](research/long_history_all_prior/report.md) | [逐篇覆盖表](research/long_history_all_prior/coverage.md)、[研究协议](research/long_history_all_prior/protocol.md) |
 | 小涨后为何掉榜、是否该保留 | [完整历史掉榜研究](research/chip_duration/rank_confirmation/long_history/dropout_restart_report.md) | [确认策略交接](STRATEGY_CONFIRMATION_HANDOFF.md)、[确认规则分支复核](research/chip_duration/rank_confirmation/long_history/restart_report.md) |
 | 两个新筹码字段是什么、能不能写加分策略 | [解套后的累计换手研究](research/chip_duration/rebound_full_history/turnover_report.md) | [长周期下跌反弹研究](research/chip_duration/rebound_full_history/report.md)、[完整数据库策略研究](research/chip_duration/full_db_v2/report.md) |

@@ -25,7 +25,7 @@
 - 问题：Rust 1.94 的标准文件锁未实现 Android，且 `TryLockError` 的显示文本隐藏底层错误；解决方案选择：Android 使用原生非阻塞 `flock`，其他平台继续用标准库，并展开底层错误和锁文件路径；解释：保留跨进程互斥和文件关闭自动释放语义，区分锁忙与平台/I/O 故障。
 - 问题：下载状态读取间接初始化新筹码库，加锁清理失败会阻断整个状态页面；解决方案选择：元数据查询不再初始化、迁移或清理，缺失表按空数据或缺失策略快照处理；解释：将查询与维护分开，真正的维护入口仍显式初始化并保留重建锁保护。
 - 问题：指数字段与指标列若用连字符连接，会与表达式减法冲突；解决方案选择：使用 `I_列名`、`I300_列名` 等下划线写法，原 `I` 等简写仍表示指数涨跌幅；解释：表达式词法原生支持下划线标识符，读取时按指数代码和交易日取 `stock_data` 的原始列值，避免改变减法语义。
-- 新增或改名 `STOCK_DATA_RUNTIME_FIELDS`、`RUNTIME_INDEX_COLS` 与指标列（`ind.toml`）时必须同步前端 `ui/lianghua_web/src/shared/expressionValidation.ts` 的 `KNOWN_EXPRESSION_IDENTIFIERS`：表达式回测“参数研究”的自动识别只能靠这份白名单区分“可用字段”与“待扫描参数”，漏同步的字段会被替换成常数。
+- 新增或改名固定运行字段时，核对前端 `ui/lianghua_web/src/shared/expressionValidation.ts` 的 `KNOWN_EXPRESSION_IDENTIFIERS`，指数标识符由已有前缀规则识别。`ind.toml` 的自定义指标名称由表达式回测页面加载 `get_indicator_manage_page` 后传入 `inferUnknownConfigs` 排除，不需要手动加入固定白名单；配置更新后重新进入页面以加载新名称。排查命令：`rg -n "indicatorNames|inferUnknownConfigs|getIndicatorManagePage" ui/lianghua_web/src/pages/desktop/ExpressionBacktestPage.tsx ui/lianghua_web/src/pages/desktop/components/expressionBacktest/ExpressionBacktestForm.tsx`。
 - 数据层文件按功能拆分并保持“测试跟随被测文件”：`data/cyq_chen/{mod,config,bars,simulate,buckets,test_support}`、`data/cyq_chen_data/{mod,store,compute,maintain,test_support}`；测试写在各自文件的 `#[cfg(test)] mod tests` 内，跨文件共用的夹具放同目录 `test_support.rs`，公共 API 仍由各 `mod.rs` 汇总导出，禁止再恢复单一 `tests.rs`。
 
 - 问题：筹码特征检查点的 JSON 默认浮点解析可能将未舍入桶边界改变一个最小精度单位，恢复后以原始边界匹配桶身份时失败；解决方案选择：为 serde_json 启用 float_roundtrip，检查点边界和库存保持原始 f64 精度，拒绝不守恒或日期不兼容的状态；解释：展示精度或放宽边界匹配不能保证恢复同一个成本桶，精确往返解析保留序列化时的二进制浮点值。下次可运行 `cargo test -p lianghua-data feature_checkpoint_resume_matches_replay_with_expansion_and_zero_turnover` 定位序列化、扩容和续算差异。

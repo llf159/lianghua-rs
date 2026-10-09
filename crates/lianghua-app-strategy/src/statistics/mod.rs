@@ -3,6 +3,7 @@ mod common;
 mod detail_cache;
 mod market;
 mod page;
+mod structure_cycle;
 #[cfg(test)]
 mod test_support;
 mod universe;
@@ -30,6 +31,7 @@ pub use page::{
     get_scene_statistics_page, get_strategy_statistics_detail, get_strategy_statistics_page,
     get_strategy_triggered_stocks,
 };
+pub use structure_cycle::{MarketStructureData, StructureEngine, get_market_structure};
 pub use validation::{
     RuleExpressionValidationData, RuleExpressionValidationManualStrategy,
     RuleValidationComboResult, RuleValidationDailyMetric, RuleValidationIncrementalData,

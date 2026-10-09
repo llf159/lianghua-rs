@@ -1,6 +1,15 @@
 use std::time::Instant;
 
 use lianghua_app_data::download::{
+    ConceptMostRelatedRepairRunInput as CoreConceptMostRelatedRepairRunInput,
+    ConceptPerformanceRepairRunInput as CoreConceptPerformanceRepairRunInput,
+    DataDownloadRunInput as CoreDataDownloadRunInput, DataDownloadRunResult, DataDownloadStatus,
+    DragonTigerDownloadRunInput as CoreDragonTigerDownloadRunInput,
+    IndicatorManageDraft as CoreIndicatorManageDraft, IndicatorManagePageData,
+    MissingStockRepairRunInput as CoreMissingStockRepairRunInput,
+    StockDataIndicatorColumnsDeleteRunInput as CoreStockDataIndicatorColumnsDeleteRunInput,
+    StockDataIndicatorColumnsRebuildRunInput as CoreStockDataIndicatorColumnsRebuildRunInput,
+    ThsConceptDownloadRunInput as CoreThsConceptDownloadRunInput,
     get_data_download_status as core_get_data_download_status,
     get_indicator_manage_page as core_get_indicator_manage_page,
     prepare_concept_most_related_repair_run as core_prepare_concept_most_related_repair_run,
@@ -20,15 +29,6 @@ use lianghua_app_data::download::{
     run_prepared_stock_data_indicator_columns_rebuild as core_run_prepared_stock_data_indicator_columns_rebuild,
     run_prepared_ths_concept_download as core_run_prepared_ths_concept_download,
     save_indicator_manage_page as core_save_indicator_manage_page,
-    ConceptMostRelatedRepairRunInput as CoreConceptMostRelatedRepairRunInput,
-    ConceptPerformanceRepairRunInput as CoreConceptPerformanceRepairRunInput,
-    DataDownloadRunInput as CoreDataDownloadRunInput, DataDownloadRunResult, DataDownloadStatus,
-    DragonTigerDownloadRunInput as CoreDragonTigerDownloadRunInput,
-    IndicatorManageDraft as CoreIndicatorManageDraft, IndicatorManagePageData,
-    MissingStockRepairRunInput as CoreMissingStockRepairRunInput,
-    StockDataIndicatorColumnsDeleteRunInput as CoreStockDataIndicatorColumnsDeleteRunInput,
-    StockDataIndicatorColumnsRebuildRunInput as CoreStockDataIndicatorColumnsRebuildRunInput,
-    ThsConceptDownloadRunInput as CoreThsConceptDownloadRunInput,
 };
 use lianghua_download::download::runner::DownloadProgress as CoreDownloadProgress;
 use serde::{Deserialize, Serialize};
