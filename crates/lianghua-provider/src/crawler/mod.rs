@@ -1,5 +1,6 @@
 pub mod concept;
 pub mod intraday;
+pub mod volume_ratio;
 
 use encoding_rs::GBK;
 use rayon::prelude::*;

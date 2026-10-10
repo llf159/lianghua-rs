@@ -125,6 +125,7 @@ pub struct AllMarketMonitorRow {
     pub realtime_vol: Option<f64>,
     pub realtime_amount: Option<f64>,
     pub realtime_vol_ratio: Option<f64>,
+    pub realtime_vol_ratio_high: Option<f64>,
     pub return_5d_pct: Option<f64>,
     pub other_sort_value: Option<f64>,
     pub scene_marker: Option<String>,
@@ -155,6 +156,7 @@ pub struct AllMarketMonitorSnapshotData {
     pub requested_count: usize,
     pub fetched_count: usize,
     pub template_warning_message: Option<String>,
+    pub volume_ratio_status_message: Option<String>,
 }
 
 fn check_market_activity(
@@ -990,6 +992,7 @@ fn build_rows(
                 realtime_vol: quote.map(|item| item.vol),
                 realtime_amount: quote.map(|item| item.amount),
                 realtime_vol_ratio: volume_ratio_map.get(&stock.ts_code).copied(),
+                realtime_vol_ratio_high: None,
                 return_5d_pct,
                 other_sort_value: None,
                 scene_marker: scene_marker_map.get(&stock.ts_code).cloned(),
@@ -1088,7 +1091,7 @@ pub fn get_all_market_monitor_snapshot(
         .map(|item| item.ts_code.clone())
         .collect::<Vec<_>>();
     let provider = RealtimeQuoteProvider::parse(realtime_provider.as_deref())?;
-    let (quotes, volume_ratio_map, avg_price_map, fetch_meta) = match provider {
+    let (quotes, mut volume_ratio_map, avg_price_map, fetch_meta) = match provider {
         RealtimeQuoteProvider::Sina => {
             let (quotes, fetch_meta) = fetch_all_market_realtime_quote_map_for_codes(&ts_codes)?;
             (quotes, HashMap::new(), HashMap::new(), fetch_meta)
@@ -1123,7 +1126,31 @@ pub fn get_all_market_monitor_snapshot(
                 .any(|date| normalize_quote_trade_date(date).as_deref() == Some(today.as_str()))
         })
     });
-    let data_version = fetch_meta.refreshed_at.clone();
+    let volume_ratios = if matches!(provider, RealtimeQuoteProvider::Tencent) {
+        fetch_meta
+            .quote_trade_date
+            .as_deref()
+            .map(|date| super::volume_ratio::snapshot(source_path, &quotes, date))
+            .transpose()?
+    } else {
+        None
+    };
+    if let Some(snapshot) = &volume_ratios {
+        for (code, (value, _)) in &snapshot.values {
+            volume_ratio_map.insert(code.clone(), *value);
+        }
+    }
+    let data_version = fetch_meta.refreshed_at.as_ref().map(|version| {
+        format!(
+            "{version}|volume-ratio:{}",
+            volume_ratios
+                .as_ref()
+                .map_or(0, |snapshot| snapshot.revision)
+        )
+    });
+    let volume_ratio_status_message = volume_ratios
+        .as_ref()
+        .and_then(|snapshot| snapshot.status.clone());
     if !has_new_realtime_data(last_data_version.as_deref(), data_version.as_deref()) {
         return Ok(AllMarketMonitorSnapshotData {
             rows: Vec::new(),
@@ -1137,6 +1164,7 @@ pub fn get_all_market_monitor_snapshot(
             requested_count: fetch_meta.requested_count,
             fetched_count: fetch_meta.fetched_count,
             template_warning_message: None,
+            volume_ratio_status_message,
         });
     }
 
@@ -1424,6 +1452,11 @@ pub fn get_all_market_monitor_snapshot(
         &scene_marker_map,
         &fetch_meta,
     );
+    if let Some(snapshot) = &volume_ratios {
+        for row in &mut rows {
+            row.realtime_vol_ratio_high = snapshot.values.get(&row.ts_code).map(|(_, high)| *high);
+        }
+    }
     let template_warning_message = if template_enabled.unwrap_or(false) {
         (|source_path: &str,
           stocks: &[StockMeta],
@@ -1810,6 +1843,7 @@ pub fn get_all_market_monitor_snapshot(
         requested_count: fetch_meta.requested_count,
         fetched_count: fetch_meta.fetched_count,
         template_warning_message,
+        volume_ratio_status_message,
     })
 }
 

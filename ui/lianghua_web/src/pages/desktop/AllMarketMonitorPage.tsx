@@ -523,37 +523,6 @@ function createEmptyHitRecordsByPeriod(): SpeedHitRecordsByPeriod {
   };
 }
 
-function updateRecordHighs(
-  recordHighs: Map<string, number>,
-  rows: AllMarketMonitorRow[],
-  capturedAt: number,
-  getValue: (row: AllMarketMonitorRow) => number | null | undefined,
-) {
-  const newHighTimes = new Map<string, number>();
-
-  for (const row of rows) {
-    const value = getValue(row);
-    if (!isFiniteNumber(value)) {
-      continue;
-    }
-
-    const previous = recordHighs.get(row.ts_code);
-    if (!isFiniteNumber(previous)) {
-      recordHighs.set(row.ts_code, value);
-      continue;
-    }
-
-    if (value <= previous) {
-      continue;
-    }
-
-    recordHighs.set(row.ts_code, value);
-    newHighTimes.set(row.ts_code, capturedAt);
-  }
-
-  return newHighTimes;
-}
-
 export default function AllMarketMonitorPage() {
   const { excludedConcepts } = useConceptExclusions();
   const [sourcePath, setSourcePath] = useState("");
@@ -630,6 +599,7 @@ export default function AllMarketMonitorPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [templateWarning, setTemplateWarning] = useState("");
+  const [volumeRatioStatus, setVolumeRatioStatus] = useState("");
   const [marketStatus, setMarketStatus] = useState("");
   const [refreshedAt, setRefreshedAt] = useState("");
   const [rankDate, setRankDate] = useState("");
@@ -679,8 +649,12 @@ export default function AllMarketMonitorPage() {
     otherSortExpression,
   });
   const historyRef = useRef<PriceSnapshot[]>([]);
-  const volumeRatioRecordHighsRef = useRef<Map<string, number>>(new Map());
-  const changePctRecordHighsRef = useRef<Map<string, number>>(new Map());
+  const volumeRatioRecordHighsRef = useRef<
+    Map<string, { tradeDate: string; high: number }>
+  >(new Map());
+  const changePctRecordHighsRef = useRef<
+    Map<string, { tradeDate: string; high: number; atHigh: boolean }>
+  >(new Map());
 
   refreshConfigRef.current = {
     sceneStageThreshold,
@@ -968,6 +942,7 @@ export default function AllMarketMonitorPage() {
       );
       if (!enabledRef.current) return;
       setMarketStatus(result.market_status_message ?? "");
+      setVolumeRatioStatus(result.volume_ratio_status_message ?? "");
       if (result.market_active === false) {
         window.clearInterval(pollTimerRef.current);
         setEnabled(false);
@@ -982,32 +957,93 @@ export default function AllMarketMonitorPage() {
       const capturedAt = Date.now();
       const nextRows = result.rows ?? [];
       const nextIndexRows = result.index_rows ?? [];
-      const nextVolumeRatioNewHighTimes = updateRecordHighs(
-        volumeRatioRecordHighsRef.current,
-        nextRows,
-        capturedAt,
-        (row) => row.realtime_vol_ratio,
-      );
-      const nextChangePctNewHighTimes = updateRecordHighs(
-        changePctRecordHighsRef.current,
-        nextRows,
-        capturedAt,
-        (row) => row.realtime_change_pct,
-      );
+      const nextVolumeRatioNewHighTimes = new Map<string, number>();
+      const resetVolumeRatioCodes = new Set<string>();
+      for (const row of nextRows) {
+        const tradeDate = row.realtime_trade_date;
+        const high = row.realtime_vol_ratio_high;
+        if (!tradeDate || !isFiniteNumber(high)) continue;
+        const previous = volumeRatioRecordHighsRef.current.get(row.ts_code);
+        if (!previous || tradeDate > previous.tradeDate) {
+          volumeRatioRecordHighsRef.current.set(row.ts_code, { tradeDate, high });
+          resetVolumeRatioCodes.add(row.ts_code);
+        } else if (tradeDate === previous.tradeDate && high > previous.high) {
+          volumeRatioRecordHighsRef.current.set(row.ts_code, { tradeDate, high });
+          nextVolumeRatioNewHighTimes.set(row.ts_code, capturedAt);
+        }
+      }
+      const nextChangePctNewHighTimes = new Map<string, number>();
+      const resetChangePctCodes = new Set<string>();
+      for (const row of nextRows) {
+        const tradeDate = row.realtime_trade_date;
+        const high = row.realtime_high;
+        const price = row.realtime_price;
+        if (
+          !tradeDate ||
+          !isFiniteNumber(high) ||
+          high <= 0 ||
+          !isFiniteNumber(price) ||
+          price <= 0 ||
+          !isFiniteNumber(row.realtime_pre_close) ||
+          row.realtime_pre_close <= 0
+        ) {
+          continue;
+        }
+
+        const previous = changePctRecordHighsRef.current.get(row.ts_code);
+        if (previous && tradeDate < previous.tradeDate) continue;
+        const dayHigh =
+          previous?.tradeDate === tradeDate
+            ? Math.max(high, previous.high)
+            : high;
+        // 距当日最高价不超过 0.1% 视为触及高点；持续在范围内不重复触发。
+        const atHigh = price >= dayHigh * 0.999 - 1e-8;
+        if (!previous || tradeDate > previous.tradeDate) {
+          resetChangePctCodes.add(row.ts_code);
+          if (atHigh) nextChangePctNewHighTimes.set(row.ts_code, capturedAt);
+        } else if (high > previous.high || (atHigh && !previous.atHigh)) {
+          nextChangePctNewHighTimes.set(row.ts_code, capturedAt);
+        }
+        changePctRecordHighsRef.current.set(row.ts_code, {
+          tradeDate,
+          high: dayHigh,
+          atHigh,
+        });
+      }
       setVolumeRatioNewHighTimes(nextVolumeRatioNewHighTimes);
       setChangePctNewHighTimes(nextChangePctNewHighTimes);
-      if (nextVolumeRatioNewHighTimes.size > 0) {
+      if (resetVolumeRatioCodes.size > 0) {
+        setMonitorEvents((prev) =>
+          prev.filter(
+            (event) =>
+              event.kind !== "realtime_vol_ratio" ||
+              !resetVolumeRatioCodes.has(event.record.ts_code),
+          ),
+        );
+      }
+      if (resetVolumeRatioCodes.size > 0 || nextVolumeRatioNewHighTimes.size > 0) {
         setVolumeRatioRecordHighEventTimes((prev) => {
           const next = new Map(prev);
+          resetVolumeRatioCodes.forEach((tsCode) => next.delete(tsCode));
           nextVolumeRatioNewHighTimes.forEach((time, tsCode) => {
             next.set(tsCode, time);
           });
           return next;
         });
       }
-      if (nextChangePctNewHighTimes.size > 0) {
+      if (resetChangePctCodes.size > 0) {
+        setMonitorEvents((prev) =>
+          prev.filter(
+            (event) =>
+              event.kind !== "realtime_change_pct" ||
+              !resetChangePctCodes.has(event.record.ts_code),
+          ),
+        );
+      }
+      if (resetChangePctCodes.size > 0 || nextChangePctNewHighTimes.size > 0) {
         setChangePctRecordHighEventTimes((prev) => {
           const next = new Map(prev);
+          resetChangePctCodes.forEach((tsCode) => next.delete(tsCode));
           nextChangePctNewHighTimes.forEach((time, tsCode) => {
             next.set(tsCode, time);
           });
@@ -1105,6 +1141,7 @@ export default function AllMarketMonitorPage() {
     setVolumeRatioRecordHighEventTimes(new Map());
     setChangePctRecordHighEventTimes(new Map());
     setTemplateWarning("");
+    setVolumeRatioStatus("");
   }, [sourcePathTrimmed]);
 
   useEffect(() => {
@@ -1357,7 +1394,14 @@ export default function AllMarketMonitorPage() {
             ? changePctRecordHighEventTimes
             : volumeRatioRecordHighEventTimes
         ).get(row.ts_code);
-        const value = row[kind];
+        const value =
+          kind === "realtime_change_pct"
+            ? isFiniteNumber(row.realtime_high) &&
+              isFiniteNumber(row.realtime_pre_close) &&
+              row.realtime_pre_close > 0
+              ? (row.realtime_high / row.realtime_pre_close - 1) * 100
+              : null
+            : row.realtime_vol_ratio_high;
         if (at != null && isFiniteNumber(value))
           detected.push({
             key: `${kind}:${row.ts_code}`,
@@ -1788,6 +1832,9 @@ export default function AllMarketMonitorPage() {
         ) : null}
         {templateWarning ? (
           <div className="all-market-warning">{templateWarning}</div>
+        ) : null}
+        {volumeRatioStatus ? (
+          <div className="all-market-warning" role="status">{volumeRatioStatus}</div>
         ) : null}
       </section>
 

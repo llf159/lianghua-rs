@@ -213,6 +213,7 @@ export type AllMarketMonitorRow = {
   realtime_vol?: number | null;
   realtime_amount?: number | null;
   realtime_vol_ratio?: number | null;
+  realtime_vol_ratio_high?: number | null;
   return_5d_pct?: number | null;
   other_sort_value?: number | null;
   scene_marker?: string | null;
@@ -241,6 +242,7 @@ export type AllMarketMonitorSnapshotData = {
   requested_count: number;
   fetched_count: number;
   template_warning_message?: string | null;
+  volume_ratio_status_message?: string | null;
 };
 
 export type IntradayRealtimeRefreshQuery = {

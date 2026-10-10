@@ -44,29 +44,29 @@ pub struct TencentIntradayData {
 }
 
 #[derive(Debug, Deserialize)]
-struct TencentIntradayResponse {
-    code: i64,
+pub(super) struct TencentIntradayResponse {
+    pub(super) code: i64,
     #[serde(default)]
     msg: String,
     #[serde(default)]
-    data: serde_json::Map<String, serde_json::Value>,
+    pub(super) data: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
-struct TencentIntradaySymbolWrapper {
-    data: TencentIntradayPayload,
+pub(super) struct TencentIntradaySymbolWrapper {
+    pub(super) data: TencentIntradayPayload,
     #[serde(default)]
     qt: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
-struct TencentIntradayPayload {
-    date: String,
+pub(super) struct TencentIntradayPayload {
+    pub(super) date: String,
     #[serde(default)]
-    data: Vec<String>,
+    pub(super) data: Vec<String>,
 }
 
-fn normalize_trade_date(raw: &str) -> Result<String, String> {
+pub(super) fn normalize_trade_date(raw: &str) -> Result<String, String> {
     let trimmed = raw.trim();
     if trimmed.len() == 8 && trimmed.chars().all(|ch| ch.is_ascii_digit()) {
         Ok(trimmed.to_string())
@@ -75,7 +75,11 @@ fn normalize_trade_date(raw: &str) -> Result<String, String> {
     }
 }
 
-fn parse_non_negative_f64(raw: &str, field_name: &str, row: &str) -> Result<f64, String> {
+pub(super) fn parse_non_negative_f64(
+    raw: &str,
+    field_name: &str,
+    row: &str,
+) -> Result<f64, String> {
     let value = raw
         .parse::<f64>()
         .map_err(|e| format!("腾讯分时字段 {field_name} 解析失败: {row}, {e}"))?;
@@ -85,7 +89,11 @@ fn parse_non_negative_f64(raw: &str, field_name: &str, row: &str) -> Result<f64,
     Ok(value)
 }
 
-fn infer_shares_per_volume_unit(price: f64, cumulative_vol: f64, cumulative_amount: f64) -> f64 {
+pub(super) fn infer_shares_per_volume_unit(
+    price: f64,
+    cumulative_vol: f64,
+    cumulative_amount: f64,
+) -> f64 {
     if price <= 0.0 || cumulative_vol <= 0.0 || cumulative_amount <= 0.0 {
         return 100.0;
     }
