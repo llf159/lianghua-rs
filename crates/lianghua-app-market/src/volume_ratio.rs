@@ -11,9 +11,25 @@ use lianghua_provider::crawler::{
     volume_ratio::{TencentVolumeRatioData, fetch_tencent_volume_ratio, intraday_trading_minutes},
 };
 
+pub fn load_volume_ratio_averages(
+    source_path: &str,
+    trade_date: &str,
+    ts_code: Option<&str>,
+) -> Result<HashMap<String, f64>, String> {
+    let mut dates = load_trade_date_list(source_path)?;
+    dates.retain(|date| date.as_str() < trade_date);
+    dates.sort_unstable_by(|a, b| b.cmp(a));
+    dates.dedup();
+    dates.truncate(5);
+    let conn = Connection::open(source_db_path(source_path))
+        .map_err(|e| format!("打开本地量比日线失败: {e}"))?;
+    load_local_volume_averages(&conn, &dates, ts_code)
+}
+
 fn load_local_volume_averages(
     conn: &Connection,
     dates: &[String],
+    ts_code: Option<&str>,
 ) -> Result<HashMap<String, f64>, String> {
     if dates.len() != 5 {
         return Err("本地交易日历不足五日".to_string());
@@ -22,6 +38,7 @@ fn load_local_volume_averages(
         .prepare(
             "SELECT ts_code, AVG(TRY_CAST(vol AS DOUBLE)) FROM stock_data
          WHERE adj_type='qfq' AND trade_date IN (?, ?, ?, ?, ?)
+            AND (? IS NULL OR ts_code=?)
          GROUP BY ts_code
          HAVING COUNT(DISTINCT trade_date)=5 AND COUNT(*)=5
             AND COUNT(TRY_CAST(vol AS DOUBLE))=5 AND MIN(TRY_CAST(vol AS DOUBLE))>=0
@@ -29,7 +46,9 @@ fn load_local_volume_averages(
         )
         .map_err(|e| format!("预编译本地量比基准失败: {e}"))?;
     let mut rows = stmt
-        .query(params![dates[0], dates[1], dates[2], dates[3], dates[4]])
+        .query(params![
+            dates[0], dates[1], dates[2], dates[3], dates[4], ts_code, ts_code
+        ])
         .map_err(|e| format!("查询本地量比基准失败: {e}"))?;
     let mut values = HashMap::new();
     while let Some(row) = rows
@@ -195,15 +214,7 @@ pub fn snapshot(
         .local_loaded_at
         .is_none_or(|at| at.elapsed() >= Duration::from_secs(60))
     {
-        let result = load_trade_date_list(source_path).and_then(|mut dates| {
-            dates.retain(|date| date.as_str() < trade_date);
-            dates.sort_unstable_by(|a, b| b.cmp(a));
-            dates.dedup();
-            dates.truncate(5);
-            let conn = Connection::open(source_db_path(source_path))
-                .map_err(|e| format!("打开本地量比日线失败: {e}"))?;
-            load_local_volume_averages(&conn, &dates)
-        });
+        let result = load_volume_ratio_averages(source_path, trade_date, None);
         match result {
             Ok(values) => {
                 state.local_averages = values;
@@ -370,14 +381,17 @@ mod tests {
                 WHERE ts_code='920002.BJ';").unwrap();
         let mut dates =
             ["20260924", "20260928", "20260929", "20260930", "20261008"].map(str::to_string);
-        let values = load_local_volume_averages(&conn, &dates).unwrap();
+        let values = load_local_volume_averages(&conn, &dates, None).unwrap();
         assert_eq!(values.len(), 4);
         for code in ["920002.BJ", "000001.SZ", "600000.SH", "688185.SH"] {
             assert_eq!(values[code], 300.0);
         }
+        let selected = load_local_volume_averages(&conn, &dates, Some("688185.SH")).unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected["688185.SH"], 300.0);
         dates[4] = "20261012".to_string();
         assert!(
-            load_local_volume_averages(&conn, &dates)
+            load_local_volume_averages(&conn, &dates, None)
                 .unwrap()
                 .is_empty()
         );

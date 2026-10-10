@@ -286,9 +286,9 @@ impl Drop for SimilarityDisplaySleepInhibitor {
 }
 
 use data_download_bridge::{
-    get_data_download_status, get_indicator_manage_page, run_concept_most_related_repair,
-    run_concept_performance_repair, run_data_download, run_dragon_tiger_download,
-    run_missing_stock_repair, run_stock_data_indicator_columns_delete,
+    check_databases, get_data_download_status, get_indicator_manage_page, repair_database_issues,
+    run_concept_most_related_repair, run_concept_performance_repair, run_data_download,
+    run_dragon_tiger_download, run_missing_stock_repair, run_stock_data_indicator_columns_delete,
     run_stock_data_indicator_columns_rebuild, run_ths_concept_download, save_indicator_manage_page,
 };
 use managed_source_bridge::{
@@ -954,11 +954,14 @@ async fn get_stock_detail_realtime(
 
 #[tauri::command]
 async fn get_stock_detail_intraday(
+    source_path: String,
     ts_code: String,
 ) -> Result<lianghua_provider::crawler::intraday::TencentIntradayData, String> {
-    tauri::async_runtime::spawn_blocking(move || core_get_stock_detail_intraday(ts_code))
-        .await
-        .map_err(|error| error.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        core_get_stock_detail_intraday(source_path, ts_code)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -2791,6 +2794,8 @@ pub fn run() {
             export_managed_strategy_backup_file,
             export_managed_strategy_bundle,
             get_data_download_status,
+            check_databases,
+            repair_database_issues,
             get_indicator_manage_page,
             save_indicator_manage_page,
             run_stock_data_indicator_columns_delete,

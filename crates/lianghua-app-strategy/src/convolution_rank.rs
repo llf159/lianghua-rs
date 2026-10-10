@@ -387,6 +387,7 @@ pub fn run_convolution_rank_compute(
     if source_path.is_empty() {
         return Err("数据目录为空，请先到数据管理页确认当前目录".to_string());
     }
+    crate::data::download_state::ensure_stock_data_ready_for_derived(source_path)?;
     let start_date = normalize_trade_date(start_date)
         .ok_or_else(|| "开始日期格式无效，应为 YYYYMMDD 或 YYYY-MM-DD".to_string())?;
     let end_date = normalize_trade_date(end_date)

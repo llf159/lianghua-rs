@@ -43,6 +43,7 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
     allow_strategy_rebuild: bool,
     progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<Option<CyqChenRebuildSummary>, String> {
+    crate::data::download_state::ensure_stock_data_ready_for_derived(source_dir)?;
     let cyq_chen_db = cyq_chen_db_path(source_dir);
     if !cyq_chen_db.exists() {
         return Ok(None);
@@ -267,7 +268,7 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
                         total: ts_codes.len(),
                         current_label: Some(ts_code.to_string()),
                         message: format!(
-                            "新筹码增量维护中，已完成 {finished} / {} 只股票。",
+                            "新筹码增量计算中，已计算 {finished} / {} 只股票。",
                             ts_codes.len()
                         ),
                     });
@@ -297,6 +298,18 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
     }
     drop(abort_tx);
     drop(tx);
+
+    if compute_result.is_ok() {
+        if let Some(progress_cb) = progress_cb {
+            progress_cb(DownloadProgress {
+                phase: "compute_cyq_chen".to_string(),
+                finished: ts_codes.len(),
+                total: ts_codes.len(),
+                current_label: None,
+                message: "筹码计算已结束，正在等待写入、事务提交及结果库收尾。".to_string(),
+            });
+        }
+    }
 
     let writer_result = match writer_handle.join() {
         Ok(result) => result,
@@ -336,6 +349,7 @@ pub fn repair_cyq_chen_stocks_if_db_exists(
     allow_strategy_rebuild: bool,
     progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<Option<CyqChenRebuildSummary>, String> {
+    crate::data::download_state::ensure_stock_data_ready_for_derived(source_dir)?;
     let cyq_chen_db = cyq_chen_db_path(source_dir);
     if !cyq_chen_db.exists() {
         return Ok(None);
@@ -666,7 +680,7 @@ pub fn repair_cyq_chen_stocks_if_db_exists(
                         total: ts_codes.len(),
                         current_label: Some(ts_code.to_string()),
                         message: format!(
-                            "新筹码局部修复中，已完成 {finished} / {} 只股票。",
+                            "新筹码局部修复计算中，已计算 {finished} / {} 只股票。",
                             ts_codes.len()
                         ),
                     });
@@ -696,6 +710,18 @@ pub fn repair_cyq_chen_stocks_if_db_exists(
     }
     drop(abort_tx);
     drop(tx);
+
+    if compute_result.is_ok() {
+        if let Some(progress_cb) = progress_cb {
+            progress_cb(DownloadProgress {
+                phase: "compute_cyq_chen".to_string(),
+                finished: ts_codes.len(),
+                total: ts_codes.len(),
+                current_label: None,
+                message: "筹码计算已结束，正在等待写入、事务提交及结果库收尾。".to_string(),
+            });
+        }
+    }
 
     let writer_result = match writer_handle.join() {
         Ok(result) => result,
@@ -741,6 +767,7 @@ pub fn rebuild_cyq_chen_all_with_progress(
     end_date: Option<&str>,
     progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<CyqChenRebuildSummary, String> {
+    crate::data::download_state::ensure_stock_data_ready_for_derived(source_dir)?;
     create_dir_all(source_dir).map_err(|e| format!("创建新筹码目录失败:{e}"))?;
     let _rebuild_lock = crate::data::cyq_chen_temp::lock_rebuild_directory(Path::new(source_dir))?
         .ok_or_else(|| "该数据目录已有新筹码重建任务，请等待完成后再试".to_string())?;
@@ -890,7 +917,7 @@ pub fn rebuild_cyq_chen_all_with_progress(
                             total: ts_codes.len(),
                             current_label: Some(ts_code.to_string()),
                             message: format!(
-                                "新筹码计算中，已完成 {finished} / {} 只股票。",
+                                "新筹码计算中，已计算 {finished} / {} 只股票。",
                                 ts_codes.len()
                             ),
                         });
@@ -923,6 +950,18 @@ pub fn rebuild_cyq_chen_all_with_progress(
     }
     drop(abort_tx);
     drop(tx);
+
+    if compute_result.is_ok() {
+        if let Some(progress_cb) = progress_cb {
+            progress_cb(DownloadProgress {
+                phase: "compute_cyq_chen".to_string(),
+                finished: ts_codes.len(),
+                total: ts_codes.len(),
+                current_label: None,
+                message: "筹码计算已结束，正在等待写入、事务提交及结果库收尾。".to_string(),
+            });
+        }
+    }
 
     let writer_result = match writer_handle.join() {
         Ok(result) => result,

@@ -41,6 +41,8 @@ pub struct TencentIntradayData {
     pub trade_date: String,
     pub summary: Option<TencentIntradaySummary>,
     pub points: Vec<TencentIntradayPoint>,
+    pub volume_ratio_points: Vec<super::volume_ratio::TencentVolumeRatioPoint>,
+    pub volume_ratio_error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -258,6 +260,8 @@ pub fn parse_tencent_intraday_text(
         trade_date,
         summary,
         points,
+        volume_ratio_points: Vec::new(),
+        volume_ratio_error: None,
     })
 }
 
@@ -265,21 +269,26 @@ pub fn fetch_tencent_intraday(
     http: &reqwest::blocking::Client,
     ts_code: &str,
 ) -> Result<TencentIntradayData, String> {
-    let raw = (|http: &reqwest::blocking::Client, ts_code: &str| -> Result<String, String> {
-        let symbol = ts_code_to_tencent_code(ts_code)?;
-        http.get(TENCENT_INTRADAY_URL)
-            .query(&[("code", symbol)])
-            .header("Accept", "application/json, text/plain, */*")
-            .header("Referer", "https://gu.qq.com/")
-            .header("User-Agent", "Mozilla/5.0")
-            .send()
-            .map_err(|e| format!("请求腾讯分时行情失败: ts_code={ts_code}, err={e}"))?
-            .error_for_status()
-            .map_err(|e| format!("腾讯分时行情返回 HTTP 错误: ts_code={ts_code}, err={e}"))?
-            .text()
-            .map_err(|e| format!("读取腾讯分时行情响应失败: ts_code={ts_code}, err={e}"))
-    })(http, ts_code)?;
+    let raw = fetch_tencent_intraday_text(http, ts_code)?;
     parse_tencent_intraday_text(&raw, ts_code)
+}
+
+pub fn fetch_tencent_intraday_text(
+    http: &reqwest::blocking::Client,
+    ts_code: &str,
+) -> Result<String, String> {
+    let symbol = ts_code_to_tencent_code(ts_code)?;
+    http.get(TENCENT_INTRADAY_URL)
+        .query(&[("code", symbol)])
+        .header("Accept", "application/json, text/plain, */*")
+        .header("Referer", "https://gu.qq.com/")
+        .header("User-Agent", "Mozilla/5.0")
+        .send()
+        .map_err(|e| format!("请求腾讯分时行情失败: ts_code={ts_code}, err={e}"))?
+        .error_for_status()
+        .map_err(|e| format!("腾讯分时行情返回 HTTP 错误: ts_code={ts_code}, err={e}"))?
+        .text()
+        .map_err(|e| format!("读取腾讯分时行情响应失败: ts_code={ts_code}, err={e}"))
 }
 
 pub async fn fetch_tencent_intraday_async(

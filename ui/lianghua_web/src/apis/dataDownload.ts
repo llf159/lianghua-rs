@@ -85,6 +85,7 @@ export type DataDownloadStatus = {
   tradeCalendar: DataDownloadFileStatus
   thsConcepts: DataDownloadFileStatus
   missingStockRepair: DataDownloadMissingStockRepairStatus
+  pendingDerivedRebuilds: Array<{ component: string; startDate: string; endDate: string }>
   cyqChenMaintenance: DataDownloadCyqChenMaintenanceStatus
   dailyTargetTradeDate: string | null
   plannedAction: string
@@ -280,4 +281,46 @@ export async function listenDataDownloadProgress(
 
     onProgress(event.payload)
   }) as Promise<UnlistenFn>
+}
+
+export type DatabaseIssue = {
+  id: string
+  database: string
+  severity: 'error' | 'warning' | 'info'
+  title: string
+  detail: string
+  tsCode: string | null
+  stockName: string | null
+  startDate: string | null
+  endDate: string | null
+  repairAction: 'stock' | 'market' | 'index' | 'concept' | 'chip' | 'legacy-chip' | 'ranking' | 'similarity' | 'update' | null
+  blocksDerived: boolean
+}
+
+export type DatabaseCheckReport = {
+  sourcePath: string
+  checkedAt: string
+  sourceReady: boolean
+  targetTradeDate: string | null
+  stockCount: number
+  rowCount: number
+  checks: string[]
+  issues: DatabaseIssue[]
+  limitations: string[]
+}
+
+export async function checkDatabases(sourcePath: string) {
+  return invoke<DatabaseCheckReport>('check_databases', { sourcePath })
+}
+
+export async function repairDatabaseIssues(downloadId: string, request: {
+  sourcePath: string
+  issueIds: string[]
+  token: string
+  threads: number
+  retryTimes: number
+  limitCallsPerMin: number
+  includeTurnover: boolean
+}) {
+  return invoke<DataDownloadRunResult>('repair_database_issues', { downloadId, request })
 }

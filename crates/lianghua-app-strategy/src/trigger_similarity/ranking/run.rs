@@ -75,6 +75,18 @@ pub fn run_strategy_trigger_similarity_ranking(
     if source_path.is_empty() {
         return Err("source_path 不能为空".to_string());
     }
+    crate::data::download_state::ensure_stock_data_ready_for_derived(&source_path)?;
+    let source = crate::data::download_state::open_source_db_readonly(&source_path)?;
+    if crate::data::download_state::load_pending_derived_rebuilds(&source)?
+        .iter()
+        .any(|item| item.component == "ranking")
+    {
+        return Err(
+            "行情修复后评分/排名尚未重算，不能使用旧评分计算相似度。请先重算受影响区间。"
+                .to_string(),
+        );
+    }
+    drop(source);
     let conn = open_result_conn(&source_path)?;
     let resolved_trade_date = resolve_existing_trade_date(&conn, trade_date)?;
     let active_config = get_strategy_trigger_similarity_active_config(&conn)?;
@@ -1221,7 +1233,7 @@ pub fn run_strategy_trigger_similarity_ranking(
     set_ranking_progress("read-result", "正在读取排行榜结果", 0, 0);
 
     let page = get_strategy_trigger_similarity_ranking_page(
-        source_path,
+        source_path.clone(),
         Some(resolved_trade_date),
         Some(window_trade_days as u32),
         Some(pool_segments as u32),
@@ -1236,6 +1248,12 @@ pub fn run_strategy_trigger_similarity_ranking(
         Some(sample_gap_trade_days as u32),
     )?;
     set_ranking_progress("completed", "走势相似排行榜计算完成", 1, 1);
+    crate::data::download_state::clear_pending_derived_rebuild(
+        &source_path,
+        "similarity",
+        "00000000",
+        "99999999",
+    )?;
     Ok(page)
 }
 

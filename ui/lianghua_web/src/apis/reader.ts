@@ -229,6 +229,7 @@ export type AllMarketIndexRow = {
   realtime_trade_date?: string | null;
   realtime_price?: number | null;
   realtime_change_pct?: number | null;
+  realtime_amount?: number | null;
 };
 
 export type AllMarketMonitorSnapshotData = {

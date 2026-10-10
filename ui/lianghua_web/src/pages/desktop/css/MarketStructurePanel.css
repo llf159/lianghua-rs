@@ -37,6 +37,77 @@
   font-size: 15px;
   line-height: 1.7;
 }
+.market-structure-activity {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid #dbe5ed;
+  border-radius: 10px;
+  min-width: 0;
+}
+.market-structure-activity select {
+  min-height: 36px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  padding: 5px 8px;
+  color: #334155;
+  background: #fff;
+}
+.market-structure-activity-readings,
+.market-structure-outlook-readings {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.market-structure-activity-readings article,
+.market-structure-outlook-readings article {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 8px;
+  background: #f4f8fb;
+  min-width: 0;
+}
+.market-structure-activity-readings span,
+.market-structure-outlook-readings span,
+.market-structure-outlook-readings small {
+  font-size: 12px;
+  color: #64748b;
+  line-height: 1.7;
+}
+.market-structure-activity-readings strong,
+.market-structure-outlook-readings strong {
+  font-size: 20px;
+  color: #334155;
+  font-variant-numeric: tabular-nums;
+}
+.market-structure-activity-readings dl {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+.market-structure-activity-readings dl div {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 8px;
+  font-size: 12px;
+  line-height: 1.7;
+}
+.market-structure-activity-readings dt {
+  color: #64748b;
+}
+.market-structure-activity-readings dd {
+  margin: 0;
+  color: #334155;
+  font-variant-numeric: tabular-nums;
+}
+.market-structure-outlook {
+  display: grid;
+  gap: 12px;
+  border-top: 1px solid #e1e7ef;
+  padding-top: 12px;
+}
 .market-structure-degrees,
 .market-structure-indexes {
   display: grid;
@@ -216,6 +287,10 @@
   }
 }
 @media (max-width: 650px) {
+  .market-structure-activity-readings,
+  .market-structure-outlook-readings {
+    grid-template-columns: minmax(0, 1fr);
+  }
   .market-structure-degrees {
     grid-template-columns: minmax(0, 1fr);
   }

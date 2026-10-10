@@ -177,7 +177,7 @@
 .all-market-toolbar {
   margin-top: 14px;
   display: grid;
-  grid-template-columns: max-content minmax(0, 1fr);
+  grid-template-columns: max-content minmax(130px, 1fr) 170px;
   align-items: end;
   gap: 12px;
   overflow-x: auto;
@@ -259,6 +259,54 @@
   white-space: nowrap;
 }
 
+.all-market-summary {
+  display: grid;
+  align-content: center;
+  gap: 2px;
+  min-width: 0;
+  height: 72px;
+  box-sizing: border-box;
+  padding: 0 10px;
+  border-left: 1px solid #dbe4ef;
+  color: #334155;
+  font-size: 12px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.all-market-breadth-counts {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.all-market-breadth-counts strong,
+.all-market-turnover-total strong {
+  font-size: 15px;
+}
+
+.all-market-ratio-bar {
+  display: flex;
+  height: 6px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: #e2e8f0;
+}
+
+.all-market-ratio-bar span {
+  flex-basis: 0;
+  min-width: 0;
+}
+
+.all-market-ratio-bar .is-up {
+  background: #c2410c;
+}
+
+.all-market-ratio-bar .is-down {
+  background: #15803d;
+}
+
 .all-market-sort-control,
 .all-market-config-controls,
 .all-market-index-strip {
@@ -284,7 +332,7 @@
 .all-market-index-list {
   display: grid;
   grid-auto-flow: column;
-  grid-auto-columns: 118px;
+  grid-auto-columns: max-content;
   justify-content: flex-start;
   gap: 6px;
   min-width: 0;
@@ -295,6 +343,8 @@
 }
 
 .all-market-index-item {
+  width: 118px;
+  box-sizing: border-box;
   min-width: 0;
   border: 1px solid #d4deea;
   border-radius: 8px;
@@ -329,6 +379,8 @@
 }
 
 .all-market-index-empty {
+  width: 118px;
+  box-sizing: border-box;
   min-height: 46px;
   border: 1px dashed #d4deea;
   border-radius: 8px;
@@ -1591,13 +1643,40 @@
   line-height: 1.5;
 }
 
+@media (max-width: 900px) {
+  .all-market-toolbar {
+    grid-template-columns: max-content minmax(130px, 1fr) 140px;
+    gap: 8px;
+  }
+
+  .all-market-sort-switch {
+    gap: 4px;
+  }
+
+  .all-market-sort-switch button {
+    min-width: 40px;
+  }
+
+  .all-market-sort-switch button + button::before {
+    display: none;
+  }
+
+  .all-market-config-controls {
+    gap: 6px;
+  }
+
+  .all-market-params-btn {
+    padding-inline: 4px;
+  }
+}
+
 @media (max-width: 760px) {
   .all-market-card {
     padding: 12px;
   }
 
   .all-market-toolbar {
-    grid-template-columns: 1fr;
+    grid-template-columns: max-content minmax(130px, 1fr) 140px;
     align-items: stretch;
     gap: 10px;
   }

@@ -28,6 +28,10 @@ use crate::{
             load_latest_trade_date, reset_stock_data_stage_table, write_stock_list_csv,
             write_ths_concepts_csv,
         },
+        download_state::{
+            ensure_stock_data_ready_for_derived, load_pending_stock_repairs,
+            mark_derived_rebuild_required,
+        },
         load_stock_list, load_ths_concepts_list, load_trade_date_list, source_db_path,
         stock_list_path, trade_calendar_path,
     },
@@ -544,7 +548,7 @@ pub fn download_ths_concepts(
                             emit_progress(
                                 progress_cb,
                                 "write_ths_concepts",
-                                completed + 1,
+                                completed,
                                 total,
                                 Some(item.ts_code.clone()),
                                 format!(
@@ -719,7 +723,7 @@ pub fn download_ths_concepts(
                     emit_progress(
                         progress_cb,
                         "write_ths_concepts",
-                        completed + 1,
+                        completed,
                         total,
                         Some(item.ts_code.clone()),
                         format!(
@@ -1075,12 +1079,14 @@ fn write_prepared_stock_batch(
     }
 
     with_transaction(conn, |tx| {
-        if mark_chip_repair {
+        let pending_repairs = load_pending_stock_repairs(tx)?;
+        if mark_chip_repair || !pending_repairs.is_empty() {
             tx.execute(
                 "CREATE TABLE IF NOT EXISTS pending_chip_repair (ts_code VARCHAR PRIMARY KEY)",
                 [],
             )
             .map_err(|e| format!("创建筹码待修复记录失败: {e}"))?;
+            tx.execute_batch("CREATE TABLE IF NOT EXISTS completed_chip_repair(ts_code VARCHAR, model VARCHAR, PRIMARY KEY(ts_code, model))").map_err(|e| format!("创建筹码修复状态失败: {e}"))?;
         }
         let indicator_names = (|prepared_items: &[PreparedStockDownload]| -> Vec<String> {
             let mut names = HashSet::new();
@@ -1108,16 +1114,42 @@ fn write_prepared_stock_batch(
                 item.end_date.as_str(),
             )?;
             append_stage_pro_bar_rows(tx, item.adj_type, &item.rows, &item.indicators)?;
-            if mark_chip_repair {
+            let pending = pending_repairs
+                .iter()
+                .find(|pending| pending.ts_code == item.ts_code);
+            if item.adj_type == AdjType::Qfq && (mark_chip_repair || pending.is_some()) {
+                mark_derived_rebuild_required(tx, &item.start_date, &item.end_date)?;
                 tx.execute(
                     "INSERT OR REPLACE INTO pending_chip_repair VALUES (?)",
                     [item.ts_code.as_str()],
                 )
                 .map_err(|e| format!("记录筹码待修复股票失败: {e}"))?;
+                tx.execute(
+                    "DELETE FROM completed_chip_repair WHERE ts_code=?",
+                    [item.ts_code.as_str()],
+                )
+                .map_err(|e| format!("重置筹码修复状态失败: {e}"))?;
             }
         }
 
-        flush_stock_data_stage_table(tx)
+        flush_stock_data_stage_table(tx)?;
+        for item in prepared_items {
+            if item.adj_type == AdjType::Qfq && !item.rows.is_empty() {
+                if let Some(pending) = pending_repairs
+                    .iter()
+                    .find(|pending| pending.ts_code == item.ts_code)
+                {
+                    if item.start_date <= pending.start_date && item.end_date >= pending.end_date {
+                        tx.execute(
+                            "DELETE FROM pending_stock_repair WHERE ts_code = ?",
+                            [item.ts_code.as_str()],
+                        )
+                        .map_err(|e| format!("清除行情待补救记录失败: {e}"))?;
+                    }
+                }
+            }
+        }
+        Ok(())
     })
 }
 
@@ -1160,18 +1192,31 @@ where
     }
 }
 
-fn delete_stocks_all_rows(
+fn prepare_stock_repairs(
     conn: &Connection,
     ts_codes: &HashSet<String>,
     adj_type: AdjType,
+    start_date: &str,
+    end_date: &str,
+    delete_existing: bool,
 ) -> Result<(), String> {
     if ts_codes.is_empty() {
         return Ok(());
     }
 
     with_transaction(conn, |tx| {
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS pending_stock_repair (ts_code VARCHAR PRIMARY KEY, start_date VARCHAR NOT NULL, end_date VARCHAR NOT NULL)")
+            .map_err(|e| format!("创建行情待补救记录失败: {e}"))?;
         for ts_code in ts_codes {
-            delete_one_stock_all_rows(tx, ts_code, adj_type)?;
+            tx.execute(
+                "INSERT INTO pending_stock_repair
+                 SELECT ?, LEAST(COALESCE(MIN(trade_date) FILTER (WHERE try_strptime(trade_date, '%Y%m%d') IS NOT NULL), ?), ?), GREATEST(COALESCE(MAX(trade_date) FILTER (WHERE try_strptime(trade_date, '%Y%m%d') IS NOT NULL), ?), ?) FROM stock_data WHERE ts_code = ? AND adj_type = 'qfq'
+                 ON CONFLICT (ts_code) DO UPDATE SET start_date = LEAST(pending_stock_repair.start_date, excluded.start_date), end_date = GREATEST(pending_stock_repair.end_date, excluded.end_date)",
+                duckdb::params![ts_code, start_date, start_date, end_date, end_date, ts_code],
+            ).map_err(|e| format!("记录行情待补救股票失败: {e}"))?;
+            if delete_existing {
+                delete_one_stock_all_rows(tx, ts_code, adj_type)?;
+            }
         }
         Ok(())
     })
@@ -1198,11 +1243,16 @@ where
         for batch in batches {
             delete_trade_date_rows(tx, adj_type, batch.trade_date.as_str())?;
             append_stage_pro_bar_rows(tx, adj_type, &batch.rows, &batch.indicators)?;
-            on_batch_written(batch);
         }
 
         flush_stock_data_stage_table(tx)
-    })
+    })?;
+
+    // 整段增量在同一事务提交，事务内追加/flush 不代表已持久化。
+    for batch in batches {
+        on_batch_written(batch);
+    }
+    Ok(())
 }
 
 fn keep_failed_tasks(
@@ -1266,6 +1316,7 @@ fn download_first_all_market_after_basic_data(
         config.retry_times,
         "首次全量下载开始",
         "首次全量下载结束",
+        true,
         progress_cb,
     )
 }
@@ -1285,6 +1336,7 @@ fn download_selected_stocks_with_context(
     retry_times: usize,
     start_message: &str,
     done_message: &str,
+    maintain_concepts: bool,
     progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<DownloadSummary, String> {
     if ts_codes.is_empty() {
@@ -1300,7 +1352,7 @@ fn download_selected_stocks_with_context(
     }
 
     let mut total = DownloadSummary::default();
-    let tasks = build_download_task_from_stock_list_dates(
+    let mut tasks = build_download_task_from_stock_list_dates(
         source_dir,
         ts_codes,
         start_date,
@@ -1308,6 +1360,16 @@ fn download_selected_stocks_with_context(
         adj_type,
         with_factors,
     )?;
+    let pending_repairs = load_pending_stock_repairs(conn)?;
+    for task in &mut tasks {
+        if let Some(pending) = pending_repairs
+            .iter()
+            .find(|item| item.ts_code == task.ts_code)
+        {
+            task.start_date = pending.start_date.clone();
+            task.end_date = pending.end_date.clone();
+        }
+    }
     let total_tasks = tasks.len();
     if tasks.is_empty() {
         emit_progress(
@@ -1321,7 +1383,7 @@ fn download_selected_stocks_with_context(
         return Ok(DownloadSummary::default());
     }
 
-    let mut processed_tasks = 0usize;
+    let mut committed_tasks = 0usize;
     emit_progress(
         progress_cb,
         "download_bars",
@@ -1337,7 +1399,7 @@ fn download_selected_stocks_with_context(
         emit_progress(
             progress_cb,
             "write_db",
-            processed_tasks,
+            committed_tasks,
             total_tasks,
             Some(format!("第 {} 批", batch_idx + 1)),
             format!(
@@ -1347,15 +1409,15 @@ fn download_selected_stocks_with_context(
             ),
         );
         write_prepared_stock_batch(conn, &prepared_batch.prepared_items, false)?;
+        committed_tasks += batch_summary.success_count;
         merge_summary(&mut total, batch_summary);
-        processed_tasks += batch.len();
         emit_progress(
             progress_cb,
             "download_bars",
-            processed_tasks,
+            committed_tasks,
             total_tasks,
             Some(format!("第 {} 批", batch_idx + 1)),
-            format!("已处理 {} / {} 只股票。", processed_tasks, total_tasks),
+            format!("已成功提交 {} / {} 只股票。", committed_tasks, total_tasks),
         );
     }
 
@@ -1365,8 +1427,8 @@ fn download_selected_stocks_with_context(
         emit_progress(
             progress_cb,
             "retry_failed",
-            0,
-            retry_times.max(1),
+            committed_tasks,
+            total_tasks,
             Some(format!("待重试 {} 只", retry_task_count)),
             format!("共有 {} 只股票失败，准备进入重试阶段。", retry_task_count),
         );
@@ -1375,11 +1437,12 @@ fn download_selected_stocks_with_context(
                             tasks: Vec<DownloadTask>,
                             retry_times: usize,
                             pool: &ThreadPool,
+                            committed_tasks: usize,
+                            total_tasks: usize,
                             progress_cb: Option<&DownloadProgressCallback<'_>>|
          -> PreparedDownloadBatch {
             let mut merged_batch = PreparedDownloadBatch::default();
             let mut pending_tasks = tasks;
-            let retry_total = retry_times.max(1);
 
             for attempt_idx in 0..retry_times {
                 if pending_tasks.is_empty() {
@@ -1398,11 +1461,11 @@ fn download_selected_stocks_with_context(
                     emit_progress(
                         progress_cb,
                         "retry_failed",
-                        attempt_idx + 1,
-                        retry_total,
+                        committed_tasks,
+                        total_tasks,
                         Some(format!("第 {} 轮重试", attempt_idx + 1)),
                         format!(
-                            "失败补救完成，第 {} 轮重试后已没有剩余失败项。",
+                            "第 {} 轮重试已拉取全部失败项，等待写入提交。",
                             attempt_idx + 1
                         ),
                     );
@@ -1413,8 +1476,8 @@ fn download_selected_stocks_with_context(
                 emit_progress(
                     progress_cb,
                     "retry_failed",
-                    attempt_idx + 1,
-                    retry_total,
+                    committed_tasks,
+                    total_tasks,
                     Some(format!("第 {} 轮重试", attempt_idx + 1)),
                     format!(
                         "失败补救进行中，第 {} 轮后仍有 {} 只股票待重试。",
@@ -1435,13 +1498,15 @@ fn download_selected_stocks_with_context(
             failed_tasks,
             retry_times,
             pool,
+            committed_tasks,
+            total_tasks,
             progress_cb,
         );
         let retry_summary = retry_batch.summary();
         emit_progress(
             progress_cb,
             "write_db",
-            processed_tasks,
+            committed_tasks,
             total_tasks,
             Some("重试结果".to_string()),
             format!(
@@ -1450,6 +1515,15 @@ fn download_selected_stocks_with_context(
             ),
         );
         write_prepared_stock_batch(conn, &retry_batch.prepared_items, false)?;
+        committed_tasks += retry_summary.success_count;
+        emit_progress(
+            progress_cb,
+            "retry_failed",
+            committed_tasks,
+            total_tasks,
+            Some("重试结果".to_string()),
+            format!("重试结果已提交，已成功提交 {committed_tasks} / {total_tasks} 只股票。"),
+        );
 
         total.success_count += retry_summary.success_count;
         total.saved_rows += retry_summary.saved_rows;
@@ -1458,7 +1532,20 @@ fn download_selected_stocks_with_context(
     }
 
     checkpoint_stock_data(conn)?;
-    if adj_type == AdjType::Qfq {
+    if total.failed_count > 0 {
+        return Err(format!(
+            "行情下载仍有 {} 只股票失败，已停止后续计算；成功写入的数据已保留，请先执行缺失股票补全。失败原因：{}",
+            total.failed_count,
+            total
+                .failed_items
+                .iter()
+                .take(3)
+                .map(|(code, error)| format!("{code}: {error}"))
+                .collect::<Vec<_>>()
+                .join("；")
+        ));
+    }
+    if maintain_concepts && adj_type == AdjType::Qfq {
         total.concept_performance_rows +=
             sync_gaini_bx_range(source_dir, start_date, end_date, progress_cb)?;
     }
@@ -1483,6 +1570,23 @@ pub fn download_selected_stocks(
     ts_codes: &[String],
     progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<DownloadSummary, String> {
+    download_selected_stocks_with_mode(config, ts_codes, false, progress_cb)
+}
+
+pub fn repair_selected_stock_history(
+    config: &DownloadRuntimeConfig,
+    ts_codes: &[String],
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
+) -> Result<DownloadSummary, String> {
+    download_selected_stocks_with_mode(config, ts_codes, true, progress_cb)
+}
+
+fn download_selected_stocks_with_mode(
+    config: &DownloadRuntimeConfig,
+    ts_codes: &[String],
+    repair_history: bool,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
+) -> Result<DownloadSummary, String> {
     let effective_trade_date = init_stock_basic_data(config, progress_cb)?;
     let adj_type = config.adj_type;
     let source_dir = config.source_dir.as_str();
@@ -1502,6 +1606,84 @@ pub fn download_selected_stocks(
     init_stock_data_db(db_path_str)?;
     let conn = Connection::open(db_path_str).map_err(|e| format!("数据库连接错误:{e}"))?;
 
+    if repair_history {
+        // 先持久记录整个计划，但每次只删除即将修复的那一只。
+        prepare_stock_repairs(
+            &conn,
+            &ts_codes.iter().cloned().collect(),
+            adj_type,
+            start_date,
+            end_date,
+            false,
+        )?;
+        checkpoint_stock_data(&conn)?;
+        let mut total = DownloadSummary::default();
+        for (finished, code) in ts_codes.iter().enumerate() {
+            prepare_stock_repairs(
+                &conn,
+                &HashSet::from([code.clone()]),
+                adj_type,
+                start_date,
+                end_date,
+                true,
+            )?;
+            checkpoint_stock_data(&conn)?;
+            let callback = |mut progress: DownloadProgress| {
+                if progress.phase == "done" {
+                    return;
+                }
+                progress.finished = finished;
+                progress.total = ts_codes.len();
+                progress.current_label = Some(code.clone());
+                if let Some(cb) = progress_cb {
+                    cb(progress);
+                }
+            };
+            let batch = download_selected_stocks_with_context(
+                source_dir,
+                &effective_trade_date,
+                &client,
+                &pool,
+                &conn,
+                std::slice::from_ref(code),
+                start_date,
+                end_date,
+                adj_type,
+                with_factors,
+                config.retry_times,
+                "针对性股票修复开始",
+                "针对性股票修复结束",
+                false,
+                Some(&callback),
+            )?;
+            if load_pending_stock_repairs(&conn)?
+                .iter()
+                .any(|item| &item.ts_code == code)
+            {
+                return Err(format!(
+                    "{code} 未返回完整历史，待补救记录已保留，请复查后继续修复。"
+                ));
+            }
+            merge_summary(&mut total, batch);
+            emit_progress(
+                progress_cb,
+                "download_bars",
+                finished + 1,
+                ts_codes.len(),
+                Some(code.clone()),
+                format!("已提交修复 {} / {} 只股票。", finished + 1, ts_codes.len()),
+            );
+        }
+        emit_progress(
+            progress_cb,
+            "done",
+            ts_codes.len(),
+            ts_codes.len(),
+            None,
+            "所选股票完整历史修复已提交，后续数据库仍需分别重算。",
+        );
+        return Ok(total);
+    }
     download_selected_stocks_with_context(
         source_dir,
         &effective_trade_date,
@@ -1516,12 +1698,14 @@ pub fn download_selected_stocks(
         config.retry_times,
         "缺失股票补全开始",
         "缺失股票补全结束",
+        !repair_history,
         progress_cb,
     )
 }
 
-fn download_indices_with_context(
+pub fn download_selected_indices(
     config: &DownloadRuntimeConfig,
+    ts_codes: &[String],
     start_date: &str,
     end_date: &str,
     progress_cb: Option<&DownloadProgressCallback<'_>>,
@@ -1536,19 +1720,13 @@ fn download_indices_with_context(
         .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
     init_stock_data_db(db_path_str)?;
     let conn = Connection::open(db_path_str).map_err(|e| format!("数据库连接错误:{e}"))?;
-    let ts_codes = (|| -> Vec<String> {
-        INDEX_TS_CODES
-            .iter()
-            .map(|item| (*item).to_string())
-            .collect()
-    })();
 
     if ts_codes.is_empty() {
         return Ok(DownloadSummary::default());
     }
 
     let total_tasks = ts_codes.len();
-    let mut processed_tasks = 0usize;
+    let mut committed_tasks = 0usize;
     let mut total = DownloadSummary::default();
     emit_progress(
         progress_cb,
@@ -1608,7 +1786,7 @@ fn download_indices_with_context(
         emit_progress(
             progress_cb,
             "write_db",
-            processed_tasks,
+            committed_tasks,
             total_tasks,
             Some(format!("指数第 {} 批", batch_idx + 1)),
             format!(
@@ -1618,15 +1796,15 @@ fn download_indices_with_context(
             ),
         );
         write_prepared_stock_batch(&conn, &prepared_batch.prepared_items, false)?;
+        committed_tasks += batch_summary.success_count;
         merge_summary(&mut total, batch_summary);
-        processed_tasks += batch.len();
         emit_progress(
             progress_cb,
             "download_index_bars",
-            processed_tasks,
+            committed_tasks,
             total_tasks,
             Some(format!("指数第 {} 批", batch_idx + 1)),
-            format!("已处理 {} / {} 只指数。", processed_tasks, total_tasks),
+            format!("已成功提交 {} / {} 只指数。", committed_tasks, total_tasks),
         );
     }
 
@@ -1744,16 +1922,24 @@ pub fn download_indices_after_basic_data(
             if pending_trade_dates.is_empty() {
                 return Ok(DownloadSummary::default());
             }
-            download_indices_with_context(
+            download_selected_indices(
                 config,
+                &INDEX_TS_CODES
+                    .iter()
+                    .map(|code| code.to_string())
+                    .collect::<Vec<_>>(),
                 pending_trade_dates[0].as_str(),
                 effective_trade_date,
                 progress_cb,
             )
         }
         Some(_) => Ok(DownloadSummary::default()),
-        None => download_indices_with_context(
+        None => download_selected_indices(
             config,
+            &INDEX_TS_CODES
+                .iter()
+                .map(|code| code.to_string())
+                .collect::<Vec<_>>(),
             config.start_date.as_str(),
             effective_trade_date,
             progress_cb,
@@ -1787,6 +1973,8 @@ fn download_pending_all_market_after_basic_data(
         .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
     init_stock_data_db(db_path_str)?;
 
+    // 中断后不能用全市场最大日期掩盖尚未补回的复权异常股票。
+    ensure_stock_data_ready_for_derived(source_dir)?;
     let last_saved_trade_date = load_latest_trade_date(source_dir, adj_type)?
         .ok_or_else(|| "数据库里还没有可用于增量的历史数据，请先做首次下载".to_string())?;
 
@@ -1970,7 +2158,8 @@ fn download_pending_all_market_after_basic_data(
                                   inds_cache: &[IndsCache],
                                   warmup_need: usize,
                                   history_end_dates: &HashMap<String, String>,
-                                  passed_rows_by_stock: &HashMap<String, Vec<ProBarRow>>|
+                                  passed_rows_by_stock: &HashMap<String, Vec<ProBarRow>>,
+                                  progress_cb: Option<&DownloadProgressCallback<'_>>|
          -> Result<Vec<PreparedStockDownload>, String> {
             if passed_rows_by_stock.is_empty() {
                 return Ok(Vec::new());
@@ -1981,65 +2170,80 @@ fn download_pending_all_market_after_basic_data(
                 .map(|(ts_code, rows)| (ts_code.clone(), rows.clone()))
                 .collect::<Vec<_>>();
             stock_rows.sort_by(|a, b| a.0.cmp(&b.0));
+            let finished_stocks = std::sync::atomic::AtomicUsize::new(0);
 
-            let chunk_results =
-                pool.install(|| {
-                    stock_rows
-                        .par_chunks(256)
-                        .map(|chunk| -> Result<Vec<PreparedStockDownload>, String> {
-                            let dr = DataReader::new(source_dir)?;
-                            let chunk_end_dates = chunk
-                                .iter()
-                                .filter_map(|(ts_code, _)| {
-                                    history_end_dates
-                                        .get(ts_code)
-                                        .map(|end_date| (ts_code.clone(), end_date.clone()))
-                                })
-                                .collect::<HashMap<_, _>>();
-                            let mut history_rows_by_stock = load_many_tail_rows_with_warmup_need(
-                                &dr,
-                                (|adj_type: AdjType| -> &'static str {
-                                    match adj_type {
-                                        AdjType::Qfq => "qfq",
-                                        AdjType::Hfq => "hfq",
-                                        AdjType::Raw => "raw",
-                                        AdjType::Ind => "ind",
-                                    }
-                                })(adj_type),
-                                &chunk_end_dates,
-                                warmup_need,
+            let chunk_results = pool.install(|| {
+                stock_rows
+                    .par_chunks(256)
+                    .map(|chunk| -> Result<Vec<PreparedStockDownload>, String> {
+                        let dr = DataReader::new(source_dir)?;
+                        let chunk_end_dates = chunk
+                            .iter()
+                            .filter_map(|(ts_code, _)| {
+                                history_end_dates
+                                    .get(ts_code)
+                                    .map(|end_date| (ts_code.clone(), end_date.clone()))
+                            })
+                            .collect::<HashMap<_, _>>();
+                        let mut history_rows_by_stock = load_many_tail_rows_with_warmup_need(
+                            &dr,
+                            (|adj_type: AdjType| -> &'static str {
+                                match adj_type {
+                                    AdjType::Qfq => "qfq",
+                                    AdjType::Hfq => "hfq",
+                                    AdjType::Raw => "raw",
+                                    AdjType::Ind => "ind",
+                                }
+                            })(adj_type),
+                            &chunk_end_dates,
+                            warmup_need,
+                        )?;
+                        let mut chunk_out = Vec::with_capacity(chunk.len());
+
+                        for (ts_code, rows) in chunk {
+                            let indicators = calc_increment_inds_from_history(
+                                inds_cache,
+                                history_rows_by_stock.remove(ts_code),
+                                rows.as_slice(),
                             )?;
-                            let mut chunk_out = Vec::with_capacity(chunk.len());
-
-                            for (ts_code, rows) in chunk {
-                                let indicators = calc_increment_inds_from_history(
-                                    inds_cache,
-                                    history_rows_by_stock.remove(ts_code),
-                                    rows.as_slice(),
+                            let start_date =
+                                rows.first().map(|row| row.trade_date.clone()).ok_or_else(
+                                    || format!("缺少通过校验的增量行: ts_code={ts_code}"),
                                 )?;
-                                let start_date =
-                                    rows.first().map(|row| row.trade_date.clone()).ok_or_else(
-                                        || format!("缺少通过校验的增量行: ts_code={ts_code}"),
-                                    )?;
-                                let end_date =
-                                    rows.last().map(|row| row.trade_date.clone()).ok_or_else(
-                                        || format!("缺少通过校验的增量行: ts_code={ts_code}"),
-                                    )?;
+                            let end_date = rows
+                                .last()
+                                .map(|row| row.trade_date.clone())
+                                .ok_or_else(|| {
+                                    format!("缺少通过校验的增量行: ts_code={ts_code}")
+                                })?;
 
-                                chunk_out.push(PreparedStockDownload {
-                                    ts_code: ts_code.clone(),
-                                    start_date,
-                                    end_date,
-                                    adj_type,
-                                    rows: rows.clone(),
-                                    indicators,
-                                });
-                            }
+                            chunk_out.push(PreparedStockDownload {
+                                ts_code: ts_code.clone(),
+                                start_date,
+                                end_date,
+                                adj_type,
+                                rows: rows.clone(),
+                                indicators,
+                            });
+                        }
 
-                            Ok(chunk_out)
-                        })
-                        .collect::<Vec<_>>()
-                });
+                        let finished =
+                            finished_stocks.fetch_add(chunk.len(), Ordering::Relaxed) + chunk.len();
+                        emit_progress(
+                            progress_cb,
+                            "calc_incremental_indicators",
+                            finished,
+                            stock_rows.len(),
+                            chunk.last().map(|(ts_code, _)| ts_code.clone()),
+                            format!(
+                                "增量指标已计算 {finished} / {} 只股票，行情尚待提交。",
+                                stock_rows.len()
+                            ),
+                        );
+                        Ok(chunk_out)
+                    })
+                    .collect::<Vec<_>>()
+            });
 
             let mut out = Vec::with_capacity(stock_rows.len());
             for chunk_result in chunk_results {
@@ -2056,6 +2260,7 @@ fn download_pending_all_market_after_basic_data(
             warmup_need,
             &history_end_dates,
             &passed_rows_by_stock,
+            progress_cb,
         )?;
         emit_progress(
             progress_cb,
@@ -2145,7 +2350,7 @@ fn download_pending_all_market_after_basic_data(
         .iter()
         .map(|batch| batch.rows.len())
         .sum::<usize>();
-    let write_total = passed_write_batches.len() + failed_items.len();
+    let write_total = passed_write_batches.len();
 
     let conn = Connection::open(db_path_str).map_err(|e| format!("数据库连接错误:{e}"))?;
     emit_progress(
@@ -2163,7 +2368,14 @@ fn download_pending_all_market_after_basic_data(
 
     let mut written_steps = 0usize;
     if !failed_ts_codes.is_empty() {
-        delete_stocks_all_rows(&conn, &failed_ts_codes, adj_type)?;
+        prepare_stock_repairs(
+            &conn,
+            &failed_ts_codes,
+            adj_type,
+            start_date,
+            effective_trade_date,
+            true,
+        )?;
         emit_progress(
             progress_cb,
             "write_db",
@@ -2192,7 +2404,7 @@ fn download_pending_all_market_after_basic_data(
                     write_total,
                     Some(batch.trade_date.clone()),
                     format!(
-                        "已写入 {}/{} 个批次，当前交易日 {}。",
+                        "已提交 {}/{} 个交易日批次，当前交易日 {}。",
                         written_steps, write_total, batch.trade_date
                     ),
                 );
@@ -2232,7 +2444,7 @@ fn download_pending_all_market_after_basic_data(
                 .iter()
                 .map(|(ts_code, _)| ts_code.clone())
                 .collect::<Vec<_>>();
-            let tasks = build_download_task_from_stock_list_dates(
+            let mut tasks = build_download_task_from_stock_list_dates(
                 source_dir,
                 &failed_ts_codes,
                 start_date,
@@ -2240,19 +2452,29 @@ fn download_pending_all_market_after_basic_data(
                 adj_type,
                 with_factors,
             )?;
+            let pending_repairs = load_pending_stock_repairs(conn)?;
+            for task in &mut tasks {
+                if let Some(pending) = pending_repairs
+                    .iter()
+                    .find(|pending| pending.ts_code == task.ts_code)
+                {
+                    task.start_date = pending.start_date.clone();
+                    task.end_date = pending.end_date.clone();
+                }
+            }
             let total_tasks = tasks.len();
             let mut total = DownloadSummary::default();
 
-            for (task_idx, task) in tasks.iter().enumerate() {
+            for task in &tasks {
                 emit_progress(
                     progress_cb,
                     "recover_failed_stocks",
-                    task_idx,
+                    total.recovered_stock_count,
                     total_tasks,
                     Some(task.ts_code.clone()),
                     format!(
                         "正在整段补救重下 {}，进度 {}/{}。",
-                        task.ts_code, task_idx, total_tasks
+                        task.ts_code, total.recovered_stock_count, total_tasks
                     ),
                 );
                 let one_batch = pool.install(|| {
@@ -2262,6 +2484,14 @@ fn download_pending_all_market_after_basic_data(
                 let one_success_count = one_summary.success_count;
                 let one_failed_count = one_summary.failed_count;
                 if !one_batch.prepared_items.is_empty() {
+                    emit_progress(
+                        progress_cb,
+                        "recover_failed_stocks",
+                        total.recovered_stock_count,
+                        total_tasks,
+                        Some(task.ts_code.clone()),
+                        format!("{} 整段行情已拉取，正在提交补救事务。", task.ts_code),
+                    );
                     write_prepared_stock_batch(conn, &one_batch.prepared_items, true)?;
                     total.recovered_stock_count += one_batch.prepared_items.len();
                     total.recovered_stock_codes.extend(
@@ -2275,15 +2505,15 @@ fn download_pending_all_market_after_basic_data(
                 emit_progress(
                     progress_cb,
                     "recover_failed_stocks",
-                    task_idx + 1,
+                    total.recovered_stock_count,
                     total_tasks,
                     Some(task.ts_code.clone()),
                     format!(
-                        "整段补救重下 {} 完成，成功 {}，失败 {}，进度 {}/{}。",
+                        "整段补救重下 {} 已处理，成功 {}，失败 {}，已提交 {}/{}。",
                         task.ts_code,
                         one_success_count,
                         one_failed_count,
-                        task_idx + 1,
+                        total.recovered_stock_count,
                         total_tasks
                     ),
                 );
@@ -2321,6 +2551,19 @@ fn download_pending_all_market_after_basic_data(
     }
 
     checkpoint_stock_data(&conn)?;
+    if total.failed_count > 0 {
+        return Err(format!(
+            "复权异常股票仍有 {} 只未补回，已停止后续计算；删除记录和成功写入的数据已保留，请先执行缺失股票补全。失败原因：{}",
+            total.failed_count,
+            total
+                .failed_items
+                .iter()
+                .take(3)
+                .map(|(code, error)| format!("{code}: {error}"))
+                .collect::<Vec<_>>()
+                .join("；")
+        ));
+    }
     total.concept_performance_rows += sync_gaini_bx_range(
         source_dir,
         pending_trade_dates[0].as_str(),
@@ -2588,12 +2831,61 @@ mod tests {
         )
         .expect("seed stock rows");
 
-        delete_stocks_all_rows(
+        prepare_stock_repairs(
             &conn,
             &HashSet::from(["000001.SZ".to_string()]),
             AdjType::Qfq,
+            "20260102",
+            "20260106",
+            false,
+        )
+        .expect("persist repair plan before deleting any stock");
+        assert_eq!(load_pending_stock_repairs(&conn).unwrap().len(), 1);
+        let retained: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM stock_data WHERE ts_code='000001.SZ' AND adj_type='qfq'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(retained, 2);
+
+        prepare_stock_repairs(
+            &conn,
+            &HashSet::from(["000001.SZ".to_string()]),
+            AdjType::Qfq,
+            "20260102",
+            "20260106",
+            true,
         )
         .expect("delete broken stock history");
+
+        let pending =
+            load_pending_stock_repairs(&conn).expect("persist pending repair with deletion");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].start_date, "20260102");
+        assert_eq!(pending[0].end_date, "20260106");
+        let source_path = source_dir.to_str().unwrap();
+        let concept_db = crate::data::concept_performance_db_path(source_path);
+        crate::data::concept_performance_data::init_concept_performance_db(&concept_db).unwrap();
+        let concept_conn = Connection::open(&concept_db).unwrap();
+        concept_conn
+            .execute(
+                "INSERT INTO concept_performance VALUES ('20260106', 'industry', '旧行业数据', 1)",
+                [],
+            )
+            .unwrap();
+        rebuild_concept_performance_range(source_path, "20260102", "20260106").expect_err(
+            "pending repair must block industry computation before changing the derived db",
+        );
+        let retained: i64 = concept_conn
+            .query_row(
+                "SELECT COUNT(*) FROM concept_performance WHERE concept = '旧行业数据'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(retained, 1);
 
         let broken_qfq_rows = conn
             .query_row(
@@ -2632,8 +2924,36 @@ mod tests {
             }],
             indicators: HashMap::new(),
         };
-        write_incremental_trade_date_batches(&conn, &[daily_batch], AdjType::Qfq, &[], |_| {})
-            .expect("commit daily increment");
+        let mut committed_batches = 0;
+        write_incremental_trade_date_batches(
+            &conn,
+            std::slice::from_ref(&daily_batch),
+            AdjType::Qfq,
+            &[],
+            |_| {
+                // 若回调仍位于写入事务内，BEGIN 会因嵌套事务而失败。
+                conn.execute_batch("BEGIN TRANSACTION; ROLLBACK;")
+                    .expect("completion callback must run after commit");
+                committed_batches += 1;
+            },
+        )
+        .expect("commit daily increment");
+        assert_eq!(committed_batches, 1);
+
+        let invalid_daily_batch = PendingTradeDateBatch {
+            trade_date: daily_batch.trade_date.clone(),
+            rows: daily_batch.rows.clone(),
+            indicators: HashMap::from([("MA5".to_string(), Vec::new())]),
+        };
+        write_incremental_trade_date_batches(
+            &conn,
+            &[daily_batch, invalid_daily_batch],
+            AdjType::Qfq,
+            &[],
+            |_| committed_batches += 1,
+        )
+        .expect_err("failed transaction must not report completed batches");
+        assert_eq!(committed_batches, 1);
 
         let invalid_repair = PreparedStockDownload {
             ts_code: "000001.SZ".to_string(),
@@ -2688,6 +3008,17 @@ mod tests {
         assert_eq!(committed_daily_rows, 1);
         assert_eq!(broken_stock_rows, 0);
 
+        assert!(ensure_stock_data_ready_for_derived(source_path).is_err());
+        drop(conn);
+        let conn = Connection::open(&db_path).unwrap();
+        assert_eq!(load_pending_stock_repairs(&conn).unwrap().len(), 1);
+        let mut partial_repair = valid_repair.clone();
+        partial_repair.start_date = "20260105".to_string();
+        partial_repair.rows[0].trade_date = "20260105".to_string();
+        write_prepared_stock_batch(&conn, &[partial_repair], false).unwrap();
+        assert_eq!(load_pending_stock_repairs(&conn).unwrap().len(), 1);
+        assert!(ensure_stock_data_ready_for_derived(source_path).is_err());
+
         write_prepared_stock_batch(&conn, &[valid_repair], true)
             .expect("commit stock repair and pending marker");
         let pending_code: String = conn
@@ -2696,6 +3027,16 @@ mod tests {
             })
             .expect("read pending repair marker");
         assert_eq!(pending_code, "000001.SZ");
+        assert!(load_pending_stock_repairs(&conn).unwrap().is_empty());
+        let dirty = crate::data::download_state::load_pending_derived_rebuilds(&conn).unwrap();
+        assert_eq!(dirty.len(), 3);
+        assert!(
+            dirty
+                .iter()
+                .all(|item| item.start_date == "20260102" && item.end_date == "20260106")
+        );
+        checkpoint_stock_data(&conn).unwrap();
+        ensure_stock_data_ready_for_derived(source_path).expect("full repair unblocks computation");
 
         fs::remove_dir_all(source_dir).ok();
     }

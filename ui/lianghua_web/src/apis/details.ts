@@ -282,6 +282,8 @@ export type TencentIntradayData = {
   trade_date: string
   summary?: TencentIntradaySummary | null
   points: TencentIntradayPoint[]
+  volume_ratio_points?: { time: string; trading_minutes: number; volume_ratio: number }[]
+  volume_ratio_error?: string | null
 }
 
 export type StockDetailIntradaySnapshotData = {
@@ -393,7 +395,7 @@ export async function getStockDetailRealtime(query: {
   return invoke<StockDetailRealtimeData>('get_stock_detail_realtime', query)
 }
 
-export async function getStockDetailIntraday(query: { tsCode: string }) {
+export async function getStockDetailIntraday(query: { sourcePath: string; tsCode: string }) {
   return invoke<TencentIntradayData>('get_stock_detail_intraday', query)
 }
 

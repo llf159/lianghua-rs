@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fs,
     path::Path,
     sync::mpsc::{SyncSender, sync_channel},
@@ -29,6 +29,10 @@ use crate::{
             ensure_indicator_columns, flush_stock_data_indicator_stage_table,
             list_stock_data_indicator_columns, reset_stock_data_indicator_stage_table,
         },
+        download_state::{
+            ensure_stock_data_ready_for_derived, load_missing_stock_codes,
+            load_unfinished_stock_repairs, open_source_db_readonly,
+        },
         dragon_tiger_db_path, ind_toml_path, load_stock_list, load_ths_concepts_list,
         load_trade_date_list, source_db_path, stock_list_path, ths_concepts_path,
         trade_calendar_path,
@@ -47,8 +51,8 @@ use lianghua_download::download::{
         DownloadProgress, DownloadProgressCallback, DownloadRuntimeConfig,
         ThsConceptDownloadConfig, download_after_basic_data as core_run_download_with_progress,
         download_indices_after_basic_data as core_run_index_download_with_progress,
-        download_selected_stocks as core_run_selected_stock_download_with_progress,
         download_ths_concepts as core_download_ths_concepts, init_stock_basic_data,
+        repair_selected_stock_history as core_run_selected_stock_download_with_progress,
     },
 };
 
@@ -97,6 +101,7 @@ pub struct DataDownloadStatus {
     pub trade_calendar: DataDownloadFileStatus,
     pub ths_concepts: DataDownloadFileStatus,
     pub missing_stock_repair: DataDownloadMissingStockRepairStatus,
+    pub pending_derived_rebuilds: Vec<crate::data::download_state::PendingDerivedRebuild>,
     pub cyq_chen_maintenance: DataDownloadCyqChenMaintenanceStatus,
     pub daily_target_trade_date: Option<String>,
     pub planned_action: String,
@@ -432,7 +437,7 @@ fn normalize_nested_data_download_progress(
                 progress.finished = 1;
                 progress.total = 1;
                 progress.current_label = Some("指数行情".to_string());
-                progress.message = "指数行情下载阶段完成，准备维护概念/行业表现库。".to_string();
+                progress.message = "指数行情下载阶段完成。".to_string();
             }
             _ => {}
         },
@@ -462,15 +467,13 @@ fn emit_chip_maintenance_progress(
 }
 
 fn hide_chip_repair_local_counter(mut progress: DownloadProgress) -> DownloadProgress {
-    let repair_done = progress.total > 0 && progress.finished >= progress.total;
+    let repair_done = progress.phase == "done";
     progress.finished = 0;
     progress.total = 0;
     progress.message = if repair_done {
         "断点股票的筹码局部修复已完成，正在衔接其余增量股票。".to_string()
-    } else if let Some(ts_code) = progress.current_label.as_deref() {
-        format!("正在修复断点股票 {ts_code} 的筹码数据，随后继续维护其余增量股票。")
     } else {
-        "正在修复本轮断点股票的筹码数据，随后继续维护其余增量股票。".to_string()
+        format!("{}；局部修复提交后继续维护其余增量股票。", progress.message)
     };
     progress
 }
@@ -488,9 +491,9 @@ fn merge_chip_repair_into_incremental_progress(
     progress.finished = repaired_stock_count.saturating_add(incremental_finished);
     progress.total = repaired_stock_count.saturating_add(incremental_total);
     progress.message = format!(
-        "断点股票已修复 {repaired_stock_count} 只；其余增量维护已完成 \
+        "{}；断点股票已提交修复 {repaired_stock_count} 只；其余增量计算 \
          {incremental_finished} / {incremental_total} 只，总进度 {} / {}。",
-        progress.finished, progress.total
+        progress.message, progress.finished, progress.total
     );
     progress
 }
@@ -884,7 +887,17 @@ fn scan_missing_stock_codes(
         ));
     }
 
-    if !source_db.exists || source_db.row_count == 0 {
+    let conn = if source_db.exists {
+        Some(open_source_db_readonly(source_path)?)
+    } else {
+        None
+    };
+    let pending_repairs = conn
+        .as_ref()
+        .map(|conn| load_unfinished_stock_repairs(source_path, conn))
+        .transpose()?
+        .unwrap_or_default();
+    if !source_db.exists || (source_db.row_count == 0 && pending_repairs.is_empty()) {
         return Ok((
             Vec::new(),
             DataDownloadMissingStockRepairStatus {
@@ -897,73 +910,33 @@ fn scan_missing_stock_codes(
             },
         ));
     }
-
-    let list_codes: Vec<String> = load_stock_list(source_path)?
-        .into_iter()
-        .filter_map(|row| row.first().cloned())
-        .filter(|value| !value.trim().is_empty())
-        .collect();
-    let existing_codes = (|source_path: &str| -> Result<HashSet<String>, String> {
-        let db_path = source_db_path(source_path);
-        if !db_path.exists() {
-            return Ok(HashSet::new());
-        }
-
-        let db_path_str = db_path
-            .to_str()
-            .ok_or_else(|| "stock_data.db 路径不是有效 UTF-8".to_string())?;
-        let conn =
-            Connection::open(db_path_str).map_err(|e| format!("打开 stock_data.db 失败: {e}"))?;
-        let table_exists = conn
-            .query_row(
-                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
-                ["stock_data"],
-                |row| row.get::<_, i64>(0),
-            )
-            .map_err(|e| format!("检查 stock_data 表结构失败: {e}"))?;
-        if table_exists <= 0 {
-            return Ok(HashSet::new());
-        }
-
-        let mut stmt = conn
-            .prepare(
-                r#"
-            SELECT DISTINCT ts_code
-            FROM stock_data
-            WHERE adj_type = ? AND ts_code IS NOT NULL AND TRIM(ts_code) <> ''
-            "#,
-            )
-            .map_err(|e| format!("预编译现有股票代码查询失败: {e}"))?;
-        let mut rows = stmt
-            .query(["qfq"])
-            .map_err(|e| format!("查询现有股票代码失败: {e}"))?;
-
-        let mut out = HashSet::new();
-        while let Some(row) = rows
-            .next()
-            .map_err(|e| format!("读取现有股票代码失败: {e}"))?
-        {
-            let ts_code: String = row.get(0).map_err(|e| format!("读取 ts_code 失败: {e}"))?;
-            if !ts_code.trim().is_empty() {
-                out.insert(ts_code);
-            }
-        }
-
-        Ok(out)
-    })(source_path)?;
-
-    let mut missing_codes: Vec<String> = list_codes
-        .into_iter()
-        .filter(|ts_code| !existing_codes.contains(ts_code))
-        .collect();
+    let conn = conn.ok_or_else(|| "原始库不存在".to_string())?;
+    let mut missing_codes = load_missing_stock_codes(source_path, &conn)?;
+    missing_codes.extend(
+        pending_repairs
+            .iter()
+            .map(|pending| pending.ts_code.clone()),
+    );
     missing_codes.sort();
     missing_codes.dedup();
+    let suggested_start_date = source_db
+        .min_trade_date
+        .iter()
+        .chain(pending_repairs.iter().map(|pending| &pending.start_date))
+        .min()
+        .cloned();
+    let suggested_end_date = source_db
+        .max_trade_date
+        .iter()
+        .chain(pending_repairs.iter().map(|pending| &pending.end_date))
+        .max()
+        .cloned();
 
     let detail = if missing_codes.is_empty() {
-        "当前 stock_list.csv 中的股票都已在原始库里出现过，无需补全。".to_string()
+        "当前没有完全缺失或复权待补救的股票，无需补全。".to_string()
     } else {
         format!(
-            "将按当前原始库起始日期到当前原始库最新交易日，补全 {} 只完全缺失的股票。",
+            "将按原始库与待补救记录的日期范围，补全 {} 只完全缺失或复权待补救的股票。",
             missing_codes.len()
         )
     };
@@ -974,8 +947,8 @@ fn scan_missing_stock_codes(
             ready: true,
             missing_count: missing_codes.len() as u64,
             missing_samples: missing_codes.into_iter().take(12).collect(),
-            suggested_start_date: source_db.min_trade_date.clone(),
-            suggested_end_date: source_db.max_trade_date.clone(),
+            suggested_start_date,
+            suggested_end_date,
             detail,
         },
     ))
@@ -1142,6 +1115,12 @@ pub fn get_data_download_status(source_path: &str) -> Result<DataDownloadStatus,
         resolve_daily_target_trade_date(&trade_dates, &today, current_hhmm)
     });
 
+    let pending_derived_rebuilds = if source_db.exists {
+        let conn = open_source_db_readonly(trimmed)?;
+        crate::data::download_state::load_pending_derived_rebuilds(&conn)?
+    } else {
+        Vec::new()
+    };
     Ok(DataDownloadStatus {
         source_path: trimmed.to_string(),
         source_db,
@@ -1151,6 +1130,7 @@ pub fn get_data_download_status(source_path: &str) -> Result<DataDownloadStatus,
         trade_calendar,
         ths_concepts,
         missing_stock_repair,
+        pending_derived_rebuilds,
         cyq_chen_maintenance,
         daily_target_trade_date,
         planned_action,
@@ -1441,6 +1421,7 @@ pub fn run_prepared_data_download(
         effective_trade_date.as_str(),
         Some(&stock_progress_cb),
     )?;
+    ensure_stock_data_ready_for_derived(&prepared.source_path)?;
     let index_config = DownloadRuntimeConfig {
         source_dir: prepared.source_path.clone(),
         adj_type: AdjType::Ind,
@@ -1465,6 +1446,12 @@ pub fn run_prepared_data_download(
         effective_trade_date.as_str(),
         Some(&index_progress_cb),
     )?;
+    if index_summary.failed_count > 0 {
+        return Err(format!(
+            "有 {} 只指数下载失败，已停止本轮后续计算；已提交的数据保留。",
+            index_summary.failed_count
+        ));
+    }
     summary.success_count += index_summary.success_count;
     summary.failed_count += index_summary.failed_count;
     summary.saved_rows += index_summary.saved_rows;
@@ -1482,24 +1469,11 @@ pub fn run_prepared_data_download(
                 |row| row.get(0),
             )
             .map_err(|e| format!("检查筹码待修复记录失败: {e}"))?;
-        let mut recovered_stock_codes = Vec::new();
-        if pending_table_exists {
-            let mut stmt = source_conn
-                .prepare("SELECT ts_code FROM pending_chip_repair ORDER BY ts_code")
-                .map_err(|e| format!("准备筹码待修复记录查询失败: {e}"))?;
-            let mut rows = stmt
-                .query([])
-                .map_err(|e| format!("查询筹码待修复记录失败: {e}"))?;
-            while let Some(row) = rows
-                .next()
-                .map_err(|e| format!("读取筹码待修复记录失败: {e}"))?
-            {
-                recovered_stock_codes.push(
-                    row.get::<_, String>(0)
-                        .map_err(|e| format!("读取筹码待修复股票失败: {e}"))?,
-                );
-            }
-        }
+        let recovered_stock_codes =
+            crate::data::download_state::load_pending_chip_repairs_for_model(
+                &source_conn,
+                &prepared.chip_model,
+            )?;
         let has_recovered_stocks = !recovered_stock_codes.is_empty();
         if let Some(cb) = progress_cb {
             cb(lianghua_download::download::runner::DownloadProgress {
@@ -1618,9 +1592,12 @@ pub fn run_prepared_data_download(
                                 .and_then(|summary| summary.end_date.as_deref())
                         });
                     if pending_table_exists {
-                        source_conn
-                            .execute("DELETE FROM pending_chip_repair", [])
-                            .map_err(|e| format!("清除已完成的筹码待修复记录失败: {e}"))?;
+                        crate::data::download_state::clear_completed_chip_repairs(
+                            &source_conn,
+                            source_path,
+                            chip_model,
+                            recovered_stock_codes,
+                        )?;
                     }
                     Ok(Some(
                         if repair_summary.is_none() && incremental_summary.is_none() {
@@ -1690,9 +1667,12 @@ pub fn run_prepared_data_download(
                                 .and_then(|summary| summary.end_date.as_deref())
                         });
                     if pending_table_exists {
-                        source_conn
-                            .execute("DELETE FROM pending_chip_repair", [])
-                            .map_err(|e| format!("清除已完成的筹码待修复记录失败: {e}"))?;
+                        crate::data::download_state::clear_completed_chip_repairs(
+                            &source_conn,
+                            source_path,
+                            chip_model,
+                            recovered_stock_codes,
+                        )?;
                     }
                     Ok(Some(
                         if repair_summary.is_none() && incremental_summary.is_none() {
@@ -1783,11 +1763,29 @@ pub fn run_prepared_missing_stock_repair(
         allow_stale_stock_list: false,
     };
 
-    let summary = core_run_selected_stock_download_with_progress(
+    let source_progress_cb = |progress: DownloadProgress| {
+        if progress.phase != "done" {
+            if let Some(cb) = progress_cb {
+                cb(progress);
+            }
+        }
+    };
+    let mut summary = core_run_selected_stock_download_with_progress(
         &config,
         &prepared.missing_ts_codes,
-        progress_cb,
+        Some(&source_progress_cb),
     )?;
+    ensure_stock_data_ready_for_derived(&prepared.source_path)?;
+    if let Some(cb) = progress_cb {
+        cb(DownloadProgress {
+            phase: "rebuild_concept_performance".to_string(),
+            finished: 0,
+            total: 1,
+            current_label: None,
+            message: "行情已完整补回，正在重建概念/行业表现。".to_string(),
+        });
+    }
+    summary.concept_performance_rows = rebuild_concept_performance_all(&prepared.source_path)?;
     let completion_details =
         concept_performance_completion_detail(summary.concept_performance_rows)
             .into_iter()
@@ -2024,6 +2022,7 @@ pub fn run_prepared_stock_data_indicator_columns_rebuild(
     prepared: &PreparedStockDataIndicatorColumnsRebuildRun,
     progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<DataDownloadRunResult, String> {
+    ensure_stock_data_ready_for_derived(&prepared.source_path)?;
     ensure_default_indicator_manage_file(&prepared.source_path)?;
     let inds_cache = cache_ind_build(&prepared.source_path)?;
     if inds_cache.is_empty() {
@@ -2360,6 +2359,32 @@ mod tests {
     }
 
     #[test]
+    fn pending_repair_remains_available_when_all_qfq_history_was_deleted() {
+        let source_dir = temp_dir_path("empty-pending-repair");
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.to_str().unwrap();
+        crate::data::download_data::init_stock_data_db(source_db_path(source).to_str().unwrap())
+            .unwrap();
+        let conn = Connection::open(source_db_path(source)).unwrap();
+        conn.execute_batch("CREATE TABLE pending_stock_repair (ts_code VARCHAR PRIMARY KEY, start_date VARCHAR, end_date VARCHAR); INSERT INTO pending_stock_repair VALUES ('000001.SZ', '20110104', '20260106')").unwrap();
+        fs::write(stock_list_path(source), "ts_code,symbol,name,area,industry,list_date,trade_date\n000001.SZ,1,A,,,19900101,20260106\n").unwrap();
+        let status = get_data_download_status(source).unwrap();
+        assert_eq!(status.source_db.row_count, 0);
+        assert!(status.missing_stock_repair.ready);
+        assert_eq!(status.missing_stock_repair.missing_count, 1);
+        assert_eq!(
+            status.missing_stock_repair.suggested_start_date.as_deref(),
+            Some("20110104")
+        );
+        assert_eq!(
+            status.missing_stock_repair.suggested_end_date.as_deref(),
+            Some("20260106")
+        );
+        drop(conn);
+        fs::remove_dir_all(source_dir).unwrap();
+    }
+
+    #[test]
     fn normalizes_stock_nested_terminal_progress_to_non_terminal_phase() {
         let next = normalize_nested_data_download_progress(
             DataDownloadNestedProgressScope::Stock,
@@ -2396,8 +2421,12 @@ mod tests {
 
         assert_eq!(next.finished, 0);
         assert_eq!(next.total, 0);
-        assert!(next.message.contains("局部修复已完成"));
+        assert!(!next.message.contains("局部修复已完成"));
+        assert!(next.message.contains("提交后"));
         assert!(next.message.contains("其余增量股票"));
+
+        let committed = hide_chip_repair_local_counter(progress("done", 1, 1));
+        assert!(committed.message.contains("局部修复已完成"));
     }
 
     #[test]

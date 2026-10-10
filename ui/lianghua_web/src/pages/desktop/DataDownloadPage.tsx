@@ -1,7 +1,11 @@
-import { forwardRef, useDeferredValue, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import { inspectManagedSourceStatus } from '../../apis/managedSource'
 import {
   DATA_DOWNLOAD_DRAFT_STORAGE_KEY,
+  checkDatabases,
+  repairDatabaseIssues,
+  type DatabaseCheckReport,
+  type DatabaseIssue,
   getDataDownloadStatus,
   listenDataDownloadProgress,
   runConceptMostRelatedRepair,
@@ -14,6 +18,9 @@ import {
   type DataDownloadStatus,
 } from '../../apis/dataDownload'
 import DataTaskProgress from '../../shared/DataTaskProgress'
+import DatabaseIntegrityPanel from './components/DatabaseIntegrityPanel'
+import { runRankingScoreCalculation } from '../../apis/rankingCompute'
+import { runStrategyTriggerSimilarityRanking, getStrategyTriggerSimilarityRankingProgress } from '../../apis/strategyTriggerSimilarity'
 import {
   calcProgressPercent,
   formatProgressDuration,
@@ -32,7 +39,7 @@ import { readStoredDetailCyqModel } from '../../shared/chartSettings'
 import { readJsonStorage, writeJsonStorage } from '../../shared/storage'
 import './css/DataDownloadPage.css'
 
-type BusyAction = 'idle' | 'loading' | 'running'
+type BusyAction = 'idle' | 'loading' | 'running' | 'checking'
 type TaskSection = 'main' | 'dragonTiger' | 'concept'
 
 type DataDownloadDraft = {
@@ -80,21 +87,6 @@ function formatTradeDate(value: string | null | undefined) {
 
 function inputDateToCompact(value: string) {
   return value.replaceAll('-', '').trim()
-}
-
-function calcPhaseProgressPercent(progress: DataDownloadProgress | null) {
-  if (!progress || progress.total <= 0) {
-    return null
-  }
-
-  return Math.max(0, Math.min(100, Math.round((progress.finished / progress.total) * 100)))
-}
-
-function shouldSuppressFirstDownloadProgress(progress: DataDownloadProgress) {
-  return (
-    progress.action === 'first-download' &&
-    (progress.phase === 'write_db' || progress.phase === 'write_index_db')
-  )
 }
 
 function formatElapsedMs(value: number) {
@@ -170,6 +162,21 @@ function formatPhaseLabel(phase: string | null | undefined) {
       return '概念下载完成'
     case 'done':
       return '下载完成'
+    case 'repair_stock_history': return '修复股票历史'
+    case 'repair_index_history': return '修复指数历史'
+    case 'audit_recheck': return '重新检查修复计划'
+    case 'score_prepare': return '准备评分'
+    case 'score_compute': return '计算评分'
+    case 'score_write': return '提交评分及排名'
+    case 'prepare': return '准备相似度数据'
+    case 'select-templates': return '筛选历史模板'
+    case 'candidate-fingerprints': return '构建历史模板指纹'
+    case 'target-fingerprints': return '构建当日股票指纹'
+    case 'candidate-index': return '构建候选索引'
+    case 'ranking': return '计算相似度排名'
+    case 'validate': return '校验相似度结果'
+    case 'write': return '提交相似度结果'
+    case 'read-result': return '读取相似度结果'
     case 'started':
       return '已启动'
     case 'failed':
@@ -181,19 +188,32 @@ function formatPhaseLabel(phase: string | null | undefined) {
 
 function getProgressWorkflow(action: string | null | undefined) {
   switch (action) {
+    case 'repair-database':
+      return [{ key: 'database_repair', label: '针对性修复', phases: [['audit_recheck', 'repair_stock_history', 'repair_index_history', 'rebuild_concept_performance', 'maintain_cyq_incremental']] }] as ProgressWorkflowStep[]
+    case 'score':
+      return ['score_prepare', 'score_compute', 'score_write'] as ProgressWorkflowStep[]
+    case 'repair-similarity':
+      return ['prepare', 'select-templates', 'candidate-fingerprints', 'target-fingerprints', 'candidate-index', 'ranking', 'validate', 'write', 'read-result'] as ProgressWorkflowStep[]
     case 'first-download':
       return [
-        'prepare_trade_calendar',
-        'prepare_stock_list',
-        'download_bars',
-        'retry_failed',
-        'write_db',
-        'rebuild_incremental_concept_performance',
-        'stock_download_done',
-        'prepare_index_download',
-        'download_index_bars',
-        'write_index_db',
-        'index_download_done',
+        {
+          key: 'stock_download',
+          label: '股票行情',
+          phases: [
+            'prepare_trade_calendar',
+            'prepare_stock_list',
+            ['download_bars', 'retry_failed', 'write_db'],
+            ['rebuild_incremental_concept_performance', 'stock_download_done'],
+          ],
+        },
+        {
+          key: 'index_download',
+          label: '指数行情',
+          phases: [
+            'prepare_index_download',
+            ['download_index_bars', 'write_index_db', 'index_download_done'],
+          ],
+        },
       ] as ProgressWorkflowStep[]
     case 'incremental-download':
       return [
@@ -206,10 +226,9 @@ function getProgressWorkflow(action: string | null | undefined) {
             'download_pending_trade_dates',
             'validate_pending_trade_dates',
             'calc_incremental_indicators',
-            'recover_failed_stocks',
             'write_db',
-            'rebuild_incremental_concept_performance',
-            'stock_download_done',
+            'recover_failed_stocks',
+            ['rebuild_incremental_concept_performance', 'stock_download_done'],
           ],
         },
         {
@@ -217,34 +236,36 @@ function getProgressWorkflow(action: string | null | undefined) {
           label: '指数行情',
           phases: [
             'prepare_index_download',
-            'download_index_bars',
-            'write_index_db',
-            'index_download_done',
+            ['download_index_bars', 'write_index_db', 'index_download_done'],
           ],
         },
         'maintain_cyq_incremental',
       ] as ProgressWorkflowStep[]
     case 'repair-missing-stocks':
       return [
-        'download_bars',
-        'retry_failed',
-        'write_db',
+        { key: 'repair_prepare', label: '准备补救', phases: ['prepare_trade_calendar', 'prepare_stock_list'] },
+        {
+          key: 'stock_repair',
+          label: '补全股票行情',
+          phases: [['download_bars', 'retry_failed', 'write_db']],
+        },
         'rebuild_concept_performance',
-        'done',
       ] as ProgressWorkflowStep[]
     case 'download-ths-concepts':
       return [
-        'prepare_ths_concepts',
-        'fetch_ths_concept',
-        'retry_ths_concepts',
-        'write_ths_concepts',
-        'done_ths_concepts',
+        {
+          key: 'concept_download',
+          label: '概念同步',
+          phases: [['prepare_ths_concepts', 'fetch_ths_concept', 'retry_ths_concepts', 'write_ths_concepts']],
+        },
       ] as ProgressWorkflowStep[]
     case 'download-dragon-tiger':
       return [
-        'download_dragon_tiger',
-        'write_dragon_tiger',
-        'dragon_tiger_done',
+        {
+          key: 'dragon_tiger_download',
+          label: '龙虎榜同步',
+          phases: [['download_dragon_tiger', 'write_dragon_tiger']],
+        },
       ] as ProgressWorkflowStep[]
     case 'rebuild-concept-performance':
       return ['rebuild_concept_performance'] as ProgressWorkflowStep[]
@@ -459,6 +480,9 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
 ) {
   const draft = useMemo(() => readDraft(), [])
   const [status, setStatus] = useState<DataDownloadStatus | null>(null)
+  const [auditReport, setAuditReport] = useState<DatabaseCheckReport | null>(null)
+  const [auditError, setAuditError] = useState('')
+  const [auditRepairConfirm, setAuditRepairConfirm] = useState<DatabaseIssue[] | null>(null)
   const [busyAction, setBusyAction] = useState<BusyAction>('loading')
   const [localToken, setLocalToken] = useState(draft.token)
   const [startDateInput, setStartDateInput] = useState(draft.startDate)
@@ -484,6 +508,7 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
     message: string
   } | null>(null)
   const [progress, setProgress] = useState<DataDownloadProgress | null>(null)
+  const [progressPercent, setProgressPercent] = useState<number | null>(null)
   const [activeTaskSection, setActiveTaskSection] = useState<TaskSection | null>(null)
   const [feedbackSection, setFeedbackSection] = useState<TaskSection>('main')
   const activeDownloadIdRef = useRef('')
@@ -501,41 +526,25 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
   const isBusy = busyAction !== 'idle'
   const isFirstDownload = status?.plannedAction === 'first-download'
   const latestDbTradeDate = formatTradeDate(status?.sourceDb.maxTradeDate)
-  const deferredProgress = useDeferredValue(progress)
-  const progressTiming = useProgressTiming(busyAction === 'running', progress)
+  const progressTiming = useProgressTiming(busyAction === 'running', progress, getProgressWorkflow)
   const resolvedIncrementalStartDate =
     inputDateToCompact(startDateInput) || status?.sourceDb.minTradeDate || '20240101'
-  const progressPercent =
-    deferredProgress?.action === 'first-download'
-      ? calcPhaseProgressPercent(deferredProgress)
-      : calcProgressPercent(deferredProgress, getProgressWorkflow, [
-          'done',
-          'done_ths_concepts',
-          'dragon_tiger_done',
-        ])
   const shownProgressPercent = useAnimatedProgressPercent(busyAction === 'running', progressPercent)
-  const phaseStep = getPhaseStep(deferredProgress?.action, deferredProgress?.phase, getProgressWorkflow)
+  const phaseStep = getPhaseStep(progress?.action, progress?.phase, getProgressWorkflow)
   const phaseLabel = getProgressTaskLabel(
-    deferredProgress?.action,
-    deferredProgress?.phase,
+    progress?.action,
+    progress?.phase,
     getProgressWorkflow,
     formatPhaseLabel,
   )
-  const progressCounterText = getProgressCounterText(
-    deferredProgress,
-    (phase) =>
-      getProgressTaskLabel(deferredProgress?.action, phase, getProgressWorkflow, formatPhaseLabel),
+  const progressCounterText = getProgressCounterText(progress, formatPhaseLabel)
+  const progressSegments = getProgressSegments(
+    progress?.action,
+    progress?.phase,
+    getProgressWorkflow,
+    ['done', 'done_ths_concepts', 'dragon_tiger_done'],
+    formatPhaseLabel,
   )
-  const progressSegments =
-    deferredProgress?.action === 'first-download'
-      ? null
-      : getProgressSegments(
-          deferredProgress?.action,
-          deferredProgress?.phase,
-          getProgressWorkflow,
-          ['done', 'done_ths_concepts', 'dragon_tiger_done'],
-          formatPhaseLabel,
-        )
   const missingStockRepair = status?.missingStockRepair ?? null
   const showMainProgress = busyAction === 'running' && activeTaskSection === 'main'
   const showDragonTigerProgress = busyAction === 'running' && activeTaskSection === 'dragonTiger'
@@ -624,6 +633,8 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
     executor: (downloadId: string) => Promise<DataDownloadRunResult>,
   ) {
     setBusyAction('running')
+    busyActionRef.current = 'running'
+    setAuditReport(null)
     setActiveTaskSection(section)
     setFeedbackSection(section)
     setError('')
@@ -631,6 +642,7 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
     setStaleStockListConfirmMessage('')
     setCyqChenStrategyConfirm(null)
     setProgress(null)
+    setProgressPercent(null)
 
     const downloadId = `download-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     activeDownloadIdRef.current = downloadId
@@ -639,10 +651,24 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
       if (activeDownloadIdRef.current !== downloadId) {
         return
       }
-      if (shouldSuppressFirstDownloadProgress(nextProgress)) {
-        return
-      }
+      const nextPercent = calcProgressPercent(nextProgress, getProgressWorkflow, [
+        'done',
+        'done_ths_concepts',
+        'dragon_tiger_done',
+      ])
+      // 重试准备、并行回调和未知总量不能把已确认的总进度倒退。
+      setProgressPercent((previous) =>
+        nextPercent === null ? previous : Math.max(previous ?? 0, nextPercent),
+      )
       setProgress((prev) => {
+        if (
+          prev &&
+          (nextProgress.elapsedMs < prev.elapsedMs ||
+            (prev.phase === nextProgress.phase && prev.total === nextProgress.total &&
+              nextProgress.finished < prev.finished))
+        ) {
+          return prev
+        }
         if (
           prev &&
           prev.phase === nextProgress.phase &&
@@ -672,6 +698,8 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
         setNotice(
           `${result.actionLabel}完成，用时 ${formatElapsedMs(result.elapsedMs)}；写入 ${result.summary.savedRows} 行${formatCompletionDetailTail(result.completionDetails)}。`,
         )
+      } else if (result.action === 'repair-database') {
+        setNotice(`${result.actionLabel}完成，用时 ${formatElapsedMs(result.elapsedMs)}${formatCompletionDetailTail(result.completionDetails)}。`)
       } else if (result.action === 'delete-stock-data-indicator-columns') {
         setNotice(
           `${result.actionLabel}完成，用时 ${formatElapsedMs(result.elapsedMs)}；清空 ${result.summary.successCount} 列，基础行情列已保留${formatCompletionDetailTail(result.completionDetails)}。`,
@@ -706,6 +734,11 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
 
       setNotice('')
       setError(`执行下载失败: ${String(runError)}`)
+      try {
+        setStatus(await getDataDownloadStatus(sourcePath))
+      } catch (statusError) {
+        console.warn('下载失败后刷新待补全状态失败', statusError)
+      }
       return null
     } finally {
       progressUnlistenRef.current?.()
@@ -807,12 +840,102 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
         readStoredDetailCyqModel() === 'chen' && status.cyqChenMaintenance.strategyChanged
       const result = await onRunDownload(false, false, true)
       return {
-        completed: Boolean(result),
+        completed: Boolean(
+          result &&
+          result.summary.failedCount === 0 &&
+          result.status.missingStockRepair.missingCount === 0,
+        ),
         latestTradeDate: result?.status.sourceDb.maxTradeDate ?? null,
         chipStrategySkipped,
       }
     },
   }))
+
+  async function onCheckDatabases() {
+    if (!sourcePath || busyActionRef.current !== 'idle') return
+    busyActionRef.current = 'checking'
+    setBusyAction('checking')
+    setAuditError('')
+    setAuditReport(null)
+    try {
+      setAuditReport(await checkDatabases(sourcePath))
+    } catch (checkError) {
+      setAuditError(`数据库检查失败：${String(checkError)}`)
+    } finally {
+      busyActionRef.current = 'idle'
+      setBusyAction('idle')
+    }
+  }
+
+  async function onRepairDatabaseIssues(issues: DatabaseIssue[]) {
+    setAuditRepairConfirm(null)
+    if (busyActionRef.current !== 'idle' || !issues.length) return
+    const action = issues[0].repairAction
+    if (['stock', 'market', 'index'].includes(action ?? '') && !token.trim()) {
+      setAuditError('请先填写上方共用的 Tushare Token。')
+      return
+    }
+    const startDate = issues[0].startDate
+    const endDate = issues[0].endDate
+    if (action === 'update') {
+      await onRunDownload()
+    } else {
+      await runDataTask('main', async (downloadId) => {
+        // 重算前重新检查，避免使用已经过期的检查结果。
+        if (action === 'ranking' || action === 'similarity') {
+          const current = await checkDatabases(sourcePath)
+          if (!current.sourceReady) throw new Error('原始行情检查未通过，请先修复行情。')
+          if (!startDate || !endDate) throw new Error('缺少需要重算的历史区间。')
+          const currentIssue = current.issues.find((item) => item.id === issues[0].id)
+          if (!currentIssue) throw new Error('该问题已不存在，请重新检查。')
+          if (action === 'similarity' && current.issues.some((item) => item.repairAction === 'ranking')) {
+            throw new Error('评分／排名需要先修复，不能使用旧评分重算相似度。')
+          }
+          let warnings: string[] = []
+          let elapsedMs = 0
+          if (action === 'ranking') {
+            const result = await runRankingScoreCalculation(sourcePath, currentIssue.startDate ?? startDate, currentIssue.endDate ?? endDate, undefined, downloadId)
+            warnings = result.warnings
+            elapsedMs = result.elapsedMs
+          } else {
+            const started = Date.now()
+            let polling = false
+            const timer = window.setInterval(() => {
+              if (polling) return
+              polling = true
+              void getStrategyTriggerSimilarityRankingProgress().then((sample) => {
+                if (activeDownloadIdRef.current !== downloadId || !sample || sample.startedAtEpochSeconds < Math.floor(started / 1000)) return
+                const next: DataDownloadProgress = {
+                  downloadId, action: 'repair-similarity', actionLabel: '相似度修复',
+                  phase: sample.phase, finished: sample.completed, total: sample.total,
+                  elapsedMs: Date.now() - started, currentLabel: null, message: sample.message,
+                }
+                setProgress(next)
+                const value = calcProgressPercent(next, getProgressWorkflow, ['done'])
+                if (value !== null) setProgressPercent((previous) => Math.max(previous ?? 0, value))
+              }).catch(() => {}).finally(() => { polling = false })
+            }, 500)
+            try {
+              await runStrategyTriggerSimilarityRanking({ sourcePath, tradeDate: currentIssue.endDate ?? endDate })
+              elapsedMs = Date.now() - started
+            } finally { window.clearInterval(timer) }
+          }
+          return {
+            action: 'repair-database', actionLabel: action === 'ranking' ? '评分／排名修复' : '相似度修复',
+            elapsedMs, summary: { successCount: 1, failedCount: 0, savedRows: 0, conceptPerformanceRows: 0, failedItems: [] },
+            completionDetails: ['按当前生效策略重算', ...warnings], status: await getDataDownloadStatus(sourcePath),
+          }
+        }
+        return repairDatabaseIssues(downloadId, {
+          sourcePath, issueIds: issues.map((issue) => issue.id), token: token.trim(),
+          threads: Math.max(1, Number(threads) || 1), retryTimes: Math.max(0, Number(retryTimes) || 0),
+          limitCallsPerMin: Math.max(1, Number(limitCallsPerMin) || 1), includeTurnover,
+        })
+      })
+    }
+    busyActionRef.current = 'idle'
+    await onCheckDatabases()
+  }
 
   async function onRunMissingStockRepair() {
     if (!sourcePath) {
@@ -1216,15 +1339,15 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
             phaseLabel={phaseLabel}
             phaseStepPillText={phaseStep ? ` · ${phaseStep.current}/${phaseStep.total}` : ''}
             phaseStepStatText={phaseStep ? ` ${phaseStep.current}/${phaseStep.total}` : ''}
-            actionLabel={deferredProgress?.actionLabel ?? (status?.plannedActionLabel ?? '下载执行中')}
+            actionLabel={progress?.actionLabel ?? (status?.plannedActionLabel ?? '下载执行中')}
             progressPercent={progressPercent}
             progressSegments={progressSegments}
-            elapsedText={formatElapsedMs(deferredProgress?.elapsedMs ?? 0)}
+            elapsedText={formatElapsedMs(progressTiming.elapsedMs)}
             shownProgressPercent={shownProgressPercent}
             progressCounterText={progressCounterText}
             estimatedRemainingText={formatProgressDuration(progressTiming.estimatedRemainingMs)}
             estimatedTotalText={formatProgressDuration(progressTiming.estimatedTotalMs)}
-            message={deferredProgress?.message}
+            message={progress?.message}
             fallbackMessage="下载已经启动，正在等待后端返回当前状态。安卓端长时间无响应时，可以先看这里的阶段提示和耗时。"
           />
         ) : null}
@@ -1232,6 +1355,28 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
         {showMainNotice ? <div className="data-download-notice">{notice}</div> : null}
         {showMainError ? <div className="data-download-error">{error}</div> : null}
       </section>
+
+      <DatabaseIntegrityPanel
+        report={auditReport?.sourcePath === sourcePath ? auditReport : null}
+        busy={isBusy}
+        checking={busyAction === 'checking'}
+        error={auditError}
+        onCheck={() => void onCheckDatabases()}
+        onRepair={(issues) => setAuditRepairConfirm(issues)}
+      />
+      <ConfirmDialog
+        open={Boolean(auditRepairConfirm)}
+        title="执行针对性修复"
+        message={auditRepairConfirm?.[0].repairAction === 'stock' || auditRepairConfirm?.[0].repairAction === 'market'
+          ? `将按所选问题重拉 ${auditRepairConfirm?.[0].repairAction === 'market' ? '全市场' : `${new Set(auditRepairConfirm?.map((issue) => issue.tsCode)).size} 只股票的`}完整历史并重算指标。异常旧行情会先删除并保存待补回记录，失败后可继续修复；行业、筹码和排名在行情检查通过后另行重算。`
+          : auditRepairConfirm?.[0].repairAction === 'chip' || auditRepairConfirm?.[0].repairAction === 'legacy-chip'
+            ? '先局部修复待补救股票，再维护增量；新筹码策略已变化时按当前策略全量重建。提交成功后自动复查。'
+            : '将按当前生效策略和检查给出的区间修复所选数据库，成功提交后自动复查。评分和相似度修复会重新生成对应结果。'}
+        confirmText="开始修复"
+        busy={isBusy}
+        onConfirm={() => auditRepairConfirm && void onRepairDatabaseIssues(auditRepairConfirm)}
+        onCancel={() => setAuditRepairConfirm(null)}
+      />
 
       <section className="data-download-card">
         <section className="data-download-panel">
@@ -1295,14 +1440,14 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
               phaseLabel={phaseLabel}
               phaseStepPillText={phaseStep ? ` · ${phaseStep.current}/${phaseStep.total}` : ''}
               phaseStepStatText={phaseStep ? ` ${phaseStep.current}/${phaseStep.total}` : ''}
-              actionLabel={deferredProgress?.actionLabel ?? '龙虎榜数据下载'}
+              actionLabel={progress?.actionLabel ?? '龙虎榜数据下载'}
               progressPercent={progressPercent}
               progressSegments={progressSegments}
-              elapsedText={formatElapsedMs(deferredProgress?.elapsedMs ?? 0)}
+              elapsedText={formatElapsedMs(progressTiming.elapsedMs)}
               shownProgressPercent={shownProgressPercent}
               progressCounterText={progressCounterText}
-              currentObjectText={getCurrentObjectText(deferredProgress)}
-              message={deferredProgress?.message}
+              currentObjectText={getCurrentObjectText(progress)}
+              message={progress?.message}
               fallbackMessage="龙虎榜下载已经启动，正在等待后端返回当前交易日进度。"
             />
           ) : null}
@@ -1424,14 +1569,14 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
               phaseLabel={phaseLabel}
               phaseStepPillText={phaseStep ? ` · ${phaseStep.current}/${phaseStep.total}` : ''}
               phaseStepStatText={phaseStep ? ` ${phaseStep.current}/${phaseStep.total}` : ''}
-              actionLabel={deferredProgress?.actionLabel ?? '概念数据下载'}
+              actionLabel={progress?.actionLabel ?? '概念数据下载'}
               progressPercent={progressPercent}
               progressSegments={progressSegments}
-              elapsedText={formatElapsedMs(deferredProgress?.elapsedMs ?? 0)}
+              elapsedText={formatElapsedMs(progressTiming.elapsedMs)}
               shownProgressPercent={shownProgressPercent}
               progressCounterText={progressCounterText}
-              currentObjectText={getCurrentObjectText(deferredProgress)}
-              message={deferredProgress?.message}
+              currentObjectText={getCurrentObjectText(progress)}
+              message={progress?.message}
               fallbackMessage="下载已经启动，正在等待后端返回当前状态。安卓端长时间无响应时，可以先看这里的阶段提示和耗时。"
             />
           ) : null}

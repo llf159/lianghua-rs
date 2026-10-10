@@ -4642,7 +4642,7 @@ export default function DetailsPage({
       setDetailRealtimeLoading(true);
       setDetailRealtimeNotice("");
       try {
-        const pending = getStockDetailIntraday({ tsCode: normalizedTsCode });
+        const pending = getStockDetailIntraday({ sourcePath: normalizedSourcePath, tsCode: normalizedTsCode });
         detailIntradayPendingRef.current = pending;
         const intraday = await pending;
         if (detailIntradayRequestIdRef.current !== requestId) return null;

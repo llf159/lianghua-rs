@@ -91,10 +91,12 @@ export default function DownloadComputePage() {
       setDailyCompletion({
         loading: false,
         targetTradeDate,
-        download: reachesTarget(downloadStatus.sourceDb.maxTradeDate),
-        ranking: !rankingStrategyChanged && reachesTarget(rankingStatus.resultDb.maxTradeDate),
+        download:
+          reachesTarget(downloadStatus.sourceDb.maxTradeDate) &&
+          downloadStatus.missingStockRepair.missingCount === 0,
+        ranking: !rankingStrategyChanged && !(downloadStatus.pendingDerivedRebuilds ?? []).some((item) => item.component === 'ranking') && reachesTarget(rankingStatus.resultDb.maxTradeDate),
         similarity:
-          !rankingStrategyChanged && reachesTarget(rankingStatus.similarityRankDb.maxTradeDate),
+          !rankingStrategyChanged && !(downloadStatus.pendingDerivedRebuilds ?? []).some((item) => ['ranking', 'similarity'].includes(item.component)) && reachesTarget(rankingStatus.similarityRankDb.maxTradeDate),
         rankingStrategyChanged,
         error: '',
       })
@@ -152,6 +154,12 @@ export default function DownloadComputePage() {
         return
       }
 
+      const downloadStatus = await getDataDownloadStatus((await inspectManagedSourceStatus()).sourcePath)
+      if ((downloadStatus.pendingDerivedRebuilds ?? []).some((item) => item.component === 'ranking')) {
+        setDailyWorkflowStage('failed')
+        setDailyWorkflowMessage('行情修复后有历史评分待重算，请在数据库检查面板先修复评分／排名，再执行每日工作流。')
+        return
+      }
       setDailyWorkflowStage('ranking')
       setDailyWorkflowMessage(
         `${downloadResult.chipStrategySkipped ? '检测到新筹码策略变化，已走跳过路径；' : ''}正在检查排名策略并把排名补算到 ${downloadResult.latestTradeDate}。`,

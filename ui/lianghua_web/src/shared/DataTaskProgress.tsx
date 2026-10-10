@@ -46,7 +46,7 @@ export default function DataTaskProgress({
           <strong>{actionLabel}</strong>
         </div>
         <div className="data-download-progress-value">
-          <strong>{progressPercent === null ? '--' : `${progressPercent}%`}</strong>
+          <strong>{progressPercent === null ? '--' : `${Math.floor(shownProgressPercent * 10) / 10}%`}</strong>
           <span>{elapsedText}</span>
         </div>
       </div>
@@ -60,7 +60,7 @@ export default function DataTaskProgress({
       >
         <div
           className={`data-download-progress-bar-fill ${progressPercent === null ? 'is-indeterminate' : ''}`}
-          style={{ width: `${progressPercent === null ? Math.max(shownProgressPercent, 10) : Math.max(0, Math.min(100, shownProgressPercent))}%` }}
+          style={{ width: `${Math.max(0, Math.min(100, shownProgressPercent))}%` }}
         />
         {progressSegments && progressSegments.length > 1 ? (
           <div

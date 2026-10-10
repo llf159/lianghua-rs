@@ -253,6 +253,31 @@ fn collect_scoring_used_cyq_chen_runtime_keys(rules_cache: &[CachedRule]) -> Has
     collect_used_cyq_chen_runtime_keys(&programs)
 }
 
+fn ensure_scoring_dependencies_ready(
+    source_dir: &str,
+    rules: &[CachedRule],
+    used_chip_keys: &HashSet<String>,
+) -> Result<(), String> {
+    if used_chip_keys.is_empty() && !scoring_uses_similarity_rank(rules) {
+        return Ok(());
+    }
+    let source = crate::data::download_state::open_source_db_readonly(source_dir)?;
+    if !used_chip_keys.is_empty()
+        && !crate::data::download_state::load_pending_chip_repairs_for_model(&source, "chen")?
+            .is_empty()
+    {
+        return Err("评分策略使用新筹码字段，但行情修复后的新筹码尚未修复，禁止使用旧筹码计算评分。请先修复新筹码。".to_string());
+    }
+    if scoring_uses_similarity_rank(rules)
+        && crate::data::download_state::load_pending_derived_rebuilds(&source)?
+            .iter()
+            .any(|item| item.component == "similarity")
+    {
+        return Err("评分策略使用 S_RANK，但旧相似度已因行情修复失效。需先使用不依赖 S_RANK 的策略重建评分及相似度，再恢复该规则计算；禁止用旧结果重算。".to_string());
+    }
+    Ok(())
+}
+
 pub fn preview_scoring_runtime_warnings(
     source_dir: &str,
     strategy_path: Option<&str>,
@@ -262,6 +287,7 @@ pub fn preview_scoring_runtime_warnings(
     let warmup_need = warmup_rows_estimate(source_dir, strategy_path)?;
     let rules_cache = cache_rule_build(source_dir, strategy_path)?;
     let used_cyq_chen_keys = collect_scoring_used_cyq_chen_runtime_keys(&rules_cache);
+    ensure_scoring_dependencies_ready(source_dir, &rules_cache, &used_cyq_chen_keys)?;
     Ok(preview_optional_cyq_chen_injection_warnings(
         source_dir,
         start_date,
@@ -385,6 +411,7 @@ pub fn scoring_all_to_db(
     end_date: &str,
     progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<ScoringRunProfile, String> {
+    crate::data::download_state::ensure_stock_data_ready_for_derived(source_dir)?;
     let total_started_at = time::Instant::now();
     let out_db = result_db_path(source_dir);
     let init_result_db_started_at = time::Instant::now();
@@ -406,6 +433,7 @@ pub fn scoring_all_to_db(
     let need_rows = calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?;
     let rules_cache = cache_rule_build(source_dir, strategy_path)?;
     let used_cyq_chen_keys = collect_scoring_used_cyq_chen_runtime_keys(&rules_cache);
+    ensure_scoring_dependencies_ready(source_dir, &rules_cache, &used_cyq_chen_keys)?;
     let uses_similarity_rank = scoring_uses_similarity_rank(&rules_cache);
     let warnings = preview_optional_cyq_chen_injection_warnings(
         source_dir,
@@ -580,6 +608,10 @@ pub fn scoring_all_to_db(
             profile.writer.batch_count,
         );
     })(&profile);
+    drop(dr);
+    crate::data::download_state::clear_pending_derived_rebuild(
+        source_dir, "ranking", start_date, end_date,
+    )?;
     Ok(profile)
 }
 
@@ -608,6 +640,7 @@ pub fn scoring_all_to_memory_with_mode(
     end_date: &str,
     memory_mode: ScoringMemoryMode,
 ) -> Result<(ScoreBatch, ScoringRunProfile), String> {
+    crate::data::download_state::ensure_stock_data_ready_for_derived(source_dir)?;
     let total_started_at = time::Instant::now();
     let prepare_started_at = time::Instant::now();
     let st_list = load_st_list(source_dir)?;
@@ -617,6 +650,7 @@ pub fn scoring_all_to_memory_with_mode(
     let need_rows = calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?;
     let rules_cache = cache_rule_build(source_dir, strategy_path)?;
     let used_cyq_chen_keys = collect_scoring_used_cyq_chen_runtime_keys(&rules_cache);
+    ensure_scoring_dependencies_ready(source_dir, &rules_cache, &used_cyq_chen_keys)?;
     let uses_similarity_rank = scoring_uses_similarity_rank(&rules_cache);
     let warnings = preview_optional_cyq_chen_injection_warnings(
         source_dir,
@@ -728,6 +762,7 @@ pub fn scoring_single_period(
     let need_rows = calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?;
     let rules_cache = cache_rule_build(source_dir, strategy_path)?;
     let used_cyq_chen_keys = collect_scoring_used_cyq_chen_runtime_keys(&rules_cache);
+    ensure_scoring_dependencies_ready(source_dir, &rules_cache, &used_cyq_chen_keys)?;
     let uses_similarity_rank = scoring_uses_similarity_rank(&rules_cache);
     let required_runtime_keys = collect_scoring_runtime_keys(&rules_cache);
     let dr = DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;

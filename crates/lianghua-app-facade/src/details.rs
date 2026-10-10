@@ -11,7 +11,8 @@ use serde::Serialize;
 use crate::{
     crawler::{
         SinaQuote,
-        intraday::{TencentIntradayData, fetch_tencent_intraday},
+        intraday::{TencentIntradayData, fetch_tencent_intraday_text, parse_tencent_intraday_text},
+        volume_ratio::parse_tencent_volume_ratio,
     },
     data::{RowData, ScoreConfig},
     data::{
@@ -30,6 +31,7 @@ use lianghua_app_chart::indicator::{
 use lianghua_app_market::realtime::{
     RealtimeFetchMeta, fetch_realtime_quote_map_with_provider, normalize_quote_trade_date,
 };
+use lianghua_app_market::volume_ratio::load_volume_ratio_averages;
 use lianghua_app_shared::{canonical_ts_code, resolve_trade_date};
 use lianghua_app_strategy::stock_similarity::StockSimilarityPageData;
 
@@ -2394,7 +2396,10 @@ pub fn get_stock_detail_realtime(
     )
 }
 
-pub fn get_stock_detail_intraday(ts_code: String) -> Result<TencentIntradayData, String> {
+pub fn get_stock_detail_intraday(
+    source_path: String,
+    ts_code: String,
+) -> Result<TencentIntradayData, String> {
     let normalized_ts_code = canonical_ts_code(&ts_code);
     if normalized_ts_code.trim().is_empty() {
         return Err("股票代码不能为空".to_string());
@@ -2406,7 +2411,25 @@ pub fn get_stock_detail_intraday(ts_code: String) -> Result<TencentIntradayData,
         .timeout(Duration::from_secs(12))
         .build()
         .map_err(|e| format!("创建腾讯分时行情客户端失败: {e}"))?;
-    fetch_tencent_intraday(&http, &normalized_ts_code)
+    let raw = fetch_tencent_intraday_text(&http, &normalized_ts_code)?;
+    let mut intraday = parse_tencent_intraday_text(&raw, &normalized_ts_code)?;
+    let volume_ratio = load_volume_ratio_averages(
+        &source_path,
+        &intraday.trade_date,
+        Some(&normalized_ts_code),
+    )
+    .and_then(|averages| {
+        let average = averages
+            .get(&normalized_ts_code)
+            .copied()
+            .ok_or_else(|| "该股票缺少前五个交易日的完整成交量基准".to_string())?;
+        parse_tencent_volume_ratio(&raw, &normalized_ts_code, average)
+    });
+    match volume_ratio {
+        Ok(data) => intraday.volume_ratio_points = data.points,
+        Err(error) => intraday.volume_ratio_error = Some(error),
+    }
+    Ok(intraday)
 }
 
 pub fn get_stock_detail_intraday_snapshot(
@@ -2414,7 +2437,7 @@ pub fn get_stock_detail_intraday_snapshot(
     ts_code: String,
     chart_window_days: Option<u32>,
 ) -> Result<StockDetailIntradaySnapshotData, String> {
-    let intraday = get_stock_detail_intraday(ts_code)?;
+    let intraday = get_stock_detail_intraday(source_path.clone(), ts_code)?;
     let realtime_result = (|| {
         let summary = intraday
             .summary

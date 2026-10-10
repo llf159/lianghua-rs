@@ -583,6 +583,20 @@ export type MarketStructureData = {
   latest_trade_date: string | null
   base_swing_pct: number
   summary: string
+  activity: {
+    scopes: {
+      scope: 'all_a' | 'sh_sz'
+      observed_stocks: number
+      invalid_volume_stocks: number
+      invalid_amount_stocks: number
+      volume: { total: number | null; day_ratio: number | null; week_ratio: number | null; week_change: number | null }
+      amount: { total: number | null; day_ratio: number | null; week_ratio: number | null; week_change: number | null }
+    }[]
+    outlook: { horizon: number; expected_return_pct: number; activity_adjustment_pp: number }[]
+    outlook_status: string
+    model_fit_end: string
+    validation_data_asof: string
+  }
   consensus: { degree: number; up_count: number; down_count: number; broken_count: number; unavailable_count: number; description: string }[]
   indexes: {
     code: string

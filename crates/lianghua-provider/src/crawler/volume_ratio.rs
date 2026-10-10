@@ -124,16 +124,7 @@ pub fn fetch_tencent_volume_ratio(
     ts_code: &str,
     average_daily_volume: f64,
 ) -> Result<TencentVolumeRatioData, String> {
-    let symbol = ts_code_to_tencent_code(ts_code)?;
-    let intraday_raw = http
-        .get("https://web.ifzq.gtimg.cn/appstock/app/minute/query")
-        .query(&[("code", &symbol)])
-        .header("Referer", "https://gu.qq.com/")
-        .header("User-Agent", "Mozilla/5.0")
-        .send()
-        .and_then(|response| response.error_for_status())
-        .and_then(|response| response.text())
-        .map_err(|e| format!("获取腾讯量比分时失败: {e}"))?;
+    let intraday_raw = super::intraday::fetch_tencent_intraday_text(http, ts_code)?;
     parse_tencent_volume_ratio(&intraday_raw, ts_code, average_daily_volume)
 }
 

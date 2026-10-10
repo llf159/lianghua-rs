@@ -5,7 +5,8 @@ export type ProgressWorkflowStep =
   | {
       key: string
       label?: string
-      phases?: string[]
+      // 同一数组内的事件共用计数，例如下载批次和该批次的事务写入。
+      phases?: Array<string | string[]>
     }
 
 type ProgressWorkflowResolver = (action: string | null | undefined) => ProgressWorkflowStep[] | null
@@ -32,6 +33,7 @@ type ProgressTimingInput = {
 type ProgressTimingSample = {
   taskPhase: string
   phaseStartElapsedMs: number
+  phaseStartFinished: number
   sampledElapsedMs: number
   sampledAtMs: number
   finished: number
@@ -63,7 +65,7 @@ function normalizeWorkflowStep(step: ProgressWorkflowStep) {
     return {
       key: step,
       label: null,
-      phases: [step],
+      phases: [[step]],
     }
   }
 
@@ -71,7 +73,7 @@ function normalizeWorkflowStep(step: ProgressWorkflowStep) {
   return {
     key: step.key,
     label: step.label ?? null,
-    phases,
+    phases: phases.map((phase) => typeof phase === 'string' ? [phase] : phase),
   }
 }
 
@@ -94,7 +96,7 @@ function findWorkflowStep(
   }
 
   for (let stepIndex = 0; stepIndex < workflow.length; stepIndex += 1) {
-    const phaseIndex = workflow[stepIndex].phases.indexOf(normalizedPhase)
+    const phaseIndex = workflow[stepIndex].phases.findIndex((phases) => phases.includes(normalizedPhase))
     if (phaseIndex >= 0) {
       return {
         workflow,
@@ -123,37 +125,26 @@ export function calcProgressPercent(
   const doneSet = new Set(donePhases)
   const isDone =
     doneSet.has(progress.phase) || (normalizedPhase ? doneSet.has(normalizedPhase) : false)
-  const localRatio =
-    isDone
-      ? 1
-      : progress.total > 0
-        ? Math.max(0, Math.min(1, progress.finished / progress.total))
-        : null
+  if (isDone) {
+    return 100
+  }
+  const localRatio = progress.total > 0
+    ? Math.max(0, Math.min(1, progress.finished / progress.total))
+    : null
 
   if (workflowMatch) {
-    if (localRatio !== null) {
-      const stepRatio = (workflowMatch.phaseIndex + localRatio) / workflowMatch.phaseTotal
-      return Math.max(
-        0,
-        Math.min(
-          100,
-          Math.round(((workflowMatch.stepIndex + stepRatio) / workflowMatch.workflow.length) * 100),
-        ),
-      )
-    }
-
-    if (isDone) {
-      return 100
-    }
-
-    return null
+    const stepRatio = (workflowMatch.phaseIndex + (localRatio ?? 0)) / workflowMatch.phaseTotal
+    return Math.max(
+      0,
+      Math.min(99.9, ((workflowMatch.stepIndex + stepRatio) / workflowMatch.workflow.length) * 100),
+    )
   }
 
   if (localRatio === null) {
     return null
   }
 
-  return Math.max(0, Math.min(100, Math.round(localRatio * 100)))
+  return Math.max(0, Math.min(99.9, localRatio * 100))
 }
 
 export function getPhaseStep(
@@ -250,6 +241,7 @@ export function formatProgressDuration(value: number | null) {
 export function useProgressTiming(
   isRunning: boolean,
   progress: ProgressTimingInput | null | undefined,
+  getProgressWorkflow?: ProgressWorkflowResolver,
 ): ProgressTiming {
   const [clockMs, setClockMs] = useState(0)
   const [sample, setSample] = useState<ProgressTimingSample | null>(null)
@@ -272,8 +264,14 @@ export function useProgressTiming(
     const frameId = window.requestAnimationFrame(() => {
       const sampledAtMs = Date.now()
       setSample((current) => {
-        const taskPhase = `${progress.action}::${progress.phase}`
+        const workflowMatch = getProgressWorkflow
+          ? findWorkflowStep(getProgressWorkflow, progress.action, progress.phase)
+          : null
+        const taskPhase = workflowMatch
+          ? `${progress.action}::${workflowMatch.step.key}::${workflowMatch.phaseIndex}`
+          : `${progress.action}::${progress.phase}`
         const phaseChanged = !current || current.taskPhase !== taskPhase
+          || (current.total > 0 && progress.total > 0 && current.total !== progress.total)
         const valuesChanged =
           phaseChanged || current.finished !== progress.finished || current.total !== progress.total
         if (!valuesChanged) {
@@ -285,6 +283,9 @@ export function useProgressTiming(
           phaseStartElapsedMs: phaseChanged
             ? progress.elapsedMs
             : (current as ProgressTimingSample).phaseStartElapsedMs,
+          phaseStartFinished: phaseChanged
+            ? progress.finished
+            : (current as ProgressTimingSample).phaseStartFinished,
           sampledElapsedMs: progress.elapsedMs,
           sampledAtMs,
           finished: progress.finished,
@@ -293,7 +294,7 @@ export function useProgressTiming(
       })
     })
     return () => window.cancelAnimationFrame(frameId)
-  }, [isRunning, progress])
+  }, [isRunning, progress, getProgressWorkflow])
 
   if (!isRunning || !progress || !sample) {
     return {
@@ -308,9 +309,9 @@ export function useProgressTiming(
     sample.sampledElapsedMs + Math.max(0, Math.max(clockMs, sample.sampledAtMs) - sample.sampledAtMs)
   const phaseElapsedMs = Math.max(0, elapsedMs - sample.phaseStartElapsedMs)
   const estimatedTotalMs =
-    sample.finished > 0 && sample.total > 0
+    sample.finished > sample.phaseStartFinished && sample.total > 0
       ? Math.max(0, sample.sampledElapsedMs - sample.phaseStartElapsedMs) *
-        (sample.total / sample.finished)
+        ((sample.total - sample.phaseStartFinished) / (sample.finished - sample.phaseStartFinished))
       : null
   const estimatedRemainingMs =
     estimatedTotalMs === null ? null : Math.max(0, estimatedTotalMs - phaseElapsedMs)
@@ -321,14 +322,10 @@ export function useProgressTiming(
 export function useAnimatedProgressPercent(
   isRunning: boolean,
   progressPercent: number | null,
-  minPercent = 10,
+  minPercent = 0,
 ) {
   const [displayProgressPercent, setDisplayProgressPercent] = useState(0)
   const displayProgressPercentRef = useRef(0)
-
-  useEffect(() => {
-    displayProgressPercentRef.current = displayProgressPercent
-  }, [displayProgressPercent])
 
   useEffect(() => {
     if (!isRunning) {
@@ -352,7 +349,7 @@ export function useAnimatedProgressPercent(
 
     const from = displayProgressPercentRef.current
     const to = progressPercent
-    if (Math.abs(to - from) < 0.5) {
+    if (Math.abs(to - from) < 0.01) {
       displayProgressPercentRef.current = to
       frameId = window.requestAnimationFrame(() => {
         setDisplayProgressPercent(to)
@@ -388,5 +385,5 @@ export function useAnimatedProgressPercent(
     return Math.max(displayProgressPercent, minPercent)
   }
 
-  return Math.max(displayProgressPercent, Math.min(progressPercent, 100))
+  return Math.max(0, Math.min(100, displayProgressPercent))
 }

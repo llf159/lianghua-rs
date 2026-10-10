@@ -85,7 +85,9 @@ function formatSignedNumber(value: number | null) {
 }
 
 function timeToSlot(time: string) {
-  const [hourRaw, minuteRaw] = time.split(":");
+  const [hourRaw, minuteRaw] = (time.includes(":")
+    ? time
+    : `${time.slice(0, 2)}:${time.slice(2, 4)}`).split(":");
   const hour = Number(hourRaw);
   const minute = Number(minuteRaw);
   if (!Number.isInteger(hour) || !Number.isInteger(minute)) return null;
@@ -194,9 +196,24 @@ export default function IntradayChart({
       ? priceScaleSelection.mode
       : "dynamic";
   const points = data?.points ?? EMPTY_INTRADAY_POINTS;
-  const summary = useMemo(() => (data ? buildDisplaySummary(data) : null), [data]);
   const plotWidth = VIEWBOX_WIDTH - PLOT_LEFT - PLOT_RIGHT;
   const slotWidth = plotWidth / (SESSION_SLOT_COUNT - 1);
+  const volumeRatioPoints = data?.volume_ratio_points ?? [];
+  const latestVolumeRatio = volumeRatioPoints[volumeRatioPoints.length - 1];
+  const volumeRatioTop = 450;
+  const volumeRatioBottom = 530;
+  const chartHeight = volumeRatioPoints.length > 0 ? 560 : VIEWBOX_HEIGHT;
+  const maxVolumeRatio = Math.max(2, ...volumeRatioPoints.map((point) => point.volume_ratio));
+  const yForVolumeRatio = (value: number) =>
+    volumeRatioBottom - (value / maxVolumeRatio) * (volumeRatioBottom - volumeRatioTop);
+  const volumeRatioLine = volumeRatioPoints
+    .map((point) => {
+      const slot = timeToSlot(point.time);
+      return slot === null ? null : `${PLOT_LEFT + slot * slotWidth},${yForVolumeRatio(point.volume_ratio)}`;
+    })
+    .filter((value): value is string => value !== null)
+    .join(" ");
+  const summary = useMemo(() => (data ? buildDisplaySummary(data) : null), [data]);
   const hasLimitScale =
     summary?.upperLimit !== null &&
     summary?.upperLimit !== undefined &&
@@ -329,11 +346,17 @@ export default function IntradayChart({
             <span>均价 <strong>{formatNumber(summary.averagePrice)}</strong></span>
             <span>成交量 <strong>{formatCompact(summary.totalVol, "手")}</strong></span>
             <span>成交额 <strong>{formatCompact(summary.totalAmount, "元")}</strong></span>
+            <span title="累计成交量 /（前五个交易日日均量 × 已交易分钟数 / 240）；09:30 按 1 分钟计，午休不累加">
+              量比 <strong>{formatNumber(latestVolumeRatio?.volume_ratio ?? null)}</strong>
+            </span>
           </div>
         </>
       ) : null}
 
       {expanded && error ? <div className="details-error details-intraday-error">{error}</div> : null}
+      {expanded && data?.volume_ratio_error ? (
+        <div className="details-intraday-ratio-notice">量比暂不可用：{data.volume_ratio_error}</div>
+      ) : null}
       {expanded && !error && loading && points.length === 0 ? (
         <div className="details-intraday-empty">正在读取腾讯分时行情...</div>
       ) : null}
@@ -351,6 +374,7 @@ export default function IntradayChart({
               <span><i className="is-price" />价格</span>
               <span><i className="is-average" />均价</span>
               <span><i className="is-volume" />分钟成交量</span>
+              {volumeRatioPoints.length > 0 ? <span><i className="is-volume-ratio" />量比</span> : null}
             </div>
             <div className="details-intraday-chart-actions" role="group" aria-label="分时图表操作">
               <button
@@ -385,7 +409,7 @@ export default function IntradayChart({
           </div>
           <svg
             className="details-intraday-svg"
-            viewBox={`0 0 ${VIEWBOX_WIDTH} ${VIEWBOX_HEIGHT}`}
+            viewBox={`0 0 ${VIEWBOX_WIDTH} ${chartHeight}`}
             role="img"
             aria-label={`${data?.ts_code ?? "股票"}当日分时走势图`}
           >
@@ -445,8 +469,8 @@ export default function IntradayChart({
               const x = PLOT_LEFT + tick.slot * slotWidth;
               return (
                 <g key={tick.label}>
-                  <line x1={x} x2={x} y1={PRICE_TOP} y2={VOLUME_BOTTOM} className="details-intraday-grid is-vertical" />
-                  <text x={x} y={VIEWBOX_HEIGHT - 8} textAnchor="middle" className="details-intraday-axis-label">
+                  <line x1={x} x2={x} y1={PRICE_TOP} y2={volumeRatioPoints.length > 0 ? volumeRatioBottom : VOLUME_BOTTOM} className="details-intraday-grid is-vertical" />
+                  <text x={x} y={chartHeight - 8} textAnchor="middle" className="details-intraday-axis-label">
                     {tick.label}
                   </text>
                 </g>
@@ -528,6 +552,49 @@ export default function IntradayChart({
                 />
               );
             })}
+            {volumeRatioPoints.length > 0 ? (
+              <g>
+                <line
+                  x1={PLOT_LEFT}
+                  x2={VIEWBOX_WIDTH - PLOT_RIGHT}
+                  y1={volumeRatioTop}
+                  y2={volumeRatioTop}
+                  className="details-intraday-grid details-intraday-section-divider"
+                />
+                <text x={PLOT_LEFT} y={volumeRatioTop - 9} className="details-intraday-volume-label">
+                  量比 {formatNumber(latestVolumeRatio?.volume_ratio ?? null)}
+                </text>
+                {[maxVolumeRatio, 1, 0].map((value) => (
+                  <g key={`volume-ratio-${value}`}>
+                    <line
+                      x1={PLOT_LEFT}
+                      x2={VIEWBOX_WIDTH - PLOT_RIGHT}
+                      y1={yForVolumeRatio(value)}
+                      y2={yForVolumeRatio(value)}
+                      className={value === 1 ? "details-intraday-ratio-baseline" : "details-intraday-grid"}
+                    />
+                    <text
+                      x={VIEWBOX_WIDTH - PLOT_RIGHT + 8}
+                      y={yForVolumeRatio(value) + 4}
+                      className="details-intraday-axis-label"
+                    >
+                      {formatNumber(value)}
+                    </text>
+                  </g>
+                ))}
+                <polyline points={volumeRatioLine} className="details-intraday-ratio-line">
+                  <title>盘中量比：累计成交量 /（前五日日均量 × 已交易分钟数 / 240）</title>
+                </polyline>
+                {latestVolumeRatio ? (
+                  <circle
+                    cx={PLOT_LEFT + (timeToSlot(latestVolumeRatio.time) ?? 0) * slotWidth}
+                    cy={yForVolumeRatio(latestVolumeRatio.volume_ratio)}
+                    r={2.8}
+                    className="details-intraday-ratio-dot"
+                  />
+                ) : null}
+              </g>
+            ) : null}
           </svg>
         </div>
       ) : null}

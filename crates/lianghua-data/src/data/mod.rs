@@ -4,6 +4,7 @@ pub mod cyq_chen;
 pub mod cyq_chen_data;
 pub mod cyq_data;
 pub mod download_data;
+pub mod download_state;
 pub mod dragon_tiger_data;
 pub mod extras;
 pub mod runtime;

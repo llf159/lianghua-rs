@@ -503,6 +503,35 @@
   opacity: 1;
 }
 
+.details-intraday-legend i.is-volume-ratio {
+  background: #8854c5;
+}
+
+.details-intraday-ratio-line {
+  fill: none;
+  stroke: #8854c5;
+  stroke-width: 1.6px;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.details-intraday-ratio-dot {
+  fill: #8854c5;
+}
+
+.details-intraday-ratio-baseline {
+  stroke: #b6a3cf;
+  stroke-width: 1px;
+  stroke-dasharray: 4 4;
+}
+
+.details-intraday-ratio-notice {
+  margin-top: 10px;
+  color: #627083;
+  font-size: 12px;
+}
+
 .details-intraday-volume.is-up {
   fill: #d9485f;
 }

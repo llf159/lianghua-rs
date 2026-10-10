@@ -1,3 +1,4 @@
+use super::market_activity::{MarketActivityData, load_market_activity};
 use crate::data::source_db_path;
 use duckdb::{Connection, params};
 use serde::Serialize;
@@ -496,6 +497,7 @@ pub struct MarketStructureData {
     pub summary: String,
     pub consensus: Vec<MarketStructureConsensus>,
     pub indexes: Vec<MarketStructureIndex>,
+    pub activity: MarketActivityData,
 }
 
 pub fn get_market_structure(
@@ -625,6 +627,8 @@ pub fn get_market_structure(
         })
         .collect::<Vec<_>>()
         .join("；");
+    let activity =
+        load_market_activity(&conn, trade_date.as_deref().unwrap_or_default(), &indexes)?;
     Ok(MarketStructureData {
         trade_date,
         latest_trade_date,
@@ -632,6 +636,7 @@ pub fn get_market_structure(
         summary,
         consensus,
         indexes,
+        activity,
     })
 }
 
@@ -697,7 +702,7 @@ mod tests {
         let directory = crate::statistics::test_support::temp_source_dir();
         std::fs::create_dir_all(&directory).unwrap();
         let conn = Connection::open(source_db_path(directory.to_str().unwrap())).unwrap();
-        conn.execute_batch("CREATE TABLE stock_data(ts_code VARCHAR, trade_date VARCHAR, adj_type VARCHAR, close DOUBLE)").unwrap();
+        conn.execute_batch("CREATE TABLE stock_data(ts_code VARCHAR, trade_date VARCHAR, adj_type VARCHAR, close DOUBLE, vol DOUBLE, amount DOUBLE)").unwrap();
         {
             let mut appender = conn.appender("stock_data").unwrap();
             for (day, close) in [
@@ -712,7 +717,7 @@ mod tests {
                         continue;
                     }
                     appender
-                        .append_row(params![code, &date, "ind", close])
+                        .append_row(params![code, &date, "ind", close, 0.0, 0.0])
                         .unwrap();
                 }
             }

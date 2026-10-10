@@ -142,6 +142,7 @@ pub struct AllMarketIndexRow {
     pub realtime_trade_date: Option<String>,
     pub realtime_price: Option<f64>,
     pub realtime_change_pct: Option<f64>,
+    pub realtime_amount: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1774,6 +1775,9 @@ pub fn get_all_market_monitor_snapshot(
                                     .and_then(|item| normalize_quote_trade_date(&item.date)),
                                 realtime_price: quote.map(|item| item.price),
                                 realtime_change_pct: quote.and_then(|item| item.change_pct),
+                                realtime_amount: quote
+                                    .map(|item| item.amount)
+                                    .filter(|value| value.is_finite() && *value >= 0.0),
                             }
                         })
                         .collect()

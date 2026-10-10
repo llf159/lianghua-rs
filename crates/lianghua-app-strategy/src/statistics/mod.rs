@@ -2,6 +2,7 @@ mod backtest;
 mod common;
 mod detail_cache;
 mod market;
+mod market_activity;
 mod page;
 mod structure_cycle;
 #[cfg(test)]

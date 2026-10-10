@@ -63,15 +63,13 @@ pub fn init_concept_performance_db(db_path: &Path) -> Result<(), String> {
 }
 
 pub fn rebuild_concept_performance_all(source_dir: &str) -> Result<usize, String> {
+    crate::data::download_state::ensure_stock_data_ready_for_derived(source_dir)?;
     let source_db = source_db_path(source_dir);
     if !source_db.exists() {
         return Ok(0);
     }
 
-    let source_db_str = source_db
-        .to_str()
-        .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
-    let source_conn = Connection::open(source_db_str).map_err(|e| format!("打开原始库失败:{e}"))?;
+    let source_conn = crate::data::download_state::open_source_db_readonly(source_dir)?;
 
     let biaocunzai = source_conn
         .query_row(
@@ -119,6 +117,7 @@ pub fn rebuild_concept_performance_range(
     start_date: &str,
     end_date: &str,
 ) -> Result<usize, String> {
+    crate::data::download_state::ensure_stock_data_ready_for_derived(source_dir)?;
     if start_date.trim().is_empty() || end_date.trim().is_empty() {
         return Ok(0);
     }
@@ -263,6 +262,9 @@ pub fn rebuild_concept_performance_range(
             .map_err(|e| format!("提交概念表现事务失败:{e}"))?;
         Ok(())
     })(&bx_db, start_date, end_date, &bx_rows)?;
+    crate::data::download_state::clear_pending_derived_rebuild(
+        source_dir, "concept", start_date, end_date,
+    )?;
     Ok(bx_rows.len())
 }
 
@@ -740,6 +742,7 @@ pub fn load_industry_trend_series_map(
 }
 
 pub fn rebuild_most_related_concept_csv(source_dir: &str) -> Result<usize, String> {
+    crate::data::download_state::ensure_stock_data_ready_for_derived(source_dir)?;
     let source_db = source_db_path(source_dir);
     let source_db_str = source_db
         .to_str()
@@ -1008,13 +1011,21 @@ ts_code,concepts_code,concepts_name,stock_name
                 trade_date VARCHAR,
                 adj_type VARCHAR,
                 pct_chg DOUBLE,
-                close DOUBLE
+                close DOUBLE,
+                open DOUBLE DEFAULT 1, high DOUBLE DEFAULT 1, low DOUBLE DEFAULT 1,
+                pre_close DOUBLE DEFAULT 1, vol DOUBLE DEFAULT 10, amount DOUBLE DEFAULT 100,
+                change DOUBLE DEFAULT 0
             )
             "#,
             [],
         )
         .expect("create stock_data");
-        let mut app = conn.appender("stock_data").expect("appender");
+        let mut app = conn
+            .appender_with_columns(
+                "stock_data",
+                &["ts_code", "trade_date", "adj_type", "pct_chg", "close"],
+            )
+            .expect("appender");
         app.append_row(params!["000001.SZ", "20240102", "qfq", 10.0_f64, 1.0_f64])
             .expect("row1");
         app.append_row(params!["000002.SZ", "20240102", "qfq", 20.0_f64, 1.0_f64])
@@ -1038,13 +1049,21 @@ ts_code,concepts_code,concepts_name,stock_name
                 trade_date VARCHAR,
                 adj_type VARCHAR,
                 pct_chg DOUBLE,
-                close DOUBLE
+                close DOUBLE,
+                open DOUBLE DEFAULT 1, high DOUBLE DEFAULT 1, low DOUBLE DEFAULT 1,
+                pre_close DOUBLE DEFAULT 1, vol DOUBLE DEFAULT 10, amount DOUBLE DEFAULT 100,
+                change DOUBLE DEFAULT 0
             )
             "#,
             [],
         )
         .expect("create stock_data");
-        let mut app = conn.appender("stock_data").expect("appender");
+        let mut app = conn
+            .appender_with_columns(
+                "stock_data",
+                &["ts_code", "trade_date", "adj_type", "pct_chg", "close"],
+            )
+            .expect("appender");
         app.append_row(params!["000001.SZ", "20240102", "qfq", 10.0_f64, 1.0_f64])
             .expect("row1");
         app.append_row(params![
@@ -1092,7 +1111,7 @@ ts_code,concepts_code,concepts_name,stock_name
         xieru_gdnm_csv(&source_dir);
         xieru_source_db(&source_dir);
         let source_conn = Connection::open(source_db_path(source_dir.to_str().unwrap())).unwrap();
-        source_conn.execute("UPDATE stock_data SET close=0.5 WHERE ts_code='000001.SZ' AND trade_date='20240102'", []).unwrap();
+        source_conn.execute("UPDATE stock_data SET close=0.5, low=0.5 WHERE ts_code='000001.SZ' AND trade_date='20240102'; UPDATE stock_data SET pre_close=0.5 WHERE ts_code='000001.SZ' AND trade_date='20240103'", []).unwrap();
         drop(source_conn);
 
         let row_count = rebuild_concept_performance_range(
@@ -1237,21 +1256,22 @@ ts_code,concepts_code,concepts_name,stock_name
     }
 
     #[test]
-    fn rebuild_concept_performance_range_skips_sparse_invalid_daily_rows() {
+    fn rebuild_concept_performance_range_rejects_sparse_invalid_daily_rows() {
         let source_dir = linshi_mulu();
         create_dir_all(&source_dir).expect("create dir");
         xieru_stock_list(&source_dir);
         xieru_gdnm_csv(&source_dir);
         xieru_source_db_with_sparse_invalid_pct(&source_dir);
 
-        let row_count = rebuild_concept_performance_range(
+        let error = rebuild_concept_performance_range(
             source_dir.to_str().expect("utf8 path"),
             "20240102",
             "20240102",
         )
-        .expect("sparse invalid pct rows should be skipped");
+        .expect_err("invalid source rows must block downstream computation");
 
-        assert_eq!(row_count, 5);
+        assert!(error.contains("禁止"));
+        assert!(!source_dir.join("concept_performance.db").exists());
 
         let _ = remove_dir_all(source_dir);
     }
@@ -1271,8 +1291,8 @@ ts_code,concepts_code,concepts_name,stock_name
         )
         .expect_err("all invalid pct rows on a day should fail");
 
-        assert!(error.contains("没有可用于计算的有效数据"));
-        assert!(error.contains("20240103"));
+        assert!(error.contains("禁止"));
+        assert!(!source_dir.join("concept_performance.db").exists());
 
         let _ = remove_dir_all(source_dir);
     }
@@ -1289,7 +1309,14 @@ ts_code,concepts_code,concepts_name,stock_name
             .unwrap()
             .replace(",20240103,0,0,", ",,0,0,");
         fs::write(list_path, stock_list).unwrap();
-        let trade_dates: Vec<String> = (1..=40).map(|day| format!("202402{:02}", day)).collect();
+        let trade_dates: Vec<String> = (0..40)
+            .map(|offset| {
+                (chrono::NaiveDate::from_ymd_opt(2024, 2, 1).unwrap()
+                    + chrono::Duration::days(offset))
+                .format("%Y%m%d")
+                .to_string()
+            })
+            .collect();
         (|source_dir: &Path, trade_dates: &[String]| {
             let db_path = source_db_path(source_dir.to_str().expect("utf8 path"));
             let conn = Connection::open(db_path).expect("open source db");
@@ -1300,14 +1327,22 @@ ts_code,concepts_code,concepts_name,stock_name
                 trade_date VARCHAR,
                 adj_type VARCHAR,
                 pct_chg DOUBLE,
-                close DOUBLE
+                close DOUBLE,
+                open DOUBLE DEFAULT 1, high DOUBLE DEFAULT 1, low DOUBLE DEFAULT 1,
+                pre_close DOUBLE DEFAULT 1, vol DOUBLE DEFAULT 10, amount DOUBLE DEFAULT 100,
+                change DOUBLE DEFAULT 0
             )
             "#,
                 [],
             )
             .expect("create stock_data");
 
-            let mut app = conn.appender("stock_data").expect("appender");
+            let mut app = conn
+                .appender_with_columns(
+                    "stock_data",
+                    &["ts_code", "trade_date", "adj_type", "pct_chg", "close"],
+                )
+                .expect("appender");
             for (index, trade_date) in trade_dates.iter().enumerate() {
                 let day_pct = (index + 1) as f64;
                 app.append_row(params!["000001.SZ", trade_date, "qfq", day_pct, 1.0_f64])
@@ -1449,13 +1484,21 @@ ts_code,concepts_code,concepts_name,stock_name
                 trade_date VARCHAR,
                 adj_type VARCHAR,
                 pct_chg DOUBLE,
-                close DOUBLE
+                close DOUBLE,
+                open DOUBLE DEFAULT 1, high DOUBLE DEFAULT 1, low DOUBLE DEFAULT 1,
+                pre_close DOUBLE DEFAULT 1, vol DOUBLE DEFAULT 10, amount DOUBLE DEFAULT 100,
+                change DOUBLE DEFAULT 0
             )
             "#,
             [],
         )
         .expect("create stock_data");
-        let mut app = conn.appender("stock_data").expect("appender");
+        let mut app = conn
+            .appender_with_columns(
+                "stock_data",
+                &["ts_code", "trade_date", "adj_type", "pct_chg", "close"],
+            )
+            .expect("appender");
         app.append_row(params!["000001.SZ", "20240102", "qfq", 1.0_f64, 1.0_f64])
             .expect("row1");
         app.append_row(params![
@@ -1466,7 +1509,11 @@ ts_code,concepts_code,concepts_name,stock_name
             1.0_f64
         ])
         .expect("row2");
+        app.append_row(params!["000003.SZ", "20240102", "qfq", 0.0_f64, 1.0_f64])
+            .expect("complete stock coverage");
         app.flush().expect("flush");
+        drop(app);
+        drop(conn);
 
         rebuild_concept_performance_range(
             source_dir.to_str().expect("utf8 path"),

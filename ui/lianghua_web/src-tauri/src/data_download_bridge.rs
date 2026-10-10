@@ -996,3 +996,85 @@ pub async fn run_concept_performance_repair(
     .await
     .map_err(|error| error.to_string())?
 }
+
+#[tauri::command]
+pub async fn check_databases(
+    source_path: String,
+) -> Result<lianghua_app_data::integrity::DatabaseCheckReport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        lianghua_app_data::integrity::check_databases(&source_path)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn repair_database_issues(
+    app: tauri::AppHandle,
+    download_id: String,
+    request: lianghua_app_data::integrity::DatabaseRepairInput,
+) -> Result<DataDownloadRunResult, String> {
+    if download_id.trim().is_empty() {
+        return Err("download_id 不能为空".to_string());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let started = Instant::now();
+        let callback = |progress: CoreDownloadProgress| {
+            emit_core_download_progress(
+                &app,
+                &download_id,
+                "repair-database",
+                "数据库针对性修复",
+                started.elapsed().as_millis() as u64,
+                progress,
+            );
+        };
+        callback(CoreDownloadProgress {
+            phase: "audit_recheck".to_string(),
+            finished: 0,
+            total: 0,
+            current_label: None,
+            message: "正在重新检查当前数据库，生成针对性修复计划。".to_string(),
+        });
+        let result = lianghua_app_data::integrity::repair_database_issues(request, Some(&callback));
+        match result {
+            Ok(mut result) => {
+                result.elapsed_ms = started.elapsed().as_millis() as u64;
+                emit_data_download_event(
+                    &app,
+                    DataDownloadEventPayload {
+                        download_id,
+                        phase: "completed".to_string(),
+                        action: "repair-database".to_string(),
+                        action_label: "数据库针对性修复".to_string(),
+                        elapsed_ms: result.elapsed_ms,
+                        finished: result.summary.success_count,
+                        total: result.summary.success_count,
+                        current_label: None,
+                        message: "所选修复任务已提交，随后重新检查剩余问题。".to_string(),
+                    },
+                );
+                Ok(result)
+            }
+            Err(error) => {
+                emit_data_download_event(
+                    &app,
+                    DataDownloadEventPayload {
+                        download_id,
+                        phase: "failed".to_string(),
+                        action: "repair-database".to_string(),
+                        action_label: "数据库针对性修复".to_string(),
+                        elapsed_ms: started.elapsed().as_millis() as u64,
+                        finished: 0,
+                        total: 0,
+                        current_label: None,
+                        message: error.clone(),
+                    },
+                );
+                Err(error)
+            }
+        }
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}

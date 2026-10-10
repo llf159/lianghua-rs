@@ -688,6 +688,7 @@ fn cyq_float64_array(values: Vec<f64>) -> ArrayRef {
 pub fn maintain_cyq_incremental_if_db_exists(
     source_dir: &str,
 ) -> Result<Option<CyqRebuildSummary>, String> {
+    crate::data::download_state::ensure_stock_data_ready_for_derived(source_dir)?;
     let cyq_db = cyq_db_path(source_dir);
     if !cyq_db.exists() {
         return Ok(None);
@@ -938,6 +939,7 @@ pub fn repair_cyq_stocks_if_db_exists(
     ts_codes: &[String],
     progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<Option<CyqRebuildSummary>, String> {
+    crate::data::download_state::ensure_stock_data_ready_for_derived(source_dir)?;
     let cyq_db = cyq_db_path(source_dir);
     if !cyq_db.exists() {
         return Ok(None);
@@ -1203,7 +1205,7 @@ pub fn repair_cyq_stocks_if_db_exists(
                         total: ts_codes.len(),
                         current_label: Some(ts_code.to_string()),
                         message: format!(
-                            "筹码局部修复中，已完成 {finished} / {} 只股票。",
+                            "筹码局部修复计算中，已计算 {finished} / {} 只股票。",
                             ts_codes.len()
                         ),
                     });
@@ -1228,6 +1230,18 @@ pub fn repair_cyq_stocks_if_db_exists(
         let _ = abort_tx.send(CyqWriteMessage::Abort(err.clone()));
     }
     drop(abort_tx);
+
+    if compute_result.is_ok() {
+        if let Some(progress_cb) = progress_cb {
+            progress_cb(DownloadProgress {
+                phase: "compute_cyq".to_string(),
+                finished: ts_codes.len(),
+                total: ts_codes.len(),
+                current_label: None,
+                message: "筹码计算已结束，正在等待写入、事务提交及结果库收尾。".to_string(),
+            });
+        }
+    }
 
     let writer_result = match writer_handle.join() {
         Ok(result) => result,
@@ -1272,6 +1286,7 @@ pub fn rebuild_cyq_all_with_progress(
     end_date: Option<&str>,
     progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<CyqRebuildSummary, String> {
+    crate::data::download_state::ensure_stock_data_ready_for_derived(source_dir)?;
     let cyq_db = cyq_db_path(source_dir);
     init_cyq_db(&cyq_db)?;
 
@@ -1448,7 +1463,7 @@ pub fn rebuild_cyq_all_with_progress(
                             total: ts_codes.len(),
                             current_label: Some(ts_code.to_string()),
                             message: format!(
-                                "筹码计算中，已完成 {finished} / {} 只股票。",
+                                "筹码计算中，已计算 {finished} / {} 只股票。",
                                 ts_codes.len()
                             ),
                         });
@@ -1473,6 +1488,18 @@ pub fn rebuild_cyq_all_with_progress(
         let _ = abort_tx.send(CyqWriteMessage::Abort(err.clone()));
     }
     drop(abort_tx);
+
+    if compute_result.is_ok() {
+        if let Some(progress_cb) = progress_cb {
+            progress_cb(DownloadProgress {
+                phase: "compute_cyq".to_string(),
+                finished: ts_codes.len(),
+                total: ts_codes.len(),
+                current_label: None,
+                message: "筹码计算已结束，正在等待写入、事务提交及结果库收尾。".to_string(),
+            });
+        }
+    }
 
     let writer_result = match writer_handle.join() {
         Ok(result) => result,

@@ -534,6 +534,55 @@ export default function AllMarketMonitorPage() {
   );
   const [rows, setRows] = useState<AllMarketMonitorRow[]>([]);
   const [indexRows, setIndexRows] = useState<AllMarketIndexRow[]>([]);
+  const marketBreadth = useMemo(() => {
+    const dateCounts = new Map<string, number>();
+    for (const row of rows) {
+      if (
+        row.realtime_trade_date &&
+        isFiniteNumber(row.realtime_price) &&
+        row.realtime_price > 0
+      ) {
+        dateCounts.set(
+          row.realtime_trade_date,
+          (dateCounts.get(row.realtime_trade_date) ?? 0) + 1,
+        );
+      }
+    }
+    const tradeDate = [...dateCounts].sort(
+      (a, b) => b[1] - a[1] || b[0].localeCompare(a[0]),
+    )[0]?.[0];
+    let rising = 0;
+    let falling = 0;
+    let flat = 0;
+    for (const row of rows) {
+      if (
+        !tradeDate ||
+        row.realtime_trade_date !== tradeDate ||
+        !isFiniteNumber(row.realtime_price) ||
+        row.realtime_price <= 0 ||
+        !isFiniteNumber(row.realtime_pre_close) ||
+        row.realtime_pre_close <= 0
+      ) {
+        continue;
+      }
+      if (row.realtime_price > row.realtime_pre_close) rising += 1;
+      else if (row.realtime_price < row.realtime_pre_close) falling += 1;
+      else flat += 1;
+    }
+    return { tradeDate, rising, falling, flat, total: rising + falling + flat };
+  }, [rows]);
+  const marketTurnover = useMemo(() => {
+    const shanghai = indexRows.find((row) => row.ts_code === "000001.SH");
+    const shenzhen = indexRows.find((row) => row.ts_code === "399001.SZ");
+    const total =
+      shanghai?.realtime_trade_date &&
+      shanghai.realtime_trade_date === shenzhen?.realtime_trade_date &&
+      isFiniteNumber(shanghai.realtime_amount) &&
+      isFiniteNumber(shenzhen.realtime_amount)
+        ? shanghai.realtime_amount + shenzhen.realtime_amount
+        : null;
+    return { total };
+  }, [indexRows]);
   const [groupSelection, setGroupSelection] = useState<Pick<
     MarketGroup,
     "name" | "kind"
@@ -1044,7 +1093,10 @@ export default function AllMarketMonitorPage() {
           ),
         );
       }
-      if (resetVolumeRatioCodes.size > 0 || nextVolumeRatioNewHighTimes.size > 0) {
+      if (
+        resetVolumeRatioCodes.size > 0 ||
+        nextVolumeRatioNewHighTimes.size > 0
+      ) {
         setVolumeRatioRecordHighEventTimes((prev) => {
           const next = new Map(prev);
           resetVolumeRatioCodes.forEach((tsCode) => next.delete(tsCode));
@@ -1819,7 +1871,7 @@ export default function AllMarketMonitorPage() {
             </div>
           </div>
 
-          <div className="all-market-index-strip" aria-label="指数表现">
+          <div className="all-market-index-strip" aria-label="指数与市场表现">
             <span className="all-market-control-label">指数表现</span>
             <div className="all-market-index-list">
               {indexRows.length > 0 ? (
@@ -1841,6 +1893,53 @@ export default function AllMarketMonitorPage() {
               )}
             </div>
           </div>
+          <div
+            className="all-market-summary"
+            aria-label="市场涨跌家数与沪深成交额"
+            title={`涨跌按全市场有效行情统计（含北交所），不受页面筛选影响，比例条只比较上涨与下跌家数。${marketBreadth.tradeDate ?? "等待行情"}：平盘 ${marketBreadth.flat} 家，有效 ${marketBreadth.total} 家。成交额来自沪深指数行情，单位亿元；日期不一致或数据缺失时合计留空。`}
+          >
+            <div className="all-market-breadth-counts">
+              <span className="all-market-value-up">
+                涨{" "}
+                <strong>
+                  {marketBreadth.total > 0 ? marketBreadth.rising : "--"}
+                </strong>
+              </span>
+              <span className="all-market-value-down">
+                跌{" "}
+                <strong>
+                  {marketBreadth.total > 0 ? marketBreadth.falling : "--"}
+                </strong>
+              </span>
+            </div>
+            <div
+              className="all-market-ratio-bar"
+              role="img"
+              aria-label={
+                marketBreadth.total > 0
+                  ? `上涨 ${marketBreadth.rising} 家，下跌 ${marketBreadth.falling} 家，平盘 ${marketBreadth.flat} 家`
+                  : "等待涨跌行情"
+              }
+            >
+              <span
+                className="is-up"
+                style={{ flexGrow: marketBreadth.rising }}
+              />
+              <span
+                className="is-down"
+                style={{ flexGrow: marketBreadth.falling }}
+              />
+            </div>
+            <div className="all-market-turnover-total">
+              合计{" "}
+              <strong>
+                {isFiniteNumber(marketTurnover.total)
+                  ? (marketTurnover.total / 1e8).toFixed(0)
+                  : "--"}
+              </strong>{" "}
+              亿
+            </div>
+          </div>
         </div>
 
         {error ? <div className="all-market-error">{error}</div> : null}
@@ -1853,7 +1952,9 @@ export default function AllMarketMonitorPage() {
           <div className="all-market-warning">{templateWarning}</div>
         ) : null}
         {enabled && volumeRatioStatus ? (
-          <div className="all-market-warning" role="status">{volumeRatioStatus}</div>
+          <div className="all-market-warning" role="status">
+            {volumeRatioStatus}
+          </div>
         ) : null}
       </section>
 
