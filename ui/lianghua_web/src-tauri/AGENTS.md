@@ -1,80 +1,27 @@
 # Tauri crate 取舍
 
-后续 agents 修改本组件时请继续维护本文件。
+后续 agents 修改本组件时请继续维护本文件，只记录难以从代码理解的工程取舍；首次设计和普通 bug 修复不记，没有合适记录时不要硬写。
 
-- 问题：管理页删除结果库时，前端文件插件处理数据库，而计算策略快照由 Rust 后端创建在同一数据仓库目录；快照未随结果库清理。解决方案选择：删除结果库及 `strategy_snapshots/rank_compute` 统一交给后端，先清理快照再删除结果库，使用与快照创建相同的数据仓库路径解析，并保留普通策略备份。解释：两个产物属于同一次排名计算；若快照清理失败，结果库仍在，管理页删除入口可继续重试，不会留下无法通过该入口清理的孤立快照。下次可执行 `cargo test -p app deleting_result_db_removes_compute_snapshots_and_keeps_strategy_backups` 检查联动。
+- 问题：长时间相似度计算会被桌面电源策略视为空闲，移动页面又可能被系统自动释放唤醒锁；解决方案选择：Linux 计算期间使用 systemd-inhibit --what=idle:sleep，结束由 RAII 释放，申请失败只记录警告；移动 WebView 使用页面级 Screen Wake Lock，重新可见时再申请、计算结束释放；解释：以临时、可释放的申请避免改永久电源配置或申请常驻移动电源权限，申请失败不阻断计算。
 
-- 筹码策略导入与数据管理导入统一通过 `FilePath` 和 `app.fs().open` 读取选择器结果，并在 `spawn_blocking` 内执行；Android 返回的是 URI，不能直接交给 `std::fs`，否则会报路径不存在。百分号解码仅用于展示文件名，不改写读取 URI；业务层接收文本后继续完成 TOML 校验和备份。
+- 问题：Snap 的 Android Studio/JBR 自动升级可能改变实际构建 JVM，旧组合曾出现 Java 25 HotSpot 崩溃；解决方案选择：gen/android/gradle/gradle-daemon-jvm.properties 将 daemon 固定为 Java 21，JDK 路径只放用户级 ~/.gradle/gradle.properties，CI 使用 Temurin 21；解释：让构建 JVM 独立于 IDE 更新，不把机器路径或会被 Snap 清理的 revision 路径写进仓库。下次先在 gen/android 执行 ./gradlew --version 和 ./gradlew help --no-daemon；若找不到 Java 21，安装 JDK 21 并更新用户级 Gradle 的 JDK 路径。只有候选 JVM 连续通过 Debug/Release 且不再产生 hs_err_pid*.log 时才考虑解除固定。
 
-- Android 的 `MainActivity` 必须先调用 `super.onCreate`，再通过自定义 JNI 方法初始化 `rustls-platform-verifier`。Wry 0.54.4 会在加载 `WryActivity` 类时加载 Tauri 原生库，曾掩盖 JNI 调用过早的问题；Wry 0.55.1 改为在 `WryActivity.onCreate` 首次访问惰性的 `Rust` 对象时才执行 `System.loadLibrary`，因此禁止依赖类加载副作用，也禁止吞掉 `UnsatisfiedLinkError` 后继续启动，否则 verifier 实际未初始化，后续 HTTPS 请求会表现为证书验证失败。
-- 问题：桌面壳曾在任意路由开屏时预载自选数据，且自选水合与排名日期查询通过同步 Tauri command 执行多次 DuckDB 查询，导致事件线程在窗口初次绘制期间卡顿；解决方案选择：删除桌面壳的全局预载，只由自选页请求自身数据，并将自选水合、实时刷新和排名日期查询放入 `spawn_blocking`；解释：非自选路由不再支付无关数据库成本，自选首页仍自动加载所需内容，但磁盘与 DuckDB 工作不阻塞 WebView 事件处理。
-- `tauri = "2.10.3"` 是兼容版本约束，不会固定在 2.10.3；合并或重建 workspace 锁文件可能升级 Tauri/Wry。涉及 Android 启动代码时，必须结合 `Cargo.lock` 中实际解析的 Wry 版本检查原生库加载时序。
-- Linux 相似度批量计算期间通过 `systemd-inhibit --what=idle:sleep` 临时阻止空闲息屏和睡眠，计算结束由 RAII 释放；问题是长时间同步计算会被桌面电源策略误认为空闲，选择 systemd-logind inhibitor 是为了不改永久电源配置，且命令不可用时只记录警告、不阻断计算。
-- 问题：进程启动成功不代表防休眠申请成功，且同步回收子进程可能阻塞异步执行器；解决方案选择：异步等待退出或 RAII 释放通知，保留 stderr 并记录提前退出状态；解释：让申请失败可见，释放时异步终止并回收进程，不等待防休眠申请成功才开始计算。
-- Android/移动 WebView 的相似度计算使用页面级 Screen Wake Lock，并在页面重新可见时重新申请；问题是移动系统会因页面隐藏或电量策略主动释放锁，选择可见页面标准接口是为了不申请常驻电源权限，且计算结束自动释放。
+- 问题：AGP 9 默认内置 Kotlin 与当前工程及插件使用的 org.jetbrains.kotlin.android 冲突；解决方案选择：保留 android.builtInKotlin=false 与 android.newDsl=false；解释：以继续使用旧插件/DSL 为代价兼容现有 Tauri Android 工程，只有生成模板和全部插件都完成迁移后才单独撤销并验证，不能仅因 Tauri 版本升级就删除。
 
-## Android Gradle 9 兼容性记录
+- 问题：锁定插件的 Android 发布包曾声明未携带的 consumer-rules.pro，Release 合并因此失败；解决方案选择：根 build.gradle.kts 仅过滤不存在的 library consumer ProGuard 文件；解释：缩小绕过范围，保留已有规则与 R8。升级插件并确认实际解析包已携带所声明文件后，删除 LibraryExtension import 与过滤块，只验证一次 aarch64 Release APK；若仍缺文件，恢复该项并定位具体插件。
 
-### 2026-09-01 基线
+- 问题：Release lint 曾在分析字符串形式应用的 Tauri Gradle 脚本时内部崩溃，报 findFirCompiledSymbol only works on compiled declarations；解决方案选择：暂时保留 lint.checkReleaseBuilds=false；解释：绕过分析器故障以允许打包，代价是失去 Release lint 阻断，R8/ProGuard 仍开启。回收时先改为 apply(from = file("tauri.build.gradle.kts"))，再删除 lint 绕过并验证一次 aarch64 Release APK；同类内部崩溃仍存在时恢复该项。
 
-- 最初故障由 Android Studio/Snap 自动更新到 JBR 25.0.2 触发：旧的 Gradle 8.14.3、AGP 8.11.0 不支持该运行组合，本机还实际出现过 JBR 25 的 HotSpot SIGSEGV。不要把这类故障误判成业务代码错误。
-- 当前 Android 工程使用 Gradle 9.2.0、AGP 9.0.1、KGP 2.2.10。Android Studio/Gradle launcher 可以运行在 Java 25，但 `gen/android/gradle/gradle-daemon-jvm.properties` 将真正执行构建的 daemon 固定为任意厂商的 Java 21。
-- Gradle daemon 使用的 JDK 21 路径只配置在用户级 `~/.gradle/gradle.properties`；禁止把机器路径写入仓库，也不得固定到会被 Snap 升级清理的 Android Studio revision 路径。GitHub Action 使用 Temurin 21。
-- 锁文件实际解析为 Tauri 2.11.5、tauri-build 2.6.3、dialog 2.7.2、fs 2.5.1、log 2.9.0；前端锁文件为 API 2.11.1、CLI 2.11.4、dialog 2.7.0、fs 2.5.0。检查问题时以锁文件和 `cargo tree` 为准，不以 `Cargo.toml` 中的兼容下限为准。
-- 当前 Release 基线是 `aarch64 + APK`；产物为 `gen/android/app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk`。未配置签名时出现 `unsigned` 是预期行为。
+- 问题：Tauri 生成的 gen/android 已包含 Gradle、daemon JVM 与 rustls verifier 等人工迁移，直接重新初始化会覆盖这些配置；解决方案选择：升级模板时在临时 worktree/副本生成后逐文件比较，一次只撤销一个兼容项；解释：增加迁移时的人工比较成本，换取已有取舍不丢失及失败来源可定位。BuildTask 的 ExecOperations 已是 Gradle 9 API 适配，不作为临时绕过撤销。
 
-### 2026-10-09 复查
+- 问题：外接数据仓库不在 $APPDATA 作用域内，符号链接也会经 canonicalize 落到作用域外；解决方案选择：启动时根据实际仓库根目录调用 fs_scope().allow_directory，前端文件操作传绝对路径，前后端共用 warehouse_root 入口；解释：以运行时限定实际目录替代扩大静态全局文件权限，避免页面与后台读写不同仓库；仅修改 capabilities 或创建符号链接不能解决 PathForbidden。
 
-- 当前 Gradle launcher 为 Ubuntu Java 21.0.12，daemon 条件仍固定 Java 21；`./gradlew help --no-daemon` 成功。这里只验证工程配置，没有重新验证 Debug/Release APK，也没有验证 Java 25 daemon 的崩溃是否消失。
-- Tauri 2.12.2 已发布，项目锁文件仍是 Tauri 2.11.5、dialog 2.7.2、fs 2.5.1。官方 CLI 2.12.0 模板仍保留 `android.builtInKotlin=false`、`android.newDsl=false`，并继续使用 `ExecOperations`；这些适配不能因 2.12 发布而撤销。
-- 本机 registry 中 dialog 2.7.2、fs 2.5.1 的 Android 目录均没有 `consumer-rules.pro`，当前缺失文件过滤仍有实际作用。官方 2.12.0 模板也通过 `android.proguard.failOnMissingFiles=false` 兼容旧插件；优先按下文顺序升级插件后验证回收，不引入新的全局绕过。
-- 官方 CLI 2.12.0 app 模板已使用 `apply(from = file("tauri.build.gradle.kts"))`，没有关闭 Release lint；本项目仍是字符串形式并关闭 lint。上游模板变化不能代替本项目的定向 Release 验证，暂不将此项标记为已解决。
-- 模板核对入口：<https://github.com/tauri-apps/tauri/tree/tauri-cli-v2.12.0/crates/tauri-cli/templates/mobile/android>。
+- 问题：移动数据仓库可能跨文件系统，rename 不适用，而复制时数据库连接仍可能写入；解决方案选择：复制后校验文件数与总字节再切根目录，目标 source 非空时拒绝，不删除源目录；解释：保留源数据以便校验失败时恢复，代价是占用双份磁盘空间，且该校验不保证数据库内容的一致快照；复制期间须停止其他页面的数据操作。
 
-### 当前临时兼容项
-
-1. `gradle.properties` 中的 `android.builtInKotlin=false` 和 `android.newDsl=false` 必须保留。Tauri 2.11.5 及其插件仍应用 `org.jetbrains.kotlin.android`；AGP 9 默认的内置 Kotlin 会与它冲突。Tauri 已合并 Gradle 9 模板到 2.12 里程碑，但截至本记录日期尚未发布，而且上游 `dev` 模板仍保留这两个开关并注明计划到 v3 才移除。
-2. `buildSrc` 的 `BuildTask` 使用注入的 `ExecOperations`，这是 Gradle 9 对已移除 `project.exec` 的必要适配。更新或重建 Android 模板时，不得恢复旧实现。
-3. 根 `build.gradle.kts` 会从 Android library 的 consumer ProGuard 列表中仅移除不存在的文件。原因是锁定的 dialog 2.7.2、fs 2.5.1 发布包声明了 `consumer-rules.pro` 却没有携带它，AGP 9 的 Release 构建会在 `mergeReleaseConsumerProguardFiles` 失败。
-4. app 的 `lint.checkReleaseBuilds=false` 是临时绕过。AGP 9 的 `lintVital` 曾在分析通过字符串形式应用的 Tauri Kotlin Gradle 脚本时内部崩溃，错误包含 `findFirCompiledSymbol only works on compiled declarations`。这不是一次正常的 lint 代码告警；关闭它不影响 R8/ProGuard，但会失去 Release 打包前的 lint 阻断。
-5. `gen/android` 是 Tauri 生成目录但包含人工迁移：Gradle wrapper、根/app Gradle 脚本、`buildSrc`、daemon JVM 条件和 rustls verifier Maven 解析都不可被 `tauri android init` 直接覆盖。升级模板时应在临时 worktree/副本生成新工程后逐文件比较。
-
-### 二次检查入口
-
-- Tauri Gradle 9 模板：<https://github.com/tauri-apps/tauri/pull/15828>。该变更已合并到 `dev`、目标版本为 2.12；稳定版是否发布以 <https://github.com/tauri-apps/tauri/releases> 为准。
-- Tauri 后续完整内置 Kotlin 迁移讨论：<https://github.com/tauri-apps/tauri/pull/15335>。不要仅因 Gradle 9 模板发布就提前删除 legacy Kotlin 开关。
-- 插件缺失 consumer ProGuard 文件的修复：<https://github.com/tauri-apps/plugins-workspace/pull/3531>。dialog 2.7.3 和 fs 2.5.2 已包含 `consumer-rules.pro`，可以单独安排回收第 3 项绕过。
-- 每次检查先运行以下窄范围命令确认实际版本和 daemon，不运行全量测试：
-
-```bash
-cargo tree --manifest-path ui/lianghua_web/src-tauri/Cargo.toml \
-  -p tauri -p tauri-build -p tauri-plugin-dialog -p tauri-plugin-fs -p tauri-plugin-log --depth 0
-cd ui/lianghua_web/src-tauri/gen/android
-./gradlew --version
-./gradlew help --no-daemon
-```
-
-### 回收与恢复顺序
-
-一次只回收一个兼容项，失败时恢复该项，禁止同时删除全部绕过后再猜测故障来源。
-
-1. 先回收缺失 ProGuard 文件绕过：将 Rust dialog 更新到 2.7.3、fs 更新到 2.5.2，并同步对应 npm 插件；确认生成的 `tauri.settings.gradle` 指向新 crate 后，删除根 `build.gradle.kts` 的 `LibraryExtension` import 和过滤缺失 consumer ProGuard 文件的 `subprojects` 块。只跑一次 aarch64 Release APK 验证；若仍报缺文件，恢复该块并记录具体插件路径。
-2. 再尝试恢复 Release lint：将 app 末尾改为 `apply(from = file("tauri.build.gradle.kts"))`，删除 `lint { checkReleaseBuilds = false }`，只跑 aarch64 Release APK。上游确认字符串形式的 `apply` 会触发相关分析问题；若 `findFirCompiledSymbol` 仍出现，恢复 lint 绕过并等待新版 lint/Tauri 模板。
-3. Tauri 2.12 发布后，在临时 worktree 生成官方 Android 工程，与当前 `gen/android` 比较后逐项吸收 Gradle、AGP、wrapper、`buildSrc` 和 `compilerOptions` 变化。保留本项目的 rustls verifier、applicationId、min/target SDK、Release 规则和 daemon Java 21 取舍，完成 Debug 与 aarch64 Release 验证后才能替换现有模板。
-4. 不要在 Tauri 2.12 阶段删除 `android.builtInKotlin=false`/`android.newDsl=false`；只有官方插件全部停止应用旧 Kotlin 插件且上游模板删除这些开关后，才单独迁移并验证。当前上游计划点是 v3。
-5. Java 25 daemon 只在新版 JBR/Gradle/AGP 下连续通过 Debug 和 Release 且不再生成 `hs_err_pid*.log` 后再考虑。测试失败就保留 Java 21 daemon；CI 的 Temurin 21 无需随 Android Studio JBR 升级。
-
-定向构建命令：
+兼容项的窄范围验证命令（按本次撤销项只选所需构建）：
 
 ```bash
 cd ui/lianghua_web/src-tauri
 cargo tauri android build --ci --debug --target aarch64 --apk
 cargo tauri android build --ci --target aarch64 --apk
 ```
-
-## 桌面数据仓库目录与构建方式
-
-- 数据仓库根目录默认仍是 `BaseDirectory::AppData`(未配置时该路径与改动前的 `appDataDir()` 逐字节一致,安卓行为不变),可被 `~/.local/share/com.mingyuan.lianghua/warehouse.json` 的 `root` 或 `LIANGHUA_WAREHOUSE_ROOT` 覆盖;`source/` 子目录挂在根目录下。前端 `managedSource.ts` 与 Rust `warehouse_root` 必须共用这一入口,禁止只改其中一边,否则会出现「页面读 A 目录、后台写 B 目录」。
-- 外接盘路径不能只写进 `capabilities/*.json`:Tauri 的 fs 作用域判定会先 canonicalize 再比对模式(`tauri-2.10.3/src/scope/fs.rs` 的 `try_resolve_symlink_and_canonicalize`),`$APPDATA/**` 覆盖不到外接盘,符号链接目录也会落到 `$APPDATA` 之外而被判 `PathForbidden`。因此仓库根目录由启动时的 `fs_scope().allow_directory` 运行时放开,前端相关文件操作一律传绝对路径,不再用 `baseDir: BaseDirectory.AppData`。
-- 问题:直接 `cargo build -p app` 得到的桌面二进制窗口会去加载 `http://localhost:5173`,没有 vite 时是空白页,且 `frontendDist` 不会内嵌;解决方案选择:凡是要单独运行的桌面二进制(`target/debug/app` 或 release)都必须加 `--features tauri/custom-protocol`;解释:Tauri 的 `cfg(dev) = !custom-protocol`(`tauri/build.rs`),dev 模式下 `get_app_url()` 取 `devUrl`、`tauri-codegen` 也会跳过资源内嵌,而仓库里并没有定义 `custom-protocol` 这个 app 级 feature,只能按依赖 feature 语法传。下次排查空白窗口先跑 `ss -ltnp | grep 5173` 和 `rg -n 'custom-protocol' ui/lianghua_web/src-tauri/Cargo.toml`。
-- 切换数据仓库目录提供「移动现有数据并切换 / 只切换目录 / 取消」三选,移动一律走「复制 → 文件数与总字节校验 → 切根目录」,不删源目录、不用 `rename`:内置盘与外接盘跨文件系统时 `rename` 必然失败或退化成不可控的隐式拷贝,而校验失败时源目录必须保持原样。目标已存在非空 `source/` 时直接拒绝,不做覆盖(残留的未完成副本由用户手动处理)。复制期间 DuckDB 连接仍是打开的,边写边拷可能不一致,这条风险由用户承担,界面只负责提示「复制期间勿操作其它页面」。

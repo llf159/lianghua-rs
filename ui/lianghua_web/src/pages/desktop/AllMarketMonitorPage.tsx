@@ -1852,7 +1852,7 @@ export default function AllMarketMonitorPage() {
         {templateWarning ? (
           <div className="all-market-warning">{templateWarning}</div>
         ) : null}
-        {volumeRatioStatus ? (
+        {enabled && volumeRatioStatus ? (
           <div className="all-market-warning" role="status">{volumeRatioStatus}</div>
         ) : null}
       </section>
@@ -1868,8 +1868,8 @@ export default function AllMarketMonitorPage() {
                   {kind === "concept" ? "个组合" : "个行业"}
                 </span>
               </h3>
-              <p title="按当前行情池有效行情等权聚合 · 点击组合联动列表">
-                按当前行情池有效行情等权聚合 · 点击组合联动列表
+              <p title="按当前行情池有效行情聚合 · 加权涨幅按总市值加权 · 点击组合联动列表">
+                等权 / 总市值加权 · 点击组合联动列表
               </p>
             </div>
             <IntradayMarketGroupTable
@@ -1935,7 +1935,13 @@ export default function AllMarketMonitorPage() {
                     setBoardFilter(board);
                   }}
                 >
-                  {board}
+                  {board === "科创板"
+                    ? "科创"
+                    : board === "创业板"
+                      ? "创业"
+                      : board === "北交所"
+                        ? "北交"
+                        : board}
                 </button>
               ))}
               <GlobalStockSearch

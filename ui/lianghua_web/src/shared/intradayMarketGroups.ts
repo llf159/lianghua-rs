@@ -5,6 +5,7 @@ export type MarketGroup = {
   kind: "concept" | "industry";
   rows: AllMarketMonitorRow[];
   change: number;
+  weightedChange: number | null;
   median: number;
   rising: number;
   amount: number;
@@ -64,11 +65,24 @@ export function summarizeGroups(
       .map((row) => row.realtime_change_pct!)
       .sort((a, b) => a - b);
     const middle = Math.floor(changes.length / 2);
+    let totalMv = 0;
+    let weightedChangeSum = 0;
+    for (const row of members) {
+      if (
+        row.total_mv_yi != null &&
+        Number.isFinite(row.total_mv_yi) &&
+        row.total_mv_yi > 0
+      ) {
+        totalMv += row.total_mv_yi;
+        weightedChangeSum += row.realtime_change_pct! * row.total_mv_yi;
+      }
+    }
     return {
       name,
       kind,
       rows: members,
       change: changes.reduce((sum, value) => sum + value, 0) / changes.length,
+      weightedChange: totalMv > 0 ? weightedChangeSum / totalMv : null,
       median:
         changes.length % 2
           ? changes[middle]

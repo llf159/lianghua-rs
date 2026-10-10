@@ -24,6 +24,9 @@ export default function IntradayMarketGroupTable({
           <tr>
             <th>组合</th>
             <th>等权涨幅</th>
+            <th title="按总市值加权：Σ(涨幅 × 总市值) ÷ Σ总市值；仅计入总市值有效且大于零的股票，无有效市值时显示 —">
+              加权涨幅
+            </th>
             <th>上涨 / 成分</th>
             <th>领涨股</th>
           </tr>
@@ -56,6 +59,9 @@ export default function IntradayMarketGroupTable({
                 title={`中位数 ${percent(group.median)} · 成交额 ${amount(group.amount)}`}
               >
                 {percent(group.change)}
+              </td>
+              <td className={tone(group.weightedChange)}>
+                {percent(group.weightedChange)}
               </td>
               <td>
                 <span className="intraday-group-breadth">

@@ -1118,7 +1118,8 @@ pub fn get_all_market_monitor_snapshot(
                 .any(|date| normalize_quote_trade_date(date).as_deref() == Some(today.as_str()))
         })
     });
-    let volume_ratios = if matches!(provider, RealtimeQuoteProvider::Tencent) {
+    // 未确认交易时页面会在本轮后暂停，不应为无人轮询的进度排队全市场分时。
+    let volume_ratios = if market_active && matches!(provider, RealtimeQuoteProvider::Tencent) {
         fetch_meta
             .quote_trade_date
             .as_deref()
