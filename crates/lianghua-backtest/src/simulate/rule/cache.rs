@@ -547,7 +547,6 @@ pub(super) fn build_triggered_score_map(rule_rows: Vec<RuleDbRow>) -> TriggeredS
         ts_code,
         trade_date,
         rule_score,
-        ..
     } in rule_rows
     {
         rows_by_ts

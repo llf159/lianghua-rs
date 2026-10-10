@@ -19,9 +19,7 @@ use crate::{
         stock_list_path, ths_concepts_path,
     },
     download::ind_calc::{cache_ind_build, calc_inds_with_cache},
-    scoring::tools::{
-        SimilarityRankFieldInjector, inject_stock_extra_fields, load_st_list, load_total_share_map,
-    },
+    scoring::tools::{SimilarityRankFieldInjector, inject_stock_extra_fields, load_st_list},
     utils::utils::board_category,
 };
 use lianghua_app_chart::indicator::{
@@ -748,93 +746,96 @@ fn inject_chart_indicator_extra_runtime_fields(
     row_data: &mut RowData,
     source_path: &str,
     ts_code: &str,
+    input_fields: &HashSet<String>,
 ) -> Result<(), String> {
-    let st_list = load_st_list(source_path).unwrap_or_default();
-    let fallback_total_share = load_total_share_map(source_path)
-        .ok()
-        .and_then(|map| map.get(ts_code).copied());
-    inject_stock_extra_fields(
-        row_data,
-        ts_code,
-        st_list.contains(ts_code),
-        fallback_total_share,
-    )?;
-    (|row_data: &mut RowData, source_path: &str, ts_code: &str| -> Result<(), String> {
-        let len = row_data.trade_dates.len();
-        let mut rank_series = vec![None; len];
-        let mut score_series = vec![None; len];
-        if len == 0 {
-            row_data.cols.insert("RANK".to_string(), rank_series);
-            row_data.cols.insert("SCORE".to_string(), score_series);
-            return row_data.validate();
-        }
-
-        let Some(start_date) = row_data.trade_dates.first() else {
-            row_data.cols.insert("RANK".to_string(), rank_series);
-            row_data.cols.insert("SCORE".to_string(), score_series);
-            return row_data.validate();
-        };
-        let Some(end_date) = row_data.trade_dates.last() else {
-            row_data.cols.insert("RANK".to_string(), rank_series);
-            row_data.cols.insert("SCORE".to_string(), score_series);
-            return row_data.validate();
-        };
-        let rank_map = (|source_path: &str,
-                         ts_code: &str,
-                         start_date: &str,
-                         end_date: &str|
-         -> HashMap<String, ChartIndicatorRankScoreValues> {
-            let result_db = result_db_path(source_path);
-            if !result_db.exists() {
-                return HashMap::new();
+    if input_fields.contains("ZHANG") || input_fields.contains("TOTAL_MV_YI") {
+        let is_st = input_fields.contains("ZHANG")
+            && load_st_list(source_path)
+                .unwrap_or_default()
+                .contains(ts_code);
+        inject_stock_extra_fields(row_data, ts_code, is_st, None)?;
+    }
+    if input_fields.contains("RANK") || input_fields.contains("SCORE") {
+        (|row_data: &mut RowData, source_path: &str, ts_code: &str| -> Result<(), String> {
+            let len = row_data.trade_dates.len();
+            let mut rank_series = vec![None; len];
+            let mut score_series = vec![None; len];
+            if len == 0 {
+                row_data.cols.insert("RANK".to_string(), rank_series);
+                row_data.cols.insert("SCORE".to_string(), score_series);
+                return row_data.validate();
             }
 
-            let Some(result_db_str) = result_db.to_str() else {
-                return HashMap::new();
+            let Some(start_date) = row_data.trade_dates.first() else {
+                row_data.cols.insert("RANK".to_string(), rank_series);
+                row_data.cols.insert("SCORE".to_string(), score_series);
+                return row_data.validate();
             };
-            let Ok(conn) = Connection::open(result_db_str) else {
-                return HashMap::new();
+            let Some(end_date) = row_data.trade_dates.last() else {
+                row_data.cols.insert("RANK".to_string(), rank_series);
+                row_data.cols.insert("SCORE".to_string(), score_series);
+                return row_data.validate();
             };
-            let Ok(mut stmt) = conn.prepare(
-                r#"
+            let rank_map = (|source_path: &str,
+                             ts_code: &str,
+                             start_date: &str,
+                             end_date: &str|
+             -> HashMap<String, ChartIndicatorRankScoreValues> {
+                let result_db = result_db_path(source_path);
+                if !result_db.exists() {
+                    return HashMap::new();
+                }
+
+                let Some(result_db_str) = result_db.to_str() else {
+                    return HashMap::new();
+                };
+                let Ok(conn) = Connection::open(result_db_str) else {
+                    return HashMap::new();
+                };
+                let Ok(mut stmt) = conn.prepare(
+                    r#"
         SELECT trade_date, rank, total_score
         FROM score_summary
         WHERE ts_code = ? AND trade_date >= ? AND trade_date <= ?
         "#,
-            ) else {
-                return HashMap::new();
-            };
-            let Ok(mut rows) = stmt.query(params![ts_code, start_date, end_date]) else {
-                return HashMap::new();
-            };
-
-            let mut out = HashMap::new();
-            while let Ok(Some(row)) = rows.next() {
-                let Ok(trade_date) = row.get::<_, String>(0) else {
-                    continue;
+                ) else {
+                    return HashMap::new();
                 };
-                let rank = row
-                    .get::<_, Option<i64>>(1)
-                    .ok()
-                    .flatten()
-                    .map(|value| value as f64);
-                let score = row.get::<_, Option<f64>>(2).ok().flatten();
-                out.insert(trade_date, ChartIndicatorRankScoreValues { rank, score });
-            }
-            out
-        })(source_path, ts_code, start_date, end_date);
-        for (index, trade_date) in row_data.trade_dates.iter().enumerate() {
-            if let Some(values) = rank_map.get(trade_date) {
-                rank_series[index] = values.rank;
-                score_series[index] = values.score;
-            }
-        }
+                let Ok(mut rows) = stmt.query(params![ts_code, start_date, end_date]) else {
+                    return HashMap::new();
+                };
 
-        row_data.cols.insert("RANK".to_string(), rank_series);
-        row_data.cols.insert("SCORE".to_string(), score_series);
-        row_data.validate()
-    })(row_data, source_path, ts_code)?;
-    SimilarityRankFieldInjector::new(source_path, true).inject(row_data, ts_code)
+                let mut out = HashMap::new();
+                while let Ok(Some(row)) = rows.next() {
+                    let Ok(trade_date) = row.get::<_, String>(0) else {
+                        continue;
+                    };
+                    let rank = row
+                        .get::<_, Option<i64>>(1)
+                        .ok()
+                        .flatten()
+                        .map(|value| value as f64);
+                    let score = row.get::<_, Option<f64>>(2).ok().flatten();
+                    out.insert(trade_date, ChartIndicatorRankScoreValues { rank, score });
+                }
+                out
+            })(source_path, ts_code, start_date, end_date);
+            for (index, trade_date) in row_data.trade_dates.iter().enumerate() {
+                if let Some(values) = rank_map.get(trade_date) {
+                    rank_series[index] = values.rank;
+                    score_series[index] = values.score;
+                }
+            }
+
+            row_data.cols.insert("RANK".to_string(), rank_series);
+            row_data.cols.insert("SCORE".to_string(), score_series);
+            row_data.validate()
+        })(row_data, source_path, ts_code)?;
+    }
+    if input_fields.contains("S_RANK") {
+        SimilarityRankFieldInjector::new(source_path, true).inject(row_data, ts_code)?;
+    }
+    row_data.validate()
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -923,7 +924,12 @@ fn query_kline_with_compiled(
         query_kline_rows(source_conn, ts_code, &db_columns, &dependency_columns)?;
 
     if execute_indicators {
-        inject_chart_indicator_extra_runtime_fields(&mut row_data, source_path, ts_code)?;
+        inject_chart_indicator_extra_runtime_fields(
+            &mut row_data,
+            source_path,
+            ts_code,
+            &compiled.runtime_input_fields,
+        )?;
         let execution = execute_chart_indicator_config(&compiled, row_data)?;
         apply_chart_indicator_execution(&mut items, execution.values);
     }
@@ -1070,6 +1076,32 @@ fn rerun_realtime_chart_indicators(
         return Ok(());
     }
 
+    let ind_cache = cache_ind_build(source_path)?;
+    let mut chart_fields = compiled.runtime_input_fields.clone();
+    let mut input_fields = HashSet::new();
+    let mut selected = vec![false; ind_cache.len()];
+    // Programs share a runtime: an earlier assignment can feed a later indicator,
+    // even when that earlier indicator's published name is not referenced.
+    for (index, ind) in ind_cache.iter().enumerate().rev() {
+        let mut outputs = ind.assigned_identifiers.clone();
+        outputs.insert(ind.name.clone());
+        let chart_uses_output = chart_fields.remove(&ind.name.to_ascii_uppercase());
+        if !chart_uses_output && outputs.is_disjoint(&input_fields) {
+            continue;
+        }
+        selected[index] = true;
+        input_fields.retain(|name| !outputs.contains(name));
+        input_fields.extend(ind.input_identifiers.iter().cloned());
+    }
+    // Only published outputs are copied back to the chart input. Assignments
+    // inside a custom indicator must not replace the chart's database fields.
+    input_fields.extend(chart_fields);
+    let ind_cache = ind_cache
+        .into_iter()
+        .zip(selected)
+        .filter_map(|(ind, selected)| selected.then_some(ind))
+        .collect::<Vec<_>>();
+
     let mut row_data = (|items: &[DetailKlineRow],
                          source_path: &str,
                          ts_code: &str,
@@ -1167,7 +1199,12 @@ fn rerun_realtime_chart_indicators(
         }
 
         let mut row_data = RowData { trade_dates, cols };
-        inject_chart_indicator_extra_runtime_fields(&mut row_data, source_path, ts_code)?;
+        inject_chart_indicator_extra_runtime_fields(
+            &mut row_data,
+            source_path,
+            ts_code,
+            &input_fields,
+        )?;
         Ok(row_data)
     })(
         items,
@@ -1176,7 +1213,6 @@ fn rerun_realtime_chart_indicators(
         Some(realtime_pre_close),
         compiled,
     )?;
-    let ind_cache = cache_ind_build(source_path)?;
     if !ind_cache.is_empty() {
         for (name, series) in calc_inds_with_cache(&ind_cache, row_data.clone())? {
             row_data.cols.insert(name, series);
@@ -2762,8 +2798,23 @@ kind = "line"
 version = 1
 
 [[ind]]
-name = "J"
+name = "BASE"
 expr = "MA(C, 2)"
+prec = 2
+
+[[ind]]
+name = "SIDE_EFFECT"
+expr = "HELPER := BASE; HELPER"
+prec = 2
+
+[[ind]]
+name = "J"
+expr = "HELPER"
+prec = 2
+
+[[ind]]
+name = "UNUSED"
+expr = "RANK := 1; MISSING_RUNTIME_INPUT"
 prec = 2
 "#,
             )
@@ -2786,6 +2837,10 @@ key = "j_line"
 label = "J"
 expr = "J"
 kind = "line"
+
+[[panel.tooltip]]
+key = "rank"
+expr = "RANK"
 "##,
             )
             .expect("config should be written");
@@ -2832,6 +2887,10 @@ kind = "line"
         assert_eq!(
             latest.indicators.get("j_line"),
             Some(&serde_json::json!(12.0))
+        );
+        assert_eq!(
+            latest.indicators.get("__tooltip_price_rank"),
+            Some(&serde_json::Value::Null)
         );
 
         fs::remove_dir_all(source_path).ok();

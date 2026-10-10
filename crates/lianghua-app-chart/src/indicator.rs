@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
     time::UNIX_EPOCH,
 };
 
@@ -12,8 +12,11 @@ use crate::{
     data::RowData,
     expr::{
         eval::{Runtime, Value},
-        parser::{Expr, Stmt, Stmts},
-        validation::{first_unsupported_expression_function, parse_expression_program},
+        parser::Stmts,
+        validation::{
+            expression_input_identifiers, first_unsupported_expression_function,
+            parse_expression_program,
+        },
     },
 };
 
@@ -92,6 +95,7 @@ pub struct ChartColorRule {
 pub struct CompiledChartIndicatorConfig {
     pub panels: Vec<CompiledChartPanel>,
     pub database_indicator_columns: Vec<String>,
+    pub runtime_input_fields: HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -616,6 +620,7 @@ pub fn compile_chart_indicator_config(
     })(&config);
     let mut available_series_keys = HashSet::new();
     let mut database_indicator_columns = HashSet::new();
+    let mut runtime_input_fields = HashSet::new();
     let mut compiled_panels = Vec::with_capacity(config.panels.len());
 
     for panel in &config.panels {
@@ -632,6 +637,7 @@ pub fn compile_chart_indicator_config(
                 &available_series_keys,
                 db_column_lookup.as_ref(),
                 &mut database_indicator_columns,
+                &mut runtime_input_fields,
             )?;
 
             let series_key = normalize_identifier(&series.key);
@@ -656,6 +662,7 @@ pub fn compile_chart_indicator_config(
                     &available_series_keys,
                     db_column_lookup.as_ref(),
                     &mut database_indicator_columns,
+                    &mut runtime_input_fields,
                 )?;
                 compiled_color_rules.push(CompiledChartColorRule {
                     when_key: format!("__color_{}_{}_{}", panel.key, series.key, index),
@@ -692,6 +699,7 @@ pub fn compile_chart_indicator_config(
                 &available_series_keys,
                 db_column_lookup.as_ref(),
                 &mut database_indicator_columns,
+                &mut runtime_input_fields,
             )?;
             let is_vertical_line = marker.kind == Some(ChartMarkerKind::VerticalLine);
             if !is_vertical_line && let Some(y_key) = marker.y.as_deref() {
@@ -704,9 +712,11 @@ pub fn compile_chart_indicator_config(
                  -> Result<(), String> {
                     validate_key(path, y_key)?;
                     let normalized = normalize_identifier(y_key);
-                    if is_base_runtime_key(&normalized)
-                        || available_series_keys.contains(&normalized)
-                    {
+                    if is_base_runtime_key(&normalized) {
+                        runtime_input_fields.insert(normalized);
+                        return Ok(());
+                    }
+                    if available_series_keys.contains(&normalized) {
                         return Ok(());
                     }
                     if let Some(db_dependency) = injected_runtime_db_dependency(&normalized) {
@@ -718,11 +728,13 @@ pub fn compile_chart_indicator_config(
                         return Ok(());
                     }
                     if is_injected_runtime_key(&normalized) {
+                        runtime_input_fields.insert(normalized);
                         return Ok(());
                     }
                     if let Some(db_column_lookup) = db_column_lookup {
                         if let Some(column) = db_column_lookup.get(&normalized) {
                             database_indicator_columns.insert(column.clone());
+                            runtime_input_fields.insert(normalized);
                             return Ok(());
                         }
                         if all_series_keys.contains(&normalized) {
@@ -736,6 +748,7 @@ pub fn compile_chart_indicator_config(
                     }
 
                     database_indicator_columns.insert(y_key.to_string());
+                    runtime_input_fields.insert(normalized);
                     Ok(())
                 })(
                     y_key,
@@ -782,6 +795,7 @@ pub fn compile_chart_indicator_config(
                 &available_series_keys,
                 db_column_lookup.as_ref(),
                 &mut database_indicator_columns,
+                &mut runtime_input_fields,
             )?;
             compiled_tooltips.push(CompiledChartTooltip {
                 key: tooltip.key.clone(),
@@ -811,6 +825,7 @@ pub fn compile_chart_indicator_config(
     Ok(CompiledChartIndicatorConfig {
         panels: compiled_panels,
         database_indicator_columns,
+        runtime_input_fields,
     })
 }
 
@@ -842,7 +857,7 @@ pub fn execute_chart_indicator_config(
             let value = runtime.eval_program(&series.expr).map_err(|error| {
                 format!("chart series {} compute failed: {}", series.key, error.msg)
             })?;
-            let num_series = Value::as_num_series(&value, series_len).map_err(|error| {
+            let num_series = value.into_num_series(series_len).map_err(|error| {
                 format!(
                     "chart series {} result is not numeric series: {}",
                     series.key, error.msg
@@ -945,12 +960,12 @@ pub fn execute_chart_indicator_config(
 }
 
 fn insert_runtime_series_aliases(runtime: &mut Runtime, key: &str, series: Vec<Option<f64>>) {
-    runtime
-        .vars
-        .insert(key.to_string(), Value::NumSeries(series.clone()));
-
+    let value = Value::SharedNumSeries(Arc::new(series));
     let normalized = normalize_identifier(key);
-    runtime.vars.insert(normalized, Value::NumSeries(series));
+    if key != normalized {
+        runtime.vars.insert(key.to_string(), value.clone());
+    }
+    runtime.vars.insert(normalized, value);
 }
 
 fn insert_existing_runtime_alias(runtime: &mut Runtime, from: &str, to: &str) {
@@ -995,26 +1010,13 @@ fn collect_database_dependencies(
     available_series_keys: &HashSet<String>,
     db_column_lookup: Option<&HashMap<String, String>>,
     database_indicator_columns: &mut HashSet<String>,
+    runtime_input_fields: &mut HashSet<String>,
 ) -> Result<(), String> {
-    let identifiers = (|stmts: &Stmts| -> HashSet<String> {
-        let mut locals = HashSet::new();
-        let mut identifiers = HashSet::new();
-
-        for stmt in &stmts.item {
-            match stmt {
-                Stmt::Assign { name, value } => {
-                    collect_expr_identifiers(value, &locals, &mut identifiers);
-                    locals.insert(name.clone());
-                }
-                Stmt::Expr(expr) => collect_expr_identifiers(expr, &locals, &mut identifiers),
-            }
-        }
-
-        identifiers
-    })(stmts);
+    let identifiers = expression_input_identifiers(stmts);
     for identifier in identifiers {
         let normalized = normalize_identifier(&identifier);
         if is_base_runtime_key(&normalized) {
+            runtime_input_fields.insert(normalized);
             continue;
         }
         if let Some(db_dependency) = injected_runtime_db_dependency(&normalized) {
@@ -1026,6 +1028,7 @@ fn collect_database_dependencies(
             continue;
         }
         if is_injected_runtime_key(&normalized) {
+            runtime_input_fields.insert(normalized);
             continue;
         }
         if available_series_keys.contains(&normalized) {
@@ -1034,6 +1037,7 @@ fn collect_database_dependencies(
         if let Some(db_column_lookup) = db_column_lookup {
             if let Some(column) = db_column_lookup.get(&normalized) {
                 database_indicator_columns.insert(column.clone());
+                runtime_input_fields.insert(normalized);
                 continue;
             }
             if all_series_keys.contains(&normalized) {
@@ -1046,34 +1050,10 @@ fn collect_database_dependencies(
             ));
         }
         database_indicator_columns.insert(identifier);
+        runtime_input_fields.insert(normalized);
     }
 
     Ok(())
-}
-
-fn collect_expr_identifiers(
-    expr: &Expr,
-    locals: &HashSet<String>,
-    identifiers: &mut HashSet<String>,
-) {
-    match expr {
-        Expr::Number(_) => {}
-        Expr::Ident(name) => {
-            if !locals.contains(name) {
-                identifiers.insert(name.clone());
-            }
-        }
-        Expr::Call { args, .. } => {
-            for arg in args {
-                collect_expr_identifiers(arg, locals, identifiers);
-            }
-        }
-        Expr::Unary { rhs, .. } => collect_expr_identifiers(rhs, locals, identifiers),
-        Expr::Binary { lhs, rhs, .. } => {
-            collect_expr_identifiers(lhs, locals, identifiers);
-            collect_expr_identifiers(rhs, locals, identifiers);
-        }
-    }
 }
 
 fn normalize_identifier(identifier: &str) -> String {
@@ -1526,6 +1506,13 @@ format = "number"
             .expect("injected runtime fields should compile");
 
         assert!(compiled.database_indicator_columns.is_empty());
+        assert_eq!(
+            compiled.runtime_input_fields,
+            ["RANK", "SCORE", "S_RANK", "ZHANG", "TOTAL_MV_YI"]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        );
     }
 
     #[test]

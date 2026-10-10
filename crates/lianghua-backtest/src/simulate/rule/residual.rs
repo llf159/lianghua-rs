@@ -740,7 +740,6 @@ pub(super) fn load_rule_rows_for_names_filtered(
             }
 
             out.push(RuleDbRow {
-                rule_name,
                 ts_code,
                 trade_date,
                 rule_score,

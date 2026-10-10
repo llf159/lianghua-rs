@@ -212,7 +212,6 @@ pub struct RuleLayerRuntimeCache {
 #[cfg(test)]
 #[derive(Debug, Clone)]
 pub(super) struct RuleDbRow {
-    rule_name: String,
     ts_code: String,
     trade_date: String,
     rule_score: f64,

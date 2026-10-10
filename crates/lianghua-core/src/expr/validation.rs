@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::{
     eval::is_supported_expression_function,
@@ -8,6 +8,47 @@ use crate::utils::utils::{eval_binary_for_warmup, impl_expr_warmup};
 
 pub fn parse_expression_program(expression: &str) -> Result<Stmts, ParseErr> {
     Parser::new(lex_all(expression)).parse_main()
+}
+
+/// Identifiers read before an assignment in this program supplies their value.
+pub fn expression_input_identifiers(stmts: &Stmts) -> HashSet<String> {
+    let mut locals = HashSet::new();
+    let mut identifiers = HashSet::new();
+    for stmt in &stmts.item {
+        match stmt {
+            Stmt::Assign { name, value } => {
+                collect_expr_identifiers(value, &locals, &mut identifiers);
+                locals.insert(name.clone());
+            }
+            Stmt::Expr(expr) => collect_expr_identifiers(expr, &locals, &mut identifiers),
+        }
+    }
+    identifiers
+}
+
+fn collect_expr_identifiers(
+    expr: &Expr,
+    locals: &HashSet<String>,
+    identifiers: &mut HashSet<String>,
+) {
+    match expr {
+        Expr::Number(_) => {}
+        Expr::Ident(name) => {
+            if !locals.contains(name) {
+                identifiers.insert(name.clone());
+            }
+        }
+        Expr::Call { args, .. } => {
+            for arg in args {
+                collect_expr_identifiers(arg, locals, identifiers);
+            }
+        }
+        Expr::Unary { rhs, .. } => collect_expr_identifiers(rhs, locals, identifiers),
+        Expr::Binary { lhs, rhs, .. } => {
+            collect_expr_identifiers(lhs, locals, identifiers);
+            collect_expr_identifiers(rhs, locals, identifiers);
+        }
+    }
 }
 
 pub fn validate_expression_functions(stmts: &Stmts) -> Result<(), String> {

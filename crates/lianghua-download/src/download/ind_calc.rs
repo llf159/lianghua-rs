@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     path::Path,
     sync::{Arc, Mutex, OnceLock},
@@ -16,9 +16,10 @@ use crate::{
     download::ProBarRow,
     expr::eval::Value,
     expr::{
-        parser::Stmts,
+        parser::{Stmt, Stmts},
         validation::{
-            estimate_expression_warmup, parse_expression_program, validate_expression_functions,
+            estimate_expression_warmup, expression_input_identifiers, parse_expression_program,
+            validate_expression_functions,
         },
     },
 };
@@ -28,6 +29,8 @@ pub struct IndsCache {
     pub name: String,
     pub expr: Stmts,
     pub perc: usize,
+    pub input_identifiers: HashSet<String>,
+    pub assigned_identifiers: HashSet<String>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -74,10 +77,21 @@ fn compile_indicator_defs(inds: Vec<crate::data::IndData>) -> Result<Vec<IndsCac
         let stmt = parse_expression_program(&ind.expr)
             .map_err(|e| format!("表达式解析错误在{}:{}", e.idx, e.msg))?;
         validate_expression_functions(&stmt)?;
+        let input_identifiers = expression_input_identifiers(&stmt);
+        let assigned_identifiers = stmt
+            .item
+            .iter()
+            .filter_map(|stmt| match stmt {
+                Stmt::Assign { name, .. } => Some(name.clone()),
+                Stmt::Expr(_) => None,
+            })
+            .collect();
         out.push(IndsCache {
             name: ind.name,
             expr: stmt,
             perc: ind.prec,
+            input_identifiers,
+            assigned_identifiers,
         });
     }
     Ok(out)
@@ -103,10 +117,11 @@ fn load_optional_inds(source_dir: &str) -> Result<Option<Vec<crate::data::IndDat
 }
 
 pub fn cache_ind_build(source_dir: &str) -> Result<Vec<IndsCache>, String> {
-    let Some(inds) = load_optional_inds(source_dir)? else {
+    let path = ind_toml_path(source_dir);
+    if !path.exists() {
         return Ok(Vec::new());
-    };
-    compile_indicator_defs(inds)
+    }
+    cache_ind_build_from_path(&path)
 }
 
 pub fn cache_ind_build_from_path(indicator_path: &Path) -> Result<Vec<IndsCache>, String> {
