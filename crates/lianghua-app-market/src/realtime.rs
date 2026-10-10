@@ -89,13 +89,19 @@ fn build_latest_quote_time_meta<'a>(
         .filter_map(|(date, time)| {
             let date = normalize_quote_trade_date(date)?;
             let time = normalize_quote_time(time);
-            let sort_time = time.clone().unwrap_or_else(|| "00:00:00".to_string());
-            Some((date, sort_time, time))
+            Some((date, time))
         })
-        .max_by_key(|(date, sort_time, _)| (date.clone(), sort_time.clone()));
+        .max_by(|(left_date, left_time), (right_date, right_time)| {
+            left_date.cmp(right_date).then_with(|| {
+                left_time
+                    .as_deref()
+                    .unwrap_or("00:00:00")
+                    .cmp(right_time.as_deref().unwrap_or("00:00:00"))
+            })
+        });
 
     match latest {
-        Some((date, _, time)) => {
+        Some((date, time)) => {
             let refreshed_at = match &time {
                 Some(time) => format!("{date} {time}"),
                 None => date.clone(),

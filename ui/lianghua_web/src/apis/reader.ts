@@ -195,6 +195,7 @@ export type AllMarketMonitorRow = {
   ts_code: string;
   name: string;
   board: string;
+  industry?: string;
   concept?: string;
   rank?: number | null;
   best_rank_3d?: number | null;
@@ -233,6 +234,8 @@ export type AllMarketMonitorSnapshotData = {
   index_rows?: AllMarketIndexRow[];
   data_version?: string | null;
   has_new_data?: boolean;
+  market_active?: boolean;
+  market_status_message?: string | null;
   refreshed_at?: string | null;
   rank_date?: string | null;
   requested_count: number;

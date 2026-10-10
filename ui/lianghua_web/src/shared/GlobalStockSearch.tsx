@@ -15,7 +15,12 @@ import './globalStockSearch.css'
 
 const MAX_GLOBAL_STOCK_CANDIDATES = 10
 
-export default function GlobalStockSearch() {
+export default function GlobalStockSearch({ inline = false, selectedStock, onSelect, onClear }: {
+  inline?: boolean
+  selectedStock?: StockLookupRow | null
+  onSelect?: (row: StockLookupRow) => void
+  onClear?: () => void
+} = {}) {
   const location = useLocation()
   const navigate = useNavigate()
   const rootRef = useRef<HTMLDivElement | null>(null)
@@ -106,6 +111,12 @@ export default function GlobalStockSearch() {
   }
 
   function openStockDetail(row: StockLookupRow) {
+    if (onSelect) {
+      onSelect(row)
+      setIsOpen(false)
+      setLookupInput('')
+      return
+    }
     const backgroundLocation =
       location.state &&
       typeof location.state === 'object' &&
@@ -140,20 +151,34 @@ export default function GlobalStockSearch() {
     event.stopPropagation()
   }
 
+  const panelRect = inline && isOpen ? rootRef.current?.getBoundingClientRect() : null
+
   return (
-    <div className="global-stock-search" ref={rootRef}>
+    <div className={inline ? 'global-stock-search is-inline' : 'global-stock-search'} ref={rootRef}>
       <button
-        className={isOpen ? 'global-stock-search-toggle is-active' : 'global-stock-search-toggle'}
+        className={inline ? `all-market-search-toggle${selectedStock ? ' is-active' : ''}` : isOpen ? 'global-stock-search-toggle is-active' : 'global-stock-search-toggle'}
         type="button"
-        aria-label="全局股票搜索"
+        aria-label={inline ? "搜索股票" : "全局股票搜索"}
+        aria-expanded={isOpen}
+        aria-pressed={inline ? Boolean(selectedStock) : undefined}
         title="全局股票搜索"
         onClick={openPanel}
       >
-        <span aria-hidden="true" />
+        {inline ? '搜索' : <span aria-hidden="true" />}
       </button>
 
       {isOpen ? (
-        <div className="global-stock-search-panel" onMouseDown={onPanelMouseDown}>
+        <div className="global-stock-search-panel" onMouseDown={onPanelMouseDown}
+          style={panelRect ? {
+            position: 'fixed', top: panelRect.bottom + 8,
+            left: Math.max(16, Math.min(panelRect.left, window.innerWidth - Math.min(360, window.innerWidth - 32) - 16)),
+            right: 'auto', maxHeight: Math.max(160, window.innerHeight - panelRect.bottom - 24), overflowY: 'auto',
+          } : undefined}
+        >
+          {selectedStock && onClear ? <div className="global-stock-search-selection">
+            <span>筛选：{selectedStock.name}</span>
+            <button type="button" onClick={() => { onClear(); setLookupInput('') }}>清除筛选</button>
+          </div> : null}
           <label className="global-stock-search-field">
             <span>股票搜索</span>
             <input

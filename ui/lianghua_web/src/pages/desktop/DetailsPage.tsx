@@ -15,7 +15,7 @@ import {
 import { useSearchParams } from "react-router-dom";
 import {
   getStockDetailCyq,
-  getStockDetailIntradaySnapshot,
+  getStockDetailIntraday,
   getStockDetailKlineIndicators,
   getStockDetailOverview,
   getStockDetailRealtime,
@@ -4488,6 +4488,7 @@ export default function DetailsPage({
   const detailIntradayRequestIdRef = useRef(0);
   const detailIntradayRequestKeyRef = useRef("");
   const detailIntradayLoadedKeyRef = useRef("");
+  const detailIntradayPendingRef = useRef<Promise<TencentIntradayData> | null>(null);
   const detailCyqRequestKeyRef = useRef("");
   const stockSimilarityRequestKeyRef = useRef("");
   const detailStrategyRequestKeyRef = useRef("");
@@ -4617,13 +4618,14 @@ export default function DetailsPage({
       }
       const intradayLoadKey = [normalizedSourcePath, normalizedTsCode].join("|");
 
-      if (
-        !force &&
-        (detailIntradayRequestKeyRef.current === intradayLoadKey ||
-          detailIntradayLoadedKeyRef.current === intradayLoadKey)
-      ) {
-        return null;
+      if (!force && detailIntradayRequestKeyRef.current === intradayLoadKey) {
+        try {
+          return await detailIntradayPendingRef.current;
+        } catch {
+          return null;
+        }
       }
+      if (!force && detailIntradayLoadedKeyRef.current === intradayLoadKey) return null;
 
       const requestId = detailIntradayRequestIdRef.current + 1;
       detailIntradayRequestIdRef.current = requestId;
@@ -4633,33 +4635,42 @@ export default function DetailsPage({
       if (detailIntradayLoadedKeyRef.current !== intradayLoadKey) {
         detailIntradayLoadedKeyRef.current = "";
         setDetailIntradayData(null);
+        setDetailRealtimeData(null);
       }
       setDetailIntradayLoading(true);
       setDetailIntradayError("");
       setDetailRealtimeLoading(true);
       setDetailRealtimeNotice("");
       try {
-        const snapshot = await getStockDetailIntradaySnapshot({
-          sourcePath: normalizedSourcePath,
-          tsCode: normalizedTsCode,
-          chartWindowDays: DETAIL_CHART_WINDOW_DAYS,
-        });
-        if (detailIntradayRequestIdRef.current !== requestId) {
-          return null;
-        }
+        const pending = getStockDetailIntraday({ tsCode: normalizedTsCode });
+        detailIntradayPendingRef.current = pending;
+        const intraday = await pending;
+        if (detailIntradayRequestIdRef.current !== requestId) return null;
         detailIntradayLoadedKeyRef.current = intradayLoadKey;
-        setDetailIntradayData(snapshot.intraday);
-        if (snapshot.realtime) {
-          setDetailRealtimeData(snapshot.realtime);
-          setDetailRealtimeNotice("");
-        } else {
-          setDetailRealtimeNotice(
-            snapshot.realtimeError
-              ? `刷新实时日K失败: ${snapshot.realtimeError}`
-              : "刷新实时日K失败",
-          );
-        }
-        return snapshot.intraday;
+        setDetailIntradayData(intraday);
+        void (async () => {
+          await waitForNextPaint();
+          if (detailIntradayRequestIdRef.current !== requestId) return;
+          setDetailRealtimeLoading(true);
+          try {
+            const realtime = await getStockDetailRealtime({
+              sourcePath: normalizedSourcePath,
+              tsCode: normalizedTsCode,
+              chartWindowDays: DETAIL_CHART_WINDOW_DAYS,
+              realtimeProvider: readStoredRealtimeQuoteProvider(),
+            });
+            if (detailIntradayRequestIdRef.current !== requestId) return;
+            setDetailRealtimeData(realtime);
+            setDetailRealtimeNotice("");
+          } catch (error) {
+            if (detailIntradayRequestIdRef.current === requestId)
+              setDetailRealtimeNotice(`刷新实时日K失败: ${String(error)}`);
+          } finally {
+            if (detailIntradayRequestIdRef.current === requestId)
+              setDetailRealtimeLoading(false);
+          }
+        })();
+        return intraday;
       } catch (error) {
         if (detailIntradayRequestIdRef.current !== requestId) {
           return null;
@@ -4670,6 +4681,7 @@ export default function DetailsPage({
       } finally {
         if (detailIntradayRequestIdRef.current === requestId) {
           detailIntradayRequestKeyRef.current = "";
+          detailIntradayPendingRef.current = null;
           setDetailIntradayLoading(false);
           if (detailRealtimeRequestKeyRef.current === realtimeRequestKey) {
             setDetailRealtimeLoading(false);
@@ -4708,6 +4720,13 @@ export default function DetailsPage({
       setDetailStrategyError("");
       setPrevRanksError("");
       try {
+        if (routeAutoIntraday) {
+          setDetailData(null);
+          await loadDetailIntraday(nextNormalizedCode, false, nextSourcePath);
+          await waitForNextPaint();
+          await waitForNextPaint();
+          if (detailRequestIdRef.current !== requestId) return null;
+        }
         const detail = await getStockDetailPage({
           sourcePath: nextSourcePath,
           tradeDate: nextTradeDate.trim() || undefined,
@@ -4720,8 +4739,10 @@ export default function DetailsPage({
         }
 
         setDetailData(detail);
-        setDetailRealtimeData(null);
-        setDetailRealtimeNotice("");
+        if (!routeAutoIntraday) {
+          setDetailRealtimeData(null);
+          setDetailRealtimeNotice("");
+        }
         setLookupInput(
           detail.overview?.name?.trim() ??
             getLookupDigits(detail.resolved_ts_code ?? nextNormalizedCode),
@@ -4813,7 +4834,7 @@ export default function DetailsPage({
         }
       }
     },
-    [],
+    [routeAutoIntraday, loadDetailIntraday],
   );
 
   const loadDetailCyq = useCallback(
@@ -6422,11 +6443,12 @@ export default function DetailsPage({
   }, [detailRealtimeLoading]);
 
   useEffect(() => {
+    if (routeAutoIntraday) return;
     setDetailRealtimeData(null);
     setDetailRealtimeLoading(false);
     setDetailRealtimeNotice("");
     detailRealtimeRequestKeyRef.current = "";
-  }, [detailData?.resolved_trade_date, detailData?.resolved_ts_code]);
+  }, [detailData?.resolved_trade_date, detailData?.resolved_ts_code, routeAutoIntraday]);
 
   useEffect(() => {
     setDetailIntradayVisible(routeAutoIntraday);

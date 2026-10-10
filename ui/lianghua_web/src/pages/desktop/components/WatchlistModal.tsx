@@ -265,7 +265,7 @@ export default function WatchlistModal({
         <div className="watchlist-modal-head">
           <div>
             <h4>名单管理</h4>
-            <p>当前待保存 {currentCount} 只，开启名单模式后仅刷新这些股票。</p>
+            <p>当前待保存 {currentCount} 只，保存后用于监控页面的自选筛选。</p>
           </div>
           <button
             type="button"

@@ -23,6 +23,14 @@
 - 锁文件实际解析为 Tauri 2.11.5、tauri-build 2.6.3、dialog 2.7.2、fs 2.5.1、log 2.9.0；前端锁文件为 API 2.11.1、CLI 2.11.4、dialog 2.7.0、fs 2.5.0。检查问题时以锁文件和 `cargo tree` 为准，不以 `Cargo.toml` 中的兼容下限为准。
 - 当前 Release 基线是 `aarch64 + APK`；产物为 `gen/android/app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk`。未配置签名时出现 `unsigned` 是预期行为。
 
+### 2026-10-09 复查
+
+- 当前 Gradle launcher 为 Ubuntu Java 21.0.12，daemon 条件仍固定 Java 21；`./gradlew help --no-daemon` 成功。这里只验证工程配置，没有重新验证 Debug/Release APK，也没有验证 Java 25 daemon 的崩溃是否消失。
+- Tauri 2.12.2 已发布，项目锁文件仍是 Tauri 2.11.5、dialog 2.7.2、fs 2.5.1。官方 CLI 2.12.0 模板仍保留 `android.builtInKotlin=false`、`android.newDsl=false`，并继续使用 `ExecOperations`；这些适配不能因 2.12 发布而撤销。
+- 本机 registry 中 dialog 2.7.2、fs 2.5.1 的 Android 目录均没有 `consumer-rules.pro`，当前缺失文件过滤仍有实际作用。官方 2.12.0 模板也通过 `android.proguard.failOnMissingFiles=false` 兼容旧插件；优先按下文顺序升级插件后验证回收，不引入新的全局绕过。
+- 官方 CLI 2.12.0 app 模板已使用 `apply(from = file("tauri.build.gradle.kts"))`，没有关闭 Release lint；本项目仍是字符串形式并关闭 lint。上游模板变化不能代替本项目的定向 Release 验证，暂不将此项标记为已解决。
+- 模板核对入口：<https://github.com/tauri-apps/tauri/tree/tauri-cli-v2.12.0/crates/tauri-cli/templates/mobile/android>。
+
 ### 当前临时兼容项
 
 1. `gradle.properties` 中的 `android.builtInKotlin=false` 和 `android.newDsl=false` 必须保留。Tauri 2.11.5 及其插件仍应用 `org.jetbrains.kotlin.android`；AGP 9 默认的内置 Kotlin 会与它冲突。Tauri 已合并 Gradle 9 模板到 2.12 里程碑，但截至本记录日期尚未发布，而且上游 `dev` 模板仍保留这两个开关并注明计划到 v3 才移除。

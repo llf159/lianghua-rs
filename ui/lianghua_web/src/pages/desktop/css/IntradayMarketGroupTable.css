@@ -1,0 +1,128 @@
+.intraday-group-scroll {
+  max-height: 222px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-x pan-y;
+  scrollbar-width: thin;
+  font-size: 13px;
+}
+
+.intraday-group-table {
+  width: 100%;
+  min-width: 420px;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.intraday-group-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  color: var(--beta-muted, #7a8593);
+  font-weight: 400;
+  font-size: 12px;
+  text-align: right;
+  background: var(--beta-soft, #f6f8fa);
+  padding: 9px 12px;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--beta-line, #e6e9ee);
+}
+
+.intraday-group-table td {
+  padding: 0 12px;
+  border-bottom: 1px solid #f0f2f5;
+  text-align: right;
+  white-space: nowrap;
+  height: 44px;
+}
+
+.intraday-group-table th:first-child,
+.intraday-group-table td:first-child {
+  text-align: left;
+}
+
+.intraday-group-select {
+  display: flex;
+  gap: 9px;
+  align-items: center;
+  width: 100%;
+  min-height: 44px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.intraday-group-position {
+  color: var(--beta-muted, #7a8593);
+  min-width: 14px;
+}
+
+.intraday-group-table td:last-child > span,
+.intraday-group-table td:last-child small {
+  display: block;
+}
+
+.intraday-group-table td:last-child small {
+  font-size: 12px;
+  margin-top: 3px;
+}
+
+.intraday-group-breadth {
+  display: inline-flex;
+  width: 36px;
+  height: 4px;
+  background: #16846720;
+  vertical-align: middle;
+  margin-right: 8px;
+  overflow: hidden;
+  border-radius: 2px;
+}
+
+.intraday-group-breadth > span {
+  background: var(--beta-up, #d84448);
+}
+
+.intraday-group-scroll .is-up {
+  color: var(--beta-up, #d84448);
+}
+
+.intraday-group-scroll .is-down {
+  color: var(--beta-down, #168467);
+}
+
+.intraday-group-table tbody tr:hover {
+  background: var(--beta-soft, #f6f8fa);
+}
+
+.intraday-group-table tbody tr.is-selected {
+  background: var(--theme-orange-50, #fff7ed);
+}
+
+.intraday-group-more {
+  width: 100%;
+  min-height: 44px;
+  border: 0;
+  border-top: 1px solid var(--beta-line, #e6e9ee);
+  background: var(--beta-soft, #f6f8fa);
+  color: var(--beta-muted, #7a8593);
+  padding: 11px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.intraday-group-select:focus-visible,
+.intraday-group-more:focus-visible {
+  outline: 2px solid var(--theme-orange-400);
+  outline-offset: -2px;
+}
+
+.intraday-group-empty {
+  padding: 24px 12px;
+  color: var(--beta-muted, #7a8593);
+  text-align: center;
+}

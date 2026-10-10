@@ -64,11 +64,13 @@ export default function PageDesktop() {
       <button
         className="sidebar-toggle"
         type="button"
-        onClick={() => setIsCollapsed((v) => !v)}
+        aria-label={isCollapsed ? "展开导航" : "收起导航"}
+        aria-expanded={!isCollapsed}
+        onClick={() => setIsCollapsed((value) => !value)}
       >
         {isCollapsed ? "☰" : "✕"}
       </button>
-      <aside className="sidebar">
+      <aside className="sidebar" inert={isCollapsed}>
         <div className="brand">明元量化</div>
 
         <nav className="menu-wrap">

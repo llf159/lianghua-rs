@@ -4,6 +4,7 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
+use chrono::{FixedOffset, NaiveDateTime, Timelike, Utc};
 use duckdb::{Connection, params};
 use rayon::prelude::*;
 use serde::Serialize;
@@ -11,7 +12,8 @@ use serde::Serialize;
 use crate::{
     crawler::{SinaQuote, default_realtime_index_ts_codes},
     data::{
-        DataReader, RowData, load_stock_list, result_db_path, runtime::row_into_rt, source_db_path,
+        DataReader, RowData, load_stock_list, load_trade_date_list, result_db_path,
+        runtime::row_into_rt, source_db_path,
     },
     download::ind_calc::{
         IndsCache, cache_ind_build, calc_inds_with_cache_lossy, warmup_ind_estimate,
@@ -35,7 +37,7 @@ use crate::{
     },
     realtime::{
         RealtimeFetchMeta, fetch_all_market_realtime_quote_map_for_codes,
-        fetch_all_market_tencent_realtime_quote_map_for_codes,
+        fetch_all_market_tencent_realtime_quote_map_for_codes, normalize_quote_time,
     },
 };
 use lianghua_app_expression::{
@@ -50,6 +52,7 @@ struct StockMeta {
     ts_code: String,
     name: String,
     board: String,
+    industry: String,
     total_mv_yi: Option<f64>,
     concept: String,
 }
@@ -70,7 +73,7 @@ struct RankContext {
 #[derive(Debug, Clone)]
 struct RankCacheEntry {
     rank_date: String,
-    ranks: HashMap<String, RankContext>,
+    ranks: Arc<HashMap<String, RankContext>>,
 }
 
 #[derive(Debug, Clone)]
@@ -104,6 +107,7 @@ pub struct AllMarketMonitorRow {
     pub ts_code: String,
     pub name: String,
     pub board: String,
+    pub industry: String,
     pub concept: String,
     pub rank: Option<i64>,
     pub best_rank_3d: Option<i64>,
@@ -144,6 +148,8 @@ pub struct AllMarketMonitorSnapshotData {
     pub index_rows: Vec<AllMarketIndexRow>,
     pub data_version: Option<String>,
     pub has_new_data: bool,
+    pub market_active: bool,
+    pub market_status_message: Option<String>,
     pub refreshed_at: Option<String>,
     pub rank_date: Option<String>,
     pub requested_count: usize,
@@ -151,7 +157,62 @@ pub struct AllMarketMonitorSnapshotData {
     pub template_warning_message: Option<String>,
 }
 
-static SOURCE_META_CACHE: OnceLock<Mutex<HashMap<String, SourceMetaCacheEntry>>> = OnceLock::new();
+fn check_market_activity(
+    now: NaiveDateTime,
+    quotes: &HashMap<String, SinaQuote>,
+    calendar_trading_day: impl FnOnce() -> Option<bool>,
+) -> (bool, Option<String>) {
+    let seconds = now.time().num_seconds_from_midnight();
+    let session_start = if (9 * 3600 + 30 * 60..11 * 3600 + 30 * 60).contains(&seconds) {
+        9 * 3600 + 30 * 60
+    } else if (13 * 3600..15 * 3600).contains(&seconds) {
+        13 * 3600
+    } else {
+        return (
+            false,
+            Some("非连续交易时段，已刷新一次并暂停爬虫".to_string()),
+        );
+    };
+    let mut available = 0;
+    let mut fresh = 0;
+    let mut freshness_by_timestamp = HashMap::new();
+    for quote in quotes
+        .values()
+        .filter(|quote| quote.price.is_finite() && quote.price > 0.0)
+    {
+        available += 1;
+        let is_fresh = freshness_by_timestamp
+            .entry((quote.date.as_str(), quote.time.as_str()))
+            .or_insert_with(|| {
+                let timestamp = normalize_quote_trade_date(&quote.date)
+                    .zip(normalize_quote_time(&quote.time))
+                    .and_then(|(date, time)| {
+                        NaiveDateTime::parse_from_str(&format!("{date} {time}"), "%Y%m%d %H:%M:%S")
+                            .ok()
+                    });
+                timestamp.is_some_and(|timestamp| {
+                    let age = (now - timestamp).num_seconds();
+                    timestamp.date() == now.date()
+                        && timestamp.time().num_seconds_from_midnight() >= session_start
+                        && (0..=180).contains(&age)
+                })
+            });
+        fresh += usize::from(*is_fresh);
+    }
+    if available > 0 && fresh * 2 > available {
+        // 当天多数有效行情能纠正缺失、过期或误标休市的本地交易日历。
+        return (true, None);
+    }
+    let reason = if calendar_trading_day() == Some(false) {
+        "本地日历未标为交易日，且行情未确认当前正在交易"
+    } else {
+        "行情日期或更新时间未确认当前正在交易"
+    };
+    (false, Some(format!("{reason}，已刷新一次并暂停爬虫")))
+}
+
+static SOURCE_META_CACHE: OnceLock<Mutex<HashMap<String, Arc<SourceMetaCacheEntry>>>> =
+    OnceLock::new();
 static RANK_CONTEXT_CACHE: OnceLock<Mutex<HashMap<String, RankCacheEntry>>> = OnceLock::new();
 static SCENE_MARKER_CACHE: OnceLock<Mutex<HashMap<String, SceneMarkerCacheEntry>>> =
     OnceLock::new();
@@ -212,7 +273,7 @@ impl RealtimeQuoteProvider {
     }
 }
 
-fn source_meta_cache() -> &'static Mutex<HashMap<String, SourceMetaCacheEntry>> {
+fn source_meta_cache() -> &'static Mutex<HashMap<String, Arc<SourceMetaCacheEntry>>> {
     SOURCE_META_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -905,6 +966,7 @@ fn build_rows(
                     .unwrap_or(stock.name.as_str())
                     .to_string(),
                 board: stock.board.clone(),
+                industry: stock.industry.clone(),
                 concept: stock.concept.clone(),
                 rank: rank.and_then(|item| item.rank),
                 best_rank_3d: rank.and_then(|item| item.best_rank_3d),
@@ -965,7 +1027,7 @@ pub fn get_all_market_monitor_snapshot(
     other_sort_use_realtime: Option<bool>,
     last_data_version: Option<String>,
 ) -> Result<AllMarketMonitorSnapshotData, String> {
-    let mut meta = (|source_path: &str| -> Result<SourceMetaCacheEntry, String> {
+    let mut meta = (|source_path: &str| -> Result<Arc<SourceMetaCacheEntry>, String> {
         if let Some(entry) = source_meta_cache()
             .lock()
             .map_err(|_| "股票基础信息缓存锁已损坏".to_string())?
@@ -990,6 +1052,11 @@ pub fn get_all_market_monitor_snapshot(
                     ts_code: ts_code.to_string(),
                     name: name.to_string(),
                     board: board_category(ts_code, Some(name)).to_string(),
+                    industry: cols
+                        .get(4)
+                        .map(|value| value.trim())
+                        .unwrap_or_default()
+                        .to_string(),
                     total_mv_yi: (|raw: Option<&String>| -> Option<f64> {
                         raw?.trim()
                             .parse::<f64>()
@@ -1002,6 +1069,7 @@ pub fn get_all_market_monitor_snapshot(
             }
             Ok(SourceMetaCacheEntry { stocks })
         })(source_path)?;
+        let entry = Arc::new(entry);
         source_meta_cache()
             .lock()
             .map_err(|_| "股票基础信息缓存锁已损坏".to_string())?
@@ -1010,7 +1078,8 @@ pub fn get_all_market_monitor_snapshot(
     })(source_path)?;
     if let Some(ref codes) = ts_codes {
         let code_set: HashSet<&str> = codes.iter().map(|s| s.as_str()).collect();
-        meta.stocks
+        Arc::make_mut(&mut meta)
+            .stocks
             .retain(|s| code_set.contains(s.ts_code.as_str()));
     }
     let ts_codes = meta
@@ -1027,26 +1096,33 @@ pub fn get_all_market_monitor_snapshot(
         RealtimeQuoteProvider::Tencent => {
             let (tencent_quotes, fetch_meta) =
                 fetch_all_market_tencent_realtime_quote_map_for_codes(&ts_codes)?;
-            let volume_ratio_map = tencent_quotes
-                .iter()
-                .filter_map(|(ts_code, quote)| {
-                    quote.volume_ratio.map(|value| (ts_code.clone(), value))
-                })
-                .collect::<HashMap<_, _>>();
-            let avg_price_map = tencent_quotes
-                .iter()
-                .filter_map(|(ts_code, quote)| {
-                    quote.avg_price.map(|value| (ts_code.clone(), value))
-                })
-                .collect::<HashMap<_, _>>();
-            let quotes = tencent_quotes
-                .into_iter()
-                .map(|(ts_code, quote)| (ts_code, quote.into_sina_quote()))
-                .collect::<HashMap<_, _>>();
+            let mut volume_ratio_map = HashMap::with_capacity(tencent_quotes.len());
+            let mut avg_price_map = HashMap::with_capacity(tencent_quotes.len());
+            let mut quotes = HashMap::with_capacity(tencent_quotes.len());
+            for (ts_code, quote) in tencent_quotes {
+                if let Some(value) = quote.volume_ratio {
+                    volume_ratio_map.insert(ts_code.clone(), value);
+                }
+                if let Some(value) = quote.avg_price {
+                    avg_price_map.insert(ts_code.clone(), value);
+                }
+                quotes.insert(ts_code, quote.into_sina_quote());
+            }
             (quotes, volume_ratio_map, avg_price_map, fetch_meta)
         }
     };
 
+    let now = Utc::now()
+        .with_timezone(&FixedOffset::east_opt(8 * 3600).expect("valid China offset"))
+        .naive_local();
+    let (market_active, market_status_message) = check_market_activity(now, &quotes, || {
+        let today = now.format("%Y%m%d").to_string();
+        load_trade_date_list(source_path).ok().map(|dates| {
+            dates
+                .iter()
+                .any(|date| normalize_quote_trade_date(date).as_deref() == Some(today.as_str()))
+        })
+    });
     let data_version = fetch_meta.refreshed_at.clone();
     if !has_new_realtime_data(last_data_version.as_deref(), data_version.as_deref()) {
         return Ok(AllMarketMonitorSnapshotData {
@@ -1054,6 +1130,8 @@ pub fn get_all_market_monitor_snapshot(
             index_rows: Vec::new(),
             data_version,
             has_new_data: false,
+            market_active,
+            market_status_message,
             refreshed_at: fetch_meta.refreshed_at,
             rank_date: None,
             requested_count: fetch_meta.requested_count,
@@ -1063,20 +1141,23 @@ pub fn get_all_market_monitor_snapshot(
     }
 
     let conn = open_result_conn(source_path)?;
-    let (rank_date, ranks) = (|source_path: &str,
-                               conn: &Connection|
-     -> Result<(String, HashMap<String, RankContext>), String> {
-        {
-            let cache = rank_context_cache()
-                .lock()
-                .map_err(|_| "排名缓存锁已损坏".to_string())?;
-            if let Some(entry) = cache.get(source_path) {
-                return Ok((entry.rank_date.clone(), entry.ranks.clone()));
+    let (rank_date, ranks) =
+        (|source_path: &str,
+          conn: &Connection|
+         -> Result<(String, Arc<HashMap<String, RankContext>>), String> {
+            {
+                let cache = rank_context_cache()
+                    .lock()
+                    .map_err(|_| "排名缓存锁已损坏".to_string())?;
+                if let Some(entry) = cache.get(source_path) {
+                    return Ok((entry.rank_date.clone(), entry.ranks.clone()));
+                }
             }
-        }
 
-        let (rank_date, ranks) =
-            (|conn: &Connection| -> Result<(String, HashMap<String, RankContext>), String> {
+            let (rank_date, ranks) = (|conn: &Connection| -> Result<
+                (String, HashMap<String, RankContext>),
+                String,
+            > {
                 let similarity_board = (|conn: &Connection| -> bool {
                     table_exists(conn, "strategy_trigger_similarity_summary")
                 })(conn);
@@ -1185,18 +1266,19 @@ pub fn get_all_market_monitor_snapshot(
                     rank_date.ok_or_else(|| "score_summary 没有可用交易日".to_string())?;
                 Ok((rank_date, out))
             })(conn)?;
-        rank_context_cache()
-            .lock()
-            .map_err(|_| "排名缓存锁已损坏".to_string())?
-            .insert(
-                source_path.to_string(),
-                RankCacheEntry {
-                    rank_date: rank_date.clone(),
-                    ranks: ranks.clone(),
-                },
-            );
-        Ok((rank_date, ranks))
-    })(source_path, &conn)?;
+            let ranks = Arc::new(ranks);
+            rank_context_cache()
+                .lock()
+                .map_err(|_| "排名缓存锁已损坏".to_string())?
+                .insert(
+                    source_path.to_string(),
+                    RankCacheEntry {
+                        rank_date: rank_date.clone(),
+                        ranks: ranks.clone(),
+                    },
+                );
+            Ok((rank_date, ranks))
+        })(source_path, &conn)?;
     let scene_marker_candidates =
         (|source_path: &str,
           conn: &Connection,
@@ -1721,6 +1803,8 @@ pub fn get_all_market_monitor_snapshot(
         index_rows,
         data_version,
         has_new_data: true,
+        market_active,
+        market_status_message,
         refreshed_at: fetch_meta.refreshed_at,
         rank_date: Some(rank_date),
         requested_count: fetch_meta.requested_count,
@@ -1740,6 +1824,137 @@ mod tests {
     fn parse_program(expr: &str) -> Stmts {
         let mut parser = Parser::new(lex_all(expr));
         parser.parse_main().expect("expression should parse")
+    }
+
+    #[test]
+    fn market_activity_requires_session_and_fresh_quote_majority() {
+        let quote = SinaQuote {
+            date: "20261009".to_string(),
+            time: "10:00:00".to_string(),
+            ts_code: "000001.SZ".to_string(),
+            name: "test".to_string(),
+            open: 10.0,
+            high: 10.0,
+            low: 10.0,
+            pre_close: 10.0,
+            price: 10.0,
+            vol: 100.0,
+            amount: 1000.0,
+            change_pct: Some(0.0),
+        };
+        for (now, date, time, calendar, expected) in [
+            (
+                "20261009 10:01:00",
+                "20261009",
+                "10:00:00",
+                Some(true),
+                true,
+            ),
+            (
+                "20261009 10:01:00",
+                "20261009",
+                "10:00:00",
+                Some(false),
+                true,
+            ),
+            ("20261009 10:01:00", "20261009", "10:00:00", None, true),
+            (
+                "20261009 09:29:59",
+                "20261009",
+                "09:29:59",
+                Some(true),
+                false,
+            ),
+            (
+                "20261009 09:30:00",
+                "20261009",
+                "09:30:00",
+                Some(true),
+                true,
+            ),
+            (
+                "20261009 11:30:00",
+                "20261009",
+                "11:30:00",
+                Some(true),
+                false,
+            ),
+            (
+                "20261009 13:00:00",
+                "20261009",
+                "11:30:00",
+                Some(true),
+                false,
+            ),
+            (
+                "20261009 13:00:00",
+                "20261009",
+                "13:00:00",
+                Some(true),
+                true,
+            ),
+            (
+                "20261009 15:00:00",
+                "20261009",
+                "15:00:00",
+                Some(true),
+                false,
+            ),
+            (
+                "20261010 10:01:00",
+                "20261009",
+                "10:00:00",
+                Some(true),
+                false,
+            ),
+            (
+                "20261009 10:04:00",
+                "20261009",
+                "10:00:00",
+                Some(true),
+                false,
+            ),
+            (
+                "20261009 10:01:00",
+                "20261009",
+                "10:02:00",
+                Some(true),
+                false,
+            ),
+        ] {
+            let now = NaiveDateTime::parse_from_str(now, "%Y%m%d %H:%M:%S").unwrap();
+            let mut quote = quote.clone();
+            quote.date = date.to_string();
+            quote.time = time.to_string();
+            let quotes = HashMap::from([(quote.ts_code.clone(), quote)]);
+            assert_eq!(
+                check_market_activity(now, &quotes, || calendar).0,
+                expected,
+                "{now}"
+            );
+        }
+        let now = NaiveDateTime::parse_from_str("20261009 10:01:00", "%Y%m%d %H:%M:%S").unwrap();
+        assert!(!check_market_activity(now, &HashMap::new(), || Some(true)).0);
+        let mut quotes = HashMap::from([(quote.ts_code.clone(), quote.clone())]);
+        let mut stale = quote.clone();
+        stale.date = "20261008".to_string();
+        quotes.insert("stale".to_string(), stale);
+        assert!(!check_market_activity(now, &quotes, || Some(true)).0);
+        quotes.insert("fresh".to_string(), quote);
+        assert!(check_market_activity(now, &quotes, || Some(false)).0);
+        assert!(
+            check_market_activity(now, &quotes, || panic!(
+                "fresh quotes must not read calendar"
+            ))
+            .0
+        );
+        let closed = NaiveDateTime::parse_from_str("20261009 15:00:00", "%Y%m%d %H:%M:%S").unwrap();
+        assert!(
+            !check_market_activity(closed, &quotes, || panic!(
+                "closed session must not read calendar"
+            ))
+            .0
+        );
     }
 
     #[test]
@@ -1834,6 +2049,7 @@ mod tests {
                             ts_code: "000001.SZ".to_string(),
                             name: "平安银行".to_string(),
                             board: "主板".to_string(),
+                            industry: "银行".to_string(),
                             total_mv_yi: Some(100.0),
                             concept: "银行;互联金融".to_string(),
                         },
@@ -1841,6 +2057,7 @@ mod tests {
                             ts_code: "300001.SZ".to_string(),
                             name: "特锐德".to_string(),
                             board: "创业板".to_string(),
+                            industry: "电气设备".to_string(),
                             total_mv_yi: None,
                             concept: String::new(),
                         },

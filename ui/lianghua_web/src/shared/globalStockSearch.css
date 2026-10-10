@@ -153,3 +153,29 @@
   background: #fff3f5;
   color: #b00020;
 }
+
+.global-stock-search.is-inline {
+  position: relative;
+  top: auto;
+  right: auto;
+  display: inline-flex;
+}
+
+.global-stock-search-selection {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: #425367;
+  font-size: 14px;
+}
+
+.global-stock-search-selection button {
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 1px solid #c6d0da;
+  border-radius: 8px;
+  background: #fff;
+  color: #425367;
+  cursor: pointer;
+}

@@ -7,8 +7,8 @@ use tauri_plugin_fs::FsExt;
 
 #[cfg(target_os = "android")]
 use jni::{
-    JNIEnv, JavaVM,
     objects::{GlobalRef, JObject, JString, JValue},
+    JNIEnv, JavaVM,
 };
 
 #[cfg(target_os = "android")]
@@ -337,13 +337,11 @@ mod tests {
 
         let result = move_source_directory(&source_root, &target_root).unwrap();
         assert_eq!(result.file_count, 2);
-        assert!(
-            target_root
-                .join("source")
-                .join("nested")
-                .join("b.toml")
-                .is_file()
-        );
+        assert!(target_root
+            .join("source")
+            .join("nested")
+            .join("b.toml")
+            .is_file());
         assert!(!target_root.join("source").join("c.tmp").exists());
 
         assert!(move_source_directory(&source_root, &target_root).is_err());
