@@ -12,7 +12,7 @@ use serde::Serialize;
 use crate::{
     crawler::{SinaQuote, default_realtime_index_ts_codes},
     data::{
-        DataReader, RowData, load_stock_list, load_trade_date_list, result_db_path,
+        DataReader, RowData, ind_toml_path, load_stock_list, load_trade_date_list, result_db_path,
         runtime::row_into_rt, source_db_path,
     },
     download::ind_calc::{
@@ -126,6 +126,7 @@ pub struct AllMarketMonitorRow {
     pub realtime_amount: Option<f64>,
     pub realtime_vol_ratio: Option<f64>,
     pub realtime_vol_ratio_high: Option<f64>,
+    pub realtime_vol_ratio_opening_high: Option<f64>,
     pub return_5d_pct: Option<f64>,
     pub other_sort_value: Option<f64>,
     pub scene_marker: Option<String>,
@@ -234,6 +235,8 @@ struct TemplateRankScoreInfo {
 }
 
 struct AllMarketTemplateRuntimeCacheEntry {
+    cache_key: String,
+    cache_prefix: String,
     template_order: Vec<String>,
     compiled_templates: HashMap<String, CompiledIntradayMonitorTemplate>,
     base_rows: HashMap<String, RowData>,
@@ -243,7 +246,7 @@ struct AllMarketTemplateRuntimeCacheEntry {
     warning_messages: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum TemplateRuntimeDataMode {
     QuoteOnly,
     History,
@@ -425,10 +428,6 @@ fn hash_to_hex<T: Hash>(value: &T) -> String {
     format!("{:016x}", hasher.finish())
 }
 
-fn fingerprint_strings(values: &[String]) -> String {
-    hash_to_hex(&values)
-}
-
 fn expr_uses_ident(expr: &Expr, targets: &HashSet<&str>) -> bool {
     match expr {
         Expr::Ident(name) => targets.contains(name.to_ascii_uppercase().as_str()),
@@ -508,6 +507,50 @@ fn cached_template_runtime(
     templates: &[IntradayMonitorTemplate],
     data_mode: TemplateRuntimeDataMode,
 ) -> Result<Arc<AllMarketTemplateRuntimeCacheEntry>, String> {
+    let lookup_prefix = format!(
+        "{}|tpl:{}|mode:{:?}|",
+        source_path,
+        hash_to_hex(
+            &templates
+                .iter()
+                .map(|item| (item.id.trim(), item.name.trim(), item.expression.trim(),))
+                .collect::<Vec<_>>()
+        ),
+        data_mode,
+    );
+    let source_stamps = [
+        source_db_path(source_path),
+        result_db_path(source_path),
+        ind_toml_path(source_path),
+    ]
+    .map(|path| {
+        std::fs::metadata(path)
+            .ok()
+            .map(|metadata| (metadata.modified().ok(), metadata.len()))
+    });
+    let stock_fingerprint = hash_to_hex(
+        &stocks
+            .iter()
+            .map(|stock| (stock.ts_code.as_str(), stock.board.as_str()))
+            .collect::<Vec<_>>(),
+    );
+    let today = Utc::now()
+        .with_timezone(&FixedOffset::east_opt(8 * 3600).unwrap())
+        .date_naive();
+    let lookup_key = format!(
+        "{lookup_prefix}stocks:{stock_fingerprint}|source:{}|date:{today}",
+        hash_to_hex(&source_stamps)
+    );
+    // 命中时连编译、字段依赖分析和指标预热估算也一并跳过。
+    if let Some(entry) = template_runtime_cache()
+        .lock()
+        .map_err(|_| "模板预热缓存锁已损坏".to_string())?
+        .get(&lookup_key)
+        .cloned()
+    {
+        return Ok(entry);
+    }
+
     let compiled_templates = compile_intraday_templates(templates);
     let template_order = (|templates: &[IntradayMonitorTemplate]| -> Vec<String> {
         let mut seen = HashSet::new();
@@ -572,51 +615,11 @@ fn cached_template_runtime(
         || uses_rank_score
         || uses_similarity_rank
         || !cyq_chen_runtime_keys.is_empty();
-    let resolved_data_mode = if needs_history {
-        TemplateRuntimeDataMode::History
-    } else {
-        TemplateRuntimeDataMode::QuoteOnly
-    };
     let need_rows = template_warmup_need.max(indicator_warmup_need).max(1);
     let ts_codes = stocks
         .iter()
         .map(|item| item.ts_code.clone())
         .collect::<Vec<_>>();
-
-    let lookup_key = format!(
-        "{}|tpl:{}|mode:{:?}|keys:{}|rows:{}|stocks:{}",
-        source_path,
-        (|templates: &[IntradayMonitorTemplate]| -> String {
-            let parts = templates
-                .iter()
-                .map(|item| {
-                    (
-                        item.id.trim().to_string(),
-                        item.name.trim().to_string(),
-                        item.expression.trim().to_string(),
-                    )
-                })
-                .collect::<Vec<_>>();
-            hash_to_hex(&parts)
-        })(templates),
-        resolved_data_mode,
-        (|keys: &HashSet<String>| -> String {
-            let mut values = keys.iter().cloned().collect::<Vec<_>>();
-            values.sort();
-            hash_to_hex(&values)
-        })(&required_runtime_keys),
-        need_rows,
-        fingerprint_strings(&ts_codes),
-    );
-
-    if let Some(entry) = template_runtime_cache()
-        .lock()
-        .map_err(|_| "模板预热缓存锁已损坏".to_string())?
-        .get(&lookup_key)
-        .cloned()
-    {
-        return Ok(entry);
-    }
 
     let total_share_map = load_total_share_map(source_path).unwrap_or_default();
     let warning_messages = template_order
@@ -632,8 +635,10 @@ fn cached_template_runtime(
     let has_ready_template = compiled_templates
         .values()
         .any(|item| matches!(item, CompiledIntradayMonitorTemplate::Ready(_)));
-    if !has_ready_template {
+    if !has_ready_template || !needs_history {
         let entry = Arc::new(AllMarketTemplateRuntimeCacheEntry {
+            cache_key: lookup_key.clone(),
+            cache_prefix: lookup_prefix.clone(),
             template_order,
             compiled_templates,
             base_rows: HashMap::new(),
@@ -642,27 +647,11 @@ fn cached_template_runtime(
             cyq_chen_runtime_keys,
             warning_messages,
         });
-        template_runtime_cache()
+        let mut cache = template_runtime_cache()
             .lock()
-            .map_err(|_| "模板预热缓存锁已损坏".to_string())?
-            .insert(lookup_key, entry.clone());
-        return Ok(entry);
-    }
-
-    if !needs_history {
-        let entry = Arc::new(AllMarketTemplateRuntimeCacheEntry {
-            template_order,
-            compiled_templates,
-            base_rows: HashMap::new(),
-            indicator_cache,
-            total_share_map,
-            cyq_chen_runtime_keys,
-            warning_messages,
-        });
-        template_runtime_cache()
-            .lock()
-            .map_err(|_| "模板预热缓存锁已损坏".to_string())?
-            .insert(lookup_key, entry.clone());
+            .map_err(|_| "模板预热缓存锁已损坏".to_string())?;
+        cache.retain(|key, _| !key.starts_with(&lookup_prefix));
+        cache.insert(lookup_key, entry.clone());
         return Ok(entry);
     }
 
@@ -794,8 +783,9 @@ fn cached_template_runtime(
         base_rows.insert(ts_code, row_data);
     }
 
-    let _cache_key = format!("{lookup_key}|history:{start_date}..{end_date}");
     let entry = Arc::new(AllMarketTemplateRuntimeCacheEntry {
+        cache_key: lookup_key.clone(),
+        cache_prefix: lookup_prefix.clone(),
         template_order,
         compiled_templates,
         base_rows,
@@ -807,6 +797,7 @@ fn cached_template_runtime(
     let mut cache = template_runtime_cache()
         .lock()
         .map_err(|_| "模板预热缓存锁已损坏".to_string())?;
+    cache.retain(|key, _| !key.starts_with(&lookup_prefix));
     cache.insert(lookup_key, entry.clone());
     Ok(entry)
 }
@@ -993,6 +984,7 @@ fn build_rows(
                 realtime_amount: quote.map(|item| item.amount),
                 realtime_vol_ratio: volume_ratio_map.get(&stock.ts_code).copied(),
                 realtime_vol_ratio_high: None,
+                realtime_vol_ratio_opening_high: None,
                 return_5d_pct,
                 other_sort_value: None,
                 scene_marker: scene_marker_map.get(&stock.ts_code).cloned(),
@@ -1136,8 +1128,8 @@ pub fn get_all_market_monitor_snapshot(
         None
     };
     if let Some(snapshot) = &volume_ratios {
-        for (code, (value, _)) in &snapshot.values {
-            volume_ratio_map.insert(code.clone(), *value);
+        for (code, value) in &snapshot.values {
+            volume_ratio_map.insert(code.clone(), value.current);
         }
     }
     let data_version = fetch_meta.refreshed_at.as_ref().map(|version| {
@@ -1454,7 +1446,10 @@ pub fn get_all_market_monitor_snapshot(
     );
     if let Some(snapshot) = &volume_ratios {
         for row in &mut rows {
-            row.realtime_vol_ratio_high = snapshot.values.get(&row.ts_code).map(|(_, high)| *high);
+            if let Some(value) = snapshot.values.get(&row.ts_code) {
+                row.realtime_vol_ratio_high = Some(value.high);
+                row.realtime_vol_ratio_opening_high = value.opening_high;
+            }
         }
     }
     let template_warning_message = if template_enabled.unwrap_or(false) {
@@ -1486,111 +1481,76 @@ pub fn get_all_market_monitor_snapshot(
 
             let mut warning_messages = entry.warning_messages.clone();
 
-            struct RowEvalCtx {
-                row_index: usize,
-                ts_code: String,
-                runtime: Runtime,
+            let ready_templates = entry
+                .template_order
+                .iter()
+                .filter_map(|id| match entry.compiled_templates.get(id) {
+                    Some(CompiledIntradayMonitorTemplate::Ready(template)) => Some((id, template)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if ready_templates.is_empty() {
+                return build_template_warning_message(warning_messages);
             }
 
-            let build_results: Vec<Option<Result<RowEvalCtx, String>>> = rows
-                .par_iter()
-                .enumerate()
-                .map(|(i, row)| {
+            // 按股票完成构建和全部模板求值，工作线程处理完就释放 runtime。
+            let eval_warnings = rows
+                .par_iter_mut()
+                .filter_map(|row| {
                     let quote = quotes.get(&row.ts_code)?;
                     let row_data = match build_template_runtime_row_data(&entry, row, quote) {
-                        Ok(d) => d,
-                        Err(e) => return Some(Err(format!("{}: {}", row.ts_code, e))),
+                        Ok(data) => data,
+                        Err(error) => return Some(vec![format!("{}: {}", row.ts_code, error)]),
                     };
+                    let series_len = row_data.trade_dates.len();
                     let mut runtime = match row_into_rt(row_data) {
-                        Ok(rt) => rt,
-                        Err(e) => {
-                            return Some(Err(format!("{}: runtime 构建失败: {}", row.ts_code, e)));
+                        Ok(runtime) => runtime,
+                        Err(error) => {
+                            return Some(vec![format!(
+                                "{}: runtime 构建失败: {}",
+                                row.ts_code, error
+                            )]);
                         }
                     };
                     freeze_runtime_series(&mut runtime);
-                    Some(Ok(RowEvalCtx {
-                        row_index: i,
-                        ts_code: row.ts_code.clone(),
-                        runtime,
-                    }))
-                })
-                .collect();
-
-            let mut valid: Vec<RowEvalCtx> = Vec::with_capacity(rows.len());
-            for result in build_results.into_iter().flatten() {
-                match result {
-                    Ok(ctx) => valid.push(ctx),
-                    Err(w) => warning_messages.push(w),
-                }
-            }
-
-            let tpl_count = entry.template_order.len();
-            let total = valid.len().checked_mul(tpl_count).unwrap_or(0);
-
-            if total > 0 {
-                let tpl_order = &entry.template_order;
-                let compiled = &entry.compiled_templates;
-
-                let eval_results: Vec<Option<Result<(usize, AllMarketTemplateHit), String>>> = (0
-                    ..total)
-                    .into_par_iter()
-                    .map(|idx| {
-                        let row_idx = idx / tpl_count;
-                        let tpl_idx = idx % tpl_count;
-                        let ctx = &valid[row_idx];
-                        let tpl_id = &tpl_order[tpl_idx];
-
-                        let tpl = match compiled.get(tpl_id) {
-                            Some(CompiledIntradayMonitorTemplate::Ready(t)) => t,
-                            _ => return None,
-                        };
-
-                        let mut rt = ctx.runtime.clone();
-                        let hit = match (|| -> Result<bool, String> {
+                    let mut warnings = Vec::new();
+                    for (id, template) in &ready_templates {
+                        let hit = (|| -> Result<bool, String> {
+                            if let Some(hit) = runtime
+                                .eval_program_bool_at(&template.ast, series_len.saturating_sub(1))
+                                .map_err(|error| format!("表达式计算错误:{}", error.msg))?
+                            {
+                                return Ok(hit);
+                            }
+                            // 含函数的程序仍按完整序列求值，各模板赋值互相隔离。
+                            let mut rt = runtime.clone();
                             let value = rt
-                                .eval_program(&tpl.ast)
-                                .map_err(|e| format!("表达式计算错误:{}", e.msg))?;
+                                .eval_program(&template.ast)
+                                .map_err(|error| format!("表达式计算错误:{}", error.msg))?;
                             let len = rt_max_len(&rt);
                             let series = Value::as_bool_series(&value, len)
-                                .map_err(|e| format!("表达式返回值非布尔:{}", e.msg))?;
+                                .map_err(|error| format!("表达式返回值非布尔:{}", error.msg))?;
                             Ok(series.last().copied().unwrap_or(false))
-                        })() {
-                            Ok(true) => true,
-                            Ok(false) => false,
-                            Err(err) => {
-                                return Some(Err(format!(
-                                    "{}: {} · {}",
-                                    ctx.ts_code, tpl.name, err
-                                )));
+                        })();
+                        match hit {
+                            Ok(true) => {
+                                row.template_hits
+                                    .as_mut()
+                                    .unwrap()
+                                    .push(AllMarketTemplateHit {
+                                        template_id: (*id).clone(),
+                                        template_name: template.name.clone(),
+                                    })
                             }
-                        };
-
-                        if hit {
-                            Some(Ok((
-                                ctx.row_index,
-                                AllMarketTemplateHit {
-                                    template_id: tpl_id.clone(),
-                                    template_name: tpl.name.clone(),
-                                },
-                            )))
-                        } else {
-                            None
+                            Ok(false) => {}
+                            Err(error) => warnings
+                                .push(format!("{}: {} · {}", row.ts_code, template.name, error)),
                         }
-                    })
-                    .collect();
-
-                for result in eval_results.into_iter().flatten() {
-                    match result {
-                        Ok((row_idx, hit)) => {
-                            rows[row_idx]
-                                .template_hits
-                                .get_or_insert_with(Vec::new)
-                                .push(hit);
-                        }
-                        Err(w) => warning_messages.push(w),
                     }
-                }
-            }
+                    Some(warnings)
+                })
+                .collect::<Vec<_>>();
+            warning_messages.extend(eval_warnings.into_iter().flatten());
 
             build_template_warning_message(warning_messages)
         })(
@@ -1623,24 +1583,13 @@ pub fn get_all_market_monitor_snapshot(
             > {
                 let template = build_other_sort_template(expression);
                 let templates = vec![template.clone()];
-                let lookup_key = format!(
-                    "{}|other-sort-daily:{}|stocks:{}",
-                    source_path,
-                    hash_to_hex(&template.expression),
-                    fingerprint_strings(
-                        &stocks
-                            .iter()
-                            .map(|item| item.ts_code.clone())
-                            .collect::<Vec<_>>()
-                    ),
-                );
-
                 let entry = cached_template_runtime(
                     source_path,
                     stocks,
                     &templates,
                     TemplateRuntimeDataMode::History,
                 )?;
+                let lookup_key = format!("{}|other-sort-daily", entry.cache_key);
                 if let Some(values) = other_sort_daily_value_cache()
                     .lock()
                     .map_err(|_| "其他排序日K缓存锁已损坏".to_string())?
@@ -1705,10 +1654,11 @@ pub fn get_all_market_monitor_snapshot(
                 }
 
                 let values = Arc::new(values);
-                other_sort_daily_value_cache()
+                let mut cache = other_sort_daily_value_cache()
                     .lock()
-                    .map_err(|_| "其他排序日K缓存锁已损坏".to_string())?
-                    .insert(lookup_key, values.clone());
+                    .map_err(|_| "其他排序日K缓存锁已损坏".to_string())?;
+                cache.retain(|key, _| !key.starts_with(&entry.cache_prefix));
+                cache.insert(lookup_key, values.clone());
                 Ok((values, build_other_sort_warning(warnings)))
             })(source_path, stocks, expression)
             {
@@ -2130,5 +2080,59 @@ mod tests {
         assert!((change_open_pct - 1.0204081632653061).abs() < 1e-9);
         assert_eq!(rows[1].rank, None);
         assert_eq!(rows[1].realtime_price, None);
+    }
+
+    #[test]
+    fn template_runtime_plan_is_reused_and_invalidated_by_indicator_edits() {
+        let directory = std::env::temp_dir().join(format!(
+            "lianghua-template-cache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let source_path = directory.to_str().unwrap();
+        let templates = vec![IntradayMonitorTemplate {
+            id: "rt".to_string(),
+            name: "实时条件".to_string(),
+            expression: "RT_OP > 1 AND RT_VR > 2".to_string(),
+        }];
+        let first = cached_template_runtime(
+            source_path,
+            &[],
+            &templates,
+            TemplateRuntimeDataMode::QuoteOnly,
+        )
+        .unwrap();
+        let second = cached_template_runtime(
+            source_path,
+            &[],
+            &templates,
+            TemplateRuntimeDataMode::QuoteOnly,
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        std::fs::write(ind_toml_path(source_path), "version = 1\n").unwrap();
+        let revised = cached_template_runtime(
+            source_path,
+            &[],
+            &templates,
+            TemplateRuntimeDataMode::QuoteOnly,
+        )
+        .unwrap();
+        assert!(!Arc::ptr_eq(&first, &revised));
+        assert_ne!(first.cache_key, revised.cache_key);
+        let cache = template_runtime_cache().lock().unwrap();
+        assert_eq!(
+            cache
+                .keys()
+                .filter(|key| key.starts_with(&first.cache_prefix))
+                .count(),
+            1
+        );
+        drop(cache);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

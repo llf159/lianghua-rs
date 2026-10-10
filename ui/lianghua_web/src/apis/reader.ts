@@ -214,6 +214,7 @@ export type AllMarketMonitorRow = {
   realtime_amount?: number | null;
   realtime_vol_ratio?: number | null;
   realtime_vol_ratio_high?: number | null;
+  realtime_vol_ratio_opening_high?: number | null;
   return_5d_pct?: number | null;
   other_sort_value?: number | null;
   scene_marker?: string | null;

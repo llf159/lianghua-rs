@@ -650,7 +650,7 @@ export default function AllMarketMonitorPage() {
   });
   const historyRef = useRef<PriceSnapshot[]>([]);
   const volumeRatioRecordHighsRef = useRef<
-    Map<string, { tradeDate: string; high: number }>
+    Map<string, { tradeDate: string; high: number; openingReady: boolean }>
   >(new Map());
   const changePctRecordHighsRef = useRef<
     Map<string, { tradeDate: string; high: number; atHigh: boolean }>
@@ -961,16 +961,39 @@ export default function AllMarketMonitorPage() {
       const resetVolumeRatioCodes = new Set<string>();
       for (const row of nextRows) {
         const tradeDate = row.realtime_trade_date;
-        const high = row.realtime_vol_ratio_high;
-        if (!tradeDate || !isFiniteNumber(high)) continue;
+        if (!tradeDate) continue;
         const previous = volumeRatioRecordHighsRef.current.get(row.ts_code);
-        if (!previous || tradeDate > previous.tradeDate) {
-          volumeRatioRecordHighsRef.current.set(row.ts_code, { tradeDate, high });
+        if (previous && tradeDate < previous.tradeDate) continue;
+        const newDay = !previous || tradeDate > previous.tradeDate;
+        if (newDay) {
+          volumeRatioRecordHighsRef.current.set(row.ts_code, {
+            tradeDate,
+            high: 0,
+            openingReady: false,
+          });
           resetVolumeRatioCodes.add(row.ts_code);
-        } else if (tradeDate === previous.tradeDate && high > previous.high) {
-          volumeRatioRecordHighsRef.current.set(row.ts_code, { tradeDate, high });
+        }
+        const high = row.realtime_vol_ratio_high;
+        if (!isFiniteNumber(high)) continue;
+        const openingHigh = row.realtime_vol_ratio_opening_high;
+        const current = row.realtime_vol_ratio;
+        const openingReady = isFiniteNumber(openingHigh);
+        const dayHigh = newDay ? high : Math.max(high, previous.high);
+        // 首次补齐时仅当前正处于新高才提示，避免把中途启动前的历史突破补报。
+        if (
+          openingReady &&
+          isFiniteNumber(current) &&
+          current > openingHigh &&
+          current >= dayHigh &&
+          (newDay || !previous.openingReady || high > previous.high)
+        ) {
           nextVolumeRatioNewHighTimes.set(row.ts_code, capturedAt);
         }
+        volumeRatioRecordHighsRef.current.set(row.ts_code, {
+          tradeDate,
+          high: dayHigh,
+          openingReady,
+        });
       }
       const nextChangePctNewHighTimes = new Map<string, number>();
       const resetChangePctCodes = new Set<string>();
@@ -1464,9 +1487,6 @@ export default function AllMarketMonitorPage() {
           (!searchStock || row.ts_code === searchStock.ts_code) &&
           (hitPanelMode === "all" || event.kind === hitPanelMode) &&
           (event.kind !== "speed_pct" || event.period === speedPeriod) &&
-          (event.kind !== "realtime_vol_ratio" ||
-            (isFiniteNumber(volumeRatioThreshold) &&
-              event.value > volumeRatioThreshold)) &&
           (!groupCodes || groupCodes.has(row.ts_code)) &&
           (searchStock ||
             (boardFilter === "自选"
@@ -1482,7 +1502,6 @@ export default function AllMarketMonitorPage() {
     searchStock,
     hitPanelMode,
     speedPeriod,
-    volumeRatioThreshold,
     groupCodes,
     boardFilter,
     watchlistCodeSet,
@@ -2248,7 +2267,7 @@ export default function AllMarketMonitorPage() {
                           {volumeRatioNewHighTimes.has(row.ts_code) ? (
                             <span
                               className="all-market-record-high-badge"
-                              title="当前量比高于监控记录"
+                              title="量比突破开盘五分钟基准及日内已记录高点"
                             >
                               新高
                             </span>
@@ -2465,7 +2484,7 @@ export default function AllMarketMonitorPage() {
                           {event.kind === "realtime_change_pct"
                             ? "涨幅新高"
                             : event.kind === "realtime_vol_ratio"
-                              ? "量比新高"
+                              ? "日内量比新高"
                               : `${event.period ?? speedPeriod}秒涨速命中`}
                         </span>
                         <strong className={getPercentClassName(event.value)}>
@@ -2716,7 +2735,7 @@ export default function AllMarketMonitorPage() {
               </label>
 
               <label className="settings-field">
-                <span>量比阈值</span>
+                <span>量比榜 / 高亮阈值</span>
                 <input
                   type="number"
                   min="0.01"

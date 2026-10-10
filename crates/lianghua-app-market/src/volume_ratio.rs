@@ -49,10 +49,15 @@ fn load_local_volume_averages(
 struct Baseline {
     data: TencentVolumeRatioData,
     observed_high: f64,
+    observed_opening_high: f64,
+    next_point: usize,
+    loaded_at: Instant,
 }
 
 impl Baseline {
-    fn apply_quote(&mut self, quote: &SinaQuote) -> Option<(f64, f64)> {
+    fn apply_quote(&mut self, quote: &SinaQuote) -> Option<VolumeRatioValue> {
+        let quote_minute = quote.time.replace(':', "");
+        let quote_minute = quote_minute.get(..4)?;
         let (minutes, value) = if let Some(minutes) = intraday_trading_minutes(&quote.time) {
             if !quote.vol.is_finite() || quote.vol < 0.0 {
                 return None;
@@ -71,32 +76,52 @@ impl Baseline {
             } else {
                 return None;
             };
-            let last = self
-                .data
-                .points
-                .iter()
-                .rev()
-                .find(|point| point.trading_minutes <= minutes)?;
+            let end = self.data.points.partition_point(|point| {
+                point.trading_minutes <= minutes && point.time.as_str() <= quote_minute
+            });
+            let last = self.data.points.get(end.checked_sub(1)?)?;
             (minutes, last.volume_ratio)
         };
-        let quote_minute = quote.time.replace(':', "");
-        let quote_minute = quote_minute.get(..4)?;
-        let high = self
-            .data
-            .points
-            .iter()
-            .filter(|point| point.trading_minutes <= minutes && point.time.as_str() <= quote_minute)
-            .map(|point| point.volume_ratio)
-            .fold(self.observed_high.max(value), f64::max);
+        // 曲线时间单调递增，每个历史点只归并一次；实时值每轮仍重新计算。
+        while let Some(point) = self.data.points.get(self.next_point) {
+            if point.trading_minutes > minutes || point.time.as_str() > quote_minute {
+                break;
+            }
+            self.observed_high = self.observed_high.max(point.volume_ratio);
+            if point.trading_minutes <= 5.0 {
+                self.observed_opening_high = self.observed_opening_high.max(point.volume_ratio);
+            }
+            self.next_point += 1;
+        }
+        let high = self.observed_high.max(value);
         self.observed_high = high;
-        Some((value, high))
+        if minutes <= 5.0 {
+            self.observed_opening_high = self.observed_opening_high.max(value);
+        }
+        // 分时覆盖到 09:35 后才确认开盘五分钟完整；09:35 的端点仍计入基准。
+        let opening_high = (minutes > 5.0
+            && self
+                .data
+                .points
+                .last()
+                .is_some_and(|point| point.trading_minutes >= 5.0))
+        .then_some(self.observed_opening_high);
+        Some(VolumeRatioValue {
+            current: value,
+            high,
+            opening_high,
+        })
     }
 }
 
 enum Entry {
     Pending,
     Ready(Baseline),
-    Failed { at: Instant, error: String },
+    Failed {
+        at: Instant,
+        error: String,
+        baseline: Option<Baseline>,
+    },
 }
 
 #[derive(Default)]
@@ -112,8 +137,15 @@ struct Cache {
     local_error: Option<String>,
 }
 
+#[derive(Debug, PartialEq)]
+pub struct VolumeRatioValue {
+    pub current: f64,
+    pub high: f64,
+    pub opening_high: Option<f64>,
+}
+
 pub struct VolumeRatioSnapshot {
-    pub values: HashMap<String, (f64, f64)>,
+    pub values: HashMap<String, VolumeRatioValue>,
     pub revision: u64,
     pub status: Option<String>,
 }
@@ -195,10 +227,23 @@ pub fn snapshot(
         let retry = match state.entries.get(ts_code) {
             None => true,
             Some(Entry::Failed { at, .. }) => at.elapsed() >= Duration::from_secs(60),
+            Some(Entry::Ready(baseline)) => {
+                quote.time.as_str() > "09:35:00"
+                    && baseline
+                        .data
+                        .points
+                        .last()
+                        .is_none_or(|point| point.trading_minutes < 5.0)
+                    && baseline.loaded_at.elapsed() >= Duration::from_secs(60)
+            }
             _ => false,
         };
         if retry {
-            state.entries.insert(ts_code.clone(), Entry::Pending);
+            let previous = match state.entries.insert(ts_code.clone(), Entry::Pending) {
+                Some(Entry::Ready(baseline)) => Some(baseline),
+                Some(Entry::Failed { baseline, .. }) => baseline,
+                _ => None,
+            };
             let cache = Arc::clone(cache);
             let ts_code = ts_code.clone();
             let date = trade_date.to_string();
@@ -248,11 +293,19 @@ pub fn snapshot(
                         match result {
                             Ok(data) => Entry::Ready(Baseline {
                                 data,
-                                observed_high: 0.0,
+                                observed_high: previous
+                                    .as_ref()
+                                    .map_or(0.0, |baseline| baseline.observed_high),
+                                observed_opening_high: previous
+                                    .as_ref()
+                                    .map_or(0.0, |baseline| baseline.observed_opening_high),
+                                next_point: 0,
+                                loaded_at: Instant::now(),
                             }),
                             Err(error) => Entry::Failed {
                                 at: Instant::now(),
                                 error,
+                                baseline: previous,
                             },
                         },
                     );
@@ -263,6 +316,9 @@ pub fn snapshot(
         match state.entries.get_mut(ts_code) {
             Some(Entry::Ready(baseline)) => {
                 if let Some(value) = baseline.apply_quote(quote) {
+                    if value.opening_high.is_none() {
+                        pending += 1;
+                    }
                     values.insert(ts_code.clone(), value);
                 }
             }
@@ -276,8 +332,11 @@ pub fn snapshot(
     }
     let status = if pending > 0 || failed > 0 {
         Some(format!(
-            "全天量比基准：已补齐 {} 只，补齐中 {pending} 只，失败 {failed} 只；未补齐股票暂不提示量比新高{}",
-            values.len(),
+            "开盘五分钟量比基准：已补齐 {} 只，等待开盘五分钟结束或补齐中 {pending} 只，失败 {failed} 只；基准未完整的股票暂不提示量比新高{}",
+            values
+                .values()
+                .filter(|value| value.opening_high.is_some())
+                .count(),
             first_error
                 .map(|error| format!("。首条错误：{error}（60 秒后重试）"))
                 .unwrap_or_default()
@@ -355,6 +414,9 @@ mod tests {
                 ],
             },
             observed_high: 0.0,
+            observed_opening_high: 0.0,
+            next_point: 0,
+            loaded_at: Instant::now(),
         };
         let mut quote = SinaQuote {
             date: "20261009".to_string(),
@@ -370,19 +432,129 @@ mod tests {
             amount: 300000.0,
             change_pct: Some(0.0),
         };
-        assert_eq!(baseline.apply_quote(&quote), Some((1.0, 5.0)));
+        assert_eq!(
+            baseline.apply_quote(&quote),
+            Some(VolumeRatioValue {
+                current: 1.0,
+                high: 5.0,
+                opening_high: Some(5.0)
+            })
+        );
         baseline.data.volume_to_hands = 0.01;
         quote.vol *= 100.0;
-        assert_eq!(baseline.apply_quote(&quote), Some((1.0, 5.0)));
+        assert_eq!(
+            baseline.apply_quote(&quote),
+            Some(VolumeRatioValue {
+                current: 1.0,
+                high: 5.0,
+                opening_high: Some(5.0)
+            })
+        );
         baseline.data.volume_to_hands = 1.0;
         quote.vol /= 100.0;
         quote.time = "12:00:00".to_string();
-        assert_eq!(baseline.apply_quote(&quote), Some((1.0, 5.0)));
+        assert_eq!(
+            baseline.apply_quote(&quote),
+            Some(VolumeRatioValue {
+                current: 1.0,
+                high: 5.0,
+                opening_high: Some(5.0)
+            })
+        );
         quote.time = "13:00:00".to_string();
         quote.vol = 7200.0;
-        assert_eq!(baseline.apply_quote(&quote), Some((6.0, 6.0)));
+        assert_eq!(
+            baseline.apply_quote(&quote),
+            Some(VolumeRatioValue {
+                current: 6.0,
+                high: 6.0,
+                opening_high: Some(5.0)
+            })
+        );
         quote.time = "15:30:00".to_string();
         quote.vol = 999999.0;
-        assert_eq!(baseline.apply_quote(&quote), Some((2.0, 8.0)));
+        assert_eq!(
+            baseline.apply_quote(&quote),
+            Some(VolumeRatioValue {
+                current: 2.0,
+                high: 8.0,
+                opening_high: Some(5.0)
+            })
+        );
+    }
+
+    #[test]
+    fn quote_opening_baseline_waits_for_complete_five_minutes_and_keeps_live_peak() {
+        let mut baseline = Baseline {
+            data: TencentVolumeRatioData {
+                trade_date: "20261009".to_string(),
+                average_daily_volume: 2400.0,
+                volume_to_hands: 1.0,
+                points: vec![
+                    TencentVolumeRatioPoint {
+                        time: "0930".to_string(),
+                        trading_minutes: 1.0,
+                        volume_ratio: 2.0,
+                    },
+                    TencentVolumeRatioPoint {
+                        time: "0934".to_string(),
+                        trading_minutes: 4.0,
+                        volume_ratio: 3.0,
+                    },
+                ],
+            },
+            observed_high: 0.0,
+            observed_opening_high: 0.0,
+            next_point: 0,
+            loaded_at: Instant::now(),
+        };
+        let mut quote = SinaQuote {
+            date: "20261009".to_string(),
+            time: "09:34:30".to_string(),
+            ts_code: "000001.SZ".to_string(),
+            name: String::new(),
+            open: 10.0,
+            high: 10.0,
+            low: 10.0,
+            pre_close: 10.0,
+            price: 10.0,
+            vol: 180.0,
+            amount: 180000.0,
+            change_pct: Some(0.0),
+        };
+        assert_eq!(
+            baseline.apply_quote(&quote),
+            Some(VolumeRatioValue {
+                current: 4.0,
+                high: 4.0,
+                opening_high: None,
+            })
+        );
+        quote.time = "09:36:00".to_string();
+        quote.vol = 300.0;
+        assert_eq!(baseline.apply_quote(&quote).unwrap().opening_high, None);
+        baseline.data.points.push(TencentVolumeRatioPoint {
+            time: "0935".to_string(),
+            trading_minutes: 5.0,
+            volume_ratio: 3.5,
+        });
+        quote.time = "09:35:00".to_string();
+        quote.vol = 200.0;
+        assert_eq!(baseline.apply_quote(&quote).unwrap().opening_high, None);
+        quote.time = "09:36:00".to_string();
+        quote.vol = 300.0;
+        assert_eq!(
+            baseline.apply_quote(&quote),
+            Some(VolumeRatioValue {
+                current: 5.0,
+                high: 5.0,
+                opening_high: Some(4.0),
+            })
+        );
+        quote.time = "09:37:00".to_string();
+        assert_eq!(
+            baseline.apply_quote(&quote).unwrap().opening_high,
+            Some(4.0)
+        );
     }
 }
