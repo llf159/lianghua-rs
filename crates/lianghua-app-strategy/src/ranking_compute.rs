@@ -1,6 +1,5 @@
 use std::{collections::HashSet, path::Path, time::Instant};
 
-use duckdb::Connection;
 use serde::Serialize;
 
 use crate::{
@@ -163,7 +162,8 @@ fn query_trade_date_range(
     let db_path_str = db_path
         .to_str()
         .ok_or_else(|| format!("{file_name} 路径不是有效 UTF-8"))?;
-    let conn = Connection::open(db_path_str).map_err(|e| format!("打开 {file_name} 失败: {e}"))?;
+    let conn = crate::data::open_db_readonly(db_path_str)
+        .map_err(|e| format!("打开 {file_name} 失败: {e}"))?;
     let table_exists = conn
         .query_row(
             "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
@@ -239,7 +239,8 @@ fn query_table_row_count(db_path: &Path, file_name: &str, table_name: &str) -> R
     let db_path_str = db_path
         .to_str()
         .ok_or_else(|| format!("{file_name} 路径不是有效 UTF-8"))?;
-    let conn = Connection::open(db_path_str).map_err(|e| format!("打开 {file_name} 失败: {e}"))?;
+    let conn = crate::data::open_db_readonly(db_path_str)
+        .map_err(|e| format!("打开 {file_name} 失败: {e}"))?;
     let table_exists = conn
         .query_row(
             "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
@@ -336,8 +337,8 @@ fn get_rank_compute_status_inner(
             let db_path_str = db_path
                 .to_str()
                 .ok_or_else(|| format!("{file_name} 路径不是有效 UTF-8"))?;
-            let conn =
-                Connection::open(db_path_str).map_err(|e| format!("打开 {file_name} 失败: {e}"))?;
+            let conn = crate::data::open_db_readonly(db_path_str)
+                .map_err(|e| format!("打开 {file_name} 失败: {e}"))?;
             let table_exists = conn
                 .query_row(
                     "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
@@ -405,7 +406,7 @@ fn get_rank_compute_status_inner(
         String,
     > {
         let empty_range = |exists: bool| RankComputeDbRange {
-            file_name: "scoring_result.db".to_string(),
+            file_name: "strategy_similarity.db".to_string(),
             table_name: "strategy_trigger_similarity_rank".to_string(),
             exists,
             min_trade_date: None,
@@ -418,9 +419,9 @@ fn get_rank_compute_status_inner(
         }
         let db_path_str = db_path
             .to_str()
-            .ok_or_else(|| "scoring_result.db 路径不是有效 UTF-8".to_string())?;
-        let conn = Connection::open(db_path_str)
-            .map_err(|e| format!("打开 scoring_result.db 失败: {e}"))?;
+            .ok_or_else(|| "strategy_similarity.db 路径不是有效 UTF-8".to_string())?;
+        let conn = crate::data::open_db_readonly(db_path_str)
+            .map_err(|e| format!("打开 strategy_similarity.db 失败: {e}"))?;
         let table_exists = conn
         .query_row(
             "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='main' AND table_name='strategy_trigger_similarity_rank'",
@@ -436,11 +437,12 @@ fn get_rank_compute_status_inner(
             return Ok((empty_range(false), Some(config)));
         }
         let config_key = format!(
-            "{}:w{}:p{}:h{}:b{}",
+            "{}:w{}:p{}:h{}:g{}:b{}",
             config.algorithm_version,
             config.window_trade_days,
             config.pool_segments,
             config.outcome_trade_days,
+            config.sample_gap_trade_days,
             config.benchmark_index_code
         );
         let range = conn
@@ -450,7 +452,7 @@ fn get_rank_compute_status_inner(
                 [&config_key],
                 |row| {
                     Ok(RankComputeDbRange {
-                        file_name: "scoring_result.db".to_string(),
+                        file_name: "strategy_similarity.db".to_string(),
                         table_name: "strategy_trigger_similarity_rank".to_string(),
                         exists: true,
                         min_trade_date: row.get(0)?,
@@ -462,7 +464,9 @@ fn get_rank_compute_status_inner(
             )
             .map_err(|e| format!("读取走势相似排名库状态失败: {e}"))?;
         Ok((range, Some(config)))
-    })(&result_db)?;
+    })(&crate::data::similarity_db_path(
+        source_path,
+    ))?;
     let cyq_bin_row_count = query_table_row_count(&cyq_db, "cyq.db", "cyq_bin")?;
     let cyq_factor = (|db_path: &Path| -> Result<Option<u64>, String> {
         if !db_path.exists() {
@@ -472,7 +476,8 @@ fn get_rank_compute_status_inner(
         let db_path_str = db_path
             .to_str()
             .ok_or_else(|| "cyq.db 路径不是有效 UTF-8".to_string())?;
-        let conn = Connection::open(db_path_str).map_err(|e| format!("打开 cyq.db 失败: {e}"))?;
+        let conn = crate::data::open_db_readonly(db_path_str)
+            .map_err(|e| format!("打开 cyq.db 失败: {e}"))?;
         let table_exists = conn
             .query_row(
                 "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'cyq_snapshot'",
@@ -508,8 +513,8 @@ fn get_rank_compute_status_inner(
             let db_path_str = db_path
                 .to_str()
                 .ok_or_else(|| "cyq_chen.db 路径不是有效 UTF-8".to_string())?;
-            let conn =
-                Connection::open(db_path_str).map_err(|e| format!("打开 cyq_chen.db 失败: {e}"))?;
+            let conn = crate::data::open_db_readonly(db_path_str)
+                .map_err(|e| format!("打开 cyq_chen.db 失败: {e}"))?;
             let table_exists = conn
         .query_row(
             "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'cyq_chen_snapshot'",
@@ -550,7 +555,7 @@ fn get_rank_compute_status_inner(
                 let db_path_str = db_path
                     .to_str()
                     .ok_or_else(|| "原始库路径不是有效 UTF-8".to_string())?;
-                let conn = Connection::open(db_path_str)
+                let conn = crate::data::open_db_readonly(db_path_str)
                     .map_err(|e| format!("打开 stock_data.db 失败: {e}"))?;
                 let table_exists = conn
         .query_row(

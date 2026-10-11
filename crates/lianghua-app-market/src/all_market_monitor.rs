@@ -310,7 +310,10 @@ fn open_result_conn(source_path: &str) -> Result<Connection, String> {
     let result_db_str = result_db
         .to_str()
         .ok_or_else(|| "结果库路径不是有效UTF-8".to_string())?;
-    Connection::open(result_db_str).map_err(|e| format!("打开结果库失败: {e}"))
+    let conn =
+        crate::data::open_db_readonly(result_db_str).map_err(|e| format!("打开结果库失败: {e}"))?;
+    crate::data::attach_similarity_db(&conn, source_path)?;
+    Ok(conn)
 }
 
 fn open_source_conn(source_path: &str) -> Result<Connection, String> {
@@ -318,7 +321,7 @@ fn open_source_conn(source_path: &str) -> Result<Connection, String> {
     let source_db_str = source_db
         .to_str()
         .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
-    Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))
+    crate::data::open_db_readonly(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))
 }
 
 fn table_exists(conn: &Connection, table_name: &str) -> bool {

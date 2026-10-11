@@ -7,8 +7,8 @@ use crate::trigger_similarity::ranking::{
 };
 use crate::trigger_similarity::*;
 
+use super::store::open_ranking_conn;
 use crate::trigger_similarity::load::load_all_trade_dates;
-use crate::trigger_similarity::load::open_result_conn;
 use crate::trigger_similarity::load::resolve_benchmark_index_code;
 use crate::trigger_similarity::load::resolve_existing_trade_date;
 use crate::utils::utils::board_category;
@@ -36,7 +36,7 @@ pub fn get_strategy_trigger_similarity_ranking_page(
     if source_path.is_empty() {
         return Err("source_path 不能为空".to_string());
     }
-    let conn = open_result_conn(&source_path)?;
+    let conn = open_ranking_conn(&source_path)?;
     let resolved_trade_date = resolve_existing_trade_date(&conn, trade_date)?;
     let use_latest_config = window_trade_days.is_none()
         && pool_segments.is_none()

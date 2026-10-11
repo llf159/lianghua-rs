@@ -556,7 +556,7 @@ pub fn run_scene_layer_backtest(
         .to_str()
         .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
     let source_conn =
-        Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
+        crate::data::open_db_readonly(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
     let (resolved_board, exclude_st_board, total_mv_min, total_mv_max, allowed_ts_codes) =
         build_backtest_stock_filter(
             &source_path,
@@ -768,7 +768,7 @@ pub fn run_rule_layer_backtest(
         .to_str()
         .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
     let source_conn =
-        Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
+        crate::data::open_db_readonly(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
     let (resolved_board, exclude_st_board, total_mv_min, total_mv_max, allowed_ts_codes) =
         build_backtest_stock_filter(
             &source_path,
@@ -1071,7 +1071,7 @@ pub fn run_rank_layer_backtest(
         .to_str()
         .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
     let source_conn =
-        Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
+        crate::data::open_db_readonly(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
     let (resolved_board, exclude_st_board, _total_mv_min, _total_mv_max, allowed_ts_codes) =
         build_backtest_stock_filter(&source_path, board, exclude_st_board, None, None)?;
 
@@ -1223,7 +1223,7 @@ pub fn run_transient_scene_layer_backtest(
         .to_str()
         .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
     let source_conn =
-        Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
+        crate::data::open_db_readonly(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
     let (resolved_board, exclude_st_board, total_mv_min, total_mv_max, allowed_ts_codes) =
         build_backtest_stock_filter(
             &source_path,
@@ -1375,7 +1375,7 @@ pub fn run_transient_rule_layer_backtest(
         .to_str()
         .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
     let source_conn =
-        Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
+        crate::data::open_db_readonly(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
     let (resolved_board, exclude_st_board, total_mv_min, total_mv_max, allowed_ts_codes) =
         build_backtest_stock_filter(
             &source_path,
@@ -1588,7 +1588,7 @@ pub fn run_transient_rank_layer_backtest(
         .to_str()
         .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
     let source_conn =
-        Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
+        crate::data::open_db_readonly(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
     let (resolved_board, exclude_st_board, _total_mv_min, _total_mv_max, allowed_ts_codes) =
         build_backtest_stock_filter(&source_path, board, exclude_st_board, None, None)?;
 

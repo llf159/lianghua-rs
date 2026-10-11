@@ -259,11 +259,15 @@ fn build_ths_concept_http_client() -> Result<reqwest::blocking::Client, String> 
 }
 
 fn sync_gaini_bx_range(
+    source_writer: Connection,
     source_dir: &str,
     start_date: &str,
     end_date: &str,
     progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<usize, String> {
+    // duckdb-rs 的独立 open 不共享数据库实例；概念重建稍后会另开源库写清单。
+    // 消费下载连接，保证旧实例关闭后才能开始重建，避免旧目录/块缓存覆盖新写入。
+    drop(source_writer);
     emit_progress(
         progress_cb,
         "rebuild_concept_performance",
@@ -1367,7 +1371,7 @@ fn download_first_all_market_after_basic_data(
             .collect())
     })(source_dir)?;
 
-    download_selected_stocks_with_context(
+    let mut summary = download_selected_stocks_with_context(
         source_dir,
         &effective_trade_date,
         &client,
@@ -1381,9 +1385,21 @@ fn download_first_all_market_after_basic_data(
         config.retry_times,
         "首次全量下载开始",
         "首次全量下载结束",
-        true,
         progress_cb,
-    )
+    )?;
+    if adj_type == AdjType::Qfq && summary.saved_rows > 0 {
+        summary.concept_performance_rows +=
+            sync_gaini_bx_range(conn, source_dir, start_date, end_date, progress_cb)?;
+    }
+    emit_progress(
+        progress_cb,
+        "done",
+        ts_codes.len(),
+        ts_codes.len(),
+        Some(effective_trade_date.to_string()),
+        "首次全量下载结束。",
+    );
+    Ok(summary)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1401,13 +1417,12 @@ fn download_selected_stocks_with_context(
     retry_times: usize,
     start_message: &str,
     done_message: &str,
-    maintain_concepts: bool,
     progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<DownloadSummary, String> {
     if ts_codes.is_empty() {
         emit_progress(
             progress_cb,
-            "done",
+            "download_bars",
             0,
             0,
             Some(effective_trade_date.to_string()),
@@ -1439,7 +1454,7 @@ fn download_selected_stocks_with_context(
     if tasks.is_empty() {
         emit_progress(
             progress_cb,
-            "done",
+            "download_bars",
             0,
             0,
             Some(effective_trade_date.to_string()),
@@ -1610,14 +1625,10 @@ fn download_selected_stocks_with_context(
                 .join("；")
         ));
     }
-    if maintain_concepts && adj_type == AdjType::Qfq {
-        total.concept_performance_rows +=
-            sync_gaini_bx_range(source_dir, start_date, end_date, progress_cb)?;
-    }
 
     emit_progress(
         progress_cb,
-        "done",
+        "download_bars",
         total_tasks,
         total_tasks,
         Some(effective_trade_date.to_string()),
@@ -1683,6 +1694,14 @@ fn download_selected_stocks_with_mode(
         )?;
         checkpoint_stock_data(&conn)?;
         let mut total = DownloadSummary::default();
+        emit_progress(
+            progress_cb,
+            "download_bars",
+            0,
+            ts_codes.len(),
+            None,
+            format!("针对性股票修复开始，共 {} 只股票待处理。", ts_codes.len()),
+        );
         for (finished, code) in ts_codes.iter().enumerate() {
             prepare_stock_repairs(
                 &conn,
@@ -1697,6 +1716,22 @@ fn download_selected_stocks_with_mode(
                 if progress.phase == "done" {
                     return;
                 }
+                // 内层只处理一只股票，提示也要转换为整轮进度，不能反复显示“共 1 只”。
+                progress.message =
+                    if progress.phase == "download_bars" && progress.current_label.is_none() {
+                        format!(
+                            "正在下载 {code} 的完整历史（第 {} / {} 只）。",
+                            finished + 1,
+                            ts_codes.len()
+                        )
+                    } else {
+                        format!(
+                            "当前股票 {code}（第 {} / {} 只）：{}",
+                            finished + 1,
+                            ts_codes.len(),
+                            progress.message
+                        )
+                    };
                 progress.finished = finished;
                 progress.total = ts_codes.len();
                 progress.current_label = Some(code.clone());
@@ -1718,7 +1753,6 @@ fn download_selected_stocks_with_mode(
                 config.retry_times,
                 "针对性股票修复开始",
                 "针对性股票修复结束",
-                false,
                 Some(&callback),
             )?;
             if load_pending_stock_repairs(&conn)?
@@ -1736,7 +1770,11 @@ fn download_selected_stocks_with_mode(
                 finished + 1,
                 ts_codes.len(),
                 Some(code.clone()),
-                format!("已提交修复 {} / {} 只股票。", finished + 1, ts_codes.len()),
+                format!(
+                    "{code} 修复已提交，累计完成 {} / {} 只股票。",
+                    finished + 1,
+                    ts_codes.len()
+                ),
             );
         }
         emit_progress(
@@ -1749,7 +1787,7 @@ fn download_selected_stocks_with_mode(
         );
         return Ok(total);
     }
-    download_selected_stocks_with_context(
+    let mut summary = download_selected_stocks_with_context(
         source_dir,
         &effective_trade_date,
         &client,
@@ -1763,9 +1801,21 @@ fn download_selected_stocks_with_mode(
         config.retry_times,
         "缺失股票补全开始",
         "缺失股票补全结束",
-        !repair_history,
         progress_cb,
-    )
+    )?;
+    if adj_type == AdjType::Qfq && summary.saved_rows > 0 {
+        summary.concept_performance_rows +=
+            sync_gaini_bx_range(conn, source_dir, start_date, end_date, progress_cb)?;
+    }
+    emit_progress(
+        progress_cb,
+        "done",
+        ts_codes.len(),
+        ts_codes.len(),
+        Some(effective_trade_date.to_string()),
+        "缺失股票补全结束。",
+    );
+    Ok(summary)
 }
 
 pub fn download_selected_indices(
@@ -2630,6 +2680,7 @@ fn download_pending_all_market_after_basic_data(
         ));
     }
     total.concept_performance_rows += sync_gaini_bx_range(
+        conn,
         source_dir,
         pending_trade_dates[0].as_str(),
         effective_trade_date,
@@ -3108,7 +3159,22 @@ mod tests {
         );
         checkpoint_stock_data(&conn).unwrap();
         ensure_stock_data_ready_for_derived(source_path).expect("full repair unblocks computation");
-
+        fs::write(source_dir.join("stock_list.csv"), "ts_code,symbol,name,area,industry,list_date,trade_date,total_share,float_share,total_mv\n000001.SZ,1,A,,X,19900101,20260106,1,1,100\n000002.SZ,2,B,,X,19900101,20260106,1,1,100\n").unwrap();
+        let source_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM stock_data", [], |row| row.get(0))
+            .unwrap();
+        assert!(sync_gaini_bx_range(conn, source_path, "20260102", "20260106", None).unwrap() > 0);
+        let conn = Connection::open(&db_path).unwrap();
+        let dirty = crate::data::download_state::load_pending_derived_rebuilds(&conn).unwrap();
+        assert_eq!(dirty.len(), 2);
+        assert!(dirty.iter().all(|item| item.component != "concept"));
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM stock_data", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            source_rows
+        );
+        drop(conn);
         fs::remove_dir_all(source_dir).ok();
     }
 
@@ -3124,7 +3190,10 @@ mod tests {
             CREATE TABLE pending_chip_repair(ts_code VARCHAR PRIMARY KEY); INSERT INTO pending_chip_repair VALUES ('000001.SZ');
             CREATE TABLE completed_chip_repair(ts_code VARCHAR, model VARCHAR, PRIMARY KEY(ts_code, model)); INSERT INTO completed_chip_repair VALUES ('000001.SZ','chen'), ('000001.SZ','legacy')").unwrap();
         let results = Connection::open(crate::data::result_db_path(source_path)).unwrap();
-        results.execute_batch("CREATE TABLE score_summary(trade_date VARCHAR); INSERT INTO score_summary VALUES ('20260105'); CREATE TABLE strategy_trigger_similarity_rank(trade_date VARCHAR); INSERT INTO strategy_trigger_similarity_rank VALUES ('20260105')").unwrap();
+        results.execute_batch("CREATE TABLE score_summary(trade_date VARCHAR); INSERT INTO score_summary VALUES ('20260105')").unwrap();
+        drop(results);
+        let results = Connection::open(crate::data::similarity_db_path(source_path)).unwrap();
+        results.execute_batch("CREATE TABLE strategy_trigger_similarity_rank(trade_date VARCHAR); INSERT INTO strategy_trigger_similarity_rank VALUES ('20260105')").unwrap();
         drop(results);
         let batch = PendingTradeDateBatch {
             trade_date: "20260106".to_string(),

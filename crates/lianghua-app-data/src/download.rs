@@ -658,7 +658,8 @@ fn query_trade_date_range(
     let db_path_str = db_path
         .to_str()
         .ok_or_else(|| format!("{file_name} 路径不是有效 UTF-8"))?;
-    let conn = Connection::open(db_path_str).map_err(|e| format!("打开 {file_name} 失败: {e}"))?;
+    let conn = crate::data::open_db_readonly(db_path_str)
+        .map_err(|e| format!("打开 {file_name} 失败: {e}"))?;
     let table_exists = conn
         .query_row(
             "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
@@ -746,8 +747,8 @@ fn query_stock_data_adj_type_range(
     let db_path_str = db_path
         .to_str()
         .ok_or_else(|| "stock_data.db 路径不是有效 UTF-8".to_string())?;
-    let conn =
-        Connection::open(db_path_str).map_err(|e| format!("打开 stock_data.db 失败: {e}"))?;
+    let conn = crate::data::open_db_readonly(db_path_str)
+        .map_err(|e| format!("打开 stock_data.db 失败: {e}"))?;
     let table_exists = conn
         .query_row(
             "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'stock_data'",
@@ -833,7 +834,7 @@ fn query_dragon_tiger_db_status(source_path: &str) -> Result<DragonTigerDbStatus
         });
     }
 
-    let conn = Connection::open(&db_path)
+    let conn = crate::data::open_db_readonly(&db_path)
         .map_err(|error| format!("打开 dragon_tiger.db 失败: {error}"))?;
     let (min_trade_date, max_trade_date, synced_trade_dates): (
         Option<String>,
@@ -1460,8 +1461,8 @@ pub fn run_prepared_data_download(
 
     let mut completion_details = Vec::new();
     if prepared.action == "incremental-download" {
-        let source_conn = Connection::open(source_db_path(&prepared.source_path))
-            .map_err(|e| format!("打开原始库待修复记录失败: {e}"))?;
+        let source_conn =
+            crate::data::download_state::open_source_db_readonly(&prepared.source_path)?;
         let pending_table_exists: bool = source_conn
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name = 'pending_chip_repair')",
@@ -1474,6 +1475,7 @@ pub fn run_prepared_data_download(
                 &source_conn,
                 &prepared.chip_model,
             )?;
+        drop(source_conn);
         let has_recovered_stocks = !recovered_stock_codes.is_empty();
         if let Some(cb) = progress_cb {
             cb(lianghua_download::download::runner::DownloadProgress {
@@ -1591,7 +1593,9 @@ pub fn run_prepared_data_download(
                                 .as_ref()
                                 .and_then(|summary| summary.end_date.as_deref())
                         });
-                    if pending_table_exists {
+                    if pending_table_exists && !recovered_stock_codes.is_empty() {
+                        let source_conn = Connection::open(source_db_path(source_path))
+                            .map_err(|e| format!("打开原始库清除筹码修复记录失败: {e}"))?;
                         crate::data::download_state::clear_completed_chip_repairs(
                             &source_conn,
                             source_path,
@@ -1666,7 +1670,9 @@ pub fn run_prepared_data_download(
                                 .as_ref()
                                 .and_then(|summary| summary.end_date.as_deref())
                         });
-                    if pending_table_exists {
+                    if pending_table_exists && !recovered_stock_codes.is_empty() {
+                        let source_conn = Connection::open(source_db_path(source_path))
+                            .map_err(|e| format!("打开原始库清除筹码修复记录失败: {e}"))?;
                         crate::data::download_state::clear_completed_chip_repairs(
                             &source_conn,
                             source_path,
@@ -2491,6 +2497,14 @@ mod tests {
         );
 
         let source_path = source_dir.to_str().expect("utf8 path");
+        let db_path = source_db_path(source_path);
+        let writer = Connection::open(&db_path).unwrap();
+        writer
+            .execute_batch("INSERT INTO stock_data VALUES ('000003.SZ','20240102','qfq')")
+            .unwrap();
+        let database_before = fs::read(&db_path).unwrap();
+        let wal_path = db_path.with_extension("db.wal");
+        let wal_before = fs::read(&wal_path).unwrap();
         let source_qfq = query_stock_data_adj_type_range(source_path, "qfq").expect("qfq range");
         let source_all =
             query_trade_date_range(&source_db_path(source_path), "stock_data.db", "stock_data")
@@ -2499,6 +2513,11 @@ mod tests {
         assert_eq!(source_all.max_trade_date.as_deref(), Some("20240103"));
         assert_eq!(source_qfq.max_trade_date.as_deref(), Some("20240102"));
 
+        assert_eq!(source_qfq.row_count, 3);
+        // 状态查询读取未落盘的行情，但不代替仍活跃的写实例 checkpoint。
+        assert_eq!(database_before, fs::read(&db_path).unwrap());
+        assert_eq!(wal_before, fs::read(&wal_path).unwrap());
+        drop(writer);
         let _ = remove_dir_all(source_dir);
     }
 

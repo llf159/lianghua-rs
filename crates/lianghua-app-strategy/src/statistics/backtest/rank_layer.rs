@@ -84,7 +84,7 @@ pub(in crate::statistics) fn build_rank_market_value_summaries(
     summary_rows: &[ScoreSummary],
     samples: &[crate::simulate::rank::RankLayerSamplePoint],
 ) -> Result<Vec<RankLayerMarketValueSummary>, String> {
-    let conn = duckdb::Connection::open(crate::data::source_db_path(source_path))
+    let conn = crate::data::open_db_readonly(crate::data::source_db_path(source_path))
         .map_err(|e| e.to_string())?;
     let per_price = crate::data::extras::load_estimated_market_cap_per_price_map(
         &conn,

@@ -711,7 +711,8 @@ pub fn maintain_cyq_incremental_if_db_exists(
     let source_db_str = source_db
         .to_str()
         .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
-    let source_conn = Connection::open(source_db_str).map_err(|e| format!("打开原始库失败:{e}"))?;
+    let source_conn =
+        crate::data::open_db_readonly(source_db_str).map_err(|e| format!("打开原始库失败:{e}"))?;
     if !source_stock_data_exists(&source_conn)? {
         return Ok(Some(CyqRebuildSummary {
             snapshot_rows: 0,
@@ -1041,7 +1042,8 @@ pub fn repair_cyq_stocks_if_db_exists(
     let source_db_str = source_db
         .to_str()
         .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
-    let source_conn = Connection::open(source_db_str).map_err(|e| format!("打开原始库失败:{e}"))?;
+    let source_conn =
+        crate::data::open_db_readonly(source_db_str).map_err(|e| format!("打开原始库失败:{e}"))?;
     let Some((start_date, end_date)) = resolve_cyq_rebuild_trade_date_range(
         &source_conn,
         Some(&existing_start_date),
@@ -1306,7 +1308,8 @@ pub fn rebuild_cyq_all_with_progress(
     let source_db_str = source_db
         .to_str()
         .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
-    let source_conn = Connection::open(source_db_str).map_err(|e| format!("打开原始库失败:{e}"))?;
+    let source_conn =
+        crate::data::open_db_readonly(source_db_str).map_err(|e| format!("打开原始库失败:{e}"))?;
     if !source_stock_data_exists(&source_conn)? {
         clear_cyq_tables(&cyq_db)?;
         return Ok(CyqRebuildSummary {

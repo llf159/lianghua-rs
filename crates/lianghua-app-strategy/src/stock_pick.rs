@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use duckdb::{Connection, params};
+use duckdb::params;
 use rayon::prelude::*;
 use serde::Serialize;
 
@@ -126,7 +126,8 @@ fn load_trade_date_options(source_path: &str) -> Result<Vec<String>, String> {
     let source_db_str = source_db
         .to_str()
         .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
-    let conn = Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
+    let conn =
+        crate::data::open_db_readonly(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
     let mut stmt = conn
         .prepare(
             r#"
@@ -202,7 +203,8 @@ pub fn get_stock_pick_options(source_path: &str) -> Result<StockPickOptionsData,
         let result_db_str = result_db
             .to_str()
             .ok_or_else(|| "结果库路径不是有效UTF-8".to_string())?;
-        let conn = Connection::open(result_db_str).map_err(|e| format!("打开结果库失败: {e}"))?;
+        let conn = crate::data::open_db_readonly(result_db_str)
+            .map_err(|e| format!("打开结果库失败: {e}"))?;
         let mut stmt = conn
             .prepare(
                 r#"
@@ -402,7 +404,7 @@ fn load_summary_map(source_path: &str, trade_date: &str) -> HashMap<String, Summ
     let Some(result_db_str) = result_db.to_str() else {
         return HashMap::new();
     };
-    let Ok(conn) = Connection::open(result_db_str) else {
+    let Ok(conn) = crate::data::open_db_readonly(result_db_str) else {
         return HashMap::new();
     };
     let Ok(mut stmt) = conn.prepare(
@@ -443,7 +445,7 @@ fn load_rank_score_series_map(
     let Some(result_db_str) = result_db.to_str() else {
         return HashMap::new();
     };
-    let Ok(conn) = Connection::open(result_db_str) else {
+    let Ok(conn) = crate::data::open_db_readonly(result_db_str) else {
         return HashMap::new();
     };
     let Ok(mut stmt) = conn.prepare(
@@ -483,6 +485,11 @@ fn load_rank_score_series_map(
         );
     }
 
+    drop(rows);
+    drop(stmt);
+    if !crate::data::attach_similarity_db(&conn, source_path).unwrap_or(false) {
+        return out;
+    }
     let Ok(table_exists) = conn.query_row(
         "SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_schema='main' AND table_name='strategy_trigger_similarity_summary'",
         [],

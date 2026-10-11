@@ -9,6 +9,8 @@ pub mod dragon_tiger_data;
 pub mod extras;
 pub mod runtime;
 pub mod scoring_store;
+pub mod similarity_data;
+pub use similarity_data::attach_similarity_db;
 mod stock_data_fields;
 
 pub use stock_data_fields::{STOCK_DATA_KEY_COLUMN_DEFS, STOCK_DATA_RUNTIME_FIELDS};
@@ -27,6 +29,12 @@ use crate::expr::{
     validation::{parse_expression_program, validate_expression_functions},
 };
 
+// 查询入口显式只读，避免独立打开同文件的实例在关闭时 checkpoint 覆盖写入实例。
+pub fn open_db_readonly(path: impl AsRef<Path>) -> Result<Connection, duckdb::Error> {
+    let config = duckdb::Config::default().access_mode(duckdb::AccessMode::ReadOnly)?;
+    Connection::open_with_flags(path, config)
+}
+
 pub fn source_db_path(source_dir: &str) -> PathBuf {
     Path::new(source_dir).join("stock_data.db")
 }
@@ -37,6 +45,10 @@ pub fn dragon_tiger_db_path(source_dir: &str) -> PathBuf {
 
 pub fn result_db_path(source_dir: &str) -> PathBuf {
     Path::new(source_dir).join("scoring_result.db")
+}
+
+pub fn similarity_db_path(source_dir: &str) -> PathBuf {
+    Path::new(source_dir).join("strategy_similarity.db")
 }
 
 pub fn concept_performance_db_path(source_dir: &str) -> PathBuf {

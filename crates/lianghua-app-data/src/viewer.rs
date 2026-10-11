@@ -208,7 +208,7 @@ pub fn preview_managed_source_dataset(
             let db_path_str = db_path
                 .to_str()
                 .ok_or_else(|| "stock_data.db 路径不是有效 UTF-8".to_string())?;
-            let conn = Connection::open(db_path_str)
+            let conn = crate::data::open_db_readonly(db_path_str)
                 .map_err(|error| format!("打开 stock_data.db 失败: {error}"))?;
             let relation = quote_ident("stock_data");
             let columns = load_relation_columns(&conn, &relation)?;
@@ -258,7 +258,7 @@ pub fn preview_managed_source_dataset(
             let db_path_str = db_path
                 .to_str()
                 .ok_or_else(|| "dragon_tiger.db 路径不是有效 UTF-8".to_string())?;
-            let conn = Connection::open(db_path_str)
+            let conn = crate::data::open_db_readonly(db_path_str)
                 .map_err(|error| format!("打开 dragon_tiger.db 失败: {error}"))?;
             let (table_name, label, order_by) = if normalized_dataset_id.ends_with("top-list") {
                 (
@@ -287,15 +287,15 @@ pub fn preview_managed_source_dataset(
         "strategy-trigger-similarity-rank"
         | "strategy-trigger-similarity-meta"
         | "strategy-trigger-similarity-summary" => {
-            let db_path = result_db_path(source_path_str);
+            let db_path = crate::data::similarity_db_path(source_path_str);
             if !db_path.exists() {
                 return Err(format!("结果库不存在: {}", db_path.display()));
             }
             let db_path_str = db_path
                 .to_str()
-                .ok_or_else(|| "scoring_result.db 路径不是有效 UTF-8".to_string())?;
-            let conn = Connection::open(db_path_str)
-                .map_err(|error| format!("打开 scoring_result.db 失败: {error}"))?;
+                .ok_or_else(|| "strategy_similarity.db 路径不是有效 UTF-8".to_string())?;
+            let conn = crate::data::open_db_readonly(db_path_str)
+                .map_err(|error| format!("打开 strategy_similarity.db 失败: {error}"))?;
             let (table_name, label, order_by) = if normalized_dataset_id.ends_with("meta") {
                 (
                     "strategy_trigger_similarity_rank_meta",
@@ -334,7 +334,7 @@ pub fn preview_managed_source_dataset(
             let db_path_str = db_path
                 .to_str()
                 .ok_or_else(|| "scoring_result.db 路径不是有效 UTF-8".to_string())?;
-            let conn = Connection::open(db_path_str)
+            let conn = crate::data::open_db_readonly(db_path_str)
                 .map_err(|error| format!("打开 scoring_result.db 失败: {error}"))?;
             let relation = quote_ident("score_summary");
             let columns = load_relation_columns(&conn, &relation)?;
@@ -355,7 +355,7 @@ pub fn preview_managed_source_dataset(
             let db_path_str = db_path
                 .to_str()
                 .ok_or_else(|| "scoring_result.db 路径不是有效 UTF-8".to_string())?;
-            let conn = Connection::open(db_path_str)
+            let conn = crate::data::open_db_readonly(db_path_str)
                 .map_err(|error| format!("打开 scoring_result.db 失败: {error}"))?;
             let relation = quote_ident("rule_details");
             let columns = load_relation_columns(&conn, &relation)?;
@@ -376,7 +376,7 @@ pub fn preview_managed_source_dataset(
             let db_path_str = db_path
                 .to_str()
                 .ok_or_else(|| "scoring_result.db 路径不是有效 UTF-8".to_string())?;
-            let conn = Connection::open(db_path_str)
+            let conn = crate::data::open_db_readonly(db_path_str)
                 .map_err(|error| format!("打开 scoring_result.db 失败: {error}"))?;
             let relation = quote_ident("scene_details");
             let columns = load_relation_columns(&conn, &relation)?;
@@ -397,7 +397,7 @@ pub fn preview_managed_source_dataset(
             let db_path_str = db_path
                 .to_str()
                 .ok_or_else(|| "concept_performance.db 路径不是有效 UTF-8".to_string())?;
-            let conn = Connection::open(db_path_str)
+            let conn = crate::data::open_db_readonly(db_path_str)
                 .map_err(|error| format!("打开 concept_performance.db 失败: {error}"))?;
             let relation = quote_ident("concept_performance");
             let columns = load_relation_columns(&conn, &relation)?;
@@ -417,7 +417,7 @@ pub fn preview_managed_source_dataset(
             let db_path_str = db_path
                 .to_str()
                 .ok_or_else(|| "cyq.db 路径不是有效 UTF-8".to_string())?;
-            let conn = Connection::open(db_path_str)
+            let conn = crate::data::open_db_readonly(db_path_str)
                 .map_err(|error| format!("打开 cyq.db 失败: {error}"))?;
             let relation = quote_ident("cyq_snapshot");
             let columns = load_relation_columns(&conn, &relation)?;
@@ -438,7 +438,7 @@ pub fn preview_managed_source_dataset(
             let db_path_str = db_path
                 .to_str()
                 .ok_or_else(|| "cyq.db 路径不是有效 UTF-8".to_string())?;
-            let conn = Connection::open(db_path_str)
+            let conn = crate::data::open_db_readonly(db_path_str)
                 .map_err(|error| format!("打开 cyq.db 失败: {error}"))?;
             let relation = quote_ident("cyq_bin");
             let columns = load_relation_columns(&conn, &relation)?;
@@ -459,7 +459,7 @@ pub fn preview_managed_source_dataset(
             let db_path_str = db_path
                 .to_str()
                 .ok_or_else(|| "cyq_chen.db 路径不是有效 UTF-8".to_string())?;
-            let conn = Connection::open(db_path_str)
+            let conn = crate::data::open_db_readonly(db_path_str)
                 .map_err(|error| format!("打开 cyq_chen.db 失败: {error}"))?;
             let relation = quote_ident("cyq_chen_snapshot");
             let columns = load_relation_columns(&conn, &relation)?;
@@ -480,7 +480,7 @@ pub fn preview_managed_source_dataset(
             let db_path_str = db_path
                 .to_str()
                 .ok_or_else(|| "cyq_chen.db 路径不是有效 UTF-8".to_string())?;
-            let conn = Connection::open(db_path_str)
+            let conn = crate::data::open_db_readonly(db_path_str)
                 .map_err(|error| format!("打开 cyq_chen.db 失败: {error}"))?;
             let relation = quote_ident("cyq_chen_bin");
             let columns = load_relation_columns(&conn, &relation)?;
@@ -560,40 +560,45 @@ pub fn preview_managed_source_dataset(
         let db_path_str = db_path
             .to_str()
             .ok_or_else(|| "concept_performance.db 路径不是有效 UTF-8".to_string())?;
-        Connection::open(db_path_str)
+        crate::data::open_db_readonly(db_path_str)
             .map_err(|error| format!("打开 concept_performance.db 失败: {error}"))?
     } else if normalized_dataset_id.starts_with("cyq-chen-") {
         let db_path = cyq_chen_db_path(source_path_str);
         let db_path_str = db_path
             .to_str()
             .ok_or_else(|| "cyq_chen.db 路径不是有效 UTF-8".to_string())?;
-        Connection::open(db_path_str).map_err(|error| format!("打开 cyq_chen.db 失败: {error}"))?
+        crate::data::open_db_readonly(db_path_str)
+            .map_err(|error| format!("打开 cyq_chen.db 失败: {error}"))?
     } else if normalized_dataset_id.starts_with("cyq-") {
         let db_path = cyq_db_path(source_path_str);
         let db_path_str = db_path
             .to_str()
             .ok_or_else(|| "cyq.db 路径不是有效 UTF-8".to_string())?;
-        Connection::open(db_path_str).map_err(|error| format!("打开 cyq.db 失败: {error}"))?
+        crate::data::open_db_readonly(db_path_str)
+            .map_err(|error| format!("打开 cyq.db 失败: {error}"))?
     } else if normalized_dataset_id.starts_with("dragon-tiger-") {
         let db_path = dragon_tiger_db_path(source_path_str);
         let db_path_str = db_path
             .to_str()
             .ok_or_else(|| "dragon_tiger.db 路径不是有效 UTF-8".to_string())?;
-        Connection::open(db_path_str)
+        crate::data::open_db_readonly(db_path_str)
             .map_err(|error| format!("打开 dragon_tiger.db 失败: {error}"))?
     } else if normalized_dataset_id.starts_with("stock-data-") {
         let db_path = source_db_path(source_path_str);
         let db_path_str = db_path
             .to_str()
             .ok_or_else(|| "stock_data.db 路径不是有效 UTF-8".to_string())?;
-        Connection::open(db_path_str)
+        crate::data::open_db_readonly(db_path_str)
             .map_err(|error| format!("打开 stock_data.db 失败: {error}"))?
+    } else if normalized_dataset_id.starts_with("strategy-trigger-similarity-") {
+        crate::data::open_db_readonly(crate::data::similarity_db_path(source_path_str))
+            .map_err(|error| format!("打开 strategy_similarity.db 失败: {error}"))?
     } else {
         let db_path = result_db_path(source_path_str);
         let db_path_str = db_path
             .to_str()
             .ok_or_else(|| "scoring_result.db 路径不是有效 UTF-8".to_string())?;
-        Connection::open(db_path_str)
+        crate::data::open_db_readonly(db_path_str)
             .map_err(|error| format!("打开 scoring_result.db 失败: {error}"))?
     };
 
@@ -709,7 +714,7 @@ pub fn preview_managed_source_stock_data(
     let db_path_str = db_path
         .to_str()
         .ok_or_else(|| "stock_data.db 路径不是有效 UTF-8".to_string())?;
-    let conn = Connection::open(db_path_str)
+    let conn = crate::data::open_db_readonly(db_path_str)
         .map_err(|error| format!("打开 stock_data.db 失败: {error}"))?;
     let table_exists = conn
         .query_row(

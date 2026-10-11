@@ -40,6 +40,7 @@ pub fn managed_source_file_name(file_id: &str) -> Option<&'static str> {
         "stock-list" => Some("stock_list.csv"),
         "trade-calendar" => Some("trade_calendar.csv"),
         "result-db" => Some("scoring_result.db"),
+        "similarity-db" => Some("strategy_similarity.db"),
         "concept-performance-db" => Some("concept_performance.db"),
         "cyq-db" => Some("cyq.db"),
         "cyq-chen-db" => Some("cyq_chen.db"),

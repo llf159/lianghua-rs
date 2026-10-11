@@ -844,7 +844,8 @@ pub fn load_latest_close_map_before(
     let db_path_str = db_path
         .to_str()
         .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
-    let conn = Connection::open(db_path_str).map_err(|e| format!("数据库连接错误:{e}"))?;
+    let conn =
+        crate::data::open_db_readonly(db_path_str).map_err(|e| format!("数据库连接错误:{e}"))?;
 
     let sql = r#"
         SELECT
@@ -905,7 +906,8 @@ pub fn load_latest_trade_date(
     let db_path_str = db_path
         .to_str()
         .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
-    let conn = Connection::open(db_path_str).map_err(|e| format!("数据库连接错误:{e}"))?;
+    let conn =
+        crate::data::open_db_readonly(db_path_str).map_err(|e| format!("数据库连接错误:{e}"))?;
 
     let table_exists = conn
         .query_row(

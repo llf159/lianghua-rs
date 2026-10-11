@@ -5,7 +5,7 @@ use std::{
 };
 
 use chrono::Local;
-use duckdb::{Connection, params};
+use duckdb::params;
 use serde::{Deserialize, Serialize};
 
 use crate::details::DetailKlinePayload;
@@ -960,7 +960,8 @@ pub fn run_cyq_chen_single_stock_test(
         let source_db_str = source_db
             .to_str()
             .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
-        let conn = Connection::open(source_db_str).map_err(|e| format!("打开原始库失败:{e}"))?;
+        let conn = crate::data::open_db_readonly(source_db_str)
+            .map_err(|e| format!("打开原始库失败:{e}"))?;
 
         let mut stmt = conn
             .prepare("SELECT MIN(trade_date), MAX(trade_date) FROM stock_data WHERE adj_type = ?")
@@ -1126,7 +1127,8 @@ pub fn run_cyq_chen_single_stock_test(
         let source_db_str = source_db
             .to_str()
             .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
-        let conn = Connection::open(source_db_str).map_err(|e| format!("打开原始库失败:{e}"))?;
+        let conn = crate::data::open_db_readonly(source_db_str)
+            .map_err(|e| format!("打开原始库失败:{e}"))?;
         let name_map = lianghua_app_shared::build_name_map(source_path).unwrap_or_default();
         let watermark_name = name_map.get(ts_code).cloned();
         let mut payload =

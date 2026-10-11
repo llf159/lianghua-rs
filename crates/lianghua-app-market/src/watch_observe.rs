@@ -82,7 +82,7 @@ fn open_source_conn(source_path: &str) -> Result<Connection, String> {
     let source_db_str = source_db
         .to_str()
         .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
-    Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))
+    crate::data::open_db_readonly(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))
 }
 
 pub fn resolve_watch_date_for_clock(

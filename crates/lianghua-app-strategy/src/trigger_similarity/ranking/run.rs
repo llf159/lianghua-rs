@@ -7,10 +7,11 @@ use crate::trigger_similarity::ranking::store::{
 };
 use crate::trigger_similarity::*;
 
+use super::store::open_ranking_conn;
 use super::*;
 use crate::data::ind_toml_path;
-use crate::data::result_db_path;
 use crate::data::score_rule_path;
+use crate::data::similarity_db_path;
 use crate::trigger_similarity::channel::build_environment_fingerprint_map;
 use crate::trigger_similarity::channel::cached_channel_similarity;
 use crate::trigger_similarity::channel::final_similarity;
@@ -25,7 +26,6 @@ use crate::trigger_similarity::fingerprint::weighted_rule_timing_similarity_with
 use crate::trigger_similarity::load::load_all_trade_dates;
 use crate::trigger_similarity::load::load_market_environment;
 use crate::trigger_similarity::load::load_market_schema;
-use crate::trigger_similarity::load::open_result_conn;
 use crate::trigger_similarity::load::resolve_benchmark_index_code;
 use crate::trigger_similarity::load::resolve_existing_trade_date;
 use crate::trigger_similarity::sample::OutcomeSummarySample;
@@ -86,7 +86,7 @@ pub fn recompute_strategy_trigger_similarity_samples(
     config_key: &str,
     codes: &[String],
 ) -> Result<Vec<StrategyTriggerRankingRow>, String> {
-    let config = parse_active_config_key(config_key, String::new(), String::new())
+    let config = parse_active_config_key(config_key, String::new())
         .ok_or_else(|| "保存的相似度参数无法解析".to_string())?
         .config;
     if config.algorithm_version != ALGORITHM_VERSION {
@@ -166,7 +166,7 @@ fn compute_strategy_trigger_similarity_ranking(
                 .to_string(),
         );
     }
-    let conn = open_result_conn(&source_path)?;
+    let conn = open_ranking_conn(&source_path)?;
     let resolved_trade_date = resolve_existing_trade_date(&conn, trade_date)?;
     let active_config = get_strategy_trigger_similarity_active_config(&conn)?;
     let window_trade_days = window_trade_days
@@ -1143,7 +1143,7 @@ fn compute_strategy_trigger_similarity_ranking(
             benchmark_index_code,
         ) = parse_config_key(config_key)
             .ok_or_else(|| format!("无法解析走势相似排行配置: {config_key}"))?;
-        let result_path = result_db_path(source_path);
+        let result_path = similarity_db_path(source_path);
         let mut conn = Connection::open(&result_path)
             .map_err(|e| format!("打开结果库写入相似排行榜失败: {e}"))?;
         ensure_ranking_tables(&conn)?;
@@ -1511,6 +1511,7 @@ mod tests {
         drop(result);
 
         let source_path = source_dir.to_string_lossy().to_string();
+        let scoring_before = fs::read(&result_path).unwrap();
         run_strategy_trigger_similarity_ranking(
             source_path.clone(),
             Some("20240109".to_string()),
@@ -1526,6 +1527,9 @@ mod tests {
             Some(0),
         )
         .expect("compute first historical ranking snapshot");
+        assert_eq!(scoring_before, fs::read(&result_path).unwrap());
+        assert!(source_dir.join("strategy_similarity.db").exists());
+
         let market = Connection::open(source_dir.join("stock_data.db"))
             .expect("reopen market db for daily qfq rebuild simulation");
         market
@@ -1593,7 +1597,7 @@ mod tests {
         assert_eq!(sampled[0].best_similarity, saved.best_similarity);
         assert_eq!(market_before, fs::read(&market_path).unwrap());
         assert_eq!(result_before, fs::read(&result_path).unwrap());
-        let result = Connection::open(source_dir.join("scoring_result.db"))
+        let result = Connection::open(source_dir.join("strategy_similarity.db"))
             .expect("reopen result db for active config assertions");
         let summary_difference: i64 = result.query_row(
             "SELECT COUNT(*) FROM (
@@ -1722,7 +1726,7 @@ mod tests {
             Some(0),
         )
         .expect("recompute after strategy change");
-        let result = Connection::open(source_dir.join("scoring_result.db"))
+        let result = Connection::open(source_dir.join("strategy_similarity.db"))
             .expect("reopen result db after strategy change");
         assert_eq!(
             result
@@ -1762,7 +1766,7 @@ mod tests {
             Some(0),
         )
         .expect("switch active pool configuration");
-        let result = Connection::open(source_dir.join("scoring_result.db"))
+        let result = Connection::open(source_dir.join("strategy_similarity.db"))
             .expect("reopen result db after config switch");
         let (config_count, active_pool): (i64, i64) = result
             .query_row(

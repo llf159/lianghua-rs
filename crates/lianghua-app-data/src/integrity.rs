@@ -70,7 +70,7 @@ pub fn check_databases(source_path: &str) -> Result<DatabaseCheckReport, String>
         limitations: vec![
             "历史起点按 max(stock_list.csv 上市日，全库历史起点) 对照，仅作提示；停牌、恢复上市也可能导致起点偏晚。".to_string(),
             "复权衔接覆盖最近 60 个已保存交易日，只作提示；差异化分红、上游修订等也可能导致不衔接。".to_string(),
-            "新筹码不校验；其他已有后续结果按当前策略抽样重算关键数值，缺失不报错，不能证明全库正确；策略或基础资料变化也可能导致差异。".to_string(),
+            "已有概念/行业和相似度结果按当前策略抽样重算关键数值，缺失不报错，不能证明全库正确；策略或基础资料变化也可能导致差异。".to_string(),
         ],
     };
     let stocks = load_stock_list(source_path)?;
@@ -286,17 +286,14 @@ pub fn check_databases(source_path: &str) -> Result<DatabaseCheckReport, String>
         summary: format!("{} 个指数", INDEX_TS_CODES.len()),
     });
     for (file, table, component, label) in [
-        ("scoring_result.db", "score_summary", "ranking", "评分"),
         (
             "concept_performance.db",
             "concept_performance",
             "concept",
             "概念/行业表现",
         ),
-        ("cyq_chen.db", "cyq_chen_snapshot", "chip", "新筹码"),
-        ("cyq.db", "cyq_snapshot", "legacy-chip", "旧筹码"),
         (
-            "scoring_result.db",
+            "strategy_similarity.db",
             "strategy_trigger_similarity_rank",
             "similarity",
             "走势相似度",
@@ -308,12 +305,6 @@ pub fn check_databases(source_path: &str) -> Result<DatabaseCheckReport, String>
             status: "skipped".to_string(),
             summary: "数据库未生成".to_string(),
         };
-        if component == "chip" {
-            check.title = label.to_string();
-            check.summary = "未启用校验".to_string();
-            report.checks.push(check);
-            continue;
-        }
         let path = Path::new(source_path).join(file);
         if !path.exists() {
             report.checks.push(check);
@@ -489,9 +480,9 @@ fn open_check_connection(path: &Path) -> Result<Connection, String> {
     let config = Config::default()
         .access_mode(AccessMode::ReadOnly)
         .map_err(|e| e.to_string())?
-        .threads(2)
+        .threads(4)
         .map_err(|e| e.to_string())?
-        .max_memory("512MB")
+        .max_memory("2GB")
         .map_err(|e| e.to_string())?;
     Connection::open_with_flags(path, config)
         .map_err(|e| format!("只读打开 {} 失败: {e}", path.display()))
@@ -828,12 +819,17 @@ mod tests {
         assert!(report.source_ready);
         crate::data::download_state::ensure_stock_data_ready_for_derived(path).unwrap();
         assert!(
-            report
+            !report
                 .checks
                 .iter()
-                .any(|check| check.id == "chip" && check.status == "skipped")
+                .any(|check| matches!(check.id.as_str(), "chip" | "legacy-chip" | "ranking"))
         );
-        assert!(!report.issues.iter().any(|issue| issue.check_id == "chip"));
+        assert!(
+            !report
+                .issues
+                .iter()
+                .any(|issue| matches!(issue.check_id.as_str(), "chip" | "legacy-chip" | "ranking"))
+        );
         assert!(
             report
                 .issues

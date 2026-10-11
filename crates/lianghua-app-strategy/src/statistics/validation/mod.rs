@@ -47,7 +47,6 @@ use crate::statistics::validation::walk_forward::{
     ValidationFoldPlan, build_validation_fold_plan, build_validation_incremental,
     build_validation_walk_forward, sort_validation_points, validation_axis_direction_sign,
 };
-use duckdb::Connection;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -828,7 +827,7 @@ pub fn run_rule_expression_validation(
         .to_str()
         .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
     let source_conn =
-        Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
+        crate::data::open_db_readonly(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
     let layer_config = RuleLayerConfig {
         target: crate::simulate::BacktestTargetConfig {
             return_metric: params.return_metric,

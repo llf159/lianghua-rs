@@ -21,7 +21,7 @@ pub fn load_volume_ratio_averages(
     dates.sort_unstable_by(|a, b| b.cmp(a));
     dates.dedup();
     dates.truncate(5);
-    let conn = Connection::open(source_db_path(source_path))
+    let conn = crate::data::open_db_readonly(source_db_path(source_path))
         .map_err(|e| format!("打开本地量比日线失败: {e}"))?;
     load_local_volume_averages(&conn, &dates, ts_code)
 }

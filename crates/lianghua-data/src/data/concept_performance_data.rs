@@ -101,6 +101,9 @@ pub fn rebuild_concept_performance_all(source_dir: &str) -> Result<usize, String
     let ks_rq: Option<String> = row.get(0).map_err(|e| format!("读取最早交易日失败:{e}"))?;
     let js_rq: Option<String> = row.get(1).map_err(|e| format!("读取最晚交易日失败:{e}"))?;
 
+    drop(rows);
+    drop(stmt);
+    drop(source_conn);
     match (ks_rq, js_rq) {
         (Some(ks_rq), Some(js_rq)) => rebuild_concept_performance_range(source_dir, &ks_rq, &js_rq),
         _ => {
@@ -559,7 +562,7 @@ pub fn load_performance_trend_series(
     let concept_db_str = concept_db
         .to_str()
         .ok_or_else(|| "concept_performance_db路径不是有效UTF-8".to_string())?;
-    let conn = Connection::open(concept_db_str)
+    let conn = crate::data::open_db_readonly(concept_db_str)
         .map_err(|e| format!("打开 concept_performance.db 失败: {e}"))?;
 
     let mut stmt = conn
@@ -664,7 +667,7 @@ fn load_performance_trend_series_map(
     let concept_db_str = concept_db
         .to_str()
         .ok_or_else(|| "concept_performance_db路径不是有效UTF-8".to_string())?;
-    let conn = Connection::open(concept_db_str)
+    let conn = crate::data::open_db_readonly(concept_db_str)
         .map_err(|e| format!("打开 concept_performance.db 失败: {e}"))?;
 
     for chunk in names.chunks(512) {
@@ -750,14 +753,14 @@ pub fn rebuild_most_related_concept_csv(source_dir: &str) -> Result<usize, Strin
     let source_db_str = source_db
         .to_str()
         .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
-    let conn =
-        Connection::open(source_db_str).map_err(|e| format!("打开 stock_data.db 失败: {e}"))?;
+    let conn = crate::data::open_db_readonly(source_db_str)
+        .map_err(|e| format!("打开 stock_data.db 失败: {e}"))?;
 
     let concept_db = concept_performance_db_path(source_dir);
     let concept_db_str = concept_db
         .to_str()
         .ok_or_else(|| "concept_performance_db路径不是有效UTF-8".to_string())?;
-    let concept_conn = Connection::open(concept_db_str)
+    let concept_conn = crate::data::open_db_readonly(concept_db_str)
         .map_err(|e| format!("打开 concept_performance.db 失败: {e}"))?;
 
     let mut concept_stmt = concept_conn

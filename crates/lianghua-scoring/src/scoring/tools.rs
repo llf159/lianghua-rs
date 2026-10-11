@@ -7,7 +7,8 @@ pub use crate::data::extras::{
     inject_stock_extra_fields, load_st_list, load_total_share_map,
 };
 use crate::data::{
-    RowData, RuleKind, ScopeWay, ScoreRule, cyq_chen_db_path, load_trade_date_list, result_db_path,
+    RowData, RuleKind, ScopeWay, ScoreRule, cyq_chen_db_path, load_trade_date_list,
+    similarity_db_path,
 };
 use crate::expr::eval::{Runtime, Value};
 use crate::expr::{
@@ -50,7 +51,7 @@ impl SimilarityRankFieldInjector {
         if !enabled {
             return Self { conn: None };
         }
-        let db_path = result_db_path(source_dir);
+        let db_path = similarity_db_path(source_dir);
         let conn = db_path
             .exists()
             .then(|| {
@@ -909,8 +910,8 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&source_dir).expect("create temp source directory");
-        let conn =
-            duckdb::Connection::open(source_dir.join("scoring_result.db")).expect("open result db");
+        let conn = duckdb::Connection::open(source_dir.join("strategy_similarity.db"))
+            .expect("open similarity db");
         conn.execute_batch(
             "CREATE TABLE strategy_trigger_similarity_summary (trade_date VARCHAR, ts_code VARCHAR, rank BIGINT);\
              INSERT INTO strategy_trigger_similarity_summary VALUES ('20240103', '000001.SZ', 7);",

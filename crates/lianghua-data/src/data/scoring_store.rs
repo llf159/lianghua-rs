@@ -402,7 +402,10 @@ pub fn build_rank_tiebreak(
 
     if let TieBreakWay::KdjJ = tie_break {
         let attach_started_at = time::Instant::now();
-        let attach_sql = format!("ATTACH {} AS src_db", duckdb_string_literal(source_db_path));
+        let attach_sql = format!(
+            "ATTACH {} AS src_db (READ_ONLY)",
+            duckdb_string_literal(source_db_path)
+        );
         conn.execute(&attach_sql, [])
             .map_err(|e| format!("附加原始库失败:{e}"))?;
         profile.attach_source_db_ms = Some(attach_started_at.elapsed().as_millis() as u64);
@@ -1055,7 +1058,10 @@ pub fn write_score_batches_from_channel(
         let source_db_path =
             source_db_path.ok_or_else(|| "J值同分排名需要原始库路径".to_string())?;
         let attach_started_at = time::Instant::now();
-        let attach_sql = format!("ATTACH {} AS src_db", duckdb_string_literal(source_db_path));
+        let attach_sql = format!(
+            "ATTACH {} AS src_db (READ_ONLY)",
+            duckdb_string_literal(source_db_path)
+        );
         conn.execute(&attach_sql, [])
             .map_err(|e| format!("附加原始库失败:{e}"))?;
         source_db_attached = true;

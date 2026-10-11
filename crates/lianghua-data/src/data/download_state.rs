@@ -319,7 +319,11 @@ pub fn pending_rebuild_affects_saved_results(
         "similarity" => "strategy_trigger_similarity_rank",
         _ => return Err(format!("不支持的结果依赖: {component}")),
     };
-    let path = result_db_path(source_dir);
+    let path = if component == "similarity" {
+        super::similarity_db_path(source_dir)
+    } else {
+        result_db_path(source_dir)
+    };
     if !path.exists() {
         return Ok(false);
     }

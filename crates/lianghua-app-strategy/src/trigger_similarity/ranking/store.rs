@@ -1,7 +1,6 @@
 use crate::trigger_similarity::ranking::{
     ALGORITHM_VERSION, ActiveConfigRecord, StrategyTriggerSimilarityActiveConfig,
 };
-use crate::trigger_similarity::*;
 
 use crate::data::source_db_path;
 use crate::data::stock_list_path;
@@ -10,6 +9,25 @@ use duckdb::params;
 use std::fs;
 use std::path::Path;
 use std::time::UNIX_EPOCH;
+pub(super) fn open_ranking_conn(source_path: &str) -> Result<Connection, String> {
+    let conn = Connection::open_in_memory().map_err(|e| format!("打开相似度查询连接失败: {e}"))?;
+    for (path, alias) in [
+        (crate::data::result_db_path(source_path), "trigger_score_db"),
+        (source_db_path(source_path), "trigger_market_db"),
+    ] {
+        let path = path.to_str().ok_or("相似度输入库路径不是有效UTF-8")?;
+        conn.execute_batch(&format!(
+            "ATTACH '{}' AS {alias} (READ_ONLY)",
+            path.replace('\'', "''")
+        ))
+        .map_err(|e| format!("挂载相似度输入库失败: {e}"))?;
+    }
+    conn.execute_batch("CREATE TEMP VIEW score_summary AS SELECT * FROM trigger_score_db.main.score_summary; CREATE TEMP VIEW rule_details AS SELECT * FROM trigger_score_db.main.rule_details")
+        .map_err(|e| format!("挂载评分输入表失败: {e}"))?;
+    crate::data::attach_similarity_db(&conn, source_path)?;
+    Ok(conn)
+}
+
 pub(super) fn config_key(
     window_trade_days: usize,
     pool_segments: usize,
@@ -110,7 +128,6 @@ pub(super) fn stable_content_signature(path: &Path) -> Result<String, String> {
 
 pub(super) fn parse_active_config_key(
     key: &str,
-    _scope_trade_date: String,
     scope_signature: String,
 ) -> Option<ActiveConfigRecord> {
     let (algorithm_version, suffix) = key.split_once(':')?;
@@ -138,7 +155,7 @@ pub(super) fn parse_active_config_key(
             window_trade_days: window?,
             pool_segments: pool?,
             outcome_trade_days: outcome?,
-            sample_gap_trade_days: sample_gap.unwrap_or(MIN_SAMPLE_GAP_TRADE_DAYS),
+            sample_gap_trade_days: sample_gap?,
             benchmark_index_code: benchmark?,
         },
         config_key: key.to_string(),
@@ -152,47 +169,21 @@ pub(super) fn load_active_config_record(
     if !table_exists(conn, "strategy_trigger_similarity_active_config")? {
         return Ok(None);
     }
-    let has_explicit_columns = [
-        "algorithm_version",
-        "window_trade_days",
-        "pool_segments",
-        "outcome_trade_days",
-        "sample_gap_trade_days",
-        "benchmark_index_code",
-    ]
-    .into_iter()
-    .all(|column| {
-        (|conn: &Connection, table_name: &str, column_name: &str| -> bool {
-            conn.query_row(
-                "SELECT COUNT(*) > 0 FROM information_schema.columns \
-         WHERE table_schema='main' AND table_name=? AND column_name=?",
-                params![table_name, column_name],
-                |row| row.get(0),
-            )
-            .unwrap_or(false)
-        })(conn, "strategy_trigger_similarity_active_config", column)
-    });
-    let query = if has_explicit_columns {
-        "SELECT config_key, scope_trade_date, scope_signature, algorithm_version, \
+    let query = "SELECT config_key, scope_signature, algorithm_version, \
          window_trade_days, pool_segments, outcome_trade_days, sample_gap_trade_days, \
          benchmark_index_code \
-         FROM strategy_trigger_similarity_active_config WHERE id=1"
-    } else {
-        "SELECT config_key, scope_trade_date, scope_signature, NULL, NULL, NULL, NULL, NULL, NULL \
-         FROM strategy_trigger_similarity_active_config WHERE id=1"
-    };
+         FROM strategy_trigger_similarity_active_config WHERE id=1";
     let row = conn
         .query_row(query, [], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<i64>>(4)?,
-                row.get::<_, Option<i64>>(5)?,
-                row.get::<_, Option<i64>>(6)?,
-                row.get::<_, Option<i64>>(7)?,
-                row.get::<_, Option<String>>(8)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, String>(7)?,
             ))
         })
         .map(Some)
@@ -201,60 +192,31 @@ pub(super) fn load_active_config_record(
             other => Err(other),
         })
         .map_err(|e| format!("读取走势相似生效配置失败: {e}"))?;
-    Ok(row.and_then(
-        |(key, date, signature, algorithm, window, pool, outcome, sample_gap, benchmark)| {
-            let explicit = match (algorithm, window, pool, outcome, sample_gap, benchmark) {
-                (
-                    Some(algorithm),
-                    Some(window),
-                    Some(pool),
-                    Some(outcome),
-                    Some(sample_gap),
-                    Some(benchmark),
-                ) => Some(ActiveConfigRecord {
-                    config: StrategyTriggerSimilarityActiveConfig {
-                        algorithm_version: algorithm,
-                        window_trade_days: usize::try_from(window).ok()?,
-                        pool_segments: usize::try_from(pool).ok()?,
-                        outcome_trade_days: usize::try_from(outcome).ok()?,
-                        sample_gap_trade_days: usize::try_from(sample_gap).ok()?,
-                        benchmark_index_code: benchmark,
-                    },
-                    config_key: key.clone(),
-                    scope_signature: signature.clone(),
-                }),
-                _ => None,
-            };
-            explicit.or_else(|| parse_active_config_key(&key, date, signature))
+    row.map(
+        |(key, signature, algorithm, window, pool, outcome, sample_gap, benchmark)| {
+            Ok(ActiveConfigRecord {
+                config: StrategyTriggerSimilarityActiveConfig {
+                    algorithm_version: algorithm,
+                    window_trade_days: usize::try_from(window).map_err(|_| "相似度窗口参数无效")?,
+                    pool_segments: usize::try_from(pool).map_err(|_| "相似度样本池参数无效")?,
+                    outcome_trade_days: usize::try_from(outcome)
+                        .map_err(|_| "相似度后验参数无效")?,
+                    sample_gap_trade_days: usize::try_from(sample_gap)
+                        .map_err(|_| "相似度样本间隔无效")?,
+                    benchmark_index_code: benchmark,
+                },
+                config_key: key,
+                scope_signature: signature,
+            })
         },
-    ))
+    )
+    .transpose()
 }
 
 pub fn get_strategy_trigger_similarity_active_config(
     conn: &Connection,
 ) -> Result<Option<StrategyTriggerSimilarityActiveConfig>, String> {
-    if let Some(record) = load_active_config_record(conn)? {
-        return Ok(Some(record.config));
-    }
-    if !table_exists(conn, "strategy_trigger_similarity_rank_meta")? {
-        return Ok(None);
-    }
-    let key: Option<String> = conn
-        .query_row(
-            "SELECT config_key FROM strategy_trigger_similarity_rank_meta \
-             ORDER BY generated_at_epoch_seconds DESC, trade_date DESC LIMIT 1",
-            [],
-            |row| row.get(0),
-        )
-        .map(Some)
-        .or_else(|error| match error {
-            duckdb::Error::QueryReturnedNoRows => Ok(None),
-            other => Err(other),
-        })
-        .map_err(|e| format!("读取最新走势相似配置失败: {e}"))?;
-    Ok(key.and_then(|key| {
-        parse_active_config_key(&key, String::new(), String::new()).map(|record| record.config)
-    }))
+    Ok(load_active_config_record(conn)?.map(|record| record.config))
 }
 
 pub(super) fn ensure_ranking_tables(conn: &Connection) -> Result<(), String> {
@@ -325,18 +287,6 @@ pub(super) fn ensure_ranking_tables(conn: &Connection) -> Result<(), String> {
           ON strategy_trigger_similarity_rank(trade_date, config_key, rank, ts_code);
         CREATE INDEX IF NOT EXISTS idx_strategy_similarity_summary_code_date
           ON strategy_trigger_similarity_summary(ts_code, trade_date);
-        ALTER TABLE strategy_trigger_similarity_active_config
-          ADD COLUMN IF NOT EXISTS algorithm_version VARCHAR;
-        ALTER TABLE strategy_trigger_similarity_active_config
-          ADD COLUMN IF NOT EXISTS window_trade_days BIGINT;
-        ALTER TABLE strategy_trigger_similarity_active_config
-          ADD COLUMN IF NOT EXISTS pool_segments BIGINT;
-        ALTER TABLE strategy_trigger_similarity_active_config
-          ADD COLUMN IF NOT EXISTS outcome_trade_days BIGINT;
-        ALTER TABLE strategy_trigger_similarity_active_config
-          ADD COLUMN IF NOT EXISTS sample_gap_trade_days BIGINT;
-        ALTER TABLE strategy_trigger_similarity_active_config
-          ADD COLUMN IF NOT EXISTS benchmark_index_code VARCHAR;
         "#,
     )
     .map_err(|e| format!("创建策略相似排行榜表失败: {e}"))
@@ -371,47 +321,5 @@ pub(super) fn parse_config_key(key: &str) -> Option<(usize, usize, usize, usize,
             benchmark = Some(value.to_string());
         }
     }
-    Some((
-        window?,
-        pool?,
-        outcome?,
-        sample_gap.unwrap_or(MIN_SAMPLE_GAP_TRADE_DAYS),
-        benchmark?,
-    ))
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::trigger_similarity::ranking::store::ensure_ranking_tables;
-    use crate::trigger_similarity::ranking::store::get_strategy_trigger_similarity_active_config;
-    use duckdb::Connection;
-
-    #[test]
-    fn active_config_migrates_from_the_legacy_config_key_row() {
-        let conn = Connection::open_in_memory().expect("open in-memory DuckDB");
-        conn.execute_batch(
-            r#"
-            CREATE TABLE strategy_trigger_similarity_active_config (
-                id TINYINT PRIMARY KEY,
-                config_key VARCHAR NOT NULL,
-                scope_trade_date VARCHAR NOT NULL,
-                scope_signature VARCHAR NOT NULL,
-                updated_at_epoch_seconds BIGINT NOT NULL
-            );
-            INSERT INTO strategy_trigger_similarity_active_config
-            VALUES (1, 'legacy-v3:w20:p3:h5:b000001.SH', '20240110', 'scope', 1);
-            "#,
-        )
-        .expect("create legacy active config");
-
-        ensure_ranking_tables(&conn).expect("migrate active config table");
-        let active = get_strategy_trigger_similarity_active_config(&conn)
-            .expect("read migrated active config")
-            .expect("active config should exist");
-        assert_eq!(active.algorithm_version, "legacy-v3");
-        assert_eq!(active.window_trade_days, 20);
-        assert_eq!(active.pool_segments, 3);
-        assert_eq!(active.outcome_trade_days, 5);
-        assert_eq!(active.benchmark_index_code, "000001.SH");
-    }
+    Some((window?, pool?, outcome?, sample_gap?, benchmark?))
 }

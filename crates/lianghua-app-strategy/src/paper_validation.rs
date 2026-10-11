@@ -1560,7 +1560,8 @@ fn load_trade_date_options(source_path: &str) -> Result<Vec<String>, String> {
     let source_db_str = source_db
         .to_str()
         .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
-    let conn = Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
+    let conn =
+        crate::data::open_db_readonly(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
     let mut stmt = conn
         .prepare(
             r#"
@@ -1593,7 +1594,8 @@ fn load_index_daily_returns(
     let source_db_str = source_db
         .to_str()
         .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
-    let conn = Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
+    let conn =
+        crate::data::open_db_readonly(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
     let mut stmt = conn
         .prepare(
             r#"

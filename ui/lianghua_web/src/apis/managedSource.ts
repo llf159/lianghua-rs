@@ -63,6 +63,16 @@ export const MANAGED_SOURCE_FILES = [
     scanPathHints: [] as string[],
   },
   {
+    id: 'similarity-db',
+    label: '走势相似度库',
+    description: '走势相似榜、每日汇总及计算参数。',
+    fileName: 'strategy_similarity.db',
+    expectedSourcePath: 'source/strategy_similarity.db',
+    targetRelativePathSuffix: 'strategy_similarity.db',
+    extensions: ['db'],
+    scanPathHints: ['similarity'],
+  },
+  {
     id: 'concept-performance-db',
     label: '概念表现库',
     description: '概念行情表现聚合结果库。',

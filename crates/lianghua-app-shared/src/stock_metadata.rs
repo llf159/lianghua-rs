@@ -5,7 +5,7 @@ use std::{
     time::UNIX_EPOCH,
 };
 
-use duckdb::{Connection, params_from_iter};
+use duckdb::params_from_iter;
 
 use crate::data::{
     load_stock_list, load_ths_concepts_list, load_ths_concepts_named_map, source_db_path,
@@ -250,7 +250,8 @@ pub fn build_latest_vol_map(
     let source_db_str = source_db
         .to_str()
         .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
-    let conn = Connection::open(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))?;
+    let conn = lianghua_data::data::open_db_readonly(source_db_str)
+        .map_err(|e| format!("打开原始库失败: {e}"))?;
 
     let placeholders = std::iter::repeat_n("?", ts_codes.len())
         .collect::<Vec<_>>()
