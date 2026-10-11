@@ -75,6 +75,7 @@ const KNOWN_EXPRESSION_IDENTIFIERS = new Set([
   "RT_OP",
   "RT_FH",
   "RT_VR",
+  "RT_VR5H",
   "RT_AVG",
   "RATEO",
   "RATEH",

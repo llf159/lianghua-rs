@@ -910,8 +910,33 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&source_dir).expect("create temp source directory");
+        let source_path = source_dir.to_str().expect("utf8 path");
+        let mut missing_row = RowData {
+            trade_dates: vec!["20240102".to_string(), "20240103".to_string()],
+            cols: HashMap::from([("C".to_string(), vec![Some(10.0), Some(11.0)])]),
+        };
+        SimilarityRankFieldInjector::new(source_path, true)
+            .inject(&mut missing_row, "000001.SZ")
+            .expect("missing similarity db does not block injection");
+        assert_eq!(missing_row.cols["S_RANK"], vec![None, None]);
+        assert!(!source_dir.join("strategy_similarity.db").exists());
+
         let conn = duckdb::Connection::open(source_dir.join("strategy_similarity.db"))
             .expect("open similarity db");
+        drop(conn);
+        let mut missing_batch = vec![("000001.SZ".to_string(), missing_row)];
+        SimilarityRankFieldInjector::new(source_path, true)
+            .inject_batch(&mut missing_batch)
+            .expect("missing similarity table does not block injection");
+        assert_eq!(missing_batch[0].1.cols["S_RANK"], vec![None, None]);
+        let mut runtime = crate::data::runtime::row_into_rt(missing_batch.pop().unwrap().1)
+            .expect("runtime accepts missing similarity ranks");
+        runtime
+            .eval_program(&super::parse_expression_program("S_RANK <= 100 OR C > 0").unwrap())
+            .expect("expression accepts missing similarity ranks");
+
+        let conn = duckdb::Connection::open(source_dir.join("strategy_similarity.db"))
+            .expect("reopen similarity db");
         conn.execute_batch(
             "CREATE TABLE strategy_trigger_similarity_summary (trade_date VARCHAR, ts_code VARCHAR, rank BIGINT);\
              INSERT INTO strategy_trigger_similarity_summary VALUES ('20240103', '000001.SZ', 7);",

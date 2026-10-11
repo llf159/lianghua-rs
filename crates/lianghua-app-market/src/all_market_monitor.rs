@@ -1,3 +1,7 @@
+use crate::{
+    daily_baseline::{self, DailyBaseline},
+    open_monitor_result_conn as open_result_conn,
+};
 use std::{
     collections::{HashMap, HashSet, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
@@ -41,7 +45,8 @@ use crate::{
     },
 };
 use lianghua_app_expression::{
-    RT_AVERAGE_PRICE, RT_FALL_FROM_HIGH_PCT, RT_OPEN_CHANGE_PCT, RT_VOLUME_RATIO,
+    RT_AVERAGE_PRICE, RT_FALL_FROM_HIGH_PCT, RT_OPEN_CHANGE_PCT, RT_OPENING_VOLUME_RATIO_HIGH,
+    RT_VOLUME_RATIO,
 };
 use lianghua_app_shared::build_concepts_map;
 
@@ -74,6 +79,7 @@ struct RankContext {
 struct RankCacheEntry {
     rank_date: String,
     ranks: Arc<HashMap<String, RankContext>>,
+    scene_candidates: Arc<HashMap<String, Vec<SceneMarkerCandidate>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -81,19 +87,6 @@ struct SceneMarkerCandidate {
     scene_name: String,
     scene_rank: Option<i64>,
     stage_level: i32,
-}
-
-#[derive(Debug, Clone)]
-struct SceneMarkerCacheEntry {
-    rank_date: String,
-    candidates: HashMap<String, Vec<SceneMarkerCandidate>>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Return5dContext {
-    latest_close: Option<f64>,
-    realtime_base_close: Option<f64>,
-    daily_base_close: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -161,7 +154,7 @@ pub struct AllMarketMonitorSnapshotData {
     pub volume_ratio_status_message: Option<String>,
 }
 
-fn check_market_activity(
+pub(crate) fn check_market_activity(
     now: NaiveDateTime,
     quotes: &HashMap<String, SinaQuote>,
     calendar_trading_day: impl FnOnce() -> Option<bool>,
@@ -218,10 +211,6 @@ fn check_market_activity(
 static SOURCE_META_CACHE: OnceLock<Mutex<HashMap<String, Arc<SourceMetaCacheEntry>>>> =
     OnceLock::new();
 static RANK_CONTEXT_CACHE: OnceLock<Mutex<HashMap<String, RankCacheEntry>>> = OnceLock::new();
-static SCENE_MARKER_CACHE: OnceLock<Mutex<HashMap<String, SceneMarkerCacheEntry>>> =
-    OnceLock::new();
-static RETURN_5D_CONTEXT_CACHE: OnceLock<Mutex<HashMap<String, HashMap<String, Return5dContext>>>> =
-    OnceLock::new();
 static TEMPLATE_RUNTIME_CACHE: OnceLock<
     Mutex<HashMap<String, Arc<AllMarketTemplateRuntimeCacheEntry>>>,
 > = OnceLock::new();
@@ -287,12 +276,118 @@ fn rank_context_cache() -> &'static Mutex<HashMap<String, RankCacheEntry>> {
     RANK_CONTEXT_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn scene_marker_cache() -> &'static Mutex<HashMap<String, SceneMarkerCacheEntry>> {
-    SCENE_MARKER_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn return_5d_context_cache() -> &'static Mutex<HashMap<String, HashMap<String, Return5dContext>>> {
-    RETURN_5D_CONTEXT_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+fn load_rank_context(conn: &Connection) -> Result<RankCacheEntry, String> {
+    let similarity_board = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_catalog='similarity_db' AND table_schema='main' AND table_name='strategy_trigger_similarity_summary')",
+        [], |row| row.get::<_, bool>(0),
+    ).unwrap_or(false);
+    let latest_sim_cte = if similarity_board {
+        r#",
+        latest_sim AS (
+            SELECT ts_code, rank AS similarity_rank
+            FROM similarity_db.main.strategy_trigger_similarity_summary
+            WHERE trade_date = (SELECT MAX(trade_date) FROM similarity_db.main.strategy_trigger_similarity_summary)
+                AND rank IS NOT NULL
+        )"#
+    } else {
+        ""
+    };
+    let (ts_code_column, sim_column, sim_join) = if similarity_board {
+        (
+            "COALESCE(agg.ts_code, sim.ts_code)",
+            "sim.similarity_rank",
+            "FULL OUTER JOIN latest_sim sim ON sim.ts_code = agg.ts_code",
+        )
+    } else {
+        ("agg.ts_code", "CAST(NULL AS BIGINT)", "")
+    };
+    let sql = format!(
+        r#"
+        WITH recent_dates AS (
+            SELECT DISTINCT trade_date FROM score_summary
+            ORDER BY trade_date DESC LIMIT 3
+        ), latest AS (
+            SELECT MAX(trade_date) AS rd FROM recent_dates
+        ), agg AS (
+            SELECT s.ts_code,
+                MAX(CASE WHEN s.trade_date = latest.rd THEN s.rank END) AS current_rank,
+                MIN(s.rank) AS best_rank_3d,
+                MAX(CASE WHEN s.trade_date = latest.rd THEN s.total_score END) AS current_total_score
+            FROM score_summary s
+            INNER JOIN recent_dates d ON s.trade_date = d.trade_date
+            CROSS JOIN latest
+            GROUP BY s.ts_code
+        ){latest_sim_cte}
+        SELECT latest.rd, {ts_code_column}, agg.current_rank, agg.best_rank_3d,
+            agg.current_total_score, {sim_column},
+            CAST(NULL AS VARCHAR), CAST(NULL AS VARCHAR), CAST(NULL AS BIGINT)
+        FROM agg {sim_join} CROSS JOIN latest
+        UNION ALL
+        SELECT latest.rd, ts_code, NULL, NULL, NULL, NULL, scene_name, stage, scene_rank
+        FROM scene_details CROSS JOIN latest
+        WHERE trade_date = latest.rd AND scene_name IS NOT NULL AND TRIM(scene_name) <> ''
+        "#,
+    );
+    // 两类记录直接拼接，避免同股多条场景重复展开排名。
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("预编译监控排名与场景失败: {e}"))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| format!("查询监控排名与场景失败: {e}"))?;
+    let mut rank_date = String::new();
+    let mut ranks = HashMap::new();
+    let mut scene_candidates = HashMap::<String, Vec<SceneMarkerCandidate>>::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("读取监控排名与场景失败: {e}"))?
+    {
+        let ts_code: String = row.get(1).map_err(|e| format!("读取排名代码失败: {e}"))?;
+        if ts_code.trim().is_empty() {
+            continue;
+        }
+        if rank_date.is_empty() {
+            rank_date = row
+                .get::<_, Option<String>>(0)
+                .map_err(|e| format!("读取最新总榜日期失败: {e}"))?
+                .unwrap_or_default();
+        }
+        let scene_name: Option<String> = row
+            .get(6)
+            .map_err(|e| format!("读取场景标记名称失败: {e}"))?;
+        if let Some(scene_name) = scene_name {
+            let stage: Option<String> = row
+                .get(7)
+                .map_err(|e| format!("读取场景标记等级失败: {e}"))?;
+            scene_candidates
+                .entry(ts_code)
+                .or_default()
+                .push(SceneMarkerCandidate {
+                    scene_name: scene_name.trim().to_string(),
+                    scene_rank: row
+                        .get(8)
+                        .map_err(|e| format!("读取场景标记排名失败: {e}"))?,
+                    stage_level: scene_stage_level(stage.as_deref()),
+                });
+        } else {
+            ranks.insert(
+                ts_code,
+                RankContext {
+                    rank: row.get(2).map_err(|e| format!("读取排名失败: {e}"))?,
+                    best_rank_3d: row
+                        .get(3)
+                        .map_err(|e| format!("读取三日最优排名失败: {e}"))?,
+                    total_score: row.get(4).map_err(|e| format!("读取总分失败: {e}"))?,
+                    similarity_rank: row.get(5).map_err(|e| format!("读取相似排名失败: {e}"))?,
+                },
+            );
+        }
+    }
+    Ok(RankCacheEntry {
+        rank_date,
+        ranks: Arc::new(ranks),
+        scene_candidates: Arc::new(scene_candidates),
+    })
 }
 
 fn template_runtime_cache()
@@ -303,100 +398,6 @@ fn template_runtime_cache()
 fn other_sort_daily_value_cache()
 -> &'static Mutex<HashMap<String, Arc<HashMap<String, Option<f64>>>>> {
     OTHER_SORT_DAILY_VALUE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn open_result_conn(source_path: &str) -> Result<Connection, String> {
-    let result_db = result_db_path(source_path);
-    let result_db_str = result_db
-        .to_str()
-        .ok_or_else(|| "结果库路径不是有效UTF-8".to_string())?;
-    let conn =
-        crate::data::open_db_readonly(result_db_str).map_err(|e| format!("打开结果库失败: {e}"))?;
-    crate::data::attach_similarity_db(&conn, source_path)?;
-    Ok(conn)
-}
-
-fn open_source_conn(source_path: &str) -> Result<Connection, String> {
-    let source_db = source_db_path(source_path);
-    let source_db_str = source_db
-        .to_str()
-        .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
-    crate::data::open_db_readonly(source_db_str).map_err(|e| format!("打开原始库失败: {e}"))
-}
-
-fn table_exists(conn: &Connection, table_name: &str) -> bool {
-    conn.query_row(
-        "SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_schema='main' AND table_name=?",
-        params![table_name],
-        |row| row.get::<_, bool>(0),
-    )
-    .unwrap_or(false)
-}
-
-fn load_return_5d_context_map(
-    conn: &Connection,
-    ts_codes: &[String],
-) -> Result<HashMap<String, Return5dContext>, String> {
-    if ts_codes.is_empty() {
-        return Ok(HashMap::new());
-    }
-
-    let placeholders = std::iter::repeat_n("?", ts_codes.len())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        r#"
-        SELECT
-            ts_code,
-            MAX(CASE WHEN row_num = 1 THEN close_value ELSE NULL END) AS latest_close,
-            MAX(CASE WHEN row_num = 5 THEN close_value ELSE NULL END) AS realtime_base_close,
-            MAX(CASE WHEN row_num = 6 THEN close_value ELSE NULL END) AS daily_base_close
-        FROM (
-            SELECT
-                ts_code,
-                TRY_CAST(close AS DOUBLE) AS close_value,
-                ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY trade_date DESC) AS row_num
-            FROM stock_data
-            WHERE adj_type = ? AND ts_code IN ({placeholders})
-        ) ranked
-        WHERE row_num IN (1, 5, 6)
-        GROUP BY ts_code
-        "#
-    );
-
-    let mut params = Vec::with_capacity(ts_codes.len() + 1);
-    params.push("qfq".to_string());
-    params.extend(ts_codes.iter().cloned());
-
-    let mut stmt = conn
-        .prepare(&sql)
-        .map_err(|e| format!("预编译五日涨幅查询失败: {e}"))?;
-    let mut rows = stmt
-        .query(duckdb::params_from_iter(params.iter()))
-        .map_err(|e| format!("查询五日涨幅失败: {e}"))?;
-    let mut out = HashMap::new();
-
-    while let Some(row) = rows.next().map_err(|e| format!("读取五日涨幅失败: {e}"))? {
-        let ts_code: String = row
-            .get(0)
-            .map_err(|e| format!("读取五日涨幅代码失败: {e}"))?;
-        out.insert(
-            ts_code,
-            Return5dContext {
-                latest_close: row
-                    .get(1)
-                    .map_err(|e| format!("读取五日涨幅最新收盘失败: {e}"))?,
-                realtime_base_close: row
-                    .get(2)
-                    .map_err(|e| format!("读取五日涨幅实时基准失败: {e}"))?,
-                daily_base_close: row
-                    .get(3)
-                    .map_err(|e| format!("读取五日涨幅日线基准失败: {e}"))?,
-            },
-        );
-    }
-
-    Ok(out)
 }
 
 fn calc_return_pct(price: Option<f64>, base: Option<f64>) -> Option<f64> {
@@ -856,6 +857,10 @@ fn build_template_runtime_row_data(
                 })(quote),
             ),
             (RT_VOLUME_RATIO, row.realtime_vol_ratio),
+            (
+                RT_OPENING_VOLUME_RATIO_HIGH,
+                row.realtime_vol_ratio_opening_high,
+            ),
             (RT_AVERAGE_PRICE, row.realtime_avg_price),
             ("S_RANK", row.similarity_rank.map(|value| value as f64)),
         ],
@@ -934,7 +939,7 @@ fn build_rows(
     quotes: &HashMap<String, SinaQuote>,
     volume_ratio_map: &HashMap<String, f64>,
     avg_price_map: &HashMap<String, f64>,
-    return_5d_map: &HashMap<String, Return5dContext>,
+    return_5d_map: &HashMap<String, DailyBaseline>,
     scene_marker_map: &HashMap<String, String>,
     fetch_meta: &RealtimeFetchMeta,
 ) -> Vec<AllMarketMonitorRow> {
@@ -1165,229 +1170,19 @@ pub fn get_all_market_monitor_snapshot(
         });
     }
 
-    let conn = open_result_conn(source_path)?;
-    let (rank_date, ranks) =
-        (|source_path: &str,
-          conn: &Connection|
-         -> Result<(String, Arc<HashMap<String, RankContext>>), String> {
-            {
-                let cache = rank_context_cache()
-                    .lock()
-                    .map_err(|_| "排名缓存锁已损坏".to_string())?;
-                if let Some(entry) = cache.get(source_path) {
-                    return Ok((entry.rank_date.clone(), entry.ranks.clone()));
-                }
-            }
-
-            let (rank_date, ranks) = (|conn: &Connection| -> Result<
-                (String, HashMap<String, RankContext>),
-                String,
-            > {
-                let similarity_board = (|conn: &Connection| -> bool {
-                    table_exists(conn, "strategy_trigger_similarity_summary")
-                })(conn);
-                let latest_sim_cte = if similarity_board {
-                    r#",
-            latest_sim AS (
-                SELECT r.ts_code, r.rank AS similarity_rank
-                FROM strategy_trigger_similarity_summary r
-                WHERE r.trade_date = (
-                      SELECT MAX(m.trade_date)
-                      FROM strategy_trigger_similarity_summary m
-                  )
-                  AND r.rank IS NOT NULL
-            )"#
-                } else {
-                    ""
-                };
-                let sim_column = if similarity_board {
-                    "sim.similarity_rank"
-                } else {
-                    "CAST(NULL AS BIGINT)"
-                };
-                let sim_join = if similarity_board {
-                    "LEFT JOIN latest_sim sim ON sim.ts_code = agg.ts_code"
-                } else {
-                    ""
-                };
-
-                let sql = format!(
-                    r#"
-        WITH recent_dates AS (
-            SELECT
-                trade_date,
-                ROW_NUMBER() OVER (ORDER BY trade_date DESC) AS date_rank
-            FROM (
-                SELECT trade_date
-                FROM score_summary
-                GROUP BY trade_date
-                ORDER BY trade_date DESC
-                LIMIT 3
-            ) dates
-        ),
-        agg AS (
-            SELECT
-                s.ts_code,
-                MAX(CASE WHEN s.trade_date = latest.rd THEN s.rank ELSE NULL END) AS current_rank,
-                MIN(CASE WHEN d.date_rank <= 3 AND s.rank IS NOT NULL THEN s.rank ELSE NULL END) AS best_rank_3d,
-                MAX(CASE WHEN s.trade_date = latest.rd THEN s.total_score ELSE NULL END) AS current_total_score
-            FROM score_summary s
-            INNER JOIN recent_dates d ON s.trade_date = d.trade_date
-            CROSS JOIN (SELECT MAX(trade_date) AS rd FROM score_summary) latest
-            GROUP BY s.ts_code
-        ){latest_sim_cte}
-        SELECT
-            (SELECT MAX(trade_date) FROM score_summary),
-            agg.ts_code,
-            agg.current_rank,
-            agg.best_rank_3d,
-            agg.current_total_score,
-            {sim_column}
-        FROM agg
-        {sim_join}
-        "#
-                );
-
-                let mut stmt = conn
-                    .prepare(&sql)
-                    .map_err(|e| format!("预编译全市场总榜排名失败: {e}"))?;
-                let mut rows = stmt
-                    .query([])
-                    .map_err(|e| format!("查询全市场总榜排名失败: {e}"))?;
-                let mut out = HashMap::new();
-                let mut rank_date: Option<String> = None;
-
-                while let Some(row) = rows
-                    .next()
-                    .map_err(|e| format!("读取全市场总榜排名失败: {e}"))?
-                {
-                    let ts_code: String =
-                        row.get(1).map_err(|e| format!("读取排名代码失败: {e}"))?;
-                    if ts_code.trim().is_empty() {
-                        continue;
-                    }
-                    if rank_date.is_none() {
-                        let date: Option<String> = row
-                            .get(0)
-                            .map_err(|e| format!("读取最新总榜日期字段失败: {e}"))?;
-                        rank_date = date.filter(|value| !value.trim().is_empty());
-                    }
-                    out.insert(
-                        ts_code,
-                        RankContext {
-                            rank: row.get(2).map_err(|e| format!("读取排名失败: {e}"))?,
-                            best_rank_3d: row
-                                .get(3)
-                                .map_err(|e| format!("读取三日最优排名失败: {e}"))?,
-                            similarity_rank: row
-                                .get(5)
-                                .map_err(|e| format!("读取相似榜单排名失败: {e}"))?,
-                            total_score: row.get(4).map_err(|e| format!("读取总分失败: {e}"))?,
-                        },
-                    );
-                }
-
-                let rank_date =
-                    rank_date.ok_or_else(|| "score_summary 没有可用交易日".to_string())?;
-                Ok((rank_date, out))
-            })(conn)?;
-            let ranks = Arc::new(ranks);
-            rank_context_cache()
-                .lock()
-                .map_err(|_| "排名缓存锁已损坏".to_string())?
-                .insert(
-                    source_path.to_string(),
-                    RankCacheEntry {
-                        rank_date: rank_date.clone(),
-                        ranks: ranks.clone(),
-                    },
-                );
-            Ok((rank_date, ranks))
-        })(source_path, &conn)?;
-    let scene_marker_candidates =
-        (|source_path: &str,
-          conn: &Connection,
-          rank_date: &str|
-         -> Result<HashMap<String, Vec<SceneMarkerCandidate>>, String> {
-            if let Some(entry) = scene_marker_cache()
-                .lock()
-                .map_err(|_| "场景标记缓存锁已损坏".to_string())?
-                .get(source_path)
-                .filter(|entry| entry.rank_date == rank_date)
-                .cloned()
-            {
-                return Ok(entry.candidates);
-            }
-
-            let candidates =
-                (|conn: &Connection,
-                  rank_date: &str|
-                 -> Result<HashMap<String, Vec<SceneMarkerCandidate>>, String> {
-                    let mut stmt = conn
-                        .prepare(
-                            r#"
-            SELECT
-                ts_code,
-                scene_name,
-                stage,
-                scene_rank
-            FROM scene_details
-            WHERE trade_date = ?
-              AND scene_name IS NOT NULL
-              AND TRIM(scene_name) <> ''
-            ORDER BY
-                ts_code ASC,
-                COALESCE(scene_rank, 999999) ASC,
-                scene_name ASC
-            "#,
-                        )
-                        .map_err(|e| format!("预编译全市场场景标记失败: {e}"))?;
-                    let mut rows = stmt
-                        .query(params![rank_date])
-                        .map_err(|e| format!("查询全市场场景标记失败: {e}"))?;
-                    let mut out = HashMap::<String, Vec<SceneMarkerCandidate>>::new();
-
-                    while let Some(row) = rows
-                        .next()
-                        .map_err(|e| format!("读取全市场场景标记失败: {e}"))?
-                    {
-                        let ts_code: String = row
-                            .get(0)
-                            .map_err(|e| format!("读取场景标记代码失败: {e}"))?;
-                        let scene_name: String = row
-                            .get(1)
-                            .map_err(|e| format!("读取场景标记名称失败: {e}"))?;
-                        let stage: Option<String> = row
-                            .get(2)
-                            .map_err(|e| format!("读取场景标记等级失败: {e}"))?;
-                        let scene_rank: Option<i64> = row
-                            .get(3)
-                            .map_err(|e| format!("读取场景标记排名失败: {e}"))?;
-                        if ts_code.trim().is_empty() || scene_name.trim().is_empty() {
-                            continue;
-                        }
-                        out.entry(ts_code).or_default().push(SceneMarkerCandidate {
-                            scene_name: scene_name.trim().to_string(),
-                            scene_rank,
-                            stage_level: scene_stage_level(stage.as_deref()),
-                        });
-                    }
-
-                    Ok(out)
-                })(conn, rank_date)?;
-            scene_marker_cache()
-                .lock()
-                .map_err(|_| "场景标记缓存锁已损坏".to_string())?
-                .insert(
-                    source_path.to_string(),
-                    SceneMarkerCacheEntry {
-                        rank_date: rank_date.to_string(),
-                        candidates: candidates.clone(),
-                    },
-                );
-            Ok(candidates)
-        })(source_path, &conn, &rank_date)
-        .unwrap_or_default();
+    let rank_context = (|| -> Result<RankCacheEntry, String> {
+        let mut cache = rank_context_cache()
+            .lock()
+            .map_err(|_| "排名与场景缓存锁已损坏".to_string())?;
+        if let Some(entry) = cache.get(source_path) {
+            return Ok(entry.clone());
+        }
+        let entry = load_rank_context(&open_result_conn(source_path)?)?;
+        if !entry.rank_date.is_empty() {
+            cache.insert(source_path.to_string(), entry.clone());
+        }
+        Ok(entry)
+    })()?;
     let scene_marker_map = (|candidates: &HashMap<String, Vec<SceneMarkerCandidate>>,
                              threshold_level: i32|
      -> HashMap<String, String> {
@@ -1412,40 +1207,24 @@ pub fn get_all_market_monitor_snapshot(
         }
         out
     })(
-        &scene_marker_candidates,
+        &rank_context.scene_candidates,
         parse_scene_stage_threshold(scene_stage_threshold.as_deref()),
     );
-    let return_5d_map = open_source_conn(source_path)
-        .and_then(|conn| {
-            (|source_path: &str,
-              conn: &Connection,
-              ts_codes: &[String]|
-             -> Result<HashMap<String, Return5dContext>, String> {
-                if let Some(entry) = return_5d_context_cache()
-                    .lock()
-                    .map_err(|_| "五日涨幅缓存锁已损坏".to_string())?
-                    .get(source_path)
-                    .cloned()
-                {
-                    return Ok(entry);
-                }
-
-                let entry = load_return_5d_context_map(conn, ts_codes)?;
-                return_5d_context_cache()
-                    .lock()
-                    .map_err(|_| "五日涨幅缓存锁已损坏".to_string())?
-                    .insert(source_path.to_string(), entry.clone());
-                Ok(entry)
-            })(source_path, &conn, &ts_codes)
-        })
-        .unwrap_or_default();
+    let daily_baselines = daily_baseline::load(
+        source_path,
+        fetch_meta
+            .quote_trade_date
+            .as_deref()
+            .unwrap_or(&now.format("%Y%m%d").to_string()),
+    )
+    .unwrap_or_default();
     let mut rows = build_rows(
         &meta,
-        &ranks,
+        &rank_context.ranks,
         &quotes,
         &volume_ratio_map,
         &avg_price_map,
-        &return_5d_map,
+        &daily_baselines.rows,
         &scene_marker_map,
         &fetch_meta,
     );
@@ -1797,7 +1576,7 @@ pub fn get_all_market_monitor_snapshot(
         market_active,
         market_status_message,
         refreshed_at: fetch_meta.refreshed_at,
-        rank_date: Some(rank_date),
+        rank_date: (!rank_context.rank_date.is_empty()).then_some(rank_context.rank_date),
         requested_count: fetch_meta.requested_count,
         fetched_count: fetch_meta.fetched_count,
         template_warning_message,
@@ -1816,6 +1595,73 @@ mod tests {
     fn parse_program(expr: &str) -> Stmts {
         let mut parser = Parser::new(lex_all(expr));
         parser.parse_main().expect("expression should parse")
+    }
+
+    #[test]
+    fn combined_ranks_and_scenes_preserve_dates_and_independent_records() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE score_summary(trade_date VARCHAR, ts_code VARCHAR, rank BIGINT, total_score DOUBLE);
+            CREATE TABLE scene_details(trade_date VARCHAR, ts_code VARCHAR, scene_name VARCHAR,
+                stage VARCHAR, scene_rank BIGINT);
+            INSERT INTO score_summary VALUES
+                ('20261009','a',1,999), ('20261010','a',10,100),
+                ('20261011','a',30,110), ('20261012','a',50,120),
+                ('20261009','old',2,200), ('20261011','previous',8,80);
+            INSERT INTO scene_details VALUES
+                ('20261012','a',' observe ','observe',2),
+                ('20261012','a','confirmed','confirm',9),
+                ('20261012','scene_only','triggered','trigger',3),
+                ('20261011','a','old_scene','confirm',1),
+                ('20261012','a','  ','confirm',1);",
+        ).unwrap();
+        for similarity_board in [false, true] {
+            if similarity_board {
+                conn.execute_batch(
+                    "ATTACH ':memory:' AS similarity_db;
+                    CREATE TABLE similarity_db.strategy_trigger_similarity_summary
+                        (trade_date VARCHAR, ts_code VARCHAR, rank BIGINT);
+                    INSERT INTO similarity_db.strategy_trigger_similarity_summary VALUES
+                        ('20261012','a',99), ('20261013','a',7),
+                        ('20261013','similarity_only',1);",
+                )
+                .unwrap();
+            }
+            let context = load_rank_context(&conn).unwrap();
+            assert_eq!(context.rank_date, "20261012");
+            assert_eq!(context.ranks["a"].rank, Some(50));
+            assert_eq!(context.ranks["a"].best_rank_3d, Some(10));
+            assert_eq!(context.ranks["a"].total_score, Some(120.0));
+            assert_eq!(
+                context.ranks["a"].similarity_rank,
+                similarity_board.then_some(7)
+            );
+            assert_eq!(context.ranks["previous"].rank, None);
+            assert_eq!(context.ranks["previous"].best_rank_3d, Some(8));
+            assert!(!context.ranks.contains_key("old"));
+            assert!(!context.ranks.contains_key("scene_only"));
+            assert_eq!(context.scene_candidates["a"].len(), 2);
+            let observed = context.scene_candidates["a"]
+                .iter()
+                .find(|candidate| candidate.scene_name == "observe")
+                .unwrap();
+            assert_eq!(observed.stage_level, 1);
+            assert_eq!(observed.scene_rank, Some(2));
+            assert_eq!(
+                context.scene_candidates["scene_only"][0].scene_name,
+                "triggered"
+            );
+            if similarity_board {
+                assert_eq!(context.ranks["similarity_only"].rank, None);
+                assert_eq!(context.ranks["similarity_only"].similarity_rank, Some(1));
+            }
+        }
+        conn.execute_batch("DELETE FROM score_summary; DELETE FROM scene_details;")
+            .unwrap();
+        let context = load_rank_context(&conn).unwrap();
+        assert!(context.rank_date.is_empty());
+        assert!(context.scene_candidates.is_empty());
+        assert_eq!(context.ranks["a"].similarity_rank, Some(7));
     }
 
     #[test]
@@ -2033,7 +1879,7 @@ mod tests {
             },
         );
 
-        let rows = build_rows(
+        let mut rows = build_rows(
             &(|| -> SourceMetaCacheEntry {
                 SourceMetaCacheEntry {
                     stocks: vec![
@@ -2088,6 +1934,41 @@ mod tests {
         assert!((change_open_pct - 1.0204081632653061).abs() < 1e-9);
         assert_eq!(rows[1].rank, None);
         assert_eq!(rows[1].realtime_price, None);
+
+        let entry = AllMarketTemplateRuntimeCacheEntry {
+            cache_key: String::new(),
+            cache_prefix: String::new(),
+            template_order: Vec::new(),
+            compiled_templates: HashMap::new(),
+            base_rows: HashMap::from([(
+                rows[0].ts_code.clone(),
+                RowData {
+                    trade_dates: vec!["20240531".to_string()],
+                    cols: HashMap::new(),
+                },
+            )]),
+            indicator_cache: Vec::new(),
+            total_share_map: HashMap::new(),
+            cyq_chen_runtime_keys: HashSet::new(),
+            warning_messages: Vec::new(),
+        };
+        let program = parse_program("RT_VR > RT_VR5H");
+        rows[0].realtime_vol_ratio = Some(3.0);
+        for (opening_high, expected) in [(Some(2.0), true), (Some(4.0), false), (None, false)] {
+            rows[0].realtime_vol_ratio_opening_high = opening_high;
+            let row_data =
+                build_template_runtime_row_data(&entry, &rows[0], &quotes["000001.SZ"]).unwrap();
+            assert_eq!(
+                row_data.cols[RT_OPENING_VOLUME_RATIO_HIGH],
+                vec![None, opening_high]
+            );
+            let mut runtime = row_into_rt(row_data).unwrap();
+            let value = runtime.eval_program(&program).unwrap();
+            assert_eq!(
+                Value::as_bool_series(&value, 2).unwrap(),
+                vec![false, expected]
+            );
+        }
     }
 
     #[test]

@@ -2017,7 +2017,7 @@ export default function AllMarketMonitorPage() {
           }
         >
           <div className="all-market-table-head">
-            <h3>{isVolumeRatioBoard ? "量比榜" : "实时行情"}</h3>
+            {isVolumeRatioBoard ? <h3>量比榜</h3> : null}
             <div
               className="all-market-board-tabs"
               role="group"

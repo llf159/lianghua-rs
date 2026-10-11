@@ -1,3 +1,4 @@
+use crate::open_monitor_result_conn as open_result_conn;
 use std::collections::{HashMap, HashSet};
 
 use duckdb::{Connection, params};
@@ -11,7 +12,7 @@ use crate::{
     crawler::{SinaQuote, TencentQuote},
     data::{
         DataReader, RowData, RuntimeKeyCollectOptions, collect_runtime_keys_from_expr_programs,
-        expr_program_uses_runtime_key, result_db_path, runtime::row_into_rt, source_db_path,
+        expr_program_uses_runtime_key, runtime::row_into_rt, source_db_path,
     },
     download::ind_calc::{
         IndsCache, cache_ind_build, calc_inds_with_cache_lossy, warmup_ind_estimate,
@@ -33,7 +34,7 @@ use crate::{
 };
 use lianghua_app_expression::{
     INTRADAY_REALTIME_FIELDS, RT_AVERAGE_PRICE, RT_FALL_FROM_HIGH_PCT, RT_OPEN_CHANGE_PCT,
-    RT_VOLUME_RATIO,
+    RT_OPENING_VOLUME_RATIO_HIGH, RT_VOLUME_RATIO,
 };
 use lianghua_app_shared::{build_concepts_map, build_name_map, build_total_mv_map, filter_mv};
 
@@ -82,6 +83,8 @@ pub struct IntradayMonitorRow {
     pub realtime_change_pct: Option<f64>,
     pub realtime_change_open_pct: Option<f64>,
     pub realtime_vol_ratio: Option<f64>,
+    #[serde(default)]
+    pub realtime_vol_ratio_opening_high: Option<f64>,
     pub return_5d_pct: Option<f64>,
     pub return_5d_base_close: Option<f64>,
     pub template_tag_text: Option<String>,
@@ -199,17 +202,6 @@ impl RealtimeQuoteProvider {
             _ => Err("实时行情源仅支持 sina 或 tencent".to_string()),
         }
     }
-}
-
-fn open_result_conn(source_path: &str) -> Result<Connection, String> {
-    let result_db = result_db_path(source_path);
-    let result_db_str = result_db
-        .to_str()
-        .ok_or_else(|| "结果库路径不是有效UTF-8".to_string())?;
-    let conn =
-        crate::data::open_db_readonly(result_db_str).map_err(|e| format!("打开结果库失败: {e}"))?;
-    crate::data::attach_similarity_db(&conn, source_path)?;
-    Ok(conn)
 }
 
 fn resolve_trade_date(
@@ -1098,6 +1090,10 @@ fn apply_intraday_template_tag_for_row(
                                     ),
                                 ),
                                 (RT_VOLUME_RATIO, row.realtime_vol_ratio),
+                                (
+                                    RT_OPENING_VOLUME_RATIO_HIGH,
+                                    row.realtime_vol_ratio_opening_high,
+                                ),
                                 (RT_AVERAGE_PRICE, row.realtime_avg_price),
                             ],
                         )
@@ -1197,7 +1193,7 @@ fn apply_intraday_template_tag_for_row(
                         let mut similarity_rank_series = vec![None; row_data.trade_dates.len()];
                         let similarity_table_exists = result_conn
                         .query_row(
-                            "SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_schema='main' AND table_name='strategy_trigger_similarity_summary'",
+                            "SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_catalog='similarity_db' AND table_schema='main' AND table_name='strategy_trigger_similarity_summary'",
                             [],
                             |db_row| db_row.get::<_, bool>(0),
                         )
@@ -1284,7 +1280,7 @@ fn apply_intraday_template_tags(
     source_path: &str,
     rows: &mut [IntradayMonitorRow],
     quote_map: &HashMap<String, SinaQuote>,
-    templates: &[IntradayMonitorTemplate],
+    compiled_templates: &HashMap<String, CompiledIntradayMonitorTemplate>,
     rank_mode_configs: &[IntradayMonitorRankModeConfig],
 ) -> Option<String> {
     for row in rows.iter_mut() {
@@ -1292,11 +1288,10 @@ fn apply_intraday_template_tags(
         row.template_tag_tone = None;
     }
 
-    if templates.is_empty() || rank_mode_configs.is_empty() {
+    if compiled_templates.is_empty() || rank_mode_configs.is_empty() {
         return None;
     }
 
-    let compiled_templates = compile_intraday_templates(templates);
     let ready_programs = compiled_templates
         .values()
         .filter_map(|item| match item {
@@ -1352,7 +1347,7 @@ fn apply_intraday_template_tags(
     let runtime_context = IntradayTemplateRuntimeContext {
         source_path,
         quote_map,
-        compiled_templates: &compiled_templates,
+        compiled_templates,
         rank_mode_configs,
         need_rows,
         indicator_cache: &indicator_cache,
@@ -1463,6 +1458,7 @@ fn apply_sina_quote_to_intraday_row(row: &mut IntradayMonitorRow, quote: &SinaQu
             None
         };
     row.realtime_vol_ratio = None;
+    row.realtime_vol_ratio_opening_high = None;
     row.return_5d_pct = calc_return_pct(Some(quote.price), row.return_5d_base_close);
 }
 
@@ -1479,6 +1475,7 @@ fn clear_realtime_intraday_row(row: &mut IntradayMonitorRow) {
     row.realtime_change_pct = None;
     row.realtime_change_open_pct = None;
     row.realtime_vol_ratio = None;
+    row.realtime_vol_ratio_opening_high = None;
 }
 
 pub fn refresh_intraday_monitor_realtime(
@@ -1542,6 +1539,7 @@ pub fn refresh_intraday_monitor_realtime(
                             None
                         };
                         row.realtime_vol_ratio = quote.volume_ratio;
+                        row.realtime_vol_ratio_opening_high = None;
                         row.return_5d_pct =
                             calc_return_pct(Some(quote.price), row.return_5d_base_close);
                     })(row, quote);
@@ -1557,13 +1555,54 @@ pub fn refresh_intraday_monitor_realtime(
         }
     };
 
-    let warning_message = apply_intraday_template_tags(
+    let compiled_templates = compile_intraday_templates(&templates);
+    let needs_opening_high = next_rows.iter().any(|row| {
+        resolve_template_id_for_row(row, &rank_mode_configs)
+            .and_then(|id| compiled_templates.get(id))
+            .is_some_and(|template| match template {
+                CompiledIntradayMonitorTemplate::Ready(template) => {
+                    expr_program_uses_runtime_key(&template.ast, RT_OPENING_VOLUME_RATIO_HIGH)
+                }
+                _ => false,
+            })
+    });
+    let now = chrono::Utc::now()
+        .with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).expect("valid China offset"))
+        .naive_local();
+    let volume_ratios = if needs_opening_high
+        && provider == RealtimeQuoteProvider::Tencent
+        && super::all_market_monitor::check_market_activity(now, &quote_map, || None).0
+    {
+        fetch_meta
+            .quote_trade_date
+            .as_deref()
+            .map(|date| super::volume_ratio::snapshot(source_path, &quote_map, date))
+            .transpose()?
+    } else {
+        None
+    };
+    if let Some(snapshot) = &volume_ratios {
+        for row in &mut next_rows {
+            if let Some(value) = snapshot.values.get(&row.ts_code) {
+                // 当前量比与开盘高点使用相同五日日均量，避免比较两种基准。
+                row.realtime_vol_ratio = Some(value.current);
+                row.realtime_vol_ratio_opening_high = value.opening_high;
+            }
+        }
+    }
+
+    let template_warning = apply_intraday_template_tags(
         source_path,
         &mut next_rows,
         &quote_map,
-        &templates,
+        &compiled_templates,
         &rank_mode_configs,
     );
+    let warning_message = template_warning
+        .into_iter()
+        .chain(volume_ratios.and_then(|snapshot| snapshot.status))
+        .collect::<Vec<_>>();
+    let warning_message = (!warning_message.is_empty()).then(|| warning_message.join("；"));
 
     Ok(IntradayMonitorPageData {
         rows: next_rows,
@@ -1605,7 +1644,7 @@ pub fn refresh_intraday_monitor_template_tags(
         source_path,
         &mut next_rows,
         &quote_map,
-        &templates,
+        &compile_intraday_templates(&templates),
         &rank_mode_configs,
     );
 
@@ -1775,6 +1814,7 @@ pub fn get_intraday_monitor_page(
                     realtime_change_pct: None,
                     realtime_change_open_pct: None,
                     realtime_vol_ratio: None,
+                    realtime_vol_ratio_opening_high: None,
                     return_5d_pct: None,
                     return_5d_base_close: None,
                     template_tag_text: None,
@@ -1931,6 +1971,7 @@ pub fn get_intraday_monitor_page(
                     realtime_change_pct: None,
                     realtime_change_open_pct: None,
                     realtime_vol_ratio: None,
+                    realtime_vol_ratio_opening_high: None,
                     return_5d_pct: None,
                     return_5d_base_close: None,
                     template_tag_text: None,
@@ -2030,6 +2071,7 @@ mod tests {
                 realtime_change_pct: None,
                 realtime_change_open_pct: None,
                 realtime_vol_ratio: None,
+                realtime_vol_ratio_opening_high: None,
                 return_5d_pct: None,
                 return_5d_base_close: None,
                 template_tag_text: None,
@@ -2106,6 +2148,7 @@ mod tests {
             realtime_change_pct: Some(3.03),
             realtime_change_open_pct: Some(2.0),
             realtime_vol_ratio: Some(1.5),
+            realtime_vol_ratio_opening_high: None,
             return_5d_pct: None,
             return_5d_base_close: None,
             template_tag_text: None,
@@ -2150,6 +2193,7 @@ mod tests {
             realtime_change_pct: Some(3.03),
             realtime_change_open_pct: Some(2.0),
             realtime_vol_ratio: Some(1.5),
+            realtime_vol_ratio_opening_high: None,
             return_5d_pct: None,
             return_5d_base_close: None,
             template_tag_text: None,
@@ -2178,7 +2222,7 @@ mod tests {
     fn template_validation_supports_short_realtime_fields_but_rejects_removed_long_aliases() {
         validate_intraday_monitor_template_expression(
             None,
-            "RT_OP >= 1 AND RT_FH <= 1".to_string(),
+            "RT_OP >= 1 AND RT_FH <= 1 AND RT_VR > RT_VR5H".to_string(),
         )
         .expect("short realtime fields should validate");
 
@@ -2193,7 +2237,7 @@ mod tests {
     #[test]
     fn intraday_template_runtime_key_collection_skips_injected_fields() {
         let program = parse_expression_program(
-            "M := MA(C, 5); M > MY_RT_IND AND RANK <= 50 AND SCORE > 0 AND RT_VR > 1 AND TOTAL_MV_YI > 10 AND CYQ_TPR > 0.6",
+            "M := MA(C, 5); M > MY_RT_IND AND RANK <= 50 AND SCORE > 0 AND RT_VR > RT_VR5H AND TOTAL_MV_YI > 10 AND CYQ_TPR > 0.6",
         )
         .expect("expression should parse");
 
@@ -2203,7 +2247,15 @@ mod tests {
             assert!(keys.contains(required_key), "missing {required_key}");
         }
         assert!(!keys.contains("TOTAL_MV"));
-        for injected_key in ["RANK", "SCORE", "RT_VR", "TOTAL_MV_YI", "ZHANG", "CYQ_TPR"] {
+        for injected_key in [
+            "RANK",
+            "SCORE",
+            "RT_VR",
+            "RT_VR5H",
+            "TOTAL_MV_YI",
+            "ZHANG",
+            "CYQ_TPR",
+        ] {
             assert!(!keys.contains(injected_key), "unexpected {injected_key}");
         }
         assert!(!keys.contains("O"));

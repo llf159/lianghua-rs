@@ -18,9 +18,9 @@ use crate::{
         },
     },
     scoring::tools::{
-        CyqChenFieldInjector, calc_query_need_rows, calc_query_start_date,
-        collect_used_cyq_chen_runtime_keys, cyq_chen_runtime_key_names, inject_stock_extra_fields,
-        load_st_list, load_total_share_map, rt_max_len,
+        CyqChenFieldInjector, SimilarityRankFieldInjector, calc_query_need_rows,
+        calc_query_start_date, collect_used_cyq_chen_runtime_keys, cyq_chen_runtime_key_names,
+        inject_stock_extra_fields, load_st_list, load_total_share_map, rt_max_len,
     },
     utils::utils::board_category,
 };
@@ -98,7 +98,6 @@ struct SummaryInfo {
 struct RankScoreInfo {
     rank: Option<f64>,
     score: Option<f64>,
-    similarity_rank: Option<f64>,
 }
 
 fn parse_scope_way(
@@ -364,7 +363,7 @@ pub fn validate_expression_stock_pick_template_expression(
         st_list.contains(&sample_ts_code),
         total_share_map.get(&sample_ts_code).copied(),
     )?;
-    if needs_rank_score || needs_similarity_rank {
+    if needs_rank_score {
         let first_trade_date = row_data
             .trade_dates
             .first()
@@ -372,15 +371,13 @@ pub fn validate_expression_stock_pick_template_expression(
             .unwrap_or_else(|| latest_trade_date.clone());
         let rank_score_series_map =
             load_rank_score_series_map(source_path, &first_trade_date, &latest_trade_date);
-        inject_runtime_rank_score_series(
-            &mut row_data,
-            &sample_ts_code,
-            &rank_score_series_map,
-            needs_rank_score,
-            needs_similarity_rank,
-        )?;
+        inject_runtime_rank_score_series(&mut row_data, &sample_ts_code, &rank_score_series_map)?;
     }
 
+    if needs_similarity_rank {
+        SimilarityRankFieldInjector::new(source_path, true)
+            .inject(&mut row_data, &sample_ts_code)?;
+    }
     let mut runtime = row_into_rt(row_data)?;
     let value = runtime
         .eval_program(&stmts)
@@ -475,58 +472,9 @@ fn load_rank_score_series_map(
             .flatten()
             .map(|value| value as f64);
         let score = row.get::<_, Option<f64>>(3).ok().flatten();
-        out.entry(ts_code).or_default().insert(
-            trade_date,
-            RankScoreInfo {
-                rank,
-                score,
-                similarity_rank: None,
-            },
-        );
-    }
-
-    drop(rows);
-    drop(stmt);
-    if !crate::data::attach_similarity_db(&conn, source_path).unwrap_or(false) {
-        return out;
-    }
-    let Ok(table_exists) = conn.query_row(
-        "SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_schema='main' AND table_name='strategy_trigger_similarity_summary'",
-        [],
-        |row| row.get::<_, bool>(0),
-    ) else {
-        return out;
-    };
-    if !table_exists {
-        return out;
-    }
-    let Ok(mut stmt) = conn.prepare(
-        r#"
-        SELECT ts_code, trade_date, rank
-        FROM strategy_trigger_similarity_summary
-        WHERE trade_date >= ? AND trade_date <= ?
-        "#,
-    ) else {
-        return out;
-    };
-    let Ok(mut rows) = stmt.query(params![start_date, end_date]) else {
-        return out;
-    };
-    while let Ok(Some(row)) = rows.next() {
-        let (Ok(ts_code), Ok(trade_date)) = (row.get::<_, String>(0), row.get::<_, String>(1))
-        else {
-            continue;
-        };
-        let similarity_rank = row
-            .get::<_, Option<i64>>(2)
-            .ok()
-            .flatten()
-            .map(|value| value as f64);
         out.entry(ts_code)
             .or_default()
-            .entry(trade_date)
-            .or_default()
-            .similarity_rank = similarity_rank;
+            .insert(trade_date, RankScoreInfo { rank, score });
     }
 
     out
@@ -536,33 +484,22 @@ fn inject_runtime_rank_score_series(
     row_data: &mut crate::data::RowData,
     ts_code: &str,
     rank_score_series_map: &HashMap<String, HashMap<String, RankScoreInfo>>,
-    include_rank_score: bool,
-    include_similarity_rank: bool,
 ) -> Result<(), String> {
     let len = row_data.trade_dates.len();
     let mut rank_series = vec![None; len];
     let mut score_series = vec![None; len];
-    let mut similarity_rank_series = vec![None; len];
 
     if let Some(date_to_values) = rank_score_series_map.get(ts_code) {
         for (index, trade_date) in row_data.trade_dates.iter().enumerate() {
             if let Some(values) = date_to_values.get(trade_date).copied() {
                 rank_series[index] = values.rank;
                 score_series[index] = values.score;
-                similarity_rank_series[index] = values.similarity_rank;
             }
         }
     }
 
-    if include_rank_score {
-        row_data.cols.insert("RANK".to_string(), rank_series);
-        row_data.cols.insert("SCORE".to_string(), score_series);
-    }
-    if include_similarity_rank {
-        row_data
-            .cols
-            .insert("S_RANK".to_string(), similarity_rank_series);
-    }
+    row_data.cols.insert("RANK".to_string(), rank_series);
+    row_data.cols.insert("SCORE".to_string(), score_series);
     row_data.validate()
 }
 
@@ -686,7 +623,7 @@ pub fn run_expression_stock_pick(
     let concept_map = build_concepts_map(source_path).unwrap_or_default();
     let total_share_map = load_total_share_map(source_path).unwrap_or_default();
     let summary_map = load_summary_map(source_path, &resolved_end_date);
-    let rank_score_series_map = if needs_rank_score || needs_similarity_rank {
+    let rank_score_series_map = if needs_rank_score {
         load_rank_score_series_map(source_path, &query_start_date, &resolved_end_date)
     } else {
         HashMap::new()
@@ -705,6 +642,8 @@ pub fn run_expression_stock_pick(
             let worker_reader =
                 DataReader::new_with_runtime_keys(source_path, &required_runtime_keys)?;
             let cyq_chen_injector = CyqChenFieldInjector::new(source_path, &used_cyq_chen_keys);
+            let similarity_rank_injector =
+                SimilarityRankFieldInjector::new(source_path, needs_similarity_rank);
             let mut group_rows = Vec::new();
 
             for ts_code in ts_group {
@@ -721,14 +660,15 @@ pub fn run_expression_stock_pick(
                     st_list.contains(ts_code),
                     total_share_map.get(ts_code).copied(),
                 )?;
-                if needs_rank_score || needs_similarity_rank {
+                if needs_rank_score {
                     inject_runtime_rank_score_series(
                         &mut row_data,
                         ts_code,
                         &rank_score_series_map,
-                        needs_rank_score,
-                        needs_similarity_rank,
                     )?;
+                }
+                if needs_similarity_rank {
+                    similarity_rank_injector.inject(&mut row_data, ts_code)?;
                 }
                 let trade_dates = row_data.trade_dates.clone();
                 let keep_from = trade_dates

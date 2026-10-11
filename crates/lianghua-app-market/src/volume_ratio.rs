@@ -214,11 +214,17 @@ pub fn snapshot(
         .local_loaded_at
         .is_none_or(|at| at.elapsed() >= Duration::from_secs(60))
     {
-        let result = load_volume_ratio_averages(source_path, trade_date, None);
+        let result = super::daily_baseline::load(source_path, trade_date);
         match result {
-            Ok(values) => {
-                state.local_averages = values;
-                state.local_error = None;
+            Ok(baselines) => {
+                state.local_averages = baselines
+                    .rows
+                    .iter()
+                    .filter_map(|(code, row)| {
+                        row.average_volume.map(|average| (code.clone(), average))
+                    })
+                    .collect();
+                state.local_error = baselines.volume_error.clone();
             }
             Err(error) => {
                 state.local_averages.clear();
