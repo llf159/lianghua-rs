@@ -1049,40 +1049,36 @@
   }
 }
 
-.database-integrity-summary {
-  display: grid;
-  gap: 7px;
-  padding: 12px;
-  border-radius: 10px;
-  background: #fff3e5;
-  border: 1px solid #f1c999;
-}
-.database-integrity-summary.is-ready { background: #edf8f1; border-color: #b8dcc6; }
-.database-integrity-summary.is-blocked { color: #923321; }
-.database-integrity-summary small, .database-integrity-hint { color: #6b7280; }
-.database-integrity-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
-.database-integrity-actions span { flex: 1 1 260px; color: #6b7280; font-size: 13px; }
-.database-integrity-filter { max-width: 520px; }
-.database-integrity-issues { display: grid; gap: 9px; }
-.database-integrity-issue {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 12px;
-  border: 1px solid #e2e7ee;
-  border-left: 4px solid #e5a540;
-  border-radius: 10px;
-  min-width: 0;
-}
-.database-integrity-issue.is-error { border-left-color: #d66a50; }
-.database-integrity-issue > div { min-width: 0; }
-.database-integrity-issue small { display: block; margin-top: 5px; color: #6b7280; overflow-wrap: anywhere; }
-.database-integrity-issue p { margin: 7px 0 0; color: #566273; line-height: 1.6; overflow-wrap: anywhere; }
-.database-integrity-issue button { flex: 0 0 auto; white-space: normal; max-width: 180px; }
-.database-integrity-scope { color: #566273; font-size: 13px; line-height: 1.7; }
-.database-integrity-scope summary { cursor: pointer; }
-@media (max-width: 900px) {
-  .database-integrity-issue { flex-direction: column; align-items: stretch; }
-  .database-integrity-issue button { align-self: flex-start; max-width: 100%; }
-}
+
+.database-integrity-panel { font-size: 14px; line-height: 1.6; }
+.database-integrity-summary { display: grid; gap: 4px; }
+.database-integrity-summary strong { font-size: 14px; color: #28734c; }
+.database-integrity-summary.is-blocked strong, .database-integrity-blocked { color: #b34e35; }
+.database-integrity-summary span, .database-integrity-summary small,
+.database-integrity-hint { color: #5f6978; font-size: 13px; }
+.database-integrity-summary small { overflow-wrap: anywhere; }
+.database-integrity-checks { border-top: 1px solid #e2e8f0; }
+.database-integrity-check-row { position: relative; }
+.database-integrity-check-heading { display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; align-items: center; gap: 2px 10px; padding: 12px 80px 12px 0; border-bottom: 1px solid #e2e8f0; }
+.database-integrity-repair { position: absolute; top: 12px; right: 0; }
+.database-integrity-check > summary { cursor: pointer; list-style: none; }
+.database-integrity-check > summary::-webkit-details-marker { display: none; }
+.database-integrity-check > summary::before { content: '›'; grid-column: 1; grid-row: 1 / 3; font-size: 20px; text-align: center; }
+.database-integrity-check[open] > summary::before { transform: rotate(90deg); }
+.database-integrity-check-title { grid-column: 2; grid-row: 1; font-weight: 600; overflow-wrap: anywhere; }
+.database-integrity-check-meta { grid-column: 2; grid-row: 2; color: #5f6978; font-size: 12px; overflow-wrap: anywhere; }
+.database-integrity-check-status { grid-column: 3; grid-row: 1 / 3; font-size: 13px; color: #5f6978; white-space: nowrap; }
+.database-integrity-check-status.is-passed { color: #28734c; }
+.database-integrity-check-status.is-error, .database-integrity-check-status.is-incomplete { color: #b34e35; }
+.database-integrity-check-status.is-warning { color: #a06c1d; }
+.database-integrity-issues { padding: 0 0 12px 22px; }
+.database-integrity-issue { padding: 12px 0; border-bottom: 1px solid #e2e8f0; min-width: 0; }
+.database-integrity-meta { display: flex; flex-wrap: wrap; gap: 2px 8px; font-weight: 600; overflow-wrap: anywhere; }
+.database-integrity-meta code { font-family: inherit; }
+.database-integrity-comparison { margin-top: 6px; }
+.database-integrity-comparison-label { color: #5f6978; font-size: 12px; overflow-wrap: anywhere; }
+.database-integrity-comparison dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 16px; margin: 2px 0 0; }
+.database-integrity-comparison dl > div { display: flex; gap: 8px; min-width: 0; }
+.database-integrity-comparison dt { flex-shrink: 0; color: #5f6978; }
+.database-integrity-comparison dd { margin: 0; overflow-wrap: anywhere; }
+.database-integrity-issues > button { margin-top: 10px; }

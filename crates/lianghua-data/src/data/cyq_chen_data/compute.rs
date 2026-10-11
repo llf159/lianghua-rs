@@ -121,7 +121,7 @@ pub(super) fn resolve_cyq_chen_rebuild_trade_date_range(
     Ok(Some((resolved_start_date, resolved_end_date)))
 }
 
-pub(super) fn resolve_cyq_chen_load_start_date(
+pub fn resolve_cyq_chen_load_start_date(
     source_dir: &str,
     output_start_date: &str,
     output_end_date: &str,
@@ -169,7 +169,7 @@ pub(super) fn resolve_first_computable_output_date(
         })
 }
 
-pub(super) fn compute_cyq_chen_stock_group_batch(
+pub fn compute_cyq_chen_stock_group_batch(
     worker_reader: &DataReader,
     state_conn: Option<&Connection>,
     load_start_date: &str,

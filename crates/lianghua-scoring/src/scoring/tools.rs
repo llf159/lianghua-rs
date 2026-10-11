@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use duckdb::{Connection, params, params_from_iter};
+use duckdb::{AccessMode, Config, Connection, params, params_from_iter};
 
 pub use crate::data::extras::{
     calc_zhang_pct, inject_constant_num_fields, inject_latest_num_fields,
@@ -53,7 +53,12 @@ impl SimilarityRankFieldInjector {
         let db_path = result_db_path(source_dir);
         let conn = db_path
             .exists()
-            .then(|| Connection::open(db_path).ok())
+            .then(|| {
+                Config::default()
+                    .access_mode(AccessMode::ReadOnly)
+                    .ok()
+                    .and_then(|config| Connection::open_with_flags(db_path, config).ok())
+            })
             .flatten();
         let conn = conn.filter(|conn| {
             conn.query_row(
@@ -335,7 +340,10 @@ impl CyqChenFieldInjector {
         if !cyq_db.exists() {
             return Self::unavailable(fields, "cyq_chen.db 不存在，新筹码字段已按空值注入。");
         }
-        let conn = match Connection::open(&cyq_db) {
+        let conn = match Config::default()
+            .access_mode(AccessMode::ReadOnly)
+            .and_then(|config| Connection::open_with_flags(&cyq_db, config))
+        {
             Ok(conn) => conn,
             Err(error) => {
                 return Self::unavailable(
@@ -699,7 +707,10 @@ pub fn preview_optional_cyq_chen_injection_warnings(
     }
 
     let mut warnings = Vec::new();
-    let conn = match Connection::open(&cyq_db) {
+    let conn = match Config::default()
+        .access_mode(AccessMode::ReadOnly)
+        .and_then(|config| Connection::open_with_flags(&cyq_db, config))
+    {
         Ok(conn) => conn,
         Err(error) => {
             return vec![format!(

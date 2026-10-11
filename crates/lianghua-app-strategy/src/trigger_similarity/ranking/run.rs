@@ -3,7 +3,7 @@ use crate::trigger_similarity::ranking::samples::{
 };
 use crate::trigger_similarity::ranking::store::{
     config_key, ensure_ranking_tables, load_active_config_record, load_data_signature,
-    parse_config_key, stable_content_signature,
+    parse_active_config_key, parse_config_key, stable_content_signature,
 };
 use crate::trigger_similarity::*;
 
@@ -61,32 +61,111 @@ pub fn run_strategy_trigger_similarity_ranking(
     total_mv_max: Option<f64>,
     sample_gap_trade_days: Option<u32>,
 ) -> Result<StrategyTriggerRankingPageData, String> {
+    compute_strategy_trigger_similarity_ranking(
+        source_path,
+        trade_date,
+        window_trade_days,
+        pool_segments,
+        outcome_trade_days,
+        benchmark_index_code,
+        limit,
+        board,
+        exclude_st_board,
+        total_mv_min,
+        total_mv_max,
+        sample_gap_trade_days,
+        None,
+    )?
+    .0
+    .ok_or_else(|| "排行榜未生成".to_string())
+}
+
+pub fn recompute_strategy_trigger_similarity_samples(
+    source_path: &str,
+    date: &str,
+    config_key: &str,
+    codes: &[String],
+) -> Result<Vec<StrategyTriggerRankingRow>, String> {
+    let config = parse_active_config_key(config_key, String::new(), String::new())
+        .ok_or_else(|| "保存的相似度参数无法解析".to_string())?
+        .config;
+    if config.algorithm_version != ALGORITHM_VERSION {
+        return Err("保存的相似度算法版本与当前不同，不能直接重算比对".to_string());
+    }
+    compute_strategy_trigger_similarity_ranking(
+        source_path.to_string(),
+        Some(date.to_string()),
+        Some(config.window_trade_days as u32),
+        Some(config.pool_segments as u32),
+        Some(config.outcome_trade_days as u32),
+        Some(config.benchmark_index_code),
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(config.sample_gap_trade_days as u32),
+        Some(codes),
+    )
+    .map(|result| result.1)
+}
+
+fn compute_strategy_trigger_similarity_ranking(
+    source_path: String,
+    trade_date: Option<String>,
+    window_trade_days: Option<u32>,
+    pool_segments: Option<u32>,
+    outcome_trade_days: Option<u32>,
+    benchmark_index_code: Option<String>,
+    limit: Option<u32>,
+    board: Option<String>,
+    exclude_st_board: Option<bool>,
+    total_mv_min: Option<f64>,
+    total_mv_max: Option<f64>,
+    sample_gap_trade_days: Option<u32>,
+    sample_codes: Option<&[String]>,
+) -> Result<
+    (
+        Option<StrategyTriggerRankingPageData>,
+        Vec<StrategyTriggerRankingRow>,
+    ),
+    String,
+> {
     let _guard = RANKING_COMPUTE_LOCK
         .get_or_init(|| Mutex::new(()))
         .try_lock()
         .map_err(|_| "全市场相似排行榜正在计算，请等待当前任务完成".to_string())?;
     let started = Instant::now();
-    *RANKING_PROGRESS
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .expect("相似排行榜进度锁被污染") = None;
+    if sample_codes.is_none() {
+        *RANKING_PROGRESS
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .expect("相似排行榜进度锁被污染") = None;
+    }
+    let set_ranking_progress = |phase: &str, message: &str, completed: usize, total: usize| {
+        if sample_codes.is_none() {
+            super::set_ranking_progress(phase, message, completed, total);
+        }
+    };
     set_ranking_progress("prepare", "读取行情、策略触发和市场环境", 0, 0);
     let source_path = source_path.trim().to_string();
     if source_path.is_empty() {
         return Err("source_path 不能为空".to_string());
     }
-    crate::data::download_state::ensure_stock_data_ready_for_derived(&source_path)?;
-    let source = crate::data::download_state::open_source_db_readonly(&source_path)?;
-    if crate::data::download_state::load_pending_derived_rebuilds(&source)?
-        .iter()
-        .any(|item| item.component == "ranking")
+    if sample_codes.is_none() {
+        crate::data::download_state::ensure_stock_data_ready_for_derived(&source_path)?;
+    }
+    if sample_codes.is_none()
+        && crate::data::download_state::pending_rebuild_affects_saved_results(
+            &source_path,
+            "ranking",
+        )?
     {
         return Err(
             "行情修复后评分/排名尚未重算，不能使用旧评分计算相似度。请先重算受影响区间。"
                 .to_string(),
         );
     }
-    drop(source);
     let conn = open_result_conn(&source_path)?;
     let resolved_trade_date = resolve_existing_trade_date(&conn, trade_date)?;
     let active_config = get_strategy_trigger_similarity_active_config(&conn)?;
@@ -169,8 +248,7 @@ pub fn run_strategy_trigger_similarity_ranking(
         &resolved_trade_date,
         &benchmark_index_code,
     )?;
-    let market_conn = duckdb::Connection::open(crate::data::source_db_path(&source_path))
-        .map_err(|e| e.to_string())?;
+    let market_conn = crate::data::download_state::open_source_db_readonly(&source_path)?;
     let market_cap_per_price_map = crate::data::extras::load_estimated_market_cap_per_price_map(
         &market_conn,
         &source_path,
@@ -274,9 +352,9 @@ pub fn run_strategy_trigger_similarity_ranking(
     });
 
     let phase = Instant::now();
-    let target_anchors = (|conn: &Connection,
-                           target_date: &str,
-                           start_date: &str|
+    let mut target_anchors = (|conn: &Connection,
+                               target_date: &str,
+                               start_date: &str|
      -> Result<Vec<Anchor>, String> {
         let mut stmt = conn
         .prepare(
@@ -298,6 +376,9 @@ pub fn run_strategy_trigger_similarity_ranking(
             })
             .collect()
     })(&conn, &resolved_trade_date, &target_start_date)?;
+    if let Some(codes) = sample_codes {
+        target_anchors.retain(|anchor| codes.contains(&anchor.ts_code));
+    }
     let target_anchor_count = target_anchors.len();
     let mut targets = Vec::with_capacity(target_anchor_count);
     let mut target_anchor_iter = target_anchors.into_iter();
@@ -1016,6 +1097,9 @@ pub fn run_strategy_trigger_similarity_ranking(
             "计算期间行情或策略触发数据库发生更新，已放弃提交旧排行榜，请重新计算".to_string(),
         );
     }
+    if sample_codes.is_some() {
+        return Ok((None, ranking_rows));
+    }
     let scope_signature = (|source_path: &str,
                             indicator_columns: &[String]|
      -> Result<String, String> {
@@ -1254,7 +1338,7 @@ pub fn run_strategy_trigger_similarity_ranking(
         "00000000",
         "99999999",
     )?;
-    Ok(page)
+    Ok((Some(page), Vec::new()))
 }
 
 #[cfg(test)]
@@ -1316,6 +1400,7 @@ mod tests {
             .expect("write strategy definition");
         fs::write(source_dir.join("ind.toml"), "[[indicator]]\nname = 'J'\n")
             .expect("write indicator definition");
+        fs::write(source_dir.join("stock_list.csv"), "ts_code,symbol,name,area,industry,list_date\nTARGET.SZ,1,target,,,20240101\nC0.SZ,2,c0,,,20240101\nC1.SZ,3,c1,,,20240101\nC2.SZ,4,c2,,,20240101\nC3.SZ,5,c3,,,20240101\nC4.SZ,6,c4,,,20240101\nC5.SZ,7,c5,,,20240101\n").expect("write listing dates");
         let market_path = source_dir.join("stock_data.db");
         let result_path = source_dir.join("scoring_result.db");
         let market = Connection::open(&market_path).expect("open market db");
@@ -1484,6 +1569,30 @@ mod tests {
         assert_eq!(computed.universe_count, stocks.len());
         assert!(computed.evaluated_anchor_count > 0);
         assert!(computed.items.iter().any(|row| row.ts_code == "TARGET.SZ"));
+        let market_before = fs::read(&market_path).unwrap();
+        let result_before = fs::read(&result_path).unwrap();
+        let sampled = super::recompute_strategy_trigger_similarity_samples(
+            &source_path,
+            "20240110",
+            &super::config_key(3, 2, 2, 0, "000001.SH"),
+            &["TARGET.SZ".to_string()],
+        )
+        .expect("recompute one target without writing");
+        assert_eq!(sampled.len(), 1);
+        let saved = computed
+            .items
+            .iter()
+            .find(|row| row.ts_code == "TARGET.SZ")
+            .unwrap();
+        assert_eq!(sampled[0].confidence, saved.confidence);
+        assert_eq!(
+            sampled[0].effective_sample_count,
+            saved.effective_sample_count
+        );
+        assert_eq!(sampled[0].prediction_signal, saved.prediction_signal);
+        assert_eq!(sampled[0].best_similarity, saved.best_similarity);
+        assert_eq!(market_before, fs::read(&market_path).unwrap());
+        assert_eq!(result_before, fs::read(&result_path).unwrap());
         let result = Connection::open(source_dir.join("scoring_result.db"))
             .expect("reopen result db for active config assertions");
         let summary_difference: i64 = result.query_row(

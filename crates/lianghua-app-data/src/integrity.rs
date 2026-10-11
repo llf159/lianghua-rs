@@ -6,8 +6,7 @@ use duckdb::{AccessMode, Config, Connection};
 use serde::{Deserialize, Serialize};
 
 use crate::data::download_state::{
-    load_duplicate_stock_rows, load_invalid_stock_rows, load_missing_market_dates,
-    load_pending_derived_rebuilds, load_qfq_price_link_issues, load_unfinished_stock_repairs,
+    load_listing_history_gaps, load_pending_stock_repairs, load_qfq_price_link_issues,
 };
 use crate::data::{load_stock_list, load_trade_date_list, source_db_path};
 use lianghua_download::download::runner::INDEX_TS_CODES;
@@ -16,16 +15,32 @@ use lianghua_download::download::runner::INDEX_TS_CODES;
 #[serde(rename_all = "camelCase")]
 pub struct DatabaseIssue {
     pub id: String,
+    pub check_id: String,
     pub database: String,
     pub severity: String,
     pub title: String,
-    pub detail: String,
+    pub comparisons: Vec<DatabaseComparison>,
     pub ts_code: Option<String>,
     pub stock_name: Option<String>,
     pub start_date: Option<String>,
     pub end_date: Option<String>,
     pub repair_action: Option<String>,
     pub blocks_derived: bool,
+}
+
+#[derive(Clone, Serialize)]
+pub struct DatabaseComparison {
+    pub label: String,
+    pub expected: String,
+    pub actual: String,
+}
+
+#[derive(Serialize)]
+pub struct DatabaseCheck {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub summary: String,
 }
 
 #[derive(Serialize)]
@@ -37,7 +52,7 @@ pub struct DatabaseCheckReport {
     pub target_trade_date: Option<String>,
     pub stock_count: usize,
     pub row_count: u64,
-    pub checks: Vec<String>,
+    pub checks: Vec<DatabaseCheck>,
     pub issues: Vec<DatabaseIssue>,
     pub limitations: Vec<String>,
 }
@@ -53,32 +68,12 @@ pub fn check_databases(source_path: &str) -> Result<DatabaseCheckReport, String>
         source_ready: false, target_trade_date: None, stock_count: 0, row_count: 0,
         checks: Vec::new(), issues: Vec::new(),
         limitations: vec![
-            "本地检查不能证明所有历史行情及复权因子与上游一致；未逐股核对停牌记录，逐股日期较旧不直接判为缺失。".to_string(),
-            "复权衔接检查覆盖最近 60 个已保存交易日；历史截短通过待补救记录和评分/筹码历史证据检查。".to_string(),
-            "评分、筹码的起始日期允许因预热期晚于行情；未生成的可选结果库不视为行情损坏。".to_string(),
+            "历史起点按 max(stock_list.csv 上市日，全库历史起点) 对照，仅作提示；停牌、恢复上市也可能导致起点偏晚。".to_string(),
+            "复权衔接覆盖最近 60 个已保存交易日，只作提示；差异化分红、上游修订等也可能导致不衔接。".to_string(),
+            "新筹码不校验；其他已有后续结果按当前策略抽样重算关键数值，缺失不报错，不能证明全库正确；策略或基础资料变化也可能导致差异。".to_string(),
         ],
     };
-    let stocks = match load_stock_list(source_path) {
-        Ok(stocks) if !stocks.is_empty() => stocks,
-        result => {
-            report.issues.push(DatabaseIssue {
-                id: "stock-list".to_string(),
-                database: "stock_list.csv".to_string(),
-                severity: "error".to_string(),
-                title: "股票列表不可用，无法核对股票覆盖".to_string(),
-                detail: result
-                    .err()
-                    .unwrap_or_else(|| "股票列表为空，请先刷新基础数据。".to_string()),
-                ts_code: None,
-                stock_name: None,
-                start_date: None,
-                end_date: None,
-                repair_action: None,
-                blocks_derived: true,
-            });
-            Vec::new()
-        }
-    };
+    let stocks = load_stock_list(source_path)?;
     let names = stocks
         .iter()
         .filter_map(|row| Some((row.first()?.clone(), row.get(2)?.clone())))
@@ -94,69 +89,12 @@ pub fn check_databases(source_path: &str) -> Result<DatabaseCheckReport, String>
         .max()
         .cloned();
     report.target_trade_date = target.clone();
-    if calendar.is_empty() {
-        report.issues.push(DatabaseIssue {
-            id: "calendar".to_string(),
-            database: "trade_calendar.csv".to_string(),
-            severity: "error".to_string(),
-            title: "交易日历不可用".to_string(),
-            detail: "无法判断整日缺失及最新有效交易日，请先刷新基础数据。".to_string(),
-            ts_code: None,
-            stock_name: None,
-            start_date: None,
-            end_date: None,
-            repair_action: None,
-            blocks_derived: true,
-        });
-    }
     let source_file = source_db_path(source_path);
-    if !source_file.exists() {
-        report.issues.push(DatabaseIssue {
-            id: "source-missing".to_string(),
-            database: "stock_data.db".to_string(),
-            severity: "error".to_string(),
-            title: "原始行情库不存在".to_string(),
-            detail: "请先完成首次行情下载。".to_string(),
-            ts_code: None,
-            stock_name: None,
-            start_date: None,
-            end_date: None,
-            repair_action: None,
-            blocks_derived: true,
-        });
-        return Ok(report);
-    }
-    let source = match open_check_connection(&source_file) {
-        Ok(source) => source,
-        Err(error) => {
-            report.issues.push(DatabaseIssue {
-                id: "source-unreadable".to_string(),
-                database: "stock_data.db".to_string(),
-                severity: "error".to_string(),
-                title: "原始行情库无法读取".to_string(),
-                detail: format!("{error}；先停止其他任务后重试。文件损坏需从备份恢复或重新下载。"),
-                ts_code: None,
-                stock_name: None,
-                start_date: None,
-                end_date: None,
-                repair_action: None,
-                blocks_derived: true,
-            });
-            return Ok(report);
-        }
-    };
+    let source = open_check_connection(&source_file)?;
     source
         .execute_batch("BEGIN TRANSACTION")
         .map_err(|e| format!("创建只读检查快照失败: {e}"))?;
-    let mut stmt = match source.prepare("SELECT ts_code, MIN(trade_date), MAX(trade_date), COUNT(*) FROM stock_data WHERE adj_type = 'qfq' GROUP BY ts_code") {
-        Ok(stmt) => stmt,
-        Err(error) => {
-            report.issues.push(DatabaseIssue { id: "source-schema".to_string(), database: "stock_data.db".to_string(), severity: "error".to_string(),
-                title: "行情表结构不完整或无法读取".to_string(), detail: error.to_string(), ts_code: None, stock_name: None,
-                start_date: None, end_date: None, repair_action: None, blocks_derived: true });
-            return Ok(report);
-        }
-    };
+    let mut stmt = source.prepare("SELECT ts_code, MIN(trade_date), MAX(trade_date), COUNT(*) FROM stock_data WHERE adj_type = 'qfq' GROUP BY ts_code").map_err(|e| format!("读取行情范围失败: {e}"))?;
     let ranges = stmt
         .query_map([], |row| {
             Ok((
@@ -177,163 +115,65 @@ pub fn check_databases(source_path: &str) -> Result<DatabaseCheckReport, String>
     let first = ranges.values().map(|(first, _, _)| first).min().cloned();
     let last = ranges.values().map(|(_, last, _)| last).max().cloned();
     let end = last.clone().into_iter().chain(target.clone()).max();
-    report.checks.push(format!(
-        "原始行情可读性与覆盖：{} 只股票、{} 行",
-        report.stock_count, report.row_count
-    ));
-    for row in &stocks {
-        let Some(code) = row.first() else {
-            continue;
-        };
-        if row
-            .get(5)
-            .zip(end.as_ref())
-            .is_some_and(|(listed, end)| listed > end)
-        {
-            continue;
-        }
-        if !ranges.contains_key(code) {
-            report.issues.push(stock_issue(
-                code,
-                &names,
-                "missing-stock",
-                "股票行情完全缺失",
-                "股票已上市但原始库没有该股票的 qfq 行情。",
-                first
-                    .clone()
-                    .or(Some("20100101".to_string()))
-                    .map(|date| date.max(row.get(5).cloned().unwrap_or_default())),
-                end.clone(),
-            ));
-        }
-    }
-    if report.row_count == 0 {
-        report.issues.push(DatabaseIssue {
-            id: "source-empty".to_string(),
-            database: "stock_data.db".to_string(),
-            severity: "error".to_string(),
-            title: "qfq 行情为空".to_string(),
-            detail: "请先下载指定历史区间。".to_string(),
-            ts_code: None,
-            stock_name: None,
-            start_date: None,
-            end_date: None,
-            repair_action: None,
-            blocks_derived: true,
-        });
-    }
-    let pending = load_unfinished_stock_repairs(source_path, &source)?;
-    for item in &pending {
-        report.issues.push(stock_issue(
-            &item.ts_code,
+    for gap in load_listing_history_gaps(source_path, &source)? {
+        let mut issue = stock_issue(
+            &gap.ts_code,
             &names,
-            "unfinished-stock",
-            "历史补救未完成或被截短",
-            &format!(
-                "需恢复 {} 至 {} 的完整历史，不能仅看最新日期。",
-                item.start_date, item.end_date
-            ),
-            Some(item.start_date.clone()),
-            Some(item.end_date.clone()),
-        ));
+            "truncated",
+            "行情历史起点待核验",
+            vec![DatabaseComparison {
+                label: "行情起点".to_string(),
+                expected: gap.start_date.clone(),
+                actual: ranges
+                    .get(&gap.ts_code)
+                    .map(|range| range.0.clone())
+                    .unwrap_or_else(|| "无".to_string()),
+            }],
+            Some(gap.start_date),
+            end.clone(),
+        );
+        issue.severity = "warning".to_string();
+        issue.blocks_derived = false;
+        report.issues.push(issue);
     }
-    report
-        .checks
-        .push("持久补救记录和旧版筹码补救证据".to_string());
-    for (kind, title, result) in [
-        (
-            "invalid-bars",
-            "无效价格、日期及成交数据",
-            load_invalid_stock_rows(&source),
-        ),
-        (
-            "duplicate-bars",
-            "股票交易日重复检查",
-            load_duplicate_stock_rows(&source),
-        ),
-    ] {
-        match result {
-            Ok(rows) => {
-                report.checks.push(title.to_string());
-                for (code, date, count) in rows {
-                    report.issues.push(stock_issue(&code, &names, kind, title, &format!("检测到 {count} 项，最早问题日期 {date}。将整段重拉该股票，以保持统一复权基准。"), first.clone(), end.clone()));
-                }
-            }
-            Err(error) => report.issues.push(DatabaseIssue {
-                id: kind.to_string(),
-                database: "stock_data.db".to_string(),
-                severity: "error".to_string(),
-                title: format!("{title}：检查未完成"),
-                detail: error,
-                ts_code: None,
-                stock_name: None,
-                start_date: None,
-                end_date: None,
-                repair_action: None,
-                blocks_derived: true,
-            }),
-        }
+    for pending in load_pending_stock_repairs(&source)? {
+        let mut issue = stock_issue(
+            &pending.ts_code,
+            &names,
+            "pending-stock",
+            "行情修复尚未完成",
+            vec![DatabaseComparison {
+                label: "行情修复状态".to_string(),
+                expected: "完成".to_string(),
+                actual: "未完成".to_string(),
+            }],
+            Some(pending.start_date),
+            Some(pending.end_date),
+        );
+        issue.check_id = "truncated".to_string();
+        report.issues.push(issue);
     }
-    let missing_dates = load_missing_market_dates(source_path, &source)?;
-    if !missing_dates.is_empty() {
-        report.issues.push(DatabaseIssue {
-            id: "market-gaps".to_string(),
-            database: "stock_data.db".to_string(),
-            severity: "error".to_string(),
-            title: "全市场存在整日缺口".to_string(),
-            detail: format!(
-                "缺 {} 个交易日：{}。为避免混用复权基准，需要重拉全市场历史区间。",
-                missing_dates.len(),
-                missing_dates
-                    .iter()
-                    .take(12)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join("、")
-            ),
-            ts_code: None,
-            stock_name: None,
-            start_date: first.clone(),
-            end_date: end.clone(),
-            repair_action: Some("market".to_string()),
-            blocks_derived: true,
-        });
-    }
-    report
-        .checks
-        .push("全市场交易日缺口（不将单股停牌判为缺失）".to_string());
-    if last
-        .as_ref()
-        .zip(target.as_ref())
-        .is_some_and(|(last, target)| last < target)
-    {
-        report.issues.push(DatabaseIssue {
-            id: "source-stale".to_string(),
-            database: "stock_data.db".to_string(),
-            severity: "warning".to_string(),
-            title: "行情尚未更新到当前有效交易日".to_string(),
-            detail: format!(
-                "当前最新 {}，目标 {}。",
-                last.as_deref().unwrap_or("无"),
-                target.as_deref().unwrap_or("无")
-            ),
-            ts_code: None,
-            stock_name: None,
-            start_date: first.clone(),
-            end_date: end.clone(),
-            repair_action: Some("update".to_string()),
-            blocks_derived: false,
-        });
-    }
+    report.checks.push(DatabaseCheck {
+        id: "truncated".to_string(),
+        title: "行情历史".to_string(),
+        status: "passed".to_string(),
+        summary: format!("{} 只股票", report.stock_count),
+    });
     let links = match load_qfq_price_link_issues(&source) {
         Ok(links) => links,
         Err(error) => {
+            eprintln!("复权衔接检查未完成：{error}");
             report.issues.push(DatabaseIssue {
                 id: "price-link-unavailable".to_string(),
+                check_id: "price-link".to_string(),
                 database: "stock_data.db".to_string(),
                 severity: "error".to_string(),
                 title: "复权衔接检查未完成".to_string(),
-                detail: error,
+                comparisons: vec![DatabaseComparison {
+                    label: "检查状态".to_string(),
+                    expected: "完成".to_string(),
+                    actual: "未完成".to_string(),
+                }],
                 ts_code: None,
                 stock_name: None,
                 start_date: None,
@@ -344,25 +184,34 @@ pub fn check_databases(source_path: &str) -> Result<DatabaseCheckReport, String>
             Vec::new()
         }
     };
-    for (code, date, count) in links {
+    for link in links {
+        let code = link.ts_code;
         let mut issue = stock_issue(
             &code,
             &names,
             "price-link",
             "复权衔接待核验",
-            &format!(
-                "近 60 个交易日有 {count} 处前收盘与上一条收盘不一致，最早 {date}。停牌或上游修订也可能造成此现象，重拉后再检查。"
-            ),
+            link.samples
+                .into_iter()
+                .map(|(date, expected, actual)| DatabaseComparison {
+                    label: format!("{date} 前收盘"),
+                    expected: format!("{expected:.4}"),
+                    actual: format!("{actual:.4}"),
+                })
+                .collect(),
             first.clone(),
             end.clone(),
         );
         issue.severity = "warning".to_string();
+        issue.blocks_derived = false;
         report.issues.push(issue);
     }
-    report
-        .checks
-        .push("最近 60 个交易日复权价格衔接".to_string());
-    let dirty = load_pending_derived_rebuilds(&source)?;
+    report.checks.push(DatabaseCheck {
+        id: "price-link".to_string(),
+        title: "复权价格衔接".to_string(),
+        status: "passed".to_string(),
+        summary: "最近 60 个交易日".to_string(),
+    });
     for code in INDEX_TS_CODES {
         let range: (Option<String>, Option<String>) = source.query_row("SELECT MIN(trade_date), MAX(trade_date) FROM stock_data WHERE adj_type='ind' AND ts_code=?", [code], |row| Ok((row.get(0)?, row.get(1)?))).map_err(|e| e.to_string())?;
         let mut stmt = source
@@ -375,28 +224,52 @@ pub fn check_databases(source_path: &str) -> Result<DatabaseCheckReport, String>
             .map_err(|e| e.to_string())?
             .collect::<Result<HashSet<_>, _>>()
             .map_err(|e| e.to_string())?;
-        let gap = calendar.iter().any(|date| {
-            range.0.as_ref().is_some_and(|first| date >= first)
-                && last.as_ref().is_some_and(|last| date <= last)
-                && !saved.contains(date)
-        });
+        let missing_dates = calendar
+            .iter()
+            .filter(|date| {
+                let date = *date;
+                range.0.as_ref().is_some_and(|first| date >= first)
+                    && last.as_ref().is_some_and(|last| date <= last)
+                    && !saved.contains(date)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         if range.1.is_none()
             || range
                 .1
                 .as_ref()
                 .zip(last.as_ref())
                 .is_some_and(|(index, source)| index < source)
-            || gap
+            || !missing_dates.is_empty()
         {
+            let mut comparisons = Vec::new();
+            if range.1.is_none()
+                || range
+                    .1
+                    .as_ref()
+                    .zip(last.as_ref())
+                    .is_some_and(|(index, source)| index < source)
+            {
+                comparisons.push(DatabaseComparison {
+                    label: "最新日期".to_string(),
+                    expected: last.clone().unwrap_or_else(|| "无".to_string()),
+                    actual: range.1.clone().unwrap_or_else(|| "无".to_string()),
+                });
+            }
+            if !missing_dates.is_empty() {
+                comparisons.push(DatabaseComparison {
+                    label: "缺失交易日".to_string(),
+                    expected: "0 天".to_string(),
+                    actual: format!("{} 天（{}）", missing_dates.len(), missing_dates.join("、")),
+                });
+            }
             report.issues.push(DatabaseIssue {
                 id: format!("index:{code}"),
+                check_id: "index".to_string(),
                 database: "stock_data.db / ind".to_string(),
                 severity: "warning".to_string(),
                 title: "指数行情缺失或落后".to_string(),
-                detail: format!(
-                    "指数最新日期 {}；将按该指数重拉保存区间，避免被其他指数的最大日期掩盖。",
-                    range.1.as_deref().unwrap_or("无")
-                ),
+                comparisons,
                 ts_code: Some(code.to_string()),
                 stock_name: None,
                 start_date: first.clone(),
@@ -406,12 +279,14 @@ pub fn check_databases(source_path: &str) -> Result<DatabaseCheckReport, String>
             });
         }
     }
-    report
-        .checks
-        .push("7 个内置指数分别检查日期和缺口".to_string());
-    // 旧库没有补救记录时，派生库中的更早历史仍是原始历史被截短的证据。
+    report.checks.push(DatabaseCheck {
+        id: "index".to_string(),
+        title: "指数日期与缺口".to_string(),
+        status: "passed".to_string(),
+        summary: format!("{} 个指数", INDEX_TS_CODES.len()),
+    });
     for (file, table, component, label) in [
-        ("scoring_result.db", "score_summary", "ranking", "评分/排名"),
+        ("scoring_result.db", "score_summary", "ranking", "评分"),
         (
             "concept_performance.db",
             "concept_performance",
@@ -427,24 +302,21 @@ pub fn check_databases(source_path: &str) -> Result<DatabaseCheckReport, String>
             "走势相似度",
         ),
     ] {
+        let mut check = DatabaseCheck {
+            id: component.to_string(),
+            title: format!("{label}抽样重算"),
+            status: "skipped".to_string(),
+            summary: "数据库未生成".to_string(),
+        };
+        if component == "chip" {
+            check.title = label.to_string();
+            check.summary = "未启用校验".to_string();
+            report.checks.push(check);
+            continue;
+        }
         let path = Path::new(source_path).join(file);
         if !path.exists() {
-            report.checks.push(format!("{label}：尚未生成"));
-            if let Some(required) = dirty.iter().find(|item| item.component == component) {
-                report.issues.push(DatabaseIssue {
-                    id: format!("derived:{component}"),
-                    database: file.to_string(),
-                    severity: "warning".to_string(),
-                    title: format!("{label}需要生成"),
-                    detail: "行情修复已完成，需要生成相应后续结果。".to_string(),
-                    ts_code: None,
-                    stock_name: None,
-                    start_date: Some(required.start_date.clone()),
-                    end_date: Some(required.end_date.clone()),
-                    repair_action: Some(component.to_string()),
-                    blocks_derived: false,
-                });
-            }
+            report.checks.push(check);
             continue;
         }
         let inspected = (|| -> Result<(), String> {
@@ -457,129 +329,99 @@ pub fn check_databases(source_path: &str) -> Result<DatabaseCheckReport, String>
                 )
                 .map_err(|e| e.to_string())?;
             if !exists {
-                report.checks.push(format!("{label}：尚未生成数据表"));
-                if let Some(required) = dirty.iter().find(|item| item.component == component) {
-                    report.issues.push(DatabaseIssue {
-                        id: format!("derived:{component}"),
-                        database: file.to_string(),
-                        severity: "warning".to_string(),
-                        title: format!("{label}需要生成"),
-                        detail: "行情修复已完成，需要生成相应后续结果。".to_string(),
-                        ts_code: None,
-                        stock_name: None,
-                        start_date: Some(required.start_date.clone()),
-                        end_date: Some(required.end_date.clone()),
-                        repair_action: Some(component.to_string()),
-                        blocks_derived: false,
-                    });
-                }
+                check.summary = "结果表未生成".to_string();
                 return Ok(());
             }
-            let latest: Option<String> = conn
-                .query_row(&format!("SELECT MAX(trade_date) FROM {table}"), [], |row| {
-                    row.get(0)
-                })
+            let samples = conn
+                .prepare(&format!(
+                    "SELECT DISTINCT trade_date FROM {table} ORDER BY trade_date"
+                ))
+                .map_err(|e| e.to_string())?
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
                 .map_err(|e| e.to_string())?;
-            report.checks.push(format!(
-                "{label}可读性与日期：{}",
-                latest.as_deref().unwrap_or("空")
-            ));
-            if component != "concept" && component != "similarity" {
-                let mut stmt = conn
-                    .prepare(&format!(
-                        "SELECT ts_code, MIN(trade_date) FROM {table} GROUP BY ts_code"
-                    ))
-                    .map_err(|e| e.to_string())?;
-                let earlier = stmt
-                    .query_map([], |row| {
-                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                    })
-                    .map_err(|e| e.to_string())?
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|e| e.to_string())?;
-                for (code, history) in earlier {
-                    if ranges
-                        .get(&code)
-                        .is_some_and(|(first, _, _)| first > &history)
-                        && names.contains_key(&code)
+            if samples.is_empty() {
+                check.summary = "暂无结果数据".to_string();
+                return Ok(());
+            }
+            let dates = [
+                samples[0].clone(),
+                samples[samples.len() / 2].clone(),
+                samples[samples.len() - 1].clone(),
+            ]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+            let mut compared = 0;
+            let mut differences = Vec::new();
+            let mut failures = Vec::new();
+            for date in &dates {
+                let values = match super::integrity_samples::recompute_samples(
+                    source_path,
+                    &conn,
+                    component,
+                    date,
+                ) {
+                    Ok(values) => values,
+                    Err(error) => {
+                        eprintln!("{label} {date} 抽样未完成：{error}");
+                        failures.push(DatabaseComparison {
+                            label: format!("{date} 检查状态"),
+                            expected: "完成".to_string(),
+                            actual: "未完成".to_string(),
+                        });
+                        continue;
+                    }
+                };
+                for (key, saved, computed) in values {
+                    compared += 1;
+                    if !saved.is_finite()
+                        || !computed.is_finite()
+                        || (saved - computed).abs() > 1e-6_f64.max(computed.abs() * 1e-8)
                     {
-                        let id = format!("truncated:{code}");
-                        if !report.issues.iter().any(|issue| {
-                            issue.id == id || issue.id == format!("unfinished-stock:{code}")
-                        }) {
-                            report.issues.push(stock_issue(
-                                &code,
-                                &names,
-                                "truncated",
-                                "派生库证明原始历史被截短",
-                                &format!(
-                                    "{label}保留 {history} 的历史，而当前行情从 {} 才开始。",
-                                    ranges[&code].0
-                                ),
-                                first
-                                    .clone()
-                                    .map(|first| first.min(history.clone()))
-                                    .or(Some(history)),
-                                end.clone(),
-                            ));
-                        }
+                        differences.push(DatabaseComparison {
+                            label: format!("{date} {key}"),
+                            expected: computed.to_string(),
+                            actual: saved.to_string(),
+                        });
                     }
                 }
             }
-            let needs_rebuild = dirty.iter().find(|item| item.component == component);
-            let chip_pending = if component == "chip" || component == "legacy-chip" {
-                crate::data::download_state::load_pending_chip_repairs_for_model(
-                    &source,
-                    if component == "chip" {
-                        "chen"
-                    } else {
-                        "legacy"
-                    },
-                )?
+            check.status = if failures.is_empty() {
+                "passed"
             } else {
-                Vec::new()
-            };
-            let pending_chips = !chip_pending.is_empty();
-            let raw_problem = report.issues.iter().any(|issue| issue.blocks_derived);
-            let stale = latest
-                .as_ref()
-                .zip(last.as_ref())
-                .is_some_and(|(derived, source)| derived < source);
-            if needs_rebuild.is_some() || pending_chips || raw_problem || stale || latest.is_none()
-            {
-                let detail = if let Some(required) = needs_rebuild {
-                    format!(
-                        "原始行情已改变，需重算 {} 至 {}。即使最大日期相同，旧结果仍不能视为已修复。",
-                        required.start_date, required.end_date
-                    )
-                } else if pending_chips {
-                    format!(
-                        "{} 只股票有筹码待修复记录，先修复原始行情，再局部重建筹码及维护其余增量。",
-                        chip_pending.len()
-                    )
-                } else if raw_problem {
-                    "原始行情尚有异常，当前结果不能认证；原始行情修复后再重建。".to_string()
-                } else {
-                    format!(
-                        "当前最新 {}，行情最新 {}，需补算或重建。",
-                        latest.as_deref().unwrap_or("无"),
-                        last.as_deref().unwrap_or("无")
-                    )
-                };
+                "incomplete"
+            }
+            .to_string();
+            check.summary = format!("{} 个日期 · {compared} 个数值", dates.len());
+            if !failures.is_empty() {
                 report.issues.push(DatabaseIssue {
-                    id: format!("derived:{component}"),
+                    id: format!("sample-unavailable:{component}"),
+                    check_id: component.to_string(),
                     database: file.to_string(),
                     severity: "warning".to_string(),
-                    title: format!("{label}需要修复或更新"),
-                    detail,
+                    title: format!("{label}部分抽样未完成"),
+                    comparisons: failures,
                     ts_code: None,
                     stock_name: None,
-                    start_date: first
-                        .clone()
-                        .into_iter()
-                        .chain(needs_rebuild.map(|item| item.start_date.clone()))
-                        .min(),
-                    end_date: last.clone(),
+                    start_date: None,
+                    end_date: None,
+                    repair_action: None,
+                    blocks_derived: false,
+                });
+            }
+            if !differences.is_empty() {
+                report.issues.push(DatabaseIssue {
+                    id: format!("derived:{component}"),
+                    check_id: component.to_string(),
+                    database: file.to_string(),
+                    severity: "warning".to_string(),
+                    title: format!("{label}抽样重算结果不一致"),
+                    comparisons: differences,
+                    ts_code: None,
+                    stock_name: None,
+                    start_date: samples.first().cloned(),
+                    end_date: samples.last().cloned(),
                     repair_action: Some(component.to_string()),
                     blocks_derived: false,
                 });
@@ -587,12 +429,20 @@ pub fn check_databases(source_path: &str) -> Result<DatabaseCheckReport, String>
             Ok(())
         })();
         if let Err(error) = inspected {
+            eprintln!("{label}抽样未完成：{error}");
+            check.status = "incomplete".to_string();
+            check.summary = "未完成抽样".to_string();
             report.issues.push(DatabaseIssue {
-                id: format!("unreadable:{component}"),
+                id: format!("sample-unavailable:{component}"),
+                check_id: component.to_string(),
                 database: file.to_string(),
-                severity: "error".to_string(),
-                title: format!("{label}检查失败"),
-                detail: format!("{error}；停止其他任务后重试，损坏文件应从备份恢复。"),
+                severity: "warning".to_string(),
+                title: format!("{label}抽样未完成"),
+                comparisons: vec![DatabaseComparison {
+                    label: "检查状态".to_string(),
+                    expected: "完成".to_string(),
+                    actual: "未完成".to_string(),
+                }],
                 ts_code: None,
                 stock_name: None,
                 start_date: None,
@@ -600,6 +450,29 @@ pub fn check_databases(source_path: &str) -> Result<DatabaseCheckReport, String>
                 repair_action: None,
                 blocks_derived: false,
             });
+        }
+        report.checks.push(check);
+    }
+    for check in &mut report.checks {
+        let issues = report
+            .issues
+            .iter()
+            .filter(|issue| issue.check_id == check.id)
+            .collect::<Vec<_>>();
+        if check.status == "passed" && !issues.is_empty() {
+            check.status = if issues.iter().any(|issue| issue.blocks_derived) {
+                "error"
+            } else {
+                "warning"
+            }
+            .to_string();
+        }
+        if check.id == "price-link"
+            && issues
+                .iter()
+                .any(|issue| issue.id == "price-link-unavailable")
+        {
+            check.status = "incomplete".to_string();
         }
     }
     report.source_ready =
@@ -629,16 +502,17 @@ fn stock_issue(
     names: &HashMap<String, String>,
     kind: &str,
     title: &str,
-    detail: &str,
+    comparisons: Vec<DatabaseComparison>,
     start_date: Option<String>,
     end_date: Option<String>,
 ) -> DatabaseIssue {
     DatabaseIssue {
         id: format!("{kind}:{code}"),
+        check_id: kind.to_string(),
         database: "stock_data.db / qfq".to_string(),
         severity: "error".to_string(),
         title: title.to_string(),
-        detail: detail.to_string(),
+        comparisons,
         ts_code: Some(code.to_string()),
         stock_name: names.get(code).cloned(),
         start_date,
@@ -922,13 +796,9 @@ pub fn repair_database_issues(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::download_state::{
-        clear_completed_chip_repairs, clear_pending_derived_rebuild,
-        load_pending_chip_repairs_for_model, mark_derived_rebuild_required,
-    };
 
     #[test]
-    fn database_check_preserves_files_and_tracks_repairs_without_trusting_latest_dates() {
+    fn database_check_uses_listing_dates_and_keeps_price_links_advisory() {
         let directory = std::env::temp_dir().join(format!(
             "lianghua-integrity-{}",
             std::time::SystemTime::now()
@@ -938,10 +808,10 @@ mod tests {
         ));
         std::fs::create_dir_all(&directory).unwrap();
         let path = directory.to_str().unwrap();
-        std::fs::write(directory.join("stock_list.csv"), "ts_code,symbol,name,area,industry,list_date\n000001.SZ,1,A,,,20000101\n000002.SZ,2,B,,,20000101\n000003.SZ,3,C,,,20990101\n000004.SZ,4,D,,,20000101\n").unwrap();
+        std::fs::write(directory.join("stock_list.csv"), "ts_code,symbol,name,area,industry,list_date\n689009.SH,689009,九号公司,,,20201029\n000002.SZ,2,B,,,20000101\n000003.SZ,3,C,,,20201029\n").unwrap();
         std::fs::write(
             directory.join("trade_calendar.csv"),
-            "cal_date\n20260102\n20260105\n20260106\n",
+            "cal_date\n20201029\n20260806\n20260807\n",
         )
         .unwrap();
         crate::data::download_data::init_stock_data_db(
@@ -949,91 +819,137 @@ mod tests {
         )
         .unwrap();
         let source = Connection::open(directory.join("stock_data.db")).unwrap();
-        source.execute_batch("INSERT INTO stock_data(ts_code, trade_date, adj_type, open, high, low, close, pre_close, vol, amount) VALUES
-            ('000001.SZ','20260102','qfq',10,10,10,10,10,10,100), ('000001.SZ','20260105','qfq',10,10,10,10,10,10,100), ('000001.SZ','20260106','qfq',10,10,10,10,10,10,100),
-            ('000002.SZ','20260105','qfq',10,10,10,10,10,10,100), ('000002.SZ','20260106','qfq',10,10,10,10,10,10,100),
-            ('000004.SZ','20260102','qfq',10,10,10,10,10,10,100)").unwrap();
-        source
-            .execute_batch("UPDATE stock_data SET change=0, pct_chg=0")
-            .unwrap();
+        source.execute_batch("INSERT INTO stock_data(ts_code, trade_date, adj_type, close, pre_close) VALUES ('689009.SH','20201029','qfq',41.36,41.36), ('689009.SH','20260806','qfq',41.36,41.36), ('689009.SH','20260807','qfq',40.09,41.38), ('000002.SZ','20260806','qfq',10,10)").unwrap();
         drop(source);
-        let derived = Connection::open(directory.join("scoring_result.db")).unwrap();
-        derived.execute_batch("CREATE TABLE score_summary(ts_code VARCHAR, trade_date VARCHAR); INSERT INTO score_summary VALUES ('000002.SZ','20260102'), ('000002.SZ','20260106')").unwrap();
-        drop(derived);
+        // 已有但不可读取的新筹码库也不进入校验。
+        std::fs::write(directory.join("cyq_chen.db"), b"not a database").unwrap();
         let before = std::fs::read(directory.join("stock_data.db")).unwrap();
+        let report = check_databases(path).unwrap();
+        assert!(report.source_ready);
+        crate::data::download_state::ensure_stock_data_ready_for_derived(path).unwrap();
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|check| check.id == "chip" && check.status == "skipped")
+        );
+        assert!(!report.issues.iter().any(|issue| issue.check_id == "chip"));
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.id == "truncated:000002.SZ"
+                    && issue.start_date.as_deref() == Some("20201029")
+                    && issue.check_id == "truncated"
+                    && issue.comparisons[0].expected == "20201029"
+                    && issue.comparisons[0].actual == "20260806"
+                    && !issue.blocks_derived)
+        );
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.id == "price-link:689009.SH"
+                    && !issue.blocks_derived
+                    && issue.comparisons.len() == 1
+                    && issue.comparisons[0].expected == "41.3600"
+                    && issue.comparisons[0].actual == "41.3800")
+        );
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|check| check.id == "truncated" && check.status == "warning")
+        );
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|check| check.id == "price-link" && check.status == "warning")
+        );
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|check| check.id == "concept" && check.status == "skipped")
+        );
+        assert!(
+            !report
+                .issues
+                .iter()
+                .any(|issue| issue.id == "truncated:689009.SH"
+                    || issue.ts_code.as_deref() == Some("000003.SZ")
+                    || issue.id.starts_with("invalid-bars")
+                    || issue.id == "market-gaps")
+        );
+        assert_eq!(
+            before,
+            std::fs::read(directory.join("stock_data.db")).unwrap()
+        );
+        let source = Connection::open(directory.join("stock_data.db")).unwrap();
+        source.execute_batch("INSERT INTO stock_data(ts_code, trade_date, adj_type, close, pre_close) VALUES ('000002.SZ','20201029','qfq',10,10)").unwrap();
+        drop(source);
+        assert!(check_databases(path).unwrap().source_ready);
+        crate::data::download_state::ensure_stock_data_ready_for_derived(path).unwrap();
+        let source = Connection::open(directory.join("stock_data.db")).unwrap();
+        source.execute_batch("CREATE TABLE pending_stock_repair(ts_code VARCHAR PRIMARY KEY, start_date VARCHAR, end_date VARCHAR); INSERT INTO pending_stock_repair VALUES ('000002.SZ','20201029','20260807')").unwrap();
+        drop(source);
         let report = check_databases(path).unwrap();
         assert!(!report.source_ready);
         assert!(
             report
                 .issues
                 .iter()
-                .any(|issue| issue.ts_code.as_deref() == Some("000002.SZ") && issue.blocks_derived)
+                .any(|issue| issue.id == "pending-stock:000002.SZ" && issue.blocks_derived)
         );
-        assert!(
-            !report
-                .issues
-                .iter()
-                .any(|issue| issue.ts_code.as_deref() == Some("000003.SZ")
-                    || issue.ts_code.as_deref() == Some("000004.SZ"))
-        );
-        assert_eq!(
-            before,
-            std::fs::read(directory.join("stock_data.db")).unwrap()
-        );
-        assert!(!directory.join("cyq.db").exists());
+        assert!(crate::data::download_state::ensure_stock_data_ready_for_derived(path).is_err());
         let source = Connection::open(directory.join("stock_data.db")).unwrap();
-        source.execute_batch("INSERT INTO stock_data(ts_code, trade_date, adj_type, open, high, low, close, pre_close, vol, amount) VALUES ('000002.SZ','20260102','qfq',10,10,10,10,10,10,100)").unwrap();
-        mark_derived_rebuild_required(&source, "20260102", "20260106").unwrap();
         source
-            .execute_batch("UPDATE stock_data SET change=0, pct_chg=0")
+            .execute_batch("DELETE FROM pending_stock_repair")
             .unwrap();
         drop(source);
-        let report = check_databases(path).unwrap();
-        assert!(report.source_ready);
-        assert!(
-            report
-                .issues
-                .iter()
-                .any(|issue| issue.id == "derived:ranking")
-        );
-        clear_pending_derived_rebuild(path, "ranking", "20260106", "20260106").unwrap();
-        assert!(
-            check_databases(path)
-                .unwrap()
-                .issues
-                .iter()
-                .any(|issue| issue.id == "derived:ranking")
-        );
-        clear_pending_derived_rebuild(path, "ranking", "20260102", "20260106").unwrap();
+        // 首次检查不改变文件，也不创建未生成的可选库。
+        std::fs::write(directory.join("stock_list.csv"), "ts_code,symbol,name,area,industry,list_date,trade_date,total_share,float_share,total_mv\n689009.SH,689009,九号公司,,X,20201029,20260807,1,1,100\n000002.SZ,2,B,,X,20201029,20260807,1,1,100\n").unwrap();
+        let source = Connection::open(directory.join("stock_data.db")).unwrap();
+        source
+            .execute_batch("UPDATE stock_data SET pct_chg=2")
+            .unwrap();
+        drop(source);
+        let derived = Connection::open(directory.join("concept_performance.db")).unwrap();
+        derived.execute_batch("CREATE TABLE concept_performance(trade_date VARCHAR, performance_type VARCHAR, concept VARCHAR, performance_pct DOUBLE); INSERT INTO concept_performance VALUES ('20260806','industry','X',2)").unwrap();
+        drop(derived);
         assert!(
             !check_databases(path)
                 .unwrap()
                 .issues
                 .iter()
-                .any(|issue| issue.id == "derived:ranking")
+                .any(|issue| issue.id == "derived:concept"
+                    || issue.id == "sample-unavailable:concept")
         );
-        let source = Connection::open(directory.join("stock_data.db")).unwrap();
-        source.execute_batch("CREATE TABLE pending_chip_repair(ts_code VARCHAR PRIMARY KEY); INSERT INTO pending_chip_repair VALUES ('000002.SZ')").unwrap();
-        // 两种筹码库的完成状态独立，修复一种不能吞掉另一种的断点。
-        std::fs::write(directory.join("cyq.db"), []).unwrap();
-        std::fs::write(directory.join("cyq_chen.db"), []).unwrap();
-        clear_completed_chip_repairs(&source, path, "chen", &["000002.SZ".to_string()]).unwrap();
-        assert!(
-            load_pending_chip_repairs_for_model(&source, "chen")
-                .unwrap()
-                .is_empty()
+        let derived = Connection::open(directory.join("concept_performance.db")).unwrap();
+        derived
+            .execute_batch("UPDATE concept_performance SET performance_pct=999")
+            .unwrap();
+        drop(derived);
+        assert!(check_databases(path).unwrap().issues.iter().any(|issue| {
+            issue.id == "derived:concept"
+                && issue
+                    .comparisons
+                    .iter()
+                    .any(|comparison| comparison.expected == "2" && comparison.actual == "999")
+        }));
+        let derived_before = std::fs::read(directory.join("concept_performance.db")).unwrap();
+        let before = std::fs::read(directory.join("stock_data.db")).unwrap();
+        check_databases(path).unwrap();
+        assert_eq!(
+            before,
+            std::fs::read(directory.join("stock_data.db")).unwrap()
         );
         assert_eq!(
-            load_pending_chip_repairs_for_model(&source, "legacy").unwrap(),
-            vec!["000002.SZ"]
+            derived_before,
+            std::fs::read(directory.join("concept_performance.db")).unwrap()
         );
-        clear_completed_chip_repairs(&source, path, "legacy", &["000002.SZ".to_string()]).unwrap();
-        assert!(
-            load_pending_chip_repairs_for_model(&source, "legacy")
-                .unwrap()
-                .is_empty()
-        );
-        drop(source);
+        assert!(!directory.join("cyq.db").exists());
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

@@ -398,13 +398,9 @@ impl DataReader {
         required_runtime_keys: Option<&HashSet<String>>,
         conn: Option<Connection>,
     ) -> Result<Self, String> {
-        let source_db = source_db_path(source_dir);
-        let source_db_str = source_db
-            .to_str()
-            .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
         let conn = match conn {
             Some(conn) => conn,
-            None => Connection::open(source_db_str).map_err(|e| format!("数据库连接错误:{e}"))?,
+            None => download_state::open_source_db_readonly(source_dir)?,
         };
 
         let mut sql_to_colsname = conn

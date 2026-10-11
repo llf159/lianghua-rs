@@ -285,10 +285,11 @@ export async function listenDataDownloadProgress(
 
 export type DatabaseIssue = {
   id: string
+  checkId: string
   database: string
   severity: 'error' | 'warning' | 'info'
   title: string
-  detail: string
+  comparisons: Array<{ label: string; expected: string; actual: string }>
   tsCode: string | null
   stockName: string | null
   startDate: string | null
@@ -304,7 +305,12 @@ export type DatabaseCheckReport = {
   targetTradeDate: string | null
   stockCount: number
   rowCount: number
-  checks: string[]
+  checks: Array<{
+    id: string
+    title: string
+    status: 'passed' | 'warning' | 'error' | 'incomplete' | 'skipped'
+    summary: string
+  }>
   issues: DatabaseIssue[]
   limitations: string[]
 }

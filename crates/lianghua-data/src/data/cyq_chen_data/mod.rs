@@ -1,4 +1,5 @@
 mod compute;
+pub use compute::{compute_cyq_chen_stock_group_batch, resolve_cyq_chen_load_start_date};
 mod maintain;
 mod store;
 #[cfg(test)]
@@ -43,13 +44,13 @@ pub struct CyqChenStrategyMaintenanceStatus {
 }
 
 #[derive(Debug)]
-pub(super) struct ComputedCyqChenStock {
-    ts_code: String,
-    snapshots: Vec<ChenChipSnapshot>,
+pub struct ComputedCyqChenStock {
+    pub ts_code: String,
+    pub snapshots: Vec<ChenChipSnapshot>,
     feature_state: Option<crate::data::cyq_chen::ChenChipFeatureState>,
 }
 
-pub(super) struct CyqChenInitialState {
+pub struct CyqChenInitialState {
     state_trade_date: String,
     feature_state: crate::data::cyq_chen::ChenChipFeatureState,
     bins: Vec<ChenChipBin>,
@@ -57,8 +58,8 @@ pub(super) struct CyqChenInitialState {
 }
 
 #[derive(Debug, Default)]
-pub(super) struct CyqChenWriteBatch {
-    stocks: Vec<ComputedCyqChenStock>,
+pub struct CyqChenWriteBatch {
+    pub stocks: Vec<ComputedCyqChenStock>,
 }
 
 #[derive(Debug)]

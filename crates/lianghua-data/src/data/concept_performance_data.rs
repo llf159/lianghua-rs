@@ -127,6 +127,63 @@ pub fn rebuild_concept_performance_range(
         ));
     }
 
+    let bx_rows = compute_concept_performance_range(source_dir, start_date, end_date)?;
+
+    let bx_db = concept_performance_db_path(source_dir);
+    init_concept_performance_db(&bx_db)?;
+    (|db_path: &Path,
+      start_date: &str,
+      end_date: &str,
+      bx_rows: &[GdNmBXRow]|
+     -> Result<(), String> {
+        let mut conn = Connection::open(db_path).map_err(|e| format!("打开概念表现库失败:{e}"))?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("创建概念表现事务失败:{e}"))?;
+        tx.execute(
+            "DELETE FROM concept_performance WHERE trade_date >= ? AND trade_date <= ?",
+            params![start_date, end_date],
+        )
+        .map_err(|e| format!("删除概念表现旧数据失败:{e}"))?;
+
+        if !bx_rows.is_empty() {
+            let mut app = tx
+                .appender("concept_performance")
+                .map_err(|e| format!("创建concept_performance写入器失败:{e}"))?;
+            for row in bx_rows {
+                app.append_row(params![
+                    &row.trade_date,
+                    &row.performance_type,
+                    &row.concept,
+                    row.performance_pct
+                ])
+                .map_err(|e| {
+                    format!(
+                        "写入概念表现失败, trade_date={}, performance_type={}, concept={}: {e}",
+                        row.trade_date, row.performance_type, row.concept
+                    )
+                })?;
+            }
+            app.flush()
+                .map_err(|e| format!("刷新concept_performance写入器失败:{e}"))?;
+        }
+
+        tx.commit()
+            .map_err(|e| format!("提交概念表现事务失败:{e}"))?;
+        Ok(())
+    })(&bx_db, start_date, end_date, &bx_rows)?;
+    crate::data::download_state::clear_pending_derived_rebuild(
+        source_dir, "concept", start_date, end_date,
+    )?;
+    Ok(bx_rows.len())
+}
+
+// 与持久化入口共用计算过程，检查只重算，不写结果或清除待重算记录。
+pub fn compute_concept_performance_range(
+    source_dir: &str,
+    start_date: &str,
+    end_date: &str,
+) -> Result<Vec<GdNmBXRow>, String> {
     let concept_map =
         (|source_dir: &str| -> Result<Option<HashMap<String, Vec<String>>>, String> {
             let rows = match load_ths_concepts_list(source_dir) {
@@ -190,7 +247,7 @@ pub fn rebuild_concept_performance_range(
         Ok(industry_map)
     })(source_dir)?;
 
-    let market_conn = Connection::open(source_db_path(source_dir)).map_err(|e| e.to_string())?;
+    let market_conn = crate::data::download_state::open_source_db_readonly(source_dir)?;
     let uivi_map = crate::data::extras::load_estimated_market_cap_per_price_map(
         &market_conn,
         source_dir,
@@ -219,53 +276,7 @@ pub fn rebuild_concept_performance_range(
         )?);
     }
 
-    let bx_db = concept_performance_db_path(source_dir);
-    init_concept_performance_db(&bx_db)?;
-    (|db_path: &Path,
-      start_date: &str,
-      end_date: &str,
-      bx_rows: &[GdNmBXRow]|
-     -> Result<(), String> {
-        let mut conn = Connection::open(db_path).map_err(|e| format!("打开概念表现库失败:{e}"))?;
-        let tx = conn
-            .transaction()
-            .map_err(|e| format!("创建概念表现事务失败:{e}"))?;
-        tx.execute(
-            "DELETE FROM concept_performance WHERE trade_date >= ? AND trade_date <= ?",
-            params![start_date, end_date],
-        )
-        .map_err(|e| format!("删除概念表现旧数据失败:{e}"))?;
-
-        if !bx_rows.is_empty() {
-            let mut app = tx
-                .appender("concept_performance")
-                .map_err(|e| format!("创建concept_performance写入器失败:{e}"))?;
-            for row in bx_rows {
-                app.append_row(params![
-                    &row.trade_date,
-                    &row.performance_type,
-                    &row.concept,
-                    row.performance_pct
-                ])
-                .map_err(|e| {
-                    format!(
-                        "写入概念表现失败, trade_date={}, performance_type={}, concept={}: {e}",
-                        row.trade_date, row.performance_type, row.concept
-                    )
-                })?;
-            }
-            app.flush()
-                .map_err(|e| format!("刷新concept_performance写入器失败:{e}"))?;
-        }
-
-        tx.commit()
-            .map_err(|e| format!("提交概念表现事务失败:{e}"))?;
-        Ok(())
-    })(&bx_db, start_date, end_date, &bx_rows)?;
-    crate::data::download_state::clear_pending_derived_rebuild(
-        source_dir, "concept", start_date, end_date,
-    )?;
-    Ok(bx_rows.len())
+    Ok(bx_rows)
 }
 
 fn clear_concept_performance_all(db_path: &Path) -> Result<(), String> {
@@ -308,11 +319,7 @@ fn calc_gdnm_bx_rows(
         .par_iter()
         .map(|(chunk_start, chunk_end)| {
             (|source_dir : & str, start_date : & str, end_date : & str, performance_type : & str, gdnm_map : & HashMap < String , Vec < String > >, uivi_map : & HashMap < String , f64 >| -> Result < Vec < GdNmBXRow > , String > {
-    let source_db = source_db_path(source_dir);
-    let source_db_str = source_db
-        .to_str()
-        .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
-    let conn = Connection::open(source_db_str).map_err(|e| format!("打开原始库失败:{e}"))?;
+    let conn = crate::data::download_state::open_source_db_readonly(source_dir)?;
 
     let mut stmt = conn
         .prepare(
@@ -438,11 +445,7 @@ fn load_trade_dates_in_range(
     start_date: &str,
     end_date: &str,
 ) -> Result<Vec<String>, String> {
-    let source_db = source_db_path(source_dir);
-    let source_db_str = source_db
-        .to_str()
-        .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
-    let conn = Connection::open(source_db_str).map_err(|e| format!("打开原始库失败:{e}"))?;
+    let conn = crate::data::download_state::open_source_db_readonly(source_dir)?;
 
     let mut stmt = conn
         .prepare(

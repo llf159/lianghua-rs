@@ -194,15 +194,60 @@ pub fn open_source_db_readonly(source_dir: &str) -> Result<Connection, String> {
         .map_err(|e| format!("打开行情库检查下载状态失败: {e}"))
 }
 
+pub fn load_listing_history_gaps(
+    source_dir: &str,
+    conn: &Connection,
+) -> Result<Vec<PendingStockRepair>, String> {
+    let mut stmt = conn.prepare("SELECT ts_code, MIN(trade_date), MAX(trade_date) FROM stock_data WHERE adj_type='qfq' GROUP BY ts_code")
+        .map_err(|e| format!("读取上市历史覆盖失败: {e}"))?;
+    let ranges = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                (row.get::<_, String>(1)?, row.get::<_, String>(2)?),
+            ))
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<HashMap<_, _>, _>>()
+        .map_err(|e| e.to_string())?;
+    let history_start = ranges
+        .values()
+        .map(|(first, _)| first)
+        .min()
+        .cloned()
+        .unwrap_or_default();
+    let mut gaps = Vec::new();
+    for stock in load_stock_list(source_dir)? {
+        let (Some(code), Some(listed)) = (stock.first(), stock.get(5)) else {
+            continue;
+        };
+        if chrono::NaiveDate::parse_from_str(listed, "%Y%m%d").is_err() {
+            continue;
+        }
+        let expected = listed.max(&history_start);
+        if let Some((first, last)) = ranges.get(code) {
+            if first > expected {
+                gaps.push(PendingStockRepair {
+                    ts_code: code.clone(),
+                    start_date: expected.clone(),
+                    end_date: last.clone(),
+                });
+            }
+        }
+    }
+    gaps.sort_by(|a, b| a.ts_code.cmp(&b.ts_code));
+    Ok(gaps)
+}
+
 pub fn ensure_stock_data_ready_for_derived(source_dir: &str) -> Result<(), String> {
     if !source_db_path(source_dir).exists() {
         return Err("原始行情库不存在，禁止计算后续数据库，请先下载行情。".to_string());
     }
     let conn = open_source_db_readonly(source_dir)?;
-    let pending = load_unfinished_stock_repairs(source_dir, &conn)?;
+    let pending = load_pending_stock_repairs(&conn)?;
     if !pending.is_empty() {
         return Err(format!(
-            "有 {} 只复权待补救股票存在未完成或被截短的历史（{}）。已禁止计算概念/行业表现、筹码和排名，请先执行缺失股票补全。",
+            "{} 只股票的行情修复尚未完成，禁止后续计算，请先完成行情修复（{}）。",
             pending.len(),
             pending
                 .iter()
@@ -212,50 +257,18 @@ pub fn ensure_stock_data_ready_for_derived(source_dir: &str) -> Result<(), Strin
                 .join("、")
         ));
     }
-    let table_exists: bool = conn
+    let has_rows: bool = conn
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name = 'stock_data')",
+            "SELECT EXISTS(SELECT 1 FROM stock_data WHERE adj_type='qfq')",
             [],
             |row| row.get(0),
         )
-        .map_err(|e| format!("检查行情表失败: {e}"))?;
-    if table_exists {
-        let missing = load_missing_stock_codes(source_dir, &conn)?;
-        if !missing.is_empty() {
-            return Err(format!(
-                "行情库有 {} 只完全缺失的股票（{}），可能是下载中断或首次下载未完成。已禁止后续计算，请先执行缺失股票补全。",
-                missing.len(),
-                missing
-                    .iter()
-                    .take(12)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join("、")
-            ));
-        }
+        .map_err(|e| format!("读取行情状态失败: {e}"))?;
+    if !has_rows {
+        return Err("原始行情库没有前复权数据，请先下载行情。".to_string());
     }
-    let duplicate = load_duplicate_stock_rows(&conn)?;
-    let missing_dates = load_missing_market_dates(source_dir, &conn)?;
-    if !duplicate.is_empty() || !missing_dates.is_empty() {
-        return Err(
-            "行情存在重复交易日或全市场日期缺口，禁止后续计算，请先在数据库检查面板修复。"
-                .to_string(),
-        );
-    }
-    let invalid = load_invalid_stock_rows(&conn)?;
-    let links = load_qfq_price_link_issues(&conn)?;
-    if !invalid.is_empty() || !links.is_empty() {
-        return Err(format!(
-            "行情存在无效数据或近期复权衔接待核验股票（{}），禁止后续计算，请在数据库检查面板针对性修复后复查。",
-            invalid
-                .iter()
-                .chain(links.iter())
-                .take(12)
-                .map(|(code, _, _)| code.as_str())
-                .collect::<Vec<_>>()
-                .join("、")
-        ));
-    }
+    // 起点偏晚可能来自停牌，pre_close 差异可能来自差异化分红，均不直接判为坏数据。
+
     Ok(())
 }
 
@@ -289,6 +302,49 @@ pub fn load_pending_derived_rebuilds(
     .map_err(|e| format!("查询后续库待重算记录失败: {e}"))?
     .collect::<Result<Vec<_>, _>>()
     .map_err(|e| format!("读取后续库待重算记录失败: {e}"))
+}
+
+// 新增日期待计算不代表旧结果失效；依赖门禁只拦截与已保存结果重叠的变更。
+pub fn pending_rebuild_affects_saved_results(
+    source_dir: &str,
+    component: &str,
+) -> Result<bool, String> {
+    let source = open_source_db_readonly(source_dir)?;
+    let pending = load_pending_derived_rebuilds(&source)?;
+    let Some(pending) = pending.iter().find(|item| item.component == component) else {
+        return Ok(false);
+    };
+    let table = match component {
+        "ranking" => "score_summary",
+        "similarity" => "strategy_trigger_similarity_rank",
+        _ => return Err(format!("不支持的结果依赖: {component}")),
+    };
+    let path = result_db_path(source_dir);
+    if !path.exists() {
+        return Ok(false);
+    }
+    let config = Config::default()
+        .access_mode(AccessMode::ReadOnly)
+        .map_err(|e| format!("配置结果依赖只读连接失败: {e}"))?;
+    let results =
+        Connection::open_with_flags(path, config).map_err(|e| format!("检查结果依赖失败: {e}"))?;
+    let exists: bool = results
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name=?)",
+            [table],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("检查结果依赖表失败: {e}"))?;
+    if !exists {
+        return Ok(false);
+    }
+    results
+        .query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE trade_date BETWEEN ? AND ?)"),
+            [&pending.start_date, &pending.end_date],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("检查已保存结果是否失效失败: {e}"))
 }
 
 pub fn mark_derived_rebuild_required(
@@ -328,6 +384,28 @@ pub fn clear_pending_derived_rebuild(
         .map_err(|e| format!("清除待重算记录时打开原始库失败: {e}"))?;
     conn.execute("DELETE FROM pending_derived_rebuild WHERE component = ? AND start_date >= ? AND end_date <= ?",
         duckdb::params![component, start_date, end_date]).map_err(|e| format!("清除后续库待重算记录失败: {e}"))?;
+    Ok(())
+}
+
+// 调用方须与行情写入共用事务，避免源数据与修复记账只提交一方。
+pub fn mark_chip_repairs_required(
+    conn: &Connection,
+    codes: &HashSet<String>,
+) -> Result<(), String> {
+    if codes.is_empty() {
+        return Ok(());
+    }
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS pending_chip_repair(ts_code VARCHAR PRIMARY KEY); CREATE TABLE IF NOT EXISTS completed_chip_repair(ts_code VARCHAR, model VARCHAR, PRIMARY KEY(ts_code, model))")
+        .map_err(|e| format!("创建筹码修复记录失败: {e}"))?;
+    for code in codes {
+        conn.execute(
+            "INSERT OR REPLACE INTO pending_chip_repair VALUES (?)",
+            [code],
+        )
+        .map_err(|e| format!("记录筹码待修复股票失败: {e}"))?;
+        conn.execute("DELETE FROM completed_chip_repair WHERE ts_code=?", [code])
+            .map_err(|e| format!("重置筹码修复状态失败: {e}"))?;
+    }
     Ok(())
 }
 
@@ -383,68 +461,41 @@ pub fn clear_completed_chip_repairs(
     result
 }
 
-pub fn load_invalid_stock_rows(conn: &Connection) -> Result<Vec<(String, String, u64)>, String> {
-    let has_prices: bool = conn.query_row("SELECT COUNT(*) = 9 FROM information_schema.columns WHERE table_name='stock_data' AND column_name IN ('open','high','low','close','pre_close','vol','amount','change','pct_chg')", [], |row| row.get(0)).map_err(|e| e.to_string())?;
-    if !has_prices {
-        return Err("行情表缺少必要的价格、涨跌幅或成交字段，禁止后续计算。".to_string());
-    }
-    let mut stmt = conn.prepare("SELECT ts_code, MIN(trade_date), COUNT(*) FROM stock_data WHERE adj_type='qfq' AND (try_strptime(trade_date, '%Y%m%d') IS NULL OR open IS NULL OR close IS NULL OR high IS NULL OR low IS NULL OR NOT isfinite(open) OR NOT isfinite(close) OR NOT isfinite(high) OR NOT isfinite(low) OR open <= 0 OR close <= 0 OR low <= 0 OR high < low OR high + 0.011 < greatest(open, close) OR low - 0.011 > least(open, close) OR change IS NULL OR NOT isfinite(change) OR pct_chg IS NULL OR NOT isfinite(pct_chg) OR pre_close IS NULL OR NOT isfinite(pre_close) OR vol IS NULL OR NOT isfinite(vol) OR amount IS NULL OR NOT isfinite(amount) OR vol < 0 OR amount < 0) GROUP BY ts_code").map_err(|e| format!("检查行情价格结构失败: {e}"))?;
-    stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-        .map_err(|e| e.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())
+pub struct QfqPriceLinkIssue {
+    pub ts_code: String,
+    pub samples: Vec<(String, f64, f64)>,
 }
 
-pub fn load_qfq_price_link_issues(conn: &Connection) -> Result<Vec<(String, String, u64)>, String> {
+pub fn load_qfq_price_link_issues(conn: &Connection) -> Result<Vec<QfqPriceLinkIssue>, String> {
     let has_prices: bool = conn.query_row("SELECT COUNT(*) > 0 FROM information_schema.columns WHERE table_name='stock_data' AND column_name='pre_close'", [], |row| row.get(0)).map_err(|e| e.to_string())?;
     if !has_prices {
         return Ok(Vec::new());
     }
-    let mut stmt = conn.prepare("WITH recent_dates AS (SELECT DISTINCT trade_date FROM stock_data WHERE adj_type='qfq' ORDER BY trade_date DESC LIMIT 61), recent AS (SELECT ts_code, trade_date, pre_close, LAG(close) OVER (PARTITION BY ts_code ORDER BY trade_date) AS previous_close FROM stock_data WHERE adj_type='qfq' AND trade_date >= (SELECT MIN(trade_date) FROM recent_dates)) SELECT ts_code, MIN(trade_date), COUNT(*) FROM recent WHERE previous_close IS NOT NULL AND ABS(pre_close - previous_close) > GREATEST(0.011, ABS(previous_close) * 0.0001) GROUP BY ts_code").map_err(|e| format!("检查复权衔接失败: {e}"))?;
-    stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-        .map_err(|e| e.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())
-}
-
-pub fn load_duplicate_stock_rows(conn: &Connection) -> Result<Vec<(String, String, u64)>, String> {
-    let has_key: bool = conn.query_row("SELECT COUNT(*) > 0 FROM duckdb_constraints() WHERE table_name='stock_data' AND constraint_type='PRIMARY KEY' AND array_length(constraint_column_names)=3 AND list_contains(constraint_column_names, 'ts_code') AND list_contains(constraint_column_names, 'trade_date') AND list_contains(constraint_column_names, 'adj_type')", [], |row| row.get(0)).map_err(|e| e.to_string())?;
-    if has_key {
-        return Ok(Vec::new());
-    }
-    let mut stmt = conn.prepare("SELECT ts_code, MIN(trade_date), COUNT(*) FROM (SELECT ts_code, trade_date FROM stock_data WHERE adj_type='qfq' GROUP BY ts_code, trade_date HAVING COUNT(*) > 1) GROUP BY ts_code").map_err(|e| e.to_string())?;
-    stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-        .map_err(|e| e.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())
-}
-
-pub fn load_missing_market_dates(
-    source_dir: &str,
-    conn: &Connection,
-) -> Result<Vec<String>, String> {
-    if !super::trade_calendar_path(source_dir).exists() {
-        return Ok(Vec::new());
-    }
-    let mut stmt = conn
-        .prepare(
-            "SELECT DISTINCT trade_date FROM stock_data WHERE adj_type='qfq' ORDER BY trade_date",
-        )
-        .map_err(|e| e.to_string())?;
-    let saved = stmt
-        .query_map([], |row| row.get::<_, String>(0))
-        .map_err(|e| e.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
-    let dates = saved.iter().collect::<HashSet<_>>();
-    Ok(super::load_trade_date_list(source_dir)?
-        .into_iter()
-        .filter(|date| {
-            saved.first().is_some_and(|first| date >= first)
-                && saved.last().is_some_and(|last| date <= last)
-                && !dates.contains(date)
+    let mut stmt = conn.prepare("WITH recent_dates AS (SELECT DISTINCT trade_date FROM stock_data WHERE adj_type='qfq' ORDER BY trade_date DESC LIMIT 61), recent AS (SELECT ts_code, trade_date, pre_close, LAG(close) OVER (PARTITION BY ts_code ORDER BY trade_date) AS previous_close FROM stock_data WHERE adj_type='qfq' AND trade_date >= (SELECT MIN(trade_date) FROM recent_dates)), mismatches AS (SELECT * FROM recent WHERE previous_close IS NOT NULL AND ABS(pre_close - previous_close) > GREATEST(0.011, ABS(previous_close) * 0.0001)) SELECT ts_code, trade_date, CAST(pre_close AS DOUBLE), CAST(previous_close AS DOUBLE) FROM mismatches QUALIFY ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY trade_date) <= 6 ORDER BY ts_code, trade_date").map_err(|e| format!("检查复权衔接失败: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, f64>(2)?,
+                row.get::<_, f64>(3)?,
+            ))
         })
-        .collect())
+        .map_err(|e| e.to_string())?;
+    let mut issues: Vec<QfqPriceLinkIssue> = Vec::new();
+    for row in rows {
+        let (code, date, pre_close, previous_close) = row.map_err(|e| e.to_string())?;
+        if issues.last().is_none_or(|issue| issue.ts_code != code) {
+            issues.push(QfqPriceLinkIssue {
+                ts_code: code,
+                samples: Vec::new(),
+            });
+        }
+        if let Some(issue) = issues.last_mut() {
+            issue.samples.push((date, previous_close, pre_close));
+        }
+    }
+    Ok(issues)
 }
 
 #[cfg(test)]
@@ -452,7 +503,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn legacy_chip_repair_with_truncated_source_history_blocks_computation() {
+    fn legacy_chip_repair_detects_truncated_source_history() {
         let source_dir = std::env::temp_dir().join(format!(
             "lianghua-legacy-repair-{}",
             std::time::SystemTime::now()
@@ -474,23 +525,12 @@ mod tests {
         assert_eq!(pending[0].ts_code, "000400.SZ");
         assert_eq!(pending[0].start_date, "20100104");
         assert_eq!(pending[0].end_date, "20261009");
-        assert!(
-            ensure_stock_data_ready_for_derived(source)
-                .unwrap_err()
-                .contains("000400.SZ")
-        );
-        conn.execute(
-            "INSERT INTO stock_data(ts_code,trade_date,adj_type) VALUES ('000400.SZ', '20100104', 'qfq')",
-            [],
-        )
-        .unwrap();
-        ensure_stock_data_ready_for_derived(source).unwrap();
         drop(conn);
         std::fs::remove_dir_all(source_dir).unwrap();
     }
 
     #[test]
-    fn legacy_missing_stocks_block_computation_but_future_listings_do_not() {
+    fn missing_stock_list_ignores_future_listings() {
         let source_dir = std::env::temp_dir().join(format!(
             "lianghua-download-state-{}",
             std::time::SystemTime::now()
@@ -507,17 +547,6 @@ mod tests {
             load_missing_stock_codes(source, &conn).unwrap(),
             vec!["000002.SZ"]
         );
-        assert!(
-            ensure_stock_data_ready_for_derived(source)
-                .unwrap_err()
-                .contains("000002.SZ")
-        );
-        conn.execute(
-            "INSERT INTO stock_data(ts_code,trade_date,adj_type) VALUES ('000002.SZ', '20260106', 'qfq')",
-            [],
-        )
-        .unwrap();
-        ensure_stock_data_ready_for_derived(source).unwrap();
         drop(conn);
         std::fs::remove_dir_all(source_dir).unwrap();
     }

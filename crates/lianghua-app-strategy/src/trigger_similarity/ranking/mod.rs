@@ -6,7 +6,9 @@ mod store;
 mod test_support;
 
 pub use page::get_strategy_trigger_similarity_ranking_page;
-pub use run::run_strategy_trigger_similarity_ranking;
+pub use run::{
+    recompute_strategy_trigger_similarity_samples, run_strategy_trigger_similarity_ranking,
+};
 pub use store::get_strategy_trigger_similarity_active_config;
 
 use crate::trigger_similarity::*;

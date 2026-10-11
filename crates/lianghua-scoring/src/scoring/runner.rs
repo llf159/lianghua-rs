@@ -269,9 +269,10 @@ fn ensure_scoring_dependencies_ready(
         return Err("评分策略使用新筹码字段，但行情修复后的新筹码尚未修复，禁止使用旧筹码计算评分。请先修复新筹码。".to_string());
     }
     if scoring_uses_similarity_rank(rules)
-        && crate::data::download_state::load_pending_derived_rebuilds(&source)?
-            .iter()
-            .any(|item| item.component == "similarity")
+        && crate::data::download_state::pending_rebuild_affects_saved_results(
+            source_dir,
+            "similarity",
+        )?
     {
         return Err("评分策略使用 S_RANK，但旧相似度已因行情修复失效。需先使用不依赖 S_RANK 的策略重建评分及相似度，再恢复该规则计算；禁止用旧结果重算。".to_string());
     }
