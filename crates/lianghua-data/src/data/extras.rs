@@ -104,78 +104,34 @@ pub fn load_total_share_map(source_dir: &str) -> Result<HashMap<String, f64>, St
     Ok(out)
 }
 
-pub fn load_estimated_market_cap_per_price_map(
-    conn: &duckdb::Connection,
-    source_dir: &str,
-    adj_type: &str,
-) -> Result<HashMap<String, f64>, String> {
-    if !crate::data::stock_list_path(source_dir).exists() {
-        return Ok(HashMap::new());
-    }
-    let mut anchors = Vec::new();
-    for columns in load_stock_list(source_dir)? {
-        let Some(ts_code) = columns.first().map(|v| v.trim()).filter(|v| !v.is_empty()) else {
-            continue;
-        };
-        let Some(market_cap) = columns
-            .get(9)
-            .and_then(|v| v.trim().parse::<f64>().ok())
-            .filter(|v| v.is_finite() && *v > 0.0)
-        else {
-            continue;
-        };
-        let date = columns
-            .get(6)
-            .map(|v| v.trim())
-            .filter(|v| !v.is_empty())
-            .unwrap_or("99999999");
-        anchors.push(format!(
-            "('{}', '{}', {})",
-            ts_code.replace('\'', "''"),
-            date.replace('\'', "''"),
-            market_cap / 1e4
-        ));
-    }
-    if anchors.is_empty() {
-        return Ok(HashMap::new());
-    }
-    let sql = format!(
-        r#"
-        WITH anchors(ts_code, trade_date, market_cap) AS (VALUES {}),
-        prices AS (
-            SELECT ts_code, trade_date, TRY_CAST(close AS DOUBLE) AS price
-            FROM stock_data WHERE adj_type = ?
-        )
-        SELECT a.ts_code, a.market_cap / p.price
-        FROM anchors a ASOF LEFT JOIN prices p
-          ON a.ts_code = p.ts_code AND a.trade_date >= p.trade_date
-        WHERE p.price > 0 AND isfinite(p.price)
-    "#,
-        anchors.join(",")
-    );
+/// 成交额为千元，换手率为百分数；结果为按成交均价推算的流通市值（亿）。
+pub fn estimate_market_cap(amount: Option<f64>, turnover: Option<f64>) -> Option<f64> {
+    amount
+        .zip(turnover)
+        .filter(|(amount, turnover)| {
+            amount.is_finite() && *amount > 0.0 && turnover.is_finite() && *turnover > 0.0
+        })
+        .map(|(amount, turnover)| amount / turnover / 1000.0)
+        .filter(|value| value.is_finite() && *value > 0.0)
+}
+
+pub fn estimated_market_cap_sql(conn: &duckdb::Connection) -> Result<String, String> {
     let mut stmt = conn
-        .prepare(&sql)
-        .map_err(|e| format!("预编译推测市值锚点失败:{e}"))?;
-    let mut rows = stmt
-        .query(duckdb::params![adj_type])
-        .map_err(|e| format!("查询推测市值锚点失败:{e}"))?;
-    let mut out = HashMap::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取推测市值锚点失败:{e}"))?
-    {
-        let ts_code: String = row.get(0).map_err(|e| e.to_string())?;
-        let value: f64 = row.get(1).map_err(|e| e.to_string())?;
-        if value.is_finite() && value > 0.0 {
-            out.insert(ts_code, value);
-        }
+        .prepare("SELECT name FROM pragma_table_info('stock_data')")
+        .map_err(|e| format!("读取推测市值字段失败:{e}"))?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    if !columns.iter().any(|name| name.eq_ignore_ascii_case("tor")) {
+        return Ok("NULL::DOUBLE".to_string());
     }
-    Ok(out)
+    Ok("CASE WHEN TRY_CAST(amount AS DOUBLE) > 0 AND isfinite(TRY_CAST(amount AS DOUBLE)) AND TRY_CAST(tor AS DOUBLE) > 0 AND isfinite(TRY_CAST(tor AS DOUBLE)) AND isfinite(TRY_CAST(amount AS DOUBLE) / TRY_CAST(tor AS DOUBLE) / 1000.0) THEN TRY_CAST(amount AS DOUBLE) / TRY_CAST(tor AS DOUBLE) / 1000.0 END".to_string())
 }
 
 pub fn load_estimated_market_cap_series(
     conn: &duckdb::Connection,
-    per_price: &HashMap<String, f64>,
     ts_codes: &[String],
     adj_type: &str,
     start_date: &str,
@@ -187,8 +143,9 @@ pub fn load_estimated_market_cap_series(
     let placeholders = std::iter::repeat_n("?", ts_codes.len())
         .collect::<Vec<_>>()
         .join(",");
+    let market_cap_sql = estimated_market_cap_sql(conn)?;
     let sql = format!(
-        "SELECT ts_code, trade_date, TRY_CAST(close AS DOUBLE) FROM stock_data WHERE adj_type = ? AND trade_date >= ? AND trade_date <= ? AND ts_code IN ({placeholders})"
+        "SELECT ts_code, trade_date, {market_cap_sql} FROM stock_data WHERE adj_type = ? AND trade_date >= ? AND trade_date <= ? AND ts_code IN ({placeholders})"
     );
     let mut stmt = conn
         .prepare(&sql)
@@ -207,12 +164,8 @@ pub fn load_estimated_market_cap_series(
     {
         let ts_code: String = row.get(0).map_err(|e| e.to_string())?;
         let trade_date: String = row.get(1).map_err(|e| e.to_string())?;
-        let price: Option<f64> = row.get(2).map_err(|e| e.to_string())?;
-        if let Some(value) = price
-            .zip(per_price.get(&ts_code))
-            .map(|(p, m)| p * m)
-            .filter(|v| v.is_finite() && *v > 0.0)
-        {
+        let value: Option<f64> = row.get(2).map_err(|e| e.to_string())?;
+        if let Some(value) = value.filter(|v| v.is_finite() && *v > 0.0) {
             out.entry(ts_code).or_default().insert(trade_date, value);
         }
     }
@@ -224,54 +177,75 @@ mod tests {
     use super::*;
 
     #[test]
-    fn estimated_market_cap_uses_snapshot_price_in_each_adjustment_basis() {
-        let dir = std::env::temp_dir().join(format!(
-            "lianghua_cap_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let source = dir.to_str().unwrap();
-        std::fs::write(crate::data::stock_list_path(source), "ts_code,symbol,name,area,industry,list_date,trade_date,total_share,float_share,total_mv,circ_mv\n000001.SZ,,A,,,20200101,20240103,999999,0,2000000,0\n000002.SZ,,B,,,20200101,20240103,10000,0,,0\n").unwrap();
-        let conn = duckdb::Connection::open(crate::data::source_db_path(source)).unwrap();
-        conn.execute_batch("CREATE TABLE stock_data(ts_code VARCHAR,trade_date VARCHAR,adj_type VARCHAR,close DOUBLE); INSERT INTO stock_data VALUES ('000001.SZ','20240102','qfq',5),('000001.SZ','20240103','qfq',10),('000001.SZ','20240104','qfq',20),('000001.SZ','20240102','hfq',50),('000001.SZ','20240103','hfq',100),('000002.SZ','20240102','qfq',10);").unwrap();
-        let codes = vec!["000001.SZ".to_string(), "000002.SZ".to_string()];
-        for adj in ["qfq", "hfq"] {
-            let per_price = load_estimated_market_cap_per_price_map(&conn, source, adj).unwrap();
-            let series = load_estimated_market_cap_series(
-                &conn, &per_price, &codes, adj, "20240102", "20240103",
-            )
-            .unwrap();
-            assert_eq!(series["000001.SZ"]["20240102"], 100.0);
-            assert_eq!(series["000001.SZ"]["20240103"], 200.0);
-            assert!(!series.contains_key("000002.SZ"));
+    fn estimated_market_cap_uses_daily_amount_and_turnover() {
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE stock_data(ts_code VARCHAR, trade_date VARCHAR, adj_type VARCHAR, close DOUBLE, amount DOUBLE, tor DOUBLE);
+            INSERT INTO stock_data VALUES
+            ('A','20240101','qfq',10,1000000,2),
+            ('A','20240102','qfq',99,600000,3),
+            ('A','20240103','qfq',99,600000,0),
+            ('A','20240104','qfq',99,600000,NULL),
+            ('A','20240105','qfq',99,-1,1),
+            ('A','20240106','qfq',99,'Infinity',1),
+            ('A','20240101','hfq',100,1000000,2);").unwrap();
+        let codes = vec!["A".to_string()];
+        let series =
+            load_estimated_market_cap_series(&conn, &codes, "qfq", "20240101", "20240106").unwrap();
+        assert_eq!(series["A"].len(), 2);
+        assert_eq!(series["A"]["20240101"], 500.0);
+        assert_eq!(series["A"]["20240102"], 200.0);
+        assert_eq!(
+            load_estimated_market_cap_series(&conn, &codes, "hfq", "20240101", "20240101").unwrap()
+                ["A"]["20240101"],
+            500.0
+        );
+        for (amount, tor) in [
+            (None, Some(1.0)),
+            (Some(1.0), None),
+            (Some(1.0), Some(0.0)),
+            (Some(-1.0), Some(1.0)),
+            (Some(f64::INFINITY), Some(1.0)),
+            (Some(1.0), Some(f64::NAN)),
+        ] {
+            assert_eq!(estimate_market_cap(amount, tor), None);
         }
-        let reader = crate::data::DataReader::new_with_runtime_keys(
-            source,
-            &HashSet::from(["C".to_string()]),
+        assert_eq!(estimate_market_cap(Some(1000000.0), Some(2.0)), Some(500.0));
+        let reader = crate::data::DataReader::new_inner(
+            "",
+            Some(&HashSet::from(["C".to_string()])),
+            Some(conn),
         )
         .unwrap();
-        let mut one = reader
-            .load_one("000001.SZ", "qfq", "20240102", "20240102")
-            .unwrap();
-        inject_stock_extra_fields(&mut one, "000001.SZ", false, Some(999999.0)).unwrap();
-        assert_eq!(one.cols["TOTAL_MV_YI"], vec![Some(100.0)]);
-        let tail = reader
-            .load_one_tail_rows("000001.SZ", "hfq", "20240103", 2)
-            .unwrap();
-        assert_eq!(tail.cols["TOTAL_MV_YI"], vec![Some(100.0), Some(200.0)]);
-        let batch = reader
-            .load_batch(&codes, "qfq", "20240102", "20240103")
-            .unwrap();
+        let expected = vec![Some(500.0), Some(200.0), None, None, None, None];
         assert_eq!(
-            batch["000001.SZ"].cols["TOTAL_MV_YI"],
-            vec![Some(100.0), Some(200.0)]
+            reader
+                .load_one("A", "qfq", "20240101", "20240106")
+                .unwrap()
+                .cols["TOTAL_MV_YI"],
+            expected
         );
-        assert_eq!(batch["000002.SZ"].cols["TOTAL_MV_YI"], vec![None]);
-        drop(reader);
-        drop(conn);
-        std::fs::remove_dir_all(dir).unwrap();
+        assert_eq!(
+            reader
+                .load_one_tail_rows("A", "qfq", "20240106", 6)
+                .unwrap()
+                .cols["TOTAL_MV_YI"],
+            expected
+        );
+        assert_eq!(
+            reader
+                .load_batch(&codes, "qfq", "20240101", "20240106")
+                .unwrap()["A"]
+                .cols["TOTAL_MV_YI"],
+            expected
+        );
+        reader
+            .conn
+            .execute_batch("ALTER TABLE stock_data DROP COLUMN tor")
+            .unwrap();
+        assert!(
+            load_estimated_market_cap_series(&reader.conn, &codes, "qfq", "20240101", "20240106")
+                .unwrap()
+                .is_empty()
+        );
     }
 }

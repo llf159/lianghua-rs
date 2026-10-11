@@ -86,18 +86,7 @@ pub(in crate::statistics) fn build_rank_market_value_summaries(
 ) -> Result<Vec<RankLayerMarketValueSummary>, String> {
     let conn = crate::data::open_db_readonly(crate::data::source_db_path(source_path))
         .map_err(|e| e.to_string())?;
-    let per_price = crate::data::extras::load_estimated_market_cap_per_price_map(
-        &conn,
-        source_path,
-        &input.stock_adj_type,
-    )?;
-    let weights = per_price
-        .iter()
-        .map(|(code, value)| format!("('{}', {})", code.replace('\'', "''"), value))
-        .collect::<Vec<_>>();
-    if weights.is_empty() {
-        return Ok(Vec::new());
-    }
+    let market_cap_sql = crate::data::extras::estimated_market_cap_sql(&conn)?;
     let mut out = Vec::new();
 
     for (group_label, total_mv_min, total_mv_max) in
@@ -111,15 +100,15 @@ pub(in crate::statistics) fn build_rank_market_value_summaries(
     {
         let sql = format!(
             r#"
-            WITH weights(ts_code, per_price) AS (VALUES {})
-            SELECT s.ts_code, s.trade_date
-            FROM stock_data s JOIN weights w ON s.ts_code = w.ts_code
-            WHERE s.adj_type = ? AND s.trade_date >= ? AND s.trade_date <= ?
-              AND TRY_CAST(s.close AS DOUBLE) > 0 AND isfinite(TRY_CAST(s.close AS DOUBLE) * w.per_price)
-              AND (? IS NULL OR TRY_CAST(s.close AS DOUBLE) * w.per_price >= ?)
-              AND (? IS NULL OR TRY_CAST(s.close AS DOUBLE) * w.per_price < ?)
-        "#,
-            weights.join(",")
+            WITH caps AS (
+                SELECT ts_code, trade_date, {market_cap_sql} AS market_cap
+                FROM stock_data WHERE adj_type = ? AND trade_date >= ? AND trade_date <= ?
+            )
+            SELECT ts_code, trade_date FROM caps
+            WHERE market_cap > 0 AND isfinite(market_cap)
+              AND (? IS NULL OR market_cap >= ?)
+              AND (? IS NULL OR market_cap < ?)
+        "#
         );
         let mut stmt = conn
             .prepare(&sql)

@@ -208,7 +208,7 @@ export function ExpressionBacktestForm({
           <option value="residual_return">残差收益率（%）</option>
           <option value="rise_amount">上涨金额（亿）</option>
         </select>
-        <span>上涨金额 = 残差收益率 ÷ 100 × 当日推测市值；推测市值 = 当前市值 × 当日股价 ÷ 当前股价。</span>
+        <span>上涨金额 = 残差收益率 ÷ 100 × 当日推测市值；推测流通市值（亿） = 成交额（千元） ÷ 换手率（%） ÷ 1000。</span>
       </label>
       <div className="expression-backtest-form-row">
         <label className="expression-backtest-field">

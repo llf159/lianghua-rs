@@ -108,7 +108,6 @@ pub(super) struct SampleBuildContext<'a> {
     pub(super) all_trade_dates: &'a [String],
     pub(super) environment_fingerprints: &'a HashMap<String, Arc<ChannelFingerprint>>,
     pub(super) benchmark_rows: &'a HashMap<String, BenchmarkObservation>,
-    pub(super) market_cap_per_price_map: &'a HashMap<String, f64>,
     pub(super) name_map: &'a HashMap<String, String>,
     pub(super) pool_segments: usize,
     pub(super) outcome_trade_days: usize,
@@ -165,10 +164,6 @@ pub(super) fn build_samples_for_chunk(
                 price_volume: build_channel_fingerprint(build_price_volume_channels(
                     market_rows,
                     context.pool_segments,
-                    context
-                        .market_cap_per_price_map
-                        .get(&anchor.ts_code)
-                        .copied(),
                     market_category_features(
                         &anchor.ts_code,
                         context.name_map.get(&anchor.ts_code).map(String::as_str),

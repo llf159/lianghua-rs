@@ -28,7 +28,6 @@ pub(in crate::trigger_similarity) fn build_ranking_samples_for_chunk(
     all_trade_dates: &[String],
     environment_fingerprints: &HashMap<String, Arc<ChannelFingerprint>>,
     benchmark_rows: &HashMap<String, BenchmarkObservation>,
-    market_cap_per_price_map: &HashMap<String, f64>,
     name_map: &HashMap<String, String>,
     pool_segments: usize,
     outcome_trade_days: usize,
@@ -112,7 +111,6 @@ pub(in crate::trigger_similarity) fn build_ranking_samples_for_chunk(
                     price_volume: build_channel_fingerprint(build_price_volume_channels(
                         market_rows,
                         pool_segments,
-                        market_cap_per_price_map.get(&anchor.ts_code).copied(),
                         market_category_features(
                             &anchor.ts_code,
                             name_map.get(&anchor.ts_code).map(String::as_str),
@@ -687,7 +685,6 @@ mod tests {
         )]);
         let environment = HashMap::new();
         let names = HashMap::new();
-        let market_caps = HashMap::new();
         let mut catalog = crate::trigger_similarity::RuleCatalog::default();
         let historical = build_ranking_samples_for_chunk(
             &conn,
@@ -696,7 +693,6 @@ mod tests {
             &dates,
             &environment,
             &benchmark,
-            &market_caps,
             &names,
             2,
             1,
@@ -721,7 +717,6 @@ mod tests {
             all_trade_dates: &dates,
             environment_fingerprints: &environment,
             benchmark_rows: &benchmark,
-            market_cap_per_price_map: &market_caps,
             name_map: &names,
             pool_segments: 2,
             outcome_trade_days: 1,

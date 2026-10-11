@@ -701,14 +701,8 @@ fn build_residual_map_cache(
     .unwrap_or_default();
 
     let market_caps = if input.target.needs_market_cap() {
-        let per_price = crate::data::extras::load_estimated_market_cap_per_price_map(
-            source_conn,
-            source_dir,
-            input.stock_adj_type,
-        )?;
         crate::data::extras::load_estimated_market_cap_series(
             source_conn,
-            &per_price,
             &ts_codes,
             input.stock_adj_type,
             input.start_date,

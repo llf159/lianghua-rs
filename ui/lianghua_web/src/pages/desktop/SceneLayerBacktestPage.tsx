@@ -1025,7 +1025,7 @@ export default function SceneLayerBacktestPage() {
     <div className="scene-layer-page">
       <section className="scene-layer-card">
         <h2 className="scene-layer-title">回测全局参数</h2>
-        <p className="scene-layer-caption">上涨金额 = 残差收益率 ÷ 100 × 当日推测市值；推测市值 = 当前市值 × 当日股价 ÷ 当前股价。市值筛选与分组按样本当日计算。</p>
+        <p className="scene-layer-caption">上涨金额 = 残差收益率 ÷ 100 × 当日推测市值；推测流通市值（亿） = 成交额（千元） ÷ 换手率（%） ÷ 1000。市值筛选与分组按样本当日计算。</p>
         <div className="scene-layer-form-grid">
           <label className="scene-layer-field">
             <span>回测指标</span>

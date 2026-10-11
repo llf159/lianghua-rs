@@ -470,9 +470,6 @@ export default function IntradayChart({
               return (
                 <g key={tick.label}>
                   <line x1={x} x2={x} y1={PRICE_TOP} y2={volumeRatioPoints.length > 0 ? volumeRatioBottom : VOLUME_BOTTOM} className="details-intraday-grid is-vertical" />
-                  <text x={x} y={chartHeight - 8} textAnchor="middle" className="details-intraday-axis-label">
-                    {tick.label}
-                  </text>
                 </g>
               );
             })}
@@ -596,6 +593,17 @@ export default function IntradayChart({
               </g>
             ) : null}
           </svg>
+          <div className="details-chart-axis-layer details-chart-axis-layer-x">
+            {timeTicks.map((tick) => (
+              <span
+                key={tick.label}
+                className="details-chart-x-label details-intraday-time-label"
+                style={{ left: `${((PLOT_LEFT + tick.slot * slotWidth) / VIEWBOX_WIDTH) * 100}%` }}
+              >
+                {tick.label}
+              </span>
+            ))}
+          </div>
         </div>
       ) : null}
     </section>

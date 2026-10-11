@@ -93,20 +93,10 @@ where
         Ok(None)
     })(source_conn, "ER")?;
 
-    let market_cap_per_price = if input.target.needs_market_cap() {
-        crate::data::extras::load_estimated_market_cap_per_price_map(
-            source_conn,
-            source_dir,
-            input.stock_adj_type,
-        )?
-    } else {
-        HashMap::new()
-    };
     for ts_code_batch in ts_codes.chunks(stock_batch_size.max(1)) {
         let market_caps = if input.target.needs_market_cap() {
             crate::data::extras::load_estimated_market_cap_series(
                 source_conn,
-                &market_cap_per_price,
                 ts_code_batch,
                 input.stock_adj_type,
                 input.start_date,

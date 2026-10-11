@@ -243,6 +243,7 @@
 }
 
 .details-intraday-chart-wrap {
+  position: relative;
   min-width: 0;
   overflow: hidden;
   border-top: 1px solid #e6eaf0;
@@ -1610,6 +1611,19 @@
   bottom: 2px;
   transform: translateX(-50%);
   padding: 0 2px;
+}
+
+.details-intraday-time-label {
+  bottom: 6px;
+  background: #fbfcfe;
+}
+
+.details-intraday-time-label:first-child {
+  transform: none;
+}
+
+.details-intraday-time-label:last-child {
+  transform: translateX(-100%);
 }
 
 .details-chart-tooltip {

@@ -250,32 +250,23 @@ pub fn compute_concept_performance_range(
         Ok(industry_map)
     })(source_dir)?;
 
-    let market_conn = crate::data::download_state::open_source_db_readonly(source_dir)?;
-    let uivi_map = crate::data::extras::load_estimated_market_cap_per_price_map(
-        &market_conn,
-        source_dir,
-        MR_FQFS,
-    )?;
-
     let mut bx_rows = Vec::new();
-    if !uivi_map.is_empty() && !concept_map.is_empty() {
+    if !concept_map.is_empty() {
         bx_rows.extend(calc_gdnm_bx_rows(
             source_dir,
             start_date,
             end_date,
             PERFORMANCE_TYPE_CONCEPT,
             &concept_map,
-            &uivi_map,
         )?);
     }
-    if !uivi_map.is_empty() && !industry_map.is_empty() {
+    if !industry_map.is_empty() {
         bx_rows.extend(calc_gdnm_bx_rows(
             source_dir,
             start_date,
             end_date,
             PERFORMANCE_TYPE_INDUSTRY,
             &industry_map,
-            &uivi_map,
         )?);
     }
 
@@ -300,7 +291,6 @@ fn calc_gdnm_bx_rows(
     end_date: &str,
     performance_type: &str,
     gdnm_map: &HashMap<String, Vec<String>>,
-    uivi_map: &HashMap<String, f64>,
 ) -> Result<Vec<GdNmBXRow>, String> {
     let trade_dates = load_trade_dates_in_range(source_dir, start_date, end_date)?;
     if trade_dates.is_empty() {
@@ -321,23 +311,24 @@ fn calc_gdnm_bx_rows(
     let chunk_results: Vec<Result<Vec<GdNmBXRow>, String>> = date_ranges
         .par_iter()
         .map(|(chunk_start, chunk_end)| {
-            (|source_dir : & str, start_date : & str, end_date : & str, performance_type : & str, gdnm_map : & HashMap < String , Vec < String > >, uivi_map : & HashMap < String , f64 >| -> Result < Vec < GdNmBXRow > , String > {
+            (|source_dir : & str, start_date : & str, end_date : & str, performance_type : & str, gdnm_map : & HashMap < String , Vec < String > >| -> Result < Vec < GdNmBXRow > , String > {
     let conn = crate::data::download_state::open_source_db_readonly(source_dir)?;
 
+    let market_cap_sql = crate::data::extras::estimated_market_cap_sql(&conn)?;
     let mut stmt = conn
         .prepare(
-            r#"
+            &format!(r#"
             SELECT
                 ts_code,
                 trade_date,
                 TRY_CAST(pct_chg AS DOUBLE) AS pct_chg,
-                TRY_CAST(close AS DOUBLE) AS close_price
+                {market_cap_sql} AS market_cap
             FROM stock_data
             WHERE adj_type = ?
               AND trade_date >= ?
               AND trade_date <= ?
             ORDER BY trade_date ASC, ts_code ASC
-            "#,
+            "#),
         )
         .map_err(|e| format!("预编译概念表现分块查询失败:{e}"))?;
     let mut rows = stmt
@@ -360,8 +351,8 @@ fn calc_gdnm_bx_rows(
         let Some(vhfu) = pct_chg.filter(|v| v.is_finite()) else {
             continue;
         };
-        let price: Option<f64> = row.get(3).map_err(|e| format!("读取市值推测价格失败:{e}"))?;
-        let Some(uivi) = price.zip(uivi_map.get(&ts_code)).map(|(p, m)| p * m).filter(|v| v.is_finite() && *v > 0.0) else {
+        let market_cap: Option<f64> = row.get(3).map_err(|e| format!("读取推测市值失败:{e}"))?;
+        let Some(uivi) = market_cap.filter(|v| v.is_finite() && *v > 0.0) else {
             continue;
         };
         date_has_valid_data.insert(trade_date.clone(), true);
@@ -423,7 +414,6 @@ fn calc_gdnm_bx_rows(
                 chunk_end,
                 performance_type,
                 gdnm_map,
-                uivi_map,
             )
         })
         .collect();
@@ -1019,7 +1009,7 @@ ts_code,concepts_code,concepts_name,stock_name
                 pct_chg DOUBLE,
                 close DOUBLE,
                 open DOUBLE DEFAULT 1, high DOUBLE DEFAULT 1, low DOUBLE DEFAULT 1,
-                pre_close DOUBLE DEFAULT 1, vol DOUBLE DEFAULT 10, amount DOUBLE DEFAULT 100,
+                pre_close DOUBLE DEFAULT 1, vol DOUBLE DEFAULT 10, amount DOUBLE DEFAULT 100, tor DOUBLE DEFAULT 1,
                 change DOUBLE DEFAULT 0
             )
             "#,
@@ -1043,6 +1033,8 @@ ts_code,concepts_code,concepts_name,stock_name
         app.append_row(params!["000002.SZ", "20240103", "qfq", 15.0_f64, 1.0_f64])
             .expect("row5");
         app.flush().expect("flush");
+        drop(app);
+        conn.execute("UPDATE stock_data SET amount = CASE ts_code WHEN '000002.SZ' THEN 300 WHEN '000003.SZ' THEN 50 ELSE 100 END", []).unwrap();
     }
 
     fn xieru_source_db_with_sparse_invalid_pct(source_dir: &Path) {
@@ -1057,7 +1049,7 @@ ts_code,concepts_code,concepts_name,stock_name
                 pct_chg DOUBLE,
                 close DOUBLE,
                 open DOUBLE DEFAULT 1, high DOUBLE DEFAULT 1, low DOUBLE DEFAULT 1,
-                pre_close DOUBLE DEFAULT 1, vol DOUBLE DEFAULT 10, amount DOUBLE DEFAULT 100,
+                pre_close DOUBLE DEFAULT 1, vol DOUBLE DEFAULT 10, amount DOUBLE DEFAULT 100, tor DOUBLE DEFAULT 1,
                 change DOUBLE DEFAULT 0
             )
             "#,
@@ -1117,7 +1109,7 @@ ts_code,concepts_code,concepts_name,stock_name
         xieru_gdnm_csv(&source_dir);
         xieru_source_db(&source_dir);
         let source_conn = Connection::open(source_db_path(source_dir.to_str().unwrap())).unwrap();
-        source_conn.execute("UPDATE stock_data SET close=0.5, low=0.5 WHERE ts_code='000001.SZ' AND trade_date='20240102'; UPDATE stock_data SET pre_close=0.5 WHERE ts_code='000001.SZ' AND trade_date='20240103'", []).unwrap();
+        source_conn.execute("UPDATE stock_data SET close=0.5, low=0.5, amount=50 WHERE ts_code='000001.SZ' AND trade_date='20240102'; UPDATE stock_data SET pre_close=0.5 WHERE ts_code='000001.SZ' AND trade_date='20240103'", []).unwrap();
         drop(source_conn);
 
         let row_count = rebuild_concept_performance_range(
@@ -1242,19 +1234,26 @@ ts_code,concepts_code,concepts_name,stock_name
     }
 
     #[test]
-    fn rebuild_concept_performance_range_skips_sparse_missing_market_value_data() {
+    fn rebuild_concept_performance_range_skips_sparse_missing_turnover_data() {
         let source_dir = linshi_mulu();
         create_dir_all(&source_dir).expect("create dir");
         xieru_stock_list_with_issue(&source_dir, "total_mv");
         xieru_gdnm_csv(&source_dir);
         xieru_source_db(&source_dir);
+        let conn = Connection::open(source_db_path(source_dir.to_str().unwrap())).unwrap();
+        conn.execute(
+            "UPDATE stock_data SET tor = NULL WHERE ts_code = '000002.SZ'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
 
         let row_count = rebuild_concept_performance_range(
             source_dir.to_str().expect("utf8 path"),
             "20240102",
             "20240103",
         )
-        .expect("sparse missing total_mv should be skipped");
+        .expect("sparse missing turnover should be skipped");
 
         assert_eq!(row_count, 9);
 
@@ -1335,7 +1334,7 @@ ts_code,concepts_code,concepts_name,stock_name
                 pct_chg DOUBLE,
                 close DOUBLE,
                 open DOUBLE DEFAULT 1, high DOUBLE DEFAULT 1, low DOUBLE DEFAULT 1,
-                pre_close DOUBLE DEFAULT 1, vol DOUBLE DEFAULT 10, amount DOUBLE DEFAULT 100,
+                pre_close DOUBLE DEFAULT 1, vol DOUBLE DEFAULT 10, amount DOUBLE DEFAULT 100, tor DOUBLE DEFAULT 1,
                 change DOUBLE DEFAULT 0
             )
             "#,
@@ -1492,7 +1491,7 @@ ts_code,concepts_code,concepts_name,stock_name
                 pct_chg DOUBLE,
                 close DOUBLE,
                 open DOUBLE DEFAULT 1, high DOUBLE DEFAULT 1, low DOUBLE DEFAULT 1,
-                pre_close DOUBLE DEFAULT 1, vol DOUBLE DEFAULT 10, amount DOUBLE DEFAULT 100,
+                pre_close DOUBLE DEFAULT 1, vol DOUBLE DEFAULT 10, amount DOUBLE DEFAULT 100, tor DOUBLE DEFAULT 1,
                 change DOUBLE DEFAULT 0
             )
             "#,

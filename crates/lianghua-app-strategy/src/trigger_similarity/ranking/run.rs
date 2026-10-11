@@ -248,12 +248,6 @@ fn compute_strategy_trigger_similarity_ranking(
         &resolved_trade_date,
         &benchmark_index_code,
     )?;
-    let market_conn = crate::data::download_state::open_source_db_readonly(&source_path)?;
-    let market_cap_per_price_map = crate::data::extras::load_estimated_market_cap_per_price_map(
-        &market_conn,
-        &source_path,
-        "qfq",
-    )?;
     let name_map = build_name_map(&source_path).unwrap_or_default();
     timings.push(StrategyTriggerRankingTiming {
         label: "市场环境与基准".to_string(),
@@ -317,7 +311,6 @@ fn compute_strategy_trigger_similarity_ranking(
             &all_trade_dates,
             &environment_fingerprints,
             &benchmark_rows,
-            &market_cap_per_price_map,
             &name_map,
             pool_segments,
             outcome_trade_days,
@@ -405,7 +398,6 @@ fn compute_strategy_trigger_similarity_ranking(
             &all_trade_dates,
             &environment_fingerprints,
             &benchmark_rows,
-            &market_cap_per_price_map,
             &name_map,
             pool_segments,
             outcome_trade_days,

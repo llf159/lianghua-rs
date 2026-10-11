@@ -166,6 +166,15 @@ pub fn build_simulated_row_data(
         }
     }
 
+    if let Some(series) = row_data.cols.get_mut("TOTAL_MV_YI") {
+        if let Some(last) = series.last_mut() {
+            *last = crate::data::extras::estimate_market_cap(
+                Some(simulated_amount),
+                simulated_turnover_rate,
+            );
+        }
+    }
+
     row_data.validate()?;
     Ok(row_data)
 }
@@ -213,6 +222,7 @@ mod tests {
         cols.insert("CHANGE".to_string(), vec![Some(0.3), Some(0.2)]);
         cols.insert("PCT_CHG".to_string(), vec![Some(3.0928), Some(2.0)]);
         cols.insert("TOR".to_string(), vec![Some(1.0), Some(1.2)]);
+        cols.insert("TOTAL_MV_YI".to_string(), vec![Some(1.0), Some(1.05)]);
         cols.insert("ZHANG".to_string(), vec![Some(0.095), Some(0.095)]);
 
         crate::data::RowData {
@@ -245,6 +255,10 @@ mod tests {
         );
         assert_close(row_data.cols["C"].last().copied().flatten(), Some(10.71));
         assert_close(row_data.cols["V"].last().copied().flatten(), Some(180.0));
+        assert_close(
+            row_data.cols["TOTAL_MV_YI"].last().copied().flatten(),
+            Some(1.07625),
+        );
         assert_close(row_data.cols["TOR"].last().copied().flatten(), Some(1.8));
         assert_close(
             row_data.cols["ZHANG"].last().copied().flatten(),

@@ -10,18 +10,14 @@ use std::sync::Arc;
 pub(super) fn build_price_volume_channels(
     rows: &[MarketObservation],
     segments: usize,
-    market_cap_per_price: Option<f64>,
     market_categories: [f64; 5],
 ) -> Vec<Option<Vec<f64>>> {
     let mut channels = vec![Vec::new(); 13];
     let mut previous_close: Option<f64> = None;
     for row in rows {
-        let normalized_market_cap = row
-            .close
-            .zip(market_cap_per_price)
-            .map(|(p, m)| p * m)
-            .filter(|value| value.is_finite() && *value > 0.0)
-            .map(|value| (value.log10() / 5.0).clamp(0.0, 1.0));
+        let normalized_market_cap =
+            crate::data::extras::estimate_market_cap(row.amount, row.turnover)
+                .map(|value| (value.log10() / 5.0).clamp(0.0, 1.0));
         channels[0].push(row.close.filter(|v| *v > 0.0).map(f64::ln));
         channels[1].push(row.pct_chg);
         channels[2].push(match (row.open, row.close) {
@@ -450,7 +446,7 @@ mod tests {
                     close: Some(close),
                     pct_chg: Some(1.0),
                     vol: Some(100.0),
-                    amount: Some(1_000.0),
+                    amount: Some(1_000_000.0),
                     turnover: Some(2.0),
                     net_flow: Some(10.0),
                     indicators: Vec::new(),
@@ -464,7 +460,6 @@ mod tests {
         let channels = build_price_volume_channels(
             &observations,
             3,
-            Some(100.0),
             market_category_features("688001.SH", Some("*ST 测试")),
         );
 
@@ -483,20 +478,26 @@ mod tests {
 
         let market_cap = channels[12].as_ref().expect("market cap channel");
         assert!(market_cap.iter().any(|value| *value > 0.0));
+        let mut large_observations = observations.clone();
+        for row in &mut large_observations {
+            row.amount = Some(100_000_000.0);
+        }
         let large_market_cap = build_price_volume_channels(
-            &observations,
+            &large_observations,
             3,
-            Some(10_000.0),
             market_category_features("688001.SH", Some("*ST 测试")),
         )[12]
             .clone()
             .expect("large market cap channel");
         assert!(cosine_similarity(market_cap, &large_market_cap) < 100.0);
+        let mut missing_observations = observations.clone();
+        for row in &mut missing_observations {
+            row.turnover = None;
+        }
         assert!(
             build_price_volume_channels(
-                &observations,
+                &missing_observations,
                 3,
-                None,
                 market_category_features("688001.SH", Some("*ST 测试")),
             )[12]
                 .is_none()
@@ -594,15 +595,6 @@ mod tests {
         let benchmark_rows =
             load_benchmark_rows(&conn, &all_trade_dates[0], &target_date, "000001.SH")
                 .expect("load benchmark");
-        let market_conn =
-            duckdb::Connection::open(crate::data::source_db_path(&source_path)).unwrap();
-        let market_cap_per_price_map =
-            crate::data::extras::load_estimated_market_cap_per_price_map(
-                &market_conn,
-                &source_path,
-                "qfq",
-            )
-            .unwrap();
         let name_map = build_name_map(&source_path).unwrap_or_default();
         let (selected, _) = load_outcome_selected_anchors(
             &conn,
@@ -642,7 +634,6 @@ mod tests {
                 &all_trade_dates,
                 &environment_fingerprints,
                 &benchmark_rows,
-                &market_cap_per_price_map,
                 &name_map,
                 5,
                 horizon,
