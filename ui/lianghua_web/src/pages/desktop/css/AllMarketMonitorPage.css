@@ -1833,3 +1833,12 @@
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+.all-market-baseline-toggle {
+  padding: 4px 12px;
+}
+
+.all-market-baseline-toggle:disabled {
+  opacity: 0.5;
+  cursor: default;
+}

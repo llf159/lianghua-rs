@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ensureManagedSourcePath } from "../../apis/managedSource";
 import {
   getAllMarketMonitorSnapshot,
+  setAllMarketVolumeRatioPaused,
   type StockLookupRow,
   type AllMarketIndexRow,
   type AllMarketMonitorRow,
@@ -649,6 +650,7 @@ export default function AllMarketMonitorPage() {
   const [error, setError] = useState("");
   const [templateWarning, setTemplateWarning] = useState("");
   const [volumeRatioStatus, setVolumeRatioStatus] = useState("");
+  const [volumeRatioPaused, setVolumeRatioPaused] = useState(false);
   const [marketStatus, setMarketStatus] = useState("");
   const [refreshedAt, setRefreshedAt] = useState("");
   const [rankDate, setRankDate] = useState("");
@@ -956,6 +958,17 @@ export default function AllMarketMonitorPage() {
       setLoading(false);
     }
   }, [enabled]);
+
+  useEffect(() => {
+    void setAllMarketVolumeRatioPaused(!enabled || volumeRatioPaused).catch((pauseError) => {
+      setError(`切换分时基准拉取失败: ${String(pauseError)}`);
+      setEnabled(false);
+    });
+  }, [enabled, volumeRatioPaused]);
+
+  useEffect(() => () => {
+    void setAllMarketVolumeRatioPaused(true).catch(() => {});
+  }, []);
 
   const refreshSnapshot = useCallback(async () => {
     if (!sourcePathTrimmed || inFlightRef.current || !enabledRef.current) {
@@ -1780,6 +1793,16 @@ export default function AllMarketMonitorPage() {
                 </button>
               </span>
             </div>
+
+            <button
+              type="button"
+              className="all-market-toggle all-market-baseline-toggle"
+              disabled={!enabled}
+              aria-pressed={volumeRatioPaused}
+              onClick={() => setVolumeRatioPaused((value) => !value)}
+            >
+              {volumeRatioPaused ? "恢复分时拉取" : "暂停分时拉取"}
+            </button>
 
             <button
               type="button"
