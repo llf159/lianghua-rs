@@ -8,7 +8,7 @@ use duckdb::{Connection, params};
 use lianghua_data::data::{source_db_path};
 use lianghua_provider::crawler::{
     SinaQuote,
-    volume_ratio::{TencentVolumeRatioData, fetch_tencent_volume_ratio, intraday_trading_minutes},
+    volume_ratio::{TencentVolumeRatioData, fetch_eastmoney_volume_ratio, fetch_tencent_volume_ratio, intraday_trading_minutes},
 };
 
 pub fn load_volume_ratio_averages(
@@ -148,11 +148,34 @@ struct Cache {
     local_loaded_at: Option<Instant>,
     local_error: Option<String>,
     paused: bool,
-    next_request_at: Option<Instant>,
-    cooldown_until: Option<Instant>,
+    next_request_at: [Option<Instant>; 2],
+    cooldown_until: [Option<Instant>; 2],
+    request_interval_ms: [u64; 2],
 }
 
 impl Cache {
+    fn reserve_source(&mut self, now: Instant) -> (usize, Duration) {
+        let deadlines: [Instant; 2] = std::array::from_fn(|index| {
+            self.next_request_at[index].into_iter()
+                .chain(self.cooldown_until[index]).max().unwrap_or(now)
+        });
+        let source = if deadlines[0] <= deadlines[1] { 0 } else { 1 };
+        let wait = deadlines[source].saturating_duration_since(now);
+        if wait.is_zero() {
+            let interval = self.request_interval_ms[source]
+                .max(if source == 0 { 250 } else { 100 });
+            self.next_request_at[source] = Some(now + Duration::from_millis(interval));
+        }
+        (source, wait)
+    }
+
+    fn throttle_source(&mut self, source: usize, now: Instant) {
+        self.cooldown_until[source] = Some(now + Duration::from_secs(60));
+        self.request_interval_ms[source] = self.request_interval_ms[source]
+            .max(if source == 0 { 250 } else { 100 })
+            .saturating_mul(2).min(2000);
+    }
+
     fn set_paused(&mut self, paused: bool) {
         if self.paused == paused {
             return;
@@ -208,7 +231,7 @@ pub fn snapshot(
     let (workers, http) = WORKERS
         .get_or_init(|| {
             let workers = rayon::ThreadPoolBuilder::new()
-                .num_threads(4)
+                .num_threads(8)
                 .thread_name(|index| format!("volume-ratio-{index}"))
                 .build()
                 .map_err(|e| format!("创建量比补齐线程失败: {e}"))?;
@@ -293,10 +316,14 @@ pub fn snapshot(
             let generation = state.generation;
             let local_average = state.local_averages.get(&ts_code).copied();
             let local_error = state.local_error.clone();
+            // 分时曲线单位已规范化；实时行情仍来自腾讯，须独立确认手/股单位。
+            let live_volume_to_hands = if quote.vol > 0.0 && quote.price > 0.0
+                && quote.amount > 0.0 && quote.amount / (quote.vol * quote.price) < 10.0
+            { 0.01 } else { 1.0 };
             workers.spawn(move || {
-                // 所有补齐线程共用请求节奏；等待期间定期检查暂停和任务代次。
-                loop {
-                    let wait = if let Ok(mut state) = cache.lock() {
+                // 两个平台各自限速/冷却，工作线程自动选择先可用的平台。
+                let source = loop {
+                    let (source, wait) = if let Ok(mut state) = cache.lock() {
                         if state.generation != generation || state.paused {
                             return;
                         }
@@ -305,26 +332,28 @@ pub fn snapshot(
                             state.revision += 1;
                             return;
                         }
-                        let now = Instant::now();
-                        let deadline = state.next_request_at.into_iter()
-                            .chain(state.cooldown_until)
-                            .max();
-                        let wait = deadline.map_or(Duration::ZERO, |at| at.saturating_duration_since(now));
-                        if wait.is_zero() && local_average.is_some() {
-                            // 4 个工作线程合计最多每秒启动 4 次请求，不能各自单独限速。
-                            state.next_request_at = Some(now + Duration::from_millis(250));
+                        if local_average.is_none() {
+                            (0, Duration::ZERO)
+                        } else {
+                            state.reserve_source(Instant::now())
                         }
-                        wait
                     } else {
                         return;
                     };
-                    if wait.is_zero() || local_average.is_none() {
-                        break;
+                    if wait.is_zero() {
+                        break source;
                     }
                     std::thread::sleep(wait.min(Duration::from_millis(100)));
-                }
+                };
                 let result = if let Some(average) = local_average {
-                    fetch_tencent_volume_ratio(&http, &ts_code, average)
+                    if source == 0 {
+                        fetch_tencent_volume_ratio(&http, &ts_code, average)
+                    } else {
+                        fetch_eastmoney_volume_ratio(&http, &ts_code, average).map(|mut data| {
+                            data.volume_to_hands = live_volume_to_hands;
+                            data
+                        })
+                    }
                 } else {
                     Err(local_error.unwrap_or_else(|| {
                         format!("{ts_code} 本地日线不足 {date} 前五根有成交行情，请先更新日线")
@@ -346,7 +375,12 @@ pub fn snapshot(
                     if result.as_ref().err().is_some_and(|error| {
                         error.contains("(501 ") || error.contains("(429 ")
                     }) {
-                        state.cooldown_until = Some(Instant::now() + Duration::from_secs(60));
+                        state.throttle_source(source, Instant::now());
+                    }
+                    if source == 1 && result.as_ref().err().is_some_and(|error| {
+                        error.contains("(502 ") || error.contains("请求东财分时失败")
+                    }) {
+                        state.cooldown_until[source] = Some(Instant::now() + Duration::from_secs(15));
                     }
                     state.entries.insert(
                         ts_code,
@@ -417,6 +451,22 @@ pub fn snapshot(
 mod tests {
     use super::*;
     use lianghua_provider::crawler::volume_ratio::TencentVolumeRatioPoint;
+
+    #[test]
+    fn sources_have_independent_rate_limits_and_cooldowns() {
+        let mut cache = Cache::default();
+        let now = Instant::now();
+        assert_eq!(cache.reserve_source(now), (0, Duration::ZERO));
+        assert_eq!(cache.reserve_source(now), (1, Duration::ZERO));
+        assert_eq!(cache.reserve_source(now), (1, Duration::from_millis(100)));
+        cache.throttle_source(0, now);
+        assert_eq!(cache.reserve_source(now + Duration::from_millis(100)), (1, Duration::ZERO));
+        assert_eq!(cache.request_interval_ms[0], 500);
+        assert_eq!(cache.request_interval_ms[1], 0);
+        cache.throttle_source(1, now);
+        assert_eq!(cache.request_interval_ms[1], 200);
+        assert!(cache.reserve_source(now).1 >= Duration::from_secs(60));
+    }
 
     #[test]
     fn pausing_discards_queued_jobs_and_preserves_completed_baselines() {
