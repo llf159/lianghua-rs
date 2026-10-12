@@ -434,6 +434,37 @@ pub fn load_pending_chip_repairs_for_model(
         .map_err(|e| e.to_string())
 }
 
+// 仅完整覆盖原始行情的重建可以确认历史修复完成；局部区间不能消除历史欠账。
+pub fn complete_chip_rebuild(
+    source_dir: &str,
+    model: &str,
+    start_date: &str,
+    end_date: &str,
+) -> Result<(), String> {
+    let check = open_source_db_readonly(source_dir)?;
+    let codes = load_pending_chip_repairs_for_model(&check, model)?;
+    if codes.is_empty() {
+        return Ok(());
+    }
+    let (source_start, source_end): (Option<String>, Option<String>) = check
+        .query_row(
+            "SELECT MIN(trade_date), MAX(trade_date) FROM stock_data WHERE adj_type = 'qfq'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|e| format!("读取筹码重建状态覆盖区间失败: {e}"))?;
+    drop(check);
+    let (Some(source_start), Some(source_end)) = (source_start, source_end) else {
+        return Ok(());
+    };
+    if start_date > source_start.as_str() || end_date < source_end.as_str() {
+        return Ok(());
+    }
+    let conn = Connection::open(source_db_path(source_dir))
+        .map_err(|e| format!("同步筹码重建状态时打开原始库失败: {e}"))?;
+    clear_completed_chip_repairs(&conn, source_dir, model, &codes)
+}
+
 pub fn clear_completed_chip_repairs(
     conn: &Connection,
     source_dir: &str,
@@ -505,6 +536,47 @@ pub fn load_qfq_price_link_issues(conn: &Connection) -> Result<Vec<QfqPriceLinkI
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chip_rebuild_completion_preserves_partial_and_other_model_debts() {
+        let source_dir = std::env::temp_dir().join(format!(
+            "lianghua-chip-rebuild-state-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.to_str().unwrap();
+        std::fs::write(crate::data::cyq_db_path(source), []).unwrap();
+        std::fs::write(crate::data::cyq_chen_db_path(source), []).unwrap();
+        let conn = Connection::open(source_db_path(source)).unwrap();
+        conn.execute_batch("CREATE TABLE stock_data(ts_code VARCHAR, trade_date VARCHAR, adj_type VARCHAR);
+            INSERT INTO stock_data VALUES ('000001.SZ', '20260401', 'qfq'), ('000001.SZ', '20260408', 'qfq')").unwrap();
+        mark_chip_repairs_required(&conn, &HashSet::from(["000001.SZ".to_string()])).unwrap();
+        drop(conn);
+
+        complete_chip_rebuild(source, "chen", "20260402", "20260408").unwrap();
+        let conn = open_source_db_readonly(source).unwrap();
+        assert_eq!(
+            load_pending_chip_repairs_for_model(&conn, "chen").unwrap().len(),
+            1
+        );
+        drop(conn);
+        complete_chip_rebuild(source, "chen", "20260401", "20260408").unwrap();
+        let conn = open_source_db_readonly(source).unwrap();
+        assert!(load_pending_chip_repairs_for_model(&conn, "chen").unwrap().is_empty());
+        assert_eq!(
+            load_pending_chip_repairs_for_model(&conn, "legacy").unwrap().len(),
+            1
+        );
+        drop(conn);
+        complete_chip_rebuild(source, "legacy", "20260401", "20260408").unwrap();
+        let conn = open_source_db_readonly(source).unwrap();
+        assert!(load_pending_chip_repairs_for_model(&conn, "legacy").unwrap().is_empty());
+        drop(conn);
+        std::fs::remove_dir_all(source_dir).unwrap();
+    }
 
     #[test]
     fn legacy_chip_repair_detects_truncated_source_history() {

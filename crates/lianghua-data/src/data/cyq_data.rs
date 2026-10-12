@@ -1511,6 +1511,14 @@ pub fn rebuild_cyq_all_with_progress(
 
     compute_result?;
     let (snapshot_rows, bin_rows) = writer_result?;
+    drop(reader);
+    drop(source_conn);
+    crate::data::download_state::complete_chip_rebuild(
+        source_dir,
+        "legacy",
+        &start_date,
+        &end_date,
+    )?;
     if let Some(progress_cb) = progress_cb {
         progress_cb(DownloadProgress {
             phase: "done".to_string(),

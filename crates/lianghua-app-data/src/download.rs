@@ -1524,7 +1524,9 @@ pub fn run_prepared_data_download(
                             emit_chip_maintenance_progress(progress_cb, progress);
                         }
                     };
-                    let repair_summary = if recovered_stock_codes.is_empty() {
+                    let repair_summary = if maintenance_status.strategy_changed
+                        || recovered_stock_codes.is_empty()
+                    {
                         None
                     } else {
                         repair_cyq_chen_stocks_if_db_exists(
@@ -1549,18 +1551,11 @@ pub fn run_prepared_data_download(
                             ),
                         );
                     };
-                    let incremental_summary = if maintenance_status.strategy_changed
-                        && allow_cyq_chen_strategy_rebuild
-                        && repair_summary.is_some()
-                    {
-                        None
-                    } else {
-                        maintain_cyq_chen_incremental_if_db_exists(
-                            source_path,
-                            allow_cyq_chen_strategy_rebuild,
-                            Some(&incremental_progress_cb),
-                        )?
-                    };
+                    let incremental_summary = maintain_cyq_chen_incremental_if_db_exists(
+                        source_path,
+                        allow_cyq_chen_strategy_rebuild,
+                        Some(&incremental_progress_cb),
+                    )?;
                     let snapshot_rows = repair_summary
                         .as_ref()
                         .map(|summary| summary.snapshot_rows)
