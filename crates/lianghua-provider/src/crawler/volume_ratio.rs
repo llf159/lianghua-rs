@@ -207,7 +207,7 @@ pub fn fetch_eastmoney_volume_ratio(
         .header("Referer", "https://quote.eastmoney.com/")
         .header("User-Agent", "Mozilla/5.0")
         .send().map_err(|e| super::intraday::format_intraday_request_error("东财", ts_code, e))?
-        .error_for_status().map_err(|e| format!("东财分时 HTTP 错误: {ts_code}, {e}"))?
+        .error_for_status().map_err(|e| super::intraday::format_intraday_http_error("东财", ts_code, e))?
         .text().map_err(|e| format!("读取东财分时失败: {e:?}"))?;
     parse_eastmoney_volume_ratio(&raw, ts_code, average_daily_volume)
 }

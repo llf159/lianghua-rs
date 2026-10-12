@@ -187,6 +187,23 @@ impl Cache {
             .saturating_mul(2).min(2000);
     }
 
+    fn handle_fetch_error(&mut self, source: usize, error: &str, now: Instant) {
+        let status = error.split("HTTP状态=").nth(1)
+            .and_then(|value| value.get(..3))
+            .and_then(|value| value.parse::<u16>().ok());
+        if status.is_some_and(|status| status == 429 || (500..=599).contains(&status)) {
+            self.throttle_source(source, now);
+        } else if error.contains("请求东财分时失败") || error.contains("请求腾讯分时失败")
+            || error.contains("读取东财分时失败") || error.contains("读取腾讯分时行情响应失败")
+        {
+            // 网络故障单独冷却，不把连接失败当成 HTTP 拒绝，也不缩短既有冷却。
+            self.cooldown_until[source] = Some(
+                self.cooldown_until[source].unwrap_or(now)
+                    .max(now + Duration::from_secs(15))
+            );
+        }
+    }
+
     fn set_paused(&mut self, paused: bool) {
         if self.paused == paused {
             return;
@@ -242,7 +259,7 @@ pub fn snapshot(
     let (workers, http) = WORKERS
         .get_or_init(|| {
             let workers = rayon::ThreadPoolBuilder::new()
-                .num_threads(8)
+                .num_threads(4)
                 .thread_name(|index| format!("volume-ratio-{index}"))
                 .build()
                 .map_err(|e| format!("创建量比补齐线程失败: {e}"))?;
@@ -383,15 +400,8 @@ pub fn snapshot(
                     if state.generation != generation {
                         return;
                     }
-                    if result.as_ref().err().is_some_and(|error| {
-                        error.contains("(501 ") || error.contains("(429 ")
-                    }) {
-                        state.throttle_source(source, Instant::now());
-                    }
-                    if source == 1 && result.as_ref().err().is_some_and(|error| {
-                        error.contains("(502 ") || error.contains("请求东财分时失败")
-                    }) {
-                        state.cooldown_until[source] = Some(Instant::now() + Duration::from_secs(15));
+                    if let Err(error) = &result {
+                        state.handle_fetch_error(source, error, Instant::now());
                     }
                     state.entries.insert(
                         ts_code,
@@ -483,6 +493,21 @@ mod tests {
         cache.throttle_source(1, now);
         assert_eq!(cache.request_interval_ms[1], 200);
         assert!(cache.reserve_source(now).1 >= Duration::from_secs(60));
+        for status in [429, 500, 501, 502, 503, 504] {
+            let mut cache = Cache::default();
+            cache.handle_fetch_error(0, &format!("腾讯分时 HTTP 错误; HTTP状态={status};"), now);
+            assert_eq!(cache.cooldown_until[0], Some(now + Duration::from_secs(60)));
+            assert_eq!(cache.request_interval_ms[0], 200);
+            assert_eq!(cache.reserve_source(now), (1, Duration::ZERO));
+            cache.handle_fetch_error(0, "请求腾讯分时失败（连接失败）", now);
+            assert_eq!(cache.cooldown_until[0], Some(now + Duration::from_secs(60)));
+        }
+        let mut cache = Cache::default();
+        cache.handle_fetch_error(1, "请求东财分时失败（请求超时）", now);
+        assert_eq!(cache.cooldown_until[1], Some(now + Duration::from_secs(15)));
+        assert_eq!(cache.request_interval_ms[1], 0);
+        assert_eq!(cache.reserve_source(now), (0, Duration::ZERO));
+
     }
 
     #[test]

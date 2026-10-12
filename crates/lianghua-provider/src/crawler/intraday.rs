@@ -290,6 +290,16 @@ pub(super) fn format_intraday_request_error(
     format!("请求{provider}分时失败（{kind}）: {ts_code}; 原因: {error:?}")
 }
 
+pub(super) fn format_intraday_http_error(
+    provider: &str,
+    ts_code: &str,
+    error: reqwest::Error,
+) -> String {
+    let status = error.status().map(|status| status.as_u16()).unwrap_or(0);
+    let error = error.without_url();
+    format!("{provider}分时 HTTP 错误: {ts_code}; HTTP状态={status}; {error}")
+}
+
 pub fn fetch_tencent_intraday_text(
     http: &reqwest::blocking::Client,
     ts_code: &str,
@@ -303,7 +313,7 @@ pub fn fetch_tencent_intraday_text(
         .send()
         .map_err(|e| format_intraday_request_error("腾讯", ts_code, e))?
         .error_for_status()
-        .map_err(|e| format!("腾讯分时行情返回 HTTP 错误: ts_code={ts_code}, err={e}"))?
+        .map_err(|e| format_intraday_http_error("腾讯", ts_code, e))?
         .text()
         .map_err(|e| format!("读取腾讯分时行情响应失败: ts_code={ts_code}, err={e:?}"))
 }
@@ -323,7 +333,7 @@ pub async fn fetch_tencent_intraday_async(
             .await
             .map_err(|e| format_intraday_request_error("腾讯", ts_code, e))?
             .error_for_status()
-            .map_err(|e| format!("腾讯分时行情返回 HTTP 错误: ts_code={ts_code}, err={e}"))?
+            .map_err(|e| format_intraday_http_error("腾讯", ts_code, e))?
             .text()
             .await
             .map_err(|e| format!("读取腾讯分时行情响应失败: ts_code={ts_code}, err={e:?}"))
