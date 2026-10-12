@@ -1,4 +1,8 @@
 use serde::Serialize;
+use std::{
+    collections::HashMap,
+    sync::{Mutex, OnceLock},
+};
 
 use super::{
     intraday::TencentIntradayResponse, intraday::TencentIntradaySymbolWrapper,
@@ -134,8 +138,8 @@ pub fn parse_eastmoney_volume_ratio(
     ts_code: &str,
     average_daily_volume: f64,
 ) -> Result<TencentVolumeRatioData, String> {
-    let response: serde_json::Value = serde_json::from_str(raw)
-        .map_err(|e| format!("解析东财分时失败: {e}"))?;
+    let response: serde_json::Value =
+        serde_json::from_str(raw).map_err(|e| format!("解析东财分时失败: {e}"))?;
     if response["rc"].as_i64() != Some(0) {
         return Err(format!("东财分时返回错误: {}", response["rc"]));
     }
@@ -160,12 +164,16 @@ pub fn parse_eastmoney_volume_ratio(
         }
         let (date, time) = fields[0].split_once(' ').ok_or("东财分时时间格式错误")?;
         let date = super::intraday::normalize_trade_date(&date.replace('-', ""))?;
-        if trade_date.as_ref().is_some_and(|previous| previous != &date) {
+        if trade_date
+            .as_ref()
+            .is_some_and(|previous| previous != &date)
+        {
             return Err("东财单日分时包含多个日期".to_string());
         }
         trade_date = Some(date);
         let time = time.replace(':', "");
-        if time.len() != 4 || !time.bytes().all(|value| value.is_ascii_digit())
+        if time.len() != 4
+            || !time.bytes().all(|value| value.is_ascii_digit())
             || (!previous_time.is_empty() && time <= previous_time)
         {
             return Err("东财分时时间乱序或重复".to_string());
@@ -179,7 +187,10 @@ pub fn parse_eastmoney_volume_ratio(
             cumulative_amount += amount;
         }
         if intraday_trading_minutes(&time).is_some() {
-            normalized.push(format!("{time} {} {cumulative_vol} {cumulative_amount}", fields[2]));
+            normalized.push(format!(
+                "{time} {} {cumulative_vol} {cumulative_amount}",
+                fields[2]
+            ));
         }
     }
     let trade_date = trade_date.ok_or("东财分时为空")?;
@@ -196,25 +207,273 @@ pub fn fetch_eastmoney_volume_ratio(
     average_daily_volume: f64,
 ) -> Result<TencentVolumeRatioData, String> {
     let symbol = ts_code_to_tencent_code(ts_code)?;
-    let secid = format!("{}.{}", if symbol.starts_with("sh") { 1 } else { 0 }, &symbol[2..]);
-    let raw = http.get("https://push2.eastmoney.com/api/qt/stock/trends2/get")
+    let secid = format!(
+        "{}.{}",
+        if symbol.starts_with("sh") { 1 } else { 0 },
+        &symbol[2..]
+    );
+    let raw = http
+        .get("https://push2.eastmoney.com/api/qt/stock/trends2/get")
         .query(&[
             ("secid", secid.as_str()),
             ("fields1", "f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11"),
             ("fields2", "f51,f52,f53,f54,f55,f56,f57,f58"),
-            ("ndays", "1"), ("iscr", "1"),
+            ("ndays", "1"),
+            ("iscr", "1"),
         ])
         .header("Referer", "https://quote.eastmoney.com/")
         .header("User-Agent", "Mozilla/5.0")
-        .send().map_err(|e| super::intraday::format_intraday_request_error("东财", ts_code, e))?
-        .error_for_status().map_err(|e| super::intraday::format_intraday_http_error("东财", ts_code, e))?
-        .text().map_err(|e| format!("读取东财分时失败: {e:?}"))?;
+        .send()
+        .map_err(|e| super::intraday::format_intraday_request_error("东财", ts_code, e))?
+        .error_for_status()
+        .map_err(|e| super::intraday::format_intraday_http_error("东财", ts_code, e))?
+        .text()
+        .map_err(|e| format!("读取东财分时失败: {e:?}"))?;
     parse_eastmoney_volume_ratio(&raw, ts_code, average_daily_volume)
+}
+
+/// MSN 分钟量按股累加；显式盘前量保留，分钟桶转换为闭合时间。
+/// 数据口径尚未与腾讯完全一致，调用方须标识为近似基准。
+pub fn parse_msn_volume_ratio(
+    raw: &str,
+    ts_code: &str,
+    average_daily_volume: f64,
+) -> Result<TencentVolumeRatioData, String> {
+    let symbol = ts_code_to_tencent_code(ts_code)?;
+    let exchange = if symbol.starts_with("sh") {
+        "XSHG"
+    } else if symbol.starts_with("sz") {
+        "XSHE"
+    } else {
+        return Err("MSN 量比分时暂只支持沪深股票".to_string());
+    };
+    if !average_daily_volume.is_finite() || average_daily_volume <= 0.0 {
+        return Err("本地量比五日日均量无效".to_string());
+    }
+    let response: serde_json::Value =
+        serde_json::from_str(raw).map_err(|e| format!("解析 MSN 分时失败: {e}"))?;
+    let data = &response[0];
+    if data["symbol"].as_str() != Some(&symbol[2..])
+        || data["securityType"].as_str() != Some("stock")
+        || data["chartType"].as_str() != Some("1D1M")
+    {
+        return Err(format!("MSN 分时标的或周期不匹配: {ts_code}"));
+    }
+    if data["exchangeCode"]
+        .as_str()
+        .is_some_and(|code| code != exchange)
+    {
+        return Err(format!("MSN 分时交易所不匹配: {ts_code}"));
+    }
+    let timezone = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
+    let timestamp = |value: &serde_json::Value| {
+        chrono::DateTime::parse_from_rfc3339(value.as_str().ok_or("MSN 分时时间不是字符串")?)
+            .map(|time| time.with_timezone(&timezone))
+            .map_err(|e| format!("MSN 分时时间无效: {e}"))
+    };
+    let times = data["series"]["timeStamps"]
+        .as_array()
+        .ok_or("MSN 分时缺少时间数组")?;
+    let volumes = data["series"]["volumes"]
+        .as_array()
+        .ok_or("MSN 分时缺少成交量（不能使用 chartflag=7）")?;
+    if times.len() != volumes.len() || times.len() < 5 {
+        return Err("MSN 分时成交量长度不匹配或开盘五分钟未完整".to_string());
+    }
+    let first_time = timestamp(&times[0])?;
+    let trade_date = first_time.format("%Y%m%d").to_string();
+    if first_time.format("%H%M%S").to_string() != "093000" {
+        return Err("MSN 分时缺少 09:30 起点".to_string());
+    }
+    let pre_times = data["preHoursSeries"]["timeStamps"]
+        .as_array()
+        .filter(|times| !times.is_empty())
+        .ok_or("MSN 分时缺少明确盘前竞价量，不猜测补量")?;
+    let pre_volumes = data["preHoursSeries"]["volumes"]
+        .as_array()
+        .ok_or("MSN 盘前缺少成交量")?;
+    if pre_times.len() != pre_volumes.len() {
+        return Err("MSN 盘前量与时间长度不匹配".to_string());
+    }
+    let mut cumulative_volume = 0.0;
+    let mut previous = None;
+    for (time, volume) in pre_times.iter().zip(pre_volumes) {
+        let time = timestamp(time)?;
+        if time.date_naive() != first_time.date_naive()
+            || time >= first_time
+            || previous.is_some_and(|previous| time <= previous)
+        {
+            return Err("MSN 竞价量日期或时间无效".to_string());
+        }
+        let volume = volume
+            .as_f64()
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .ok_or("MSN 竞价成交量无效")?;
+        cumulative_volume += volume;
+        previous = Some(time);
+    }
+    let mut points = vec![TencentVolumeRatioPoint {
+        time: "0930".to_string(),
+        trading_minutes: 1.0,
+        volume_ratio: cumulative_volume / 100.0 / (average_daily_volume / 240.0),
+    }];
+    previous = None;
+    for (index, (time, volume)) in times.iter().zip(volumes).enumerate() {
+        let time = timestamp(time)?;
+        if time.date_naive() != first_time.date_naive()
+            || previous.is_some_and(|previous| time <= previous)
+            || (index < 5 && time != first_time + chrono::Duration::minutes(index as i64))
+        {
+            return Err("MSN 分时日期、顺序或开盘五分钟连续性无效".to_string());
+        }
+        previous = Some(time);
+        let volume = volume
+            .as_f64()
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .ok_or("MSN 分时成交量无效")?;
+        // 11:30 的零量标记不能移到午休；连续交易桶按结束时刻使用。
+        let start = time.format("%H%M").to_string();
+        if !("0930".."1130").contains(&start.as_str())
+            && !("1300".."1457").contains(&start.as_str())
+        {
+            continue;
+        }
+        cumulative_volume += volume;
+        let closed = (time + chrono::Duration::minutes(1))
+            .format("%H%M")
+            .to_string();
+        let minutes = intraday_trading_minutes(&closed).ok_or("MSN 分时分钟边界无效")?;
+        let volume_ratio = cumulative_volume / 100.0 / (average_daily_volume * minutes / 240.0);
+        if !volume_ratio.is_finite() {
+            return Err("MSN 分时累计成交量溢出".to_string());
+        }
+        points.push(TencentVolumeRatioPoint {
+            time: closed,
+            trading_minutes: minutes,
+            volume_ratio,
+        });
+    }
+    Ok(TencentVolumeRatioData {
+        trade_date,
+        average_daily_volume,
+        volume_to_hands: 0.01,
+        points,
+    })
+}
+
+pub fn fetch_msn_volume_ratio(
+    http: &reqwest::blocking::Client,
+    ts_code: &str,
+    average_daily_volume: f64,
+) -> Result<TencentVolumeRatioData, String> {
+    let symbol = ts_code_to_tencent_code(ts_code)?;
+    let exchange = if symbol.starts_with("sh") {
+        "XSHG"
+    } else if symbol.starts_with("sz") {
+        "XSHE"
+    } else {
+        return Err("MSN 量比分时暂只支持沪深股票".to_string());
+    };
+    static IDS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    let ids = IDS.get_or_init(|| Mutex::new(HashMap::new()));
+    let cached_id = ids
+        .lock()
+        .map_err(|_| "MSN 标的缓存锁已损坏")?
+        .get(&symbol)
+        .cloned();
+    let apikey = "0QfOX3Vn51YCzitbLaRkTTBadtWpgTN8NZLW0C1SEM";
+    let read = |request: reqwest::blocking::RequestBuilder| {
+        request
+            .send()
+            .map_err(|e| super::intraday::format_intraday_request_error("MSN", ts_code, e))?
+            .error_for_status()
+            .map_err(|e| super::intraday::format_intraday_http_error("MSN", ts_code, e))?
+            .text()
+            .map_err(|e| format!("读取 MSN 分时失败: {e:?}"))
+    };
+    let id = if let Some(id) = cached_id {
+        id
+    } else {
+        let raw = read(
+            http.get(
+                "https://services.bingapis.com/contentservices-finance.csautosuggest/api/v1/Query",
+            )
+            .query(&[
+                ("query", &symbol[2..]),
+                ("market", "zh-cn"),
+                ("count", "10"),
+            ]),
+        )?;
+        let response: serde_json::Value =
+            serde_json::from_str(&raw).map_err(|e| format!("解析 MSN 标的搜索失败: {e}"))?;
+        let mut id = None;
+        for stock in response["data"]["stocks"]
+            .as_array()
+            .ok_or("MSN 搜索缺少标的数组")?
+        {
+            let stock: serde_json::Value =
+                serde_json::from_str(stock.as_str().ok_or("MSN 搜索标的不是字符串")?)
+                    .map_err(|e| format!("解析 MSN 搜索标的失败: {e}"))?;
+            if stock["OS001"].as_str() == Some(&symbol[2..])
+                && stock["ExMicCode"].as_str() == Some(exchange)
+                && stock["OS010"].as_str() == Some("ST")
+            {
+                id = stock["SecId"].as_str().map(str::to_string);
+                break;
+            }
+        }
+        let id = id.ok_or_else(|| format!("MSN 未找到沪深股票: {ts_code}"))?;
+        ids.lock()
+            .map_err(|_| "MSN 标的缓存锁已损坏")?
+            .insert(symbol, id.clone());
+        id
+    };
+    let raw = read(
+        http.get("https://assets.msn.com/service/Finance/Charts")
+            .query(&[
+                ("apikey", apikey),
+                ("ids", id.as_str()),
+                ("type", "1D1M"),
+                ("wrapodata", "false"),
+                ("cm", "zh-cn"),
+            ]),
+    )?;
+    parse_msn_volume_ratio(&raw, ts_code, average_daily_volume)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn msn_includes_explicit_auction_and_closes_five_minute_buckets() {
+        let mut raw = serde_json::json!([{
+            "symbol": "000001", "exchangeCode": "XSHE", "securityType": "stock", "chartType": "1D1M",
+            "preHoursSeries": {"timeStamps": ["2026-10-12T01:25:00Z"], "volumes": [1000]},
+            "series": {
+                "timeStamps": ["2026-10-12T01:30:00Z", "2026-10-12T01:31:00Z",
+                    "2026-10-12T01:32:00Z", "2026-10-12T01:33:00Z", "2026-10-12T01:34:00Z"],
+                "volumes": [1000, 2000, 3000, 4000, 5000]
+            }
+        }]);
+        let data = parse_msn_volume_ratio(&raw.to_string(), "000001.SZ", 2400.0).unwrap();
+        assert_eq!(data.trade_date, "20261012");
+        assert_eq!(data.volume_to_hands, 0.01);
+        assert_eq!(data.points.len(), 6);
+        assert_eq!(data.points[0].time, "0930");
+        assert_eq!(data.points[0].volume_ratio, 1.0);
+        assert_eq!(data.points[1].time, "0931");
+        assert_eq!(data.points[1].volume_ratio, 2.0);
+        assert_eq!(data.points[5].time, "0935");
+        assert_eq!(data.points[5].volume_ratio, 3.2);
+        assert!(parse_msn_volume_ratio(&raw.to_string(), "000001.SH", 2400.0).is_err());
+        assert!(parse_msn_volume_ratio(&raw.to_string(), "600519.SH", 2400.0).is_err());
+        raw[0]["series"]["timeStamps"][4] = serde_json::json!("2026-10-12T01:35:00Z");
+        assert!(parse_msn_volume_ratio(&raw.to_string(), "000001.SZ", 2400.0).is_err());
+        raw[0]["series"]["timeStamps"][4] = serde_json::json!("2026-10-12T01:34:00Z");
+        raw[0]["preHoursSeries"] = serde_json::Value::Null;
+        assert!(parse_msn_volume_ratio(&raw.to_string(), "000001.SZ", 2400.0).is_err());
+    }
 
     #[test]
     fn empty_intraday_responses_are_errors_not_successful_baselines() {
@@ -254,7 +513,10 @@ mod tests {
             assert!((em.volume_ratio - qq.volume_ratio).abs() < 1e-12);
         }
         assert!(parse_eastmoney_volume_ratio(raw, "600000.SH", 100000.0).is_err());
-        assert!(parse_eastmoney_volume_ratio(&raw.replace("09:30", "09:29"), "000001.SZ", 100000.0).is_err());
+        assert!(
+            parse_eastmoney_volume_ratio(&raw.replace("09:30", "09:29"), "000001.SZ", 100000.0)
+                .is_err()
+        );
     }
 
     #[test]

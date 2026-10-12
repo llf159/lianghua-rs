@@ -617,6 +617,58 @@
   font-size: 13px;
 }
 
+.eastmoney-session-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.eastmoney-session-actions .all-market-toggle {
+  appearance: none;
+  justify-content: center;
+  min-height: 44px;
+  max-width: 100%;
+  padding: 8px 14px;
+  border-radius: 8px;
+  background: #fff;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  touch-action: manipulation;
+}
+
+.eastmoney-session-actions .is-primary {
+  border-color: var(--theme-orange-600);
+  background: var(--theme-orange-600);
+  color: #fff;
+}
+
+.eastmoney-session-actions .is-secondary {
+  border-color: #d9e0e8;
+  background: #f7f9fc;
+  color: #64748b;
+}
+
+.eastmoney-session-actions .all-market-toggle:hover:not(:disabled) {
+  border-color: var(--theme-orange-300);
+  background: var(--theme-orange-50);
+}
+
+.eastmoney-session-actions .is-primary:hover:not(:disabled) {
+  border-color: var(--theme-orange-700);
+  background: var(--theme-orange-700);
+}
+
+.eastmoney-session-actions .all-market-toggle:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.eastmoney-session-actions .all-market-toggle:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+
 .all-market-monitor-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);

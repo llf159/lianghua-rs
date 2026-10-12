@@ -91,7 +91,7 @@ fn ts_code_to_sina_code(ts_code: &str) -> Result<String, String> {
     }
 }
 
-fn ts_code_to_tencent_code(ts_code: &str) -> Result<String, String> {
+pub fn ts_code_to_tencent_code(ts_code: &str) -> Result<String, String> {
     ts_code_to_sina_code(ts_code)
 }
 

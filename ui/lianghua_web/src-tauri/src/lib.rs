@@ -1,4 +1,5 @@
 mod data_download_bridge;
+mod eastmoney_session;
 mod managed_source_bridge;
 mod warehouse;
 
@@ -2826,6 +2827,9 @@ pub fn run() {
             validate_intraday_monitor_template_expression,
             get_all_market_monitor_snapshot,
             set_all_market_volume_ratio_paused,
+            eastmoney_session::open_eastmoney_verification,
+            eastmoney_session::use_eastmoney_verified_session,
+            eastmoney_session::stop_eastmoney_verified_session,
             get_stock_detail_page,
             get_stock_detail_kline_indicators,
             get_stock_detail_overview,

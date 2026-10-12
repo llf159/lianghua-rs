@@ -394,3 +394,15 @@ export function isMissingOverviewExtension(error: unknown) {
 export async function setAllMarketVolumeRatioPaused(paused: boolean) {
   return invoke<void>("set_all_market_volume_ratio_paused", { paused });
 }
+
+export async function openEastmoneyVerification() {
+  return invoke<void>("open_eastmoney_verification");
+}
+
+export async function useEastmoneyVerifiedSession() {
+  return invoke<void>("use_eastmoney_verified_session");
+}
+
+export async function stopEastmoneyVerifiedSession() {
+  return invoke<void>("stop_eastmoney_verified_session");
+}

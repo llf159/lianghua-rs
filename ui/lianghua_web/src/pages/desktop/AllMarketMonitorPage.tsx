@@ -3,6 +3,9 @@ import { ensureManagedSourcePath } from "../../apis/managedSource";
 import {
   getAllMarketMonitorSnapshot,
   setAllMarketVolumeRatioPaused,
+  openEastmoneyVerification,
+  useEastmoneyVerifiedSession,
+  stopEastmoneyVerifiedSession,
   type StockLookupRow,
   type AllMarketIndexRow,
   type AllMarketMonitorRow,
@@ -653,6 +656,8 @@ export default function AllMarketMonitorPage() {
   const [templateWarning, setTemplateWarning] = useState("");
   const [volumeRatioStatus, setVolumeRatioStatus] = useState("");
   const [volumeRatioPaused, setVolumeRatioPaused] = useState(false);
+  const [eastmoneySessionBusy, setEastmoneySessionBusy] = useState(false);
+  const [eastmoneySessionMessage, setEastmoneySessionMessage] = useState("");
   const [marketStatus, setMarketStatus] = useState("");
   const [refreshedAt, setRefreshedAt] = useState("");
   const [rankDate, setRankDate] = useState("");
@@ -1985,6 +1990,41 @@ export default function AllMarketMonitorPage() {
             {volumeRatioStatus}
           </div>
         ) : null}
+        <details className="all-market-warning">
+          <summary>东方财富访问验证</summary>
+          <p>东财要求验证时，打开下方页面并手动完成滑动验证。分时图恢复后返回这里检查连接；接入成功后请保持验证窗口打开。</p>
+          <div className="eastmoney-session-actions" role="group" aria-label="东财验证操作" aria-busy={eastmoneySessionBusy}>
+            <button className="all-market-toggle" type="button" disabled={eastmoneySessionBusy} onClick={async () => {
+              setEastmoneySessionBusy(true);
+              try {
+                await openEastmoneyVerification();
+                setEastmoneySessionMessage("请在东财页面完成验证，返回后点击“验证完成，检查连接”。");
+              } catch (sessionError) {
+                setEastmoneySessionMessage(String(sessionError));
+              } finally { setEastmoneySessionBusy(false); }
+            }}>打开验证页面</button>
+            <button className="all-market-toggle is-primary" type="button" disabled={eastmoneySessionBusy} onClick={async () => {
+              setEastmoneySessionBusy(true);
+              setEastmoneySessionMessage("正在检查东财浏览器会话…");
+              try {
+                await useEastmoneyVerifiedSession();
+                setEastmoneySessionMessage("连接成功，东财分时将使用已验证的窗口补齐。请保持该窗口打开；监控暂停时仍不会继续拉取。");
+              } catch (sessionError) {
+                setEastmoneySessionMessage(`连接未恢复：${String(sessionError)}`);
+              } finally { setEastmoneySessionBusy(false); }
+            }}>验证完成，检查连接</button>
+            <button className="all-market-toggle is-secondary" type="button" disabled={eastmoneySessionBusy} onClick={async () => {
+              setEastmoneySessionBusy(true);
+              try {
+                await stopEastmoneyVerifiedSession();
+                setEastmoneySessionMessage("已停止使用验证窗口，东财恢复普通接口请求。");
+              } catch (sessionError) {
+                setEastmoneySessionMessage(String(sessionError));
+              } finally { setEastmoneySessionBusy(false); }
+            }}>停止使用验证窗口</button>
+          </div>
+          {eastmoneySessionMessage ? <p role="status">{eastmoneySessionMessage}</p> : null}
+        </details>
       </section>
 
       <div className="all-market-group-grid">

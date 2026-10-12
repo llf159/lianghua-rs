@@ -2,6 +2,8 @@
 
 后续 agents 修改本组件时请继续维护本文件，只记录难以从代码理解的工程取舍；首次设计和普通 bug 修复不记，没有合适记录时不要硬写。
 
+- 问题：东财人工验证后外部浏览器恢复，但 Rust 直连仍在 TLS 握手阶段断开，复制 Cookie 不能保证复用验证状态；解决方案选择：用户在独立 WebView 手动验证，分时通过同一窗口的官网 EventSource 接口取得首个完整快照后立即关闭并复用 Rust 严格解析，只在单股探测成功后接入补齐，不向远程页面授予应用 IPC 权限；解释：保留浏览器会话与网络栈，代价是补齐期间必须保留验证窗口；每 200ms 读取一次异步结果、请求 12 秒超时，平衡 WebView 调度开销与补齐延迟，仍沿用后台源限速和监控暂停行为，不自动处理验证码。Android 验证页放在独立 singleInstance task，返回按钮和系统返回键只切回监控，避免 MainActivity 的 singleTask 回栈清掉验证页；Tao 的 set_focus 在 Android 未实现，重新显示验证页须走原生活动 Intent。
+
 - 问题：长时间相似度计算会被桌面电源策略视为空闲，移动页面又可能被系统自动释放唤醒锁；解决方案选择：Linux 计算期间使用 systemd-inhibit --what=idle:sleep，结束由 RAII 释放，申请失败只记录警告；移动 WebView 使用页面级 Screen Wake Lock，重新可见时再申请、计算结束释放；解释：以临时、可释放的申请避免改永久电源配置或申请常驻移动电源权限，申请失败不阻断计算。
 
 - 问题：Snap 的 Android Studio/JBR 自动升级可能改变实际构建 JVM，旧组合曾出现 Java 25 HotSpot 崩溃；解决方案选择：gen/android/gradle/gradle-daemon-jvm.properties 将 daemon 固定为 Java 21，JDK 路径只放用户级 ~/.gradle/gradle.properties，CI 使用 Temurin 21；解释：让构建 JVM 独立于 IDE 更新，不把机器路径或会被 Snap 清理的 revision 路径写进仓库。下次先在 gen/android 执行 ./gradlew --version 和 ./gradlew help --no-daemon；若找不到 Java 21，安装 JDK 21 并更新用户级 Gradle 的 JDK 路径。只有候选 JVM 连续通过 Debug/Release 且不再产生 hs_err_pid*.log 时才考虑解除固定。
