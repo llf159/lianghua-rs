@@ -136,6 +136,17 @@ enum Entry {
     },
 }
 
+impl Entry {
+    fn apply_quote(&mut self, quote: &SinaQuote) -> Option<VolumeRatioValue> {
+        match self {
+            Self::Ready(baseline)
+            | Self::Pending(Some(baseline))
+            | Self::Failed { baseline: Some(baseline), .. } => baseline.apply_quote(quote),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Default)]
 struct Cache {
     source_path: String,
@@ -407,21 +418,27 @@ pub fn snapshot(
                 }
             });
         }
-        match state.entries.get_mut(ts_code) {
-            Some(Entry::Ready(baseline)) => {
-                if let Some(value) = baseline.apply_quote(quote) {
-                    if value.opening_high.is_none() {
-                        pending += 1;
-                    }
-                    values.insert(ts_code.clone(), value);
+        if let Some(entry) = state.entries.get_mut(ts_code) {
+            let ready = matches!(entry, Entry::Ready(_));
+            match entry {
+                Entry::Ready(_) => {}
+                Entry::Pending(_) => pending += 1,
+                Entry::Failed { error, .. } => {
+                    failed += 1;
+                    first_error.get_or_insert(error.clone());
                 }
             }
-            Some(Entry::Pending(_)) => pending += 1,
-            Some(Entry::Failed { error, .. }) => {
+            if let Some(value) = entry.apply_quote(quote) {
+                if ready && value.opening_high.is_none() {
+                    pending += 1;
+                }
+                values.insert(ts_code.clone(), value);
+            } else if ready {
                 failed += 1;
-                first_error.get_or_insert(error.clone());
+                first_error.get_or_insert_with(|| format!(
+                    "{ts_code} 已有分时基准，但当前行情的时间或成交量无法计算量比"
+                ));
             }
-            None => {}
         }
     }
     let status = if state.paused {
@@ -632,6 +649,18 @@ mod tests {
                 opening_high: Some(5.0)
             })
         );
+        let expected = baseline.apply_quote(&quote);
+        let mut failed = Entry::Failed {
+            at: Instant::now(),
+            error: "连接失败".to_string(),
+            baseline: Some(baseline),
+        };
+        assert_eq!(failed.apply_quote(&quote), expected);
+        let Entry::Failed { baseline, .. } = failed else { unreachable!() };
+        let mut pending = Entry::Pending(baseline);
+        assert_eq!(pending.apply_quote(&quote), expected);
+        assert_eq!(Entry::Pending(None).apply_quote(&quote), None);
+
     }
 
     #[test]

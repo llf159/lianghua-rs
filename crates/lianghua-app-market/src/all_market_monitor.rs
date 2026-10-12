@@ -65,6 +65,7 @@ struct StockMeta {
 #[derive(Debug, Clone)]
 struct SourceMetaCacheEntry {
     stocks: Vec<StockMeta>,
+    warning: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1043,7 +1044,10 @@ pub fn get_all_market_monitor_snapshot(
 
         let entry = (|source_path: &str| -> Result<SourceMetaCacheEntry, String> {
             let mut stocks = Vec::new();
-            let concepts_map = build_concepts_map(source_path).unwrap_or_default();
+            let (concepts_map, warning) = match build_concepts_map(source_path) {
+                Ok(concepts) => (concepts, None),
+                Err(error) => (HashMap::new(), Some(format!("读取概念资料失败，概念榜暂不可用: {error}"))),
+            };
             for cols in load_stock_list(source_path)? {
                 let Some(ts_code) = cols.first().map(|value| value.trim()) else {
                     continue;
@@ -1071,13 +1075,15 @@ pub fn get_all_market_monitor_snapshot(
                     concept: concepts_map.get(ts_code).cloned().unwrap_or_default(),
                 });
             }
-            Ok(SourceMetaCacheEntry { stocks })
+            Ok(SourceMetaCacheEntry { stocks, warning })
         })(source_path)?;
         let entry = Arc::new(entry);
-        source_meta_cache()
-            .lock()
-            .map_err(|_| "股票基础信息缓存锁已损坏".to_string())?
-            .insert(source_path.to_string(), entry.clone());
+        if entry.warning.is_none() {
+            source_meta_cache()
+                .lock()
+                .map_err(|_| "股票基础信息缓存锁已损坏".to_string())?
+                .insert(source_path.to_string(), entry.clone());
+        }
         Ok(entry)
     })(source_path)?;
     if let Some(ref codes) = ts_codes {
@@ -1150,9 +1156,15 @@ pub fn get_all_market_monitor_snapshot(
                 .map_or(0, |snapshot| snapshot.revision)
         )
     });
-    let volume_ratio_status_message = volume_ratios
+    let mut volume_ratio_status_message = volume_ratios
         .as_ref()
         .and_then(|snapshot| snapshot.status.clone());
+    if let Some(warning) = &meta.warning {
+        volume_ratio_status_message = Some(match volume_ratio_status_message {
+            Some(message) => format!("{message}；{warning}"),
+            None => warning.clone(),
+        });
+    }
     if !has_new_realtime_data(last_data_version.as_deref(), data_version.as_deref()) {
         return Ok(AllMarketMonitorSnapshotData {
             rows: Vec::new(),
@@ -1216,8 +1228,18 @@ pub fn get_all_market_monitor_snapshot(
             .quote_trade_date
             .as_deref()
             .unwrap_or(&now.format("%Y%m%d").to_string()),
-    )
-    .unwrap_or_default();
+    );
+    let daily_baselines = match daily_baselines {
+        Ok(baselines) => baselines,
+        Err(error) => {
+            let warning = format!("读取本地日线基准失败，五日涨幅暂不可用: {error}");
+            volume_ratio_status_message = Some(match volume_ratio_status_message {
+                Some(message) => format!("{message}；{warning}"),
+                None => warning,
+            });
+            Default::default()
+        }
+    };
     let mut rows = build_rows(
         &meta,
         &rank_context.ranks,
@@ -1900,6 +1922,7 @@ mod tests {
                             concept: String::new(),
                         },
                     ],
+                    warning: None,
                 }
             })(),
             &ranks,

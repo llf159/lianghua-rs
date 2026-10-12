@@ -290,6 +290,9 @@ pub fn fetch_tencent_realtime_quote_map(
             quote_map.insert(quote.ts_code.clone(), quote);
         }
     }
+    if quote_map.is_empty() {
+        return Err("腾讯全市场行情返回空数据，已停止刷新并保留页面上一轮行情".to_string());
+    }
     let fetch_meta = build_tencent_realtime_fetch_meta(ts_codes, &quote_map);
 
     Ok((quote_map, fetch_meta))
@@ -362,6 +365,9 @@ pub fn fetch_all_market_realtime_quote_map_for_codes(
         for quote in retry_quotes {
             quote_map.insert(quote.ts_code.clone(), quote);
         }
+    }
+    if quote_map.is_empty() {
+        return Err("新浪全市场行情返回空数据，已停止刷新并保留页面上一轮行情".to_string());
     }
     let fetch_meta = build_realtime_fetch_meta(&ts_codes, &quote_map);
 
