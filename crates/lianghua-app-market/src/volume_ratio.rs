@@ -5,7 +5,7 @@ use std::{
 };
 
 use duckdb::{Connection, params};
-use lianghua_data::data::{load_trade_date_list, source_db_path};
+use lianghua_data::data::{source_db_path};
 use lianghua_provider::crawler::{
     SinaQuote,
     volume_ratio::{TencentVolumeRatioData, fetch_tencent_volume_ratio, intraday_trading_minutes},
@@ -16,39 +16,31 @@ pub fn load_volume_ratio_averages(
     trade_date: &str,
     ts_code: Option<&str>,
 ) -> Result<HashMap<String, f64>, String> {
-    let mut dates = load_trade_date_list(source_path)?;
-    dates.retain(|date| date.as_str() < trade_date);
-    dates.sort_unstable_by(|a, b| b.cmp(a));
-    dates.dedup();
-    dates.truncate(5);
     let conn = crate::data::open_db_readonly(source_db_path(source_path))
         .map_err(|e| format!("打开本地量比日线失败: {e}"))?;
-    load_local_volume_averages(&conn, &dates, ts_code)
+    load_local_volume_averages(&conn, trade_date, ts_code)
 }
 
 fn load_local_volume_averages(
     conn: &Connection,
-    dates: &[String],
+    trade_date: &str,
     ts_code: Option<&str>,
 ) -> Result<HashMap<String, f64>, String> {
-    if dates.len() != 5 {
-        return Err("本地交易日历不足五日".to_string());
-    }
     let mut stmt = conn
         .prepare(
-            "SELECT ts_code, AVG(TRY_CAST(vol AS DOUBLE)) FROM stock_data
-         WHERE adj_type='qfq' AND trade_date IN (?, ?, ?, ?, ?)
-            AND (? IS NULL OR ts_code=?)
-         GROUP BY ts_code
-         HAVING COUNT(DISTINCT trade_date)=5 AND COUNT(*)=5
-            AND COUNT(TRY_CAST(vol AS DOUBLE))=5 AND MIN(TRY_CAST(vol AS DOUBLE))>=0
-            AND isfinite(AVG(TRY_CAST(vol AS DOUBLE))) AND AVG(TRY_CAST(vol AS DOUBLE))>0",
+            "WITH recent AS (
+                SELECT ts_code, trade_date, TRY_CAST(vol AS DOUBLE) AS volume,
+                    ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY trade_date DESC) AS position
+                FROM stock_data
+                WHERE adj_type='qfq' AND trade_date < ? AND (? IS NULL OR ts_code=?)
+                    AND TRY_CAST(vol AS DOUBLE)>0 AND ISFINITE(TRY_CAST(vol AS DOUBLE))
+            )
+            SELECT ts_code, AVG(volume) FROM recent WHERE position<=5
+            GROUP BY ts_code HAVING COUNT(*)=5 AND COUNT(DISTINCT trade_date)=5",
         )
         .map_err(|e| format!("预编译本地量比基准失败: {e}"))?;
     let mut rows = stmt
-        .query(params![
-            dates[0], dates[1], dates[2], dates[3], dates[4], ts_code, ts_code
-        ])
+        .query(params![trade_date, ts_code, ts_code])
         .map_err(|e| format!("查询本地量比基准失败: {e}"))?;
     let mut values = HashMap::new();
     while let Some(row) = rows
@@ -65,6 +57,7 @@ fn load_local_volume_averages(
     Ok(values)
 }
 
+#[derive(Clone)]
 struct Baseline {
     data: TencentVolumeRatioData,
     observed_high: f64,
@@ -134,7 +127,7 @@ impl Baseline {
 }
 
 enum Entry {
-    Pending,
+    Pending(Option<Baseline>),
     Ready(Baseline),
     Failed {
         at: Instant,
@@ -154,6 +147,31 @@ struct Cache {
     local_averages: HashMap<String, f64>,
     local_loaded_at: Option<Instant>,
     local_error: Option<String>,
+    paused: bool,
+    next_request_at: Option<Instant>,
+    cooldown_until: Option<Instant>,
+}
+
+impl Cache {
+    fn set_paused(&mut self, paused: bool) {
+        if self.paused == paused {
+            return;
+        }
+        self.paused = paused;
+        self.generation += 1;
+        self.revision += 1;
+        // 中止排队和等待限速的任务，但保留已完成基准及其高点。
+        self.entries.retain(|_, entry| {
+            if let Entry::Pending(previous) = entry {
+                if let Some(baseline) = previous.take() {
+                    *entry = Entry::Ready(baseline);
+                } else {
+                    return false;
+                }
+            }
+            true
+        });
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -172,6 +190,14 @@ pub struct VolumeRatioSnapshot {
 static CACHE: OnceLock<Arc<Mutex<Cache>>> = OnceLock::new();
 static WORKERS: OnceLock<Result<(rayon::ThreadPool, reqwest::blocking::Client), String>> =
     OnceLock::new();
+
+pub fn set_fetch_paused(paused: bool) -> Result<(), String> {
+    CACHE.get_or_init(|| Arc::new(Mutex::new(Cache::default())))
+        .lock()
+        .map_err(|_| "量比缓存锁已损坏".to_string())?
+        .set_paused(paused);
+    Ok(())
+}
 
 pub fn snapshot(
     source_path: &str,
@@ -196,12 +222,7 @@ pub fn snapshot(
         .as_ref()
         .map_err(Clone::clone)?;
     let mut state = cache.lock().map_err(|_| "量比缓存锁已损坏".to_string())?;
-    if state.source_path != source_path
-        || state.date != trade_date
-        || state
-            .last_poll
-            .is_some_and(|at| at.elapsed() >= Duration::from_secs(60))
-    {
+    if state.source_path != source_path || state.date != trade_date {
         state.date = trade_date.to_string();
         state.source_path = source_path.to_string();
         state.entries.clear();
@@ -255,12 +276,16 @@ pub fn snapshot(
             }
             _ => false,
         };
-        if retry {
-            let previous = match state.entries.insert(ts_code.clone(), Entry::Pending) {
+        if retry && !state.paused {
+            let previous = match state.entries.remove(ts_code) {
                 Some(Entry::Ready(baseline)) => Some(baseline),
                 Some(Entry::Failed { baseline, .. }) => baseline,
                 _ => None,
             };
+            state.entries.insert(
+                ts_code.clone(),
+                Entry::Pending(previous.clone()),
+            );
             let cache = Arc::clone(cache);
             let ts_code = ts_code.clone();
             let date = trade_date.to_string();
@@ -269,27 +294,40 @@ pub fn snapshot(
             let local_average = state.local_averages.get(&ts_code).copied();
             let local_error = state.local_error.clone();
             workers.spawn(move || {
-                // 跨日、停止轮询后丢弃排队任务，暂停期间不持续抓取全市场。
-                if let Ok(mut state) = cache.lock() {
-                    if state.generation != generation {
+                // 所有补齐线程共用请求节奏；等待期间定期检查暂停和任务代次。
+                loop {
+                    let wait = if let Ok(mut state) = cache.lock() {
+                        if state.generation != generation || state.paused {
+                            return;
+                        }
+                        if state.last_poll.is_none_or(|at| at.elapsed() >= Duration::from_secs(60)) {
+                            state.entries.remove(&ts_code);
+                            state.revision += 1;
+                            return;
+                        }
+                        let now = Instant::now();
+                        let deadline = state.next_request_at.into_iter()
+                            .chain(state.cooldown_until)
+                            .max();
+                        let wait = deadline.map_or(Duration::ZERO, |at| at.saturating_duration_since(now));
+                        if wait.is_zero() && local_average.is_some() {
+                            // 4 个工作线程合计最多每秒启动 4 次请求，不能各自单独限速。
+                            state.next_request_at = Some(now + Duration::from_millis(250));
+                        }
+                        wait
+                    } else {
                         return;
+                    };
+                    if wait.is_zero() || local_average.is_none() {
+                        break;
                     }
-                    if state
-                        .last_poll
-                        .is_none_or(|at| at.elapsed() >= Duration::from_secs(60))
-                    {
-                        state.entries.remove(&ts_code);
-                        state.revision += 1;
-                        return;
-                    }
-                } else {
-                    return;
+                    std::thread::sleep(wait.min(Duration::from_millis(100)));
                 }
                 let result = if let Some(average) = local_average {
                     fetch_tencent_volume_ratio(&http, &ts_code, average)
                 } else {
                     Err(local_error.unwrap_or_else(|| {
-                        format!("{ts_code} 本地日线缺少 {date} 前五个交易日，请先更新日线")
+                        format!("{ts_code} 本地日线不足 {date} 前五根有成交行情，请先更新日线")
                     }))
                 }
                 .and_then(|data| {
@@ -304,6 +342,11 @@ pub fn snapshot(
                 if let Ok(mut state) = cache.lock() {
                     if state.generation != generation {
                         return;
+                    }
+                    if result.as_ref().err().is_some_and(|error| {
+                        error.contains("(501 ") || error.contains("(429 ")
+                    }) {
+                        state.cooldown_until = Some(Instant::now() + Duration::from_secs(60));
                     }
                     state.entries.insert(
                         ts_code,
@@ -339,7 +382,7 @@ pub fn snapshot(
                     values.insert(ts_code.clone(), value);
                 }
             }
-            Some(Entry::Pending) => pending += 1,
+            Some(Entry::Pending(_)) => pending += 1,
             Some(Entry::Failed { error, .. }) => {
                 failed += 1;
                 first_error.get_or_insert(error.clone());
@@ -347,7 +390,9 @@ pub fn snapshot(
             None => {}
         }
     }
-    let status = if pending > 0 || failed > 0 {
+    let status = if state.paused {
+        Some("分时基准拉取已手动暂停，已补齐数据继续使用；恢复后继续补齐。".to_string())
+    } else if pending > 0 || failed > 0 {
         Some(format!(
             "开盘五分钟量比基准：已补齐 {} 只，等待开盘五分钟结束或补齐中 {pending} 只，失败 {failed} 只；基准未完整的股票暂不提示量比新高{}",
             values
@@ -374,7 +419,44 @@ mod tests {
     use lianghua_provider::crawler::volume_ratio::TencentVolumeRatioPoint;
 
     #[test]
-    fn local_baseline_requires_exact_five_dates_and_keeps_hand_units() {
+    fn pausing_discards_queued_jobs_and_preserves_completed_baselines() {
+        let mut cache = Cache::default();
+        let baseline = Baseline {
+            data: TencentVolumeRatioData {
+                trade_date: "20261009".to_string(),
+                average_daily_volume: 300.0,
+                volume_to_hands: 1.0,
+                points: Vec::new(),
+            },
+            observed_high: 2.0,
+            observed_opening_high: 1.5,
+            next_point: 0,
+            loaded_at: Instant::now(),
+        };
+        cache.entries.insert("queued".to_string(), Entry::Pending(None));
+        cache.entries.insert("refreshing".to_string(), Entry::Pending(Some(baseline.clone())));
+        cache.entries.insert("ready".to_string(), Entry::Ready(baseline));
+        cache.set_paused(true);
+        assert!(cache.paused);
+        assert_eq!(cache.generation, 1);
+        assert!(!cache.entries.contains_key("queued"));
+        for code in ["ready", "refreshing"] {
+            let Entry::Ready(baseline) = &cache.entries[code] else {
+                panic!("lost completed baseline")
+            };
+            assert_eq!(baseline.observed_high, 2.0);
+            assert_eq!(baseline.observed_opening_high, 1.5);
+        }
+        cache.set_paused(true);
+        assert_eq!(cache.generation, 1);
+        cache.set_paused(false);
+        assert!(!cache.paused);
+        assert_eq!(cache.generation, 2);
+        assert_eq!(cache.entries.len(), 2);
+    }
+
+    #[test]
+    fn local_baseline_uses_five_traded_bars_and_keeps_hand_units() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE stock_data(ts_code VARCHAR, trade_date VARCHAR, adj_type VARCHAR, vol DOUBLE);
             INSERT INTO stock_data VALUES
@@ -385,22 +467,21 @@ mod tests {
             INSERT INTO stock_data SELECT code,trade_date,adj_type,vol FROM stock_data
                 CROSS JOIN (VALUES ('000001.SZ'),('600000.SH'),('688185.SH')) AS codes(code)
                 WHERE ts_code='920002.BJ';").unwrap();
-        let mut dates =
-            ["20260924", "20260928", "20260929", "20260930", "20261008"].map(str::to_string);
-        let values = load_local_volume_averages(&conn, &dates, None).unwrap();
+        let values = load_local_volume_averages(&conn, "20261009", None).unwrap();
         assert_eq!(values.len(), 4);
         for code in ["920002.BJ", "000001.SZ", "600000.SH", "688185.SH"] {
             assert_eq!(values[code], 300.0);
         }
-        let selected = load_local_volume_averages(&conn, &dates, Some("688185.SH")).unwrap();
+        let selected = load_local_volume_averages(&conn, "20261009", Some("688185.SH")).unwrap();
         assert_eq!(selected.len(), 1);
         assert_eq!(selected["688185.SH"], 300.0);
-        dates[4] = "20261012".to_string();
-        assert!(
-            load_local_volume_averages(&conn, &dates, None)
-                .unwrap()
-                .is_empty()
-        );
+        conn.execute_batch("INSERT INTO stock_data VALUES
+            ('paused','20260801','qfq',100), ('paused','20260803','qfq',200),
+            ('paused','20260901','qfq',300), ('paused','20260915','qfq',400),
+            ('paused','20261008','qfq',500), ('paused','20261007','qfq',0)").unwrap();
+        let paused = load_local_volume_averages(&conn, "20261009", Some("paused")).unwrap();
+        assert_eq!(paused["paused"], 300.0);
+
     }
 
     #[test]

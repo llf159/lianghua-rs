@@ -794,6 +794,11 @@ fn validate_intraday_monitor_template_expression(
 }
 
 #[tauri::command]
+fn set_all_market_volume_ratio_paused(paused: bool) -> Result<(), String> {
+    market::volume_ratio::set_fetch_paused(paused)
+}
+
+#[tauri::command]
 async fn get_all_market_monitor_snapshot(
     source_path: String,
     realtime_provider: Option<String>,
@@ -2820,6 +2825,7 @@ pub fn run() {
             get_expression_capabilities,
             validate_intraday_monitor_template_expression,
             get_all_market_monitor_snapshot,
+            set_all_market_volume_ratio_paused,
             get_stock_detail_page,
             get_stock_detail_kline_indicators,
             get_stock_detail_overview,

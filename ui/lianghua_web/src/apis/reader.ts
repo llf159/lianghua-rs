@@ -390,3 +390,7 @@ export function isMissingOverviewExtension(error: unknown) {
     message.includes("get_rank_trade_date_options")
   );
 }
+
+export async function setAllMarketVolumeRatioPaused(paused: boolean) {
+  return invoke<void>("set_all_market_volume_ratio_paused", { paused });
+}

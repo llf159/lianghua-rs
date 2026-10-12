@@ -68,6 +68,11 @@ jobs:
           cargo test --package lianghua-data chip_rebuild_completion_preserves_partial_and_other_model_debts
           cargo test --package lianghua-data maintain_cyq_chen_incremental_rebuilds_all_when_strategy_changes
 
+      - name: Test monitor daily baselines and pause behavior
+        run: |
+          cargo test --package lianghua-app-market daily_baseline::tests
+          cargo test --package lianghua-app-market volume_ratio::tests
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
