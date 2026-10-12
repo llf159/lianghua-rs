@@ -136,6 +136,17 @@ enum Entry {
     },
 }
 
+impl Entry {
+    fn apply_quote(&mut self, quote: &SinaQuote) -> Option<VolumeRatioValue> {
+        match self {
+            Self::Ready(baseline)
+            | Self::Pending(Some(baseline))
+            | Self::Failed { baseline: Some(baseline), .. } => baseline.apply_quote(quote),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Default)]
 struct Cache {
     source_path: String,
@@ -174,6 +185,23 @@ impl Cache {
         self.request_interval_ms[source] = self.request_interval_ms[source]
             .max(100)
             .saturating_mul(2).min(2000);
+    }
+
+    fn handle_fetch_error(&mut self, source: usize, error: &str, now: Instant) {
+        let status = error.split("HTTP状态=").nth(1)
+            .and_then(|value| value.get(..3))
+            .and_then(|value| value.parse::<u16>().ok());
+        if status.is_some_and(|status| status == 429 || (500..=599).contains(&status)) {
+            self.throttle_source(source, now);
+        } else if error.contains("请求东财分时失败") || error.contains("请求腾讯分时失败")
+            || error.contains("读取东财分时失败") || error.contains("读取腾讯分时行情响应失败")
+        {
+            // 网络故障单独冷却，不把连接失败当成 HTTP 拒绝，也不缩短既有冷却。
+            self.cooldown_until[source] = Some(
+                self.cooldown_until[source].unwrap_or(now)
+                    .max(now + Duration::from_secs(15))
+            );
+        }
     }
 
     fn set_paused(&mut self, paused: bool) {
@@ -231,7 +259,7 @@ pub fn snapshot(
     let (workers, http) = WORKERS
         .get_or_init(|| {
             let workers = rayon::ThreadPoolBuilder::new()
-                .num_threads(8)
+                .num_threads(4)
                 .thread_name(|index| format!("volume-ratio-{index}"))
                 .build()
                 .map_err(|e| format!("创建量比补齐线程失败: {e}"))?;
@@ -372,15 +400,8 @@ pub fn snapshot(
                     if state.generation != generation {
                         return;
                     }
-                    if result.as_ref().err().is_some_and(|error| {
-                        error.contains("(501 ") || error.contains("(429 ")
-                    }) {
-                        state.throttle_source(source, Instant::now());
-                    }
-                    if source == 1 && result.as_ref().err().is_some_and(|error| {
-                        error.contains("(502 ") || error.contains("请求东财分时失败")
-                    }) {
-                        state.cooldown_until[source] = Some(Instant::now() + Duration::from_secs(15));
+                    if let Err(error) = &result {
+                        state.handle_fetch_error(source, error, Instant::now());
                     }
                     state.entries.insert(
                         ts_code,
@@ -407,21 +428,27 @@ pub fn snapshot(
                 }
             });
         }
-        match state.entries.get_mut(ts_code) {
-            Some(Entry::Ready(baseline)) => {
-                if let Some(value) = baseline.apply_quote(quote) {
-                    if value.opening_high.is_none() {
-                        pending += 1;
-                    }
-                    values.insert(ts_code.clone(), value);
+        if let Some(entry) = state.entries.get_mut(ts_code) {
+            let ready = matches!(entry, Entry::Ready(_));
+            match entry {
+                Entry::Ready(_) => {}
+                Entry::Pending(_) => pending += 1,
+                Entry::Failed { error, .. } => {
+                    failed += 1;
+                    first_error.get_or_insert(error.clone());
                 }
             }
-            Some(Entry::Pending(_)) => pending += 1,
-            Some(Entry::Failed { error, .. }) => {
+            if let Some(value) = entry.apply_quote(quote) {
+                if ready && value.opening_high.is_none() {
+                    pending += 1;
+                }
+                values.insert(ts_code.clone(), value);
+            } else if ready {
                 failed += 1;
-                first_error.get_or_insert(error.clone());
+                first_error.get_or_insert_with(|| format!(
+                    "{ts_code} 已有分时基准，但当前行情的时间或成交量无法计算量比"
+                ));
             }
-            None => {}
         }
     }
     let status = if state.paused {
@@ -466,6 +493,21 @@ mod tests {
         cache.throttle_source(1, now);
         assert_eq!(cache.request_interval_ms[1], 200);
         assert!(cache.reserve_source(now).1 >= Duration::from_secs(60));
+        for status in [429, 500, 501, 502, 503, 504] {
+            let mut cache = Cache::default();
+            cache.handle_fetch_error(0, &format!("腾讯分时 HTTP 错误; HTTP状态={status};"), now);
+            assert_eq!(cache.cooldown_until[0], Some(now + Duration::from_secs(60)));
+            assert_eq!(cache.request_interval_ms[0], 200);
+            assert_eq!(cache.reserve_source(now), (1, Duration::ZERO));
+            cache.handle_fetch_error(0, "请求腾讯分时失败（连接失败）", now);
+            assert_eq!(cache.cooldown_until[0], Some(now + Duration::from_secs(60)));
+        }
+        let mut cache = Cache::default();
+        cache.handle_fetch_error(1, "请求东财分时失败（请求超时）", now);
+        assert_eq!(cache.cooldown_until[1], Some(now + Duration::from_secs(15)));
+        assert_eq!(cache.request_interval_ms[1], 0);
+        assert_eq!(cache.reserve_source(now), (0, Duration::ZERO));
+
     }
 
     #[test]
@@ -632,6 +674,18 @@ mod tests {
                 opening_high: Some(5.0)
             })
         );
+        let expected = baseline.apply_quote(&quote);
+        let mut failed = Entry::Failed {
+            at: Instant::now(),
+            error: "连接失败".to_string(),
+            baseline: Some(baseline),
+        };
+        assert_eq!(failed.apply_quote(&quote), expected);
+        let Entry::Failed { baseline, .. } = failed else { unreachable!() };
+        let mut pending = Entry::Pending(baseline);
+        assert_eq!(pending.apply_quote(&quote), expected);
+        assert_eq!(Entry::Pending(None).apply_quote(&quote), None);
+
     }
 
     #[test]

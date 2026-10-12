@@ -206,15 +206,31 @@ pub fn fetch_eastmoney_volume_ratio(
         ])
         .header("Referer", "https://quote.eastmoney.com/")
         .header("User-Agent", "Mozilla/5.0")
-        .send().map_err(|e| format!("请求东财分时失败: {ts_code}, {e}"))?
-        .error_for_status().map_err(|e| format!("东财分时 HTTP 错误: {ts_code}, {e}"))?
-        .text().map_err(|e| format!("读取东财分时失败: {e}"))?;
+        .send().map_err(|e| super::intraday::format_intraday_request_error("东财", ts_code, e))?
+        .error_for_status().map_err(|e| super::intraday::format_intraday_http_error("东财", ts_code, e))?
+        .text().map_err(|e| format!("读取东财分时失败: {e:?}"))?;
     parse_eastmoney_volume_ratio(&raw, ts_code, average_daily_volume)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_intraday_responses_are_errors_not_successful_baselines() {
+        for raw in [
+            r#"{"code":0,"data":{}}"#,
+            r#"{"code":0,"data":{"sz000001":{"data":{"date":"20261012","data":[]}}}}"#,
+        ] {
+            assert!(parse_tencent_volume_ratio(raw, "000001.SZ", 100000.0).is_err());
+        }
+        for raw in [
+            r#"{"rc":0,"data":null}"#,
+            r#"{"rc":0,"data":{"code":"000001","market":0,"trends":[]}}"#,
+        ] {
+            assert!(parse_eastmoney_volume_ratio(raw, "000001.SZ", 100000.0).is_err());
+        }
+    }
 
     #[test]
     fn eastmoney_cumulative_volume_matches_tencent_including_auction() {
