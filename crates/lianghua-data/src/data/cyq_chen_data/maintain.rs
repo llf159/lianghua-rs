@@ -986,12 +986,7 @@ pub fn rebuild_cyq_chen_all_with_progress(
     }
     drop(reader);
     drop(source_conn);
-    crate::data::download_state::complete_chip_rebuild(
-        source_dir,
-        "chen",
-        &start_date,
-        &end_date,
-    )?;
+    crate::data::download_state::complete_chip_rebuild(source_dir, "chen", &start_date, &end_date)?;
     if let Some(progress_cb) = progress_cb {
         progress_cb(DownloadProgress {
             phase: "done".to_string(),

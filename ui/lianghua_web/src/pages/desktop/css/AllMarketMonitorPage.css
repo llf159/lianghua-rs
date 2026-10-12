@@ -617,11 +617,107 @@
   font-size: 13px;
 }
 
+.all-market-volume-ratio-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin-top: 10px;
+}
+
+.all-market-volume-ratio-progress {
+  flex: 1 1 240px;
+  min-width: 0;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.all-market-volume-ratio-controls {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  border: 1px solid #c6d0da;
+  border-radius: 8px;
+  background: #f7f9fc;
+}
+
+.all-market-volume-ratio-controls .all-market-baseline-toggle {
+  border: 0;
+  border-radius: 7px 0 0 7px;
+  padding: 4px 10px;
+  background: transparent;
+}
+
+.all-market-volume-ratio-controls .all-market-baseline-toggle.is-active {
+  background: var(--theme-orange-600);
+  color: #fff;
+}
+
+.all-market-volume-ratio-controls .eastmoney-session-menu > .eastmoney-session-trigger {
+  border-left: 1px solid #d9e0e8;
+  padding: 0 10px;
+}
+
+.eastmoney-session-menu {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.eastmoney-session-menu > .eastmoney-session-trigger {
+  display: inline-flex;
+  align-items: center;
+  min-height: 38px;
+  padding: 0 6px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.eastmoney-session-menu > .eastmoney-session-trigger:hover {
+  color: #334155;
+}
+
+.eastmoney-session-menu > .eastmoney-session-trigger:focus-visible {
+  outline: 2px solid var(--theme-orange-300);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.eastmoney-session-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 30;
+  width: min(300px, calc(100vw - 40px));
+  box-sizing: border-box;
+  padding: 12px;
+  border: 1px solid #d9e0e8;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 4px 16px rgb(15 23 42 / 10%);
+}
+
+.eastmoney-session-popover p {
+  margin: 0 0 8px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.eastmoney-session-popover p[role="status"] {
+  margin: 8px 0 0;
+}
+
 .eastmoney-session-actions {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 6px;
 }
 
 .eastmoney-session-actions .all-market-toggle {
@@ -629,39 +725,19 @@
   justify-content: center;
   min-height: 44px;
   max-width: 100%;
-  padding: 8px 14px;
-  border-radius: 8px;
+  padding: 6px 10px;
+  border-color: #d9e0e8;
+  border-radius: 6px;
   background: #fff;
-  font-family: inherit;
-  font-size: 13px;
+  color: #425367;
+  font: inherit;
   line-height: 1.4;
   touch-action: manipulation;
 }
 
-.eastmoney-session-actions .is-primary {
-  border-color: var(--theme-orange-600);
-  background: var(--theme-orange-600);
-  color: #fff;
-}
-
-.eastmoney-session-actions .is-secondary {
-  border-color: #d9e0e8;
-  background: #f7f9fc;
-  color: #64748b;
-}
-
 .eastmoney-session-actions .all-market-toggle:hover:not(:disabled) {
-  border-color: var(--theme-orange-300);
-  background: var(--theme-orange-50);
-}
-
-.eastmoney-session-actions .is-primary:hover:not(:disabled) {
-  border-color: var(--theme-orange-700);
-  background: var(--theme-orange-700);
-}
-
-.eastmoney-session-actions .all-market-toggle:active:not(:disabled) {
-  transform: translateY(1px);
+  border-color: #9fb1c5;
+  background: #f7f9fc;
 }
 
 .eastmoney-session-actions .all-market-toggle:disabled {
@@ -1893,4 +1969,23 @@
 .all-market-baseline-toggle:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+.eastmoney-session-popover-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.eastmoney-session-popover-head button {
+  border: 1px solid #c6d0da;
+  border-radius: 6px;
+  background: #fff;
+  color: #425367;
+  min-height: 38px;
+  padding: 4px 10px;
+  font: inherit;
+  cursor: pointer;
 }

@@ -559,21 +559,33 @@ mod tests {
         complete_chip_rebuild(source, "chen", "20260402", "20260408").unwrap();
         let conn = open_source_db_readonly(source).unwrap();
         assert_eq!(
-            load_pending_chip_repairs_for_model(&conn, "chen").unwrap().len(),
+            load_pending_chip_repairs_for_model(&conn, "chen")
+                .unwrap()
+                .len(),
             1
         );
         drop(conn);
         complete_chip_rebuild(source, "chen", "20260401", "20260408").unwrap();
         let conn = open_source_db_readonly(source).unwrap();
-        assert!(load_pending_chip_repairs_for_model(&conn, "chen").unwrap().is_empty());
+        assert!(
+            load_pending_chip_repairs_for_model(&conn, "chen")
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
-            load_pending_chip_repairs_for_model(&conn, "legacy").unwrap().len(),
+            load_pending_chip_repairs_for_model(&conn, "legacy")
+                .unwrap()
+                .len(),
             1
         );
         drop(conn);
         complete_chip_rebuild(source, "legacy", "20260401", "20260408").unwrap();
         let conn = open_source_db_readonly(source).unwrap();
-        assert!(load_pending_chip_repairs_for_model(&conn, "legacy").unwrap().is_empty());
+        assert!(
+            load_pending_chip_repairs_for_model(&conn, "legacy")
+                .unwrap()
+                .is_empty()
+        );
         drop(conn);
         std::fs::remove_dir_all(source_dir).unwrap();
     }

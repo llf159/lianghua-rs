@@ -810,6 +810,7 @@ async fn get_all_market_monitor_snapshot(
     other_sort_expression: Option<String>,
     other_sort_use_realtime: Option<bool>,
     last_data_version: Option<String>,
+    volume_ratio_fetch_enabled: Option<bool>,
 ) -> Result<AllMarketMonitorSnapshotData, String> {
     tauri::async_runtime::spawn_blocking(move || {
         core_get_all_market_monitor_snapshot(
@@ -822,6 +823,7 @@ async fn get_all_market_monitor_snapshot(
             other_sort_expression,
             other_sort_use_realtime,
             last_data_version,
+            volume_ratio_fetch_enabled,
         )
     })
     .await
@@ -2768,7 +2770,8 @@ pub fn run() {
 
     let builder = builder
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init());
+        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_notification::init());
 
     builder
         .invoke_handler(tauri::generate_handler![

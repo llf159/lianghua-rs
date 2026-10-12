@@ -152,6 +152,5 @@ mod tests {
         assert_eq!(baselines["invalid"].average_volume, Some(560.0));
         let before_today = query(&conn, "20261008").unwrap();
         assert_eq!(before_today["normal"].average_volume, Some(500.0));
-
     }
 }

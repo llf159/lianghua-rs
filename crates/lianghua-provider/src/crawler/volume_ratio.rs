@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     sync::{Mutex, OnceLock},
@@ -33,19 +33,29 @@ pub fn intraday_trading_minutes(time: &str) -> Option<f64> {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TencentVolumeRatioPoint {
     pub time: String,
     pub trading_minutes: f64,
     pub volume_ratio: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TencentVolumeRatioData {
     pub trade_date: String,
     pub average_daily_volume: f64,
     pub volume_to_hands: f64,
     pub points: Vec<TencentVolumeRatioPoint>,
+}
+
+impl TencentVolumeRatioData {
+    pub fn opening_window_complete(&self) -> bool {
+        self.points.len() >= 6
+            && self.points[..6]
+                .iter()
+                .zip(["0930", "0931", "0932", "0933", "0934", "0935"])
+                .all(|(point, time)| point.time == time)
+    }
 }
 
 pub fn parse_tencent_volume_ratio(
@@ -466,6 +476,7 @@ mod tests {
         assert_eq!(data.points[1].volume_ratio, 2.0);
         assert_eq!(data.points[5].time, "0935");
         assert_eq!(data.points[5].volume_ratio, 3.2);
+        assert!(data.opening_window_complete());
         assert!(parse_msn_volume_ratio(&raw.to_string(), "000001.SH", 2400.0).is_err());
         assert!(parse_msn_volume_ratio(&raw.to_string(), "600519.SH", 2400.0).is_err());
         raw[0]["series"]["timeStamps"][4] = serde_json::json!("2026-10-12T01:35:00Z");
@@ -505,6 +516,8 @@ mod tests {
         ]}}}}"#;
         let em = parse_eastmoney_volume_ratio(raw, "000001.SZ", 100000.0).unwrap();
         let qq = parse_tencent_volume_ratio(qq, "000001.SZ", 100000.0).unwrap();
+        assert!(!em.opening_window_complete());
+        assert!(!qq.opening_window_complete());
         assert_eq!(em.trade_date, qq.trade_date);
         assert_eq!(em.volume_to_hands, qq.volume_to_hands);
         assert_eq!(em.points.len(), qq.points.len());

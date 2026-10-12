@@ -1031,6 +1031,7 @@ pub fn get_all_market_monitor_snapshot(
     other_sort_expression: Option<String>,
     other_sort_use_realtime: Option<bool>,
     last_data_version: Option<String>,
+    volume_ratio_fetch_enabled: Option<bool>,
 ) -> Result<AllMarketMonitorSnapshotData, String> {
     let mut meta = (|source_path: &str| -> Result<Arc<SourceMetaCacheEntry>, String> {
         if let Some(entry) = source_meta_cache()
@@ -1046,7 +1047,10 @@ pub fn get_all_market_monitor_snapshot(
             let mut stocks = Vec::new();
             let (concepts_map, warning) = match build_concepts_map(source_path) {
                 Ok(concepts) => (concepts, None),
-                Err(error) => (HashMap::new(), Some(format!("读取概念资料失败，概念榜暂不可用: {error}"))),
+                Err(error) => (
+                    HashMap::new(),
+                    Some(format!("读取概念资料失败，概念榜暂不可用: {error}")),
+                ),
             };
             for cols in load_stock_list(source_path)? {
                 let Some(ts_code) = cols.first().map(|value| value.trim()) else {
@@ -1133,8 +1137,10 @@ pub fn get_all_market_monitor_snapshot(
                 .any(|date| normalize_quote_trade_date(date).as_deref() == Some(today.as_str()))
         })
     });
-    // 未确认交易时页面会在本轮后暂停，不应为无人轮询的进度排队全市场分时。
-    let volume_ratios = if market_active && matches!(provider, RealtimeQuoteProvider::Tencent) {
+    // 手动补齐可以在休市后拉取行情所带日期；分时响应仍严格校验日期。
+    let volume_ratios = if (market_active || volume_ratio_fetch_enabled.unwrap_or(false))
+        && matches!(provider, RealtimeQuoteProvider::Tencent)
+    {
         fetch_meta
             .quote_trade_date
             .as_deref()

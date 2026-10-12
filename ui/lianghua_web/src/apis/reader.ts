@@ -360,6 +360,7 @@ export async function getAllMarketMonitorSnapshot(
   otherSortExpression?: string,
   otherSortUseRealtime?: boolean,
   lastDataVersion?: string,
+  volumeRatioFetchEnabled?: boolean,
 ) {
   return invoke<AllMarketMonitorSnapshotData>(
     "get_all_market_monitor_snapshot",
@@ -373,6 +374,7 @@ export async function getAllMarketMonitorSnapshot(
       otherSortExpression,
       otherSortUseRealtime,
       lastDataVersion,
+      volumeRatioFetchEnabled,
     },
   );
 }

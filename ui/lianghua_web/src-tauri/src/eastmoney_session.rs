@@ -46,9 +46,22 @@ pub async fn open_eastmoney_verification(app: tauri::AppHandle) -> Result<(), St
     .inner_size(800.0, 650.0);
     #[cfg(target_os = "android")]
     let builder = builder.activity_name("EastmoneyVerificationActivity");
-    builder
+    let _window = builder
         .build()
         .map_err(|e| format!("打开东财验证页面失败: {e}"))?;
+    #[cfg(not(target_os = "android"))]
+    {
+        let verification_window = _window.clone();
+        _window.on_window_event(move |event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // 验证会话仍用于后台分时请求，关闭按钮只收起可见窗口。
+                match verification_window.hide() {
+                    Ok(()) => api.prevent_close(),
+                    Err(error) => eprintln!("隐藏东财验证窗口失败: {error}"),
+                }
+            }
+        });
+    }
     Ok(())
 }
 

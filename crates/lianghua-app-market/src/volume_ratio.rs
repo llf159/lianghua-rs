@@ -1,5 +1,6 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
+    path::Path,
     sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
@@ -60,13 +61,16 @@ fn load_local_volume_averages(
     Ok(values)
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Baseline {
     data: TencentVolumeRatioData,
     source: usize,
+    #[serde(skip)]
     observed_high: f64,
     observed_opening_high: f64,
+    #[serde(skip)]
     next_point: usize,
+    #[serde(skip, default = "Instant::now")]
     loaded_at: Instant,
 }
 
@@ -114,14 +118,9 @@ impl Baseline {
         if minutes <= 5.0 {
             self.observed_opening_high = self.observed_opening_high.max(value);
         }
-        // 分时覆盖到 09:35 后才确认开盘五分钟完整；09:35 的端点仍计入基准。
-        let opening_high = (minutes > 5.0
-            && self
-                .data
-                .points
-                .last()
-                .is_some_and(|point| point.trading_minutes >= 5.0))
-        .then_some(self.observed_opening_high);
+        // 必须逐分钟覆盖开盘窗口，不能仅凭末点到达 09:35 判断完整。
+        let opening_high = (minutes > 5.0 && self.data.opening_window_complete())
+            .then_some(self.observed_opening_high);
         Some(VolumeRatioValue {
             current: value,
             high,
@@ -156,6 +155,9 @@ impl Entry {
 
 #[derive(Default)]
 struct Cache {
+    store: Option<rusqlite::Connection>,
+    dirty: HashSet<String>,
+    persistence_error: Option<String>,
     source_path: String,
     date: String,
     revision: u64,
@@ -173,6 +175,89 @@ struct Cache {
 }
 
 impl Cache {
+    fn restore(&mut self) -> Result<(), String> {
+        self.store = None;
+        self.dirty.clear();
+        let mut conn = rusqlite::Connection::open(
+            Path::new(&self.source_path).join("intraday_volume_ratio.sqlite3"),
+        )
+        .map_err(|error| format!("打开量比缓存失败: {error}"))?;
+        conn.busy_timeout(Duration::from_secs(2))
+            .map_err(|error| error.to_string())?;
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;
+            DROP TABLE IF EXISTS baselines_v1;
+            CREATE TABLE IF NOT EXISTS baselines_v2 (
+                code TEXT PRIMARY KEY, trade_date TEXT NOT NULL, baseline BLOB NOT NULL
+            );",
+        )
+        .map_err(|error| error.to_string())?;
+        let transaction = conn.transaction().map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "DELETE FROM baselines_v2 WHERE trade_date != ?1",
+                [&self.date],
+            )
+            .map_err(|error| error.to_string())?;
+        {
+            let mut statement = transaction
+                .prepare("SELECT code, baseline FROM baselines_v2 WHERE trade_date = ?1")
+                .map_err(|error| error.to_string())?;
+            let rows = statement
+                .query_map([&self.date], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+                })
+                .map_err(|error| error.to_string())?;
+            for row in rows {
+                let (code, bytes) = row.map_err(|error| error.to_string())?;
+                match bincode::deserialize::<Baseline>(&bytes) {
+                    Ok(baseline) if baseline.data.trade_date == self.date => {
+                        self.entries.insert(code, Entry::Ready(baseline));
+                    }
+                    _ => {
+                        self.persistence_error =
+                            Some("部分量比缓存损坏，已跳过并重新补齐".to_string());
+                    }
+                }
+            }
+        }
+        transaction.commit().map_err(|error| error.to_string())?;
+        self.store = Some(conn);
+        Ok(())
+    }
+
+    fn persist(&mut self) -> Result<(), String> {
+        if self.dirty.is_empty() {
+            return Ok(());
+        }
+        let conn = self.store.as_mut().ok_or("量比缓存未打开，数据尚未落盘")?;
+        let transaction = conn
+            .transaction()
+            .map_err(|error| format!("写入量比缓存失败: {error}"))?;
+        {
+            let mut statement = transaction.prepare("INSERT INTO baselines_v2 (code, trade_date, baseline)
+                VALUES (?1, ?2, ?3) ON CONFLICT(code) DO UPDATE SET trade_date=excluded.trade_date, baseline=excluded.baseline")
+                .map_err(|error| error.to_string())?;
+            for code in &self.dirty {
+                let baseline = match self.entries.get(code) {
+                    Some(Entry::Ready(baseline) | Entry::Pending(Some(baseline)))
+                    | Some(Entry::Failed {
+                        baseline: Some(baseline),
+                        ..
+                    }) => baseline,
+                    _ => continue,
+                };
+                let bytes = bincode::serialize(baseline).map_err(|error| error.to_string())?;
+                statement
+                    .execute(rusqlite::params![code, self.date, bytes])
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        transaction.commit().map_err(|error| error.to_string())?;
+        self.dirty.clear();
+        Ok(())
+    }
+
     fn reserve_source(
         &mut self,
         now: Instant,
@@ -316,6 +401,10 @@ pub fn snapshot(
         state.revision += 1;
         state.generation += 1;
         state.local_loaded_at = None;
+        state.persistence_error = None;
+        if let Err(error) = state.restore() {
+            state.persistence_error = Some(error);
+        }
     }
     state.last_poll = Some(Instant::now());
     let now = chrono::Utc::now().with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap());
@@ -358,11 +447,7 @@ pub fn snapshot(
             Some(Entry::Failed { at, .. }) => at.elapsed() >= Duration::from_secs(60),
             Some(Entry::Ready(baseline)) => {
                 quote.time.as_str() > "09:35:00"
-                    && baseline
-                        .data
-                        .points
-                        .last()
-                        .is_none_or(|point| point.trading_minutes < 5.0)
+                    && !baseline.data.opening_window_complete()
                     && baseline.loaded_at.elapsed() >= Duration::from_secs(60)
             }
             _ => false,
@@ -383,6 +468,7 @@ pub fn snapshot(
             let generation = state.generation;
             let local_average = state.local_averages.get(&ts_code).copied();
             let local_error = state.local_error.clone();
+            let opening_window_ended = quote.time.as_str() > "09:35:00";
             // MSN 声明延迟 15 分钟；开盘 20 分钟后才可能覆盖完整五分钟。
             let msn_supported = ts_code.ends_with(".SH") || ts_code.ends_with(".SZ");
             // 分时曲线单位已规范化；实时行情仍来自腾讯，须独立确认手/股单位。
@@ -431,10 +517,7 @@ pub fn snapshot(
                         if source == 0 {
                             fetch_tencent_volume_ratio(&http, &ts_code, average)
                         } else if source == 2 {
-                            fetch_msn_volume_ratio(&http, &ts_code, average).map(|mut data| {
-                                data.volume_to_hands = live_volume_to_hands;
-                                data
-                            })
+                            fetch_msn_volume_ratio(&http, &ts_code, average)
                         } else {
                             let browser_fetch = EASTMONEY_BROWSER_FETCH.lock()
                                 .map_err(|_| "东财浏览器会话锁已损坏".to_string())
@@ -446,9 +529,6 @@ pub fn snapshot(
                                     )
                                 }),
                                 None => fetch_eastmoney_volume_ratio(&http, &ts_code, average),
-                            }).map(|mut data| {
-                                data.volume_to_hands = live_volume_to_hands;
-                                data
                             })
                         }
                     } else {
@@ -456,13 +536,18 @@ pub fn snapshot(
                             format!("{ts_code} 本地日线不足 {date} 前五根有成交行情，请先更新日线")
                         }))
                     }
-                    .and_then(|data| {
+                    .and_then(|mut data| {
                         if data.trade_date != date {
                             return Err(format!(
                                 "分时日期 {} 与行情日期 {date} 不一致",
                                 data.trade_date
                             ));
                         }
+                        if opening_window_ended && !data.opening_window_complete() {
+                            return Err("分时未完整覆盖 09:30–09:35 开盘窗口".to_string());
+                        }
+                        // 三个源的曲线都已换算为量比；实时量单位独立于曲线源。
+                        data.volume_to_hands = live_volume_to_hands;
                         Ok(data)
                     });
                     match result {
@@ -486,6 +571,12 @@ pub fn snapshot(
                     if state.generation != generation {
                         return;
                     }
+                    // 请求在途期间仍会更新旧基准的高点，提交时保留最新观测。
+                    let previous = match state.entries.remove(&ts_code) {
+                        Some(Entry::Pending(current)) => current,
+                        _ => previous,
+                    };
+                    state.dirty.insert(ts_code.clone());
                     state.entries.insert(
                         ts_code,
                         match result {
@@ -509,6 +600,9 @@ pub fn snapshot(
                         },
                     );
                     state.revision += 1;
+                    if let Err(error) = state.persist() {
+                        state.persistence_error = Some(error);
+                    }
                 }
             });
         }
@@ -522,9 +616,29 @@ pub fn snapshot(
                     first_error.get_or_insert(error.clone());
                 }
             }
+            let previous_opening_high = match &*entry {
+                Entry::Ready(baseline)
+                | Entry::Pending(Some(baseline))
+                | Entry::Failed {
+                    baseline: Some(baseline),
+                    ..
+                } => Some(baseline.observed_opening_high),
+                _ => None,
+            };
             if let Some(value) = entry.apply_quote(quote) {
                 if ready && value.opening_high.is_none() {
                     pending += 1;
+                }
+                if previous_opening_high.is_some_and(|opening| match &*entry {
+                    Entry::Ready(baseline)
+                    | Entry::Pending(Some(baseline))
+                    | Entry::Failed {
+                        baseline: Some(baseline),
+                        ..
+                    } => baseline.observed_opening_high > opening,
+                    _ => false,
+                }) {
+                    state.dirty.insert(ts_code.clone());
                 }
                 values.insert(ts_code.clone(), value);
             } else if ready {
@@ -534,6 +648,9 @@ pub fn snapshot(
                 });
             }
         }
+    }
+    if let Err(error) = state.persist() {
+        state.persistence_error = Some(error);
     }
     let approximate = state
         .entries
@@ -548,30 +665,26 @@ pub fn snapshot(
             _ => false,
         })
         .count();
-    let mut status = if state.paused {
-        Some("分时基准拉取已手动暂停，已补齐数据继续使用；恢复后继续补齐。".to_string())
-    } else if pending > 0 || failed > 0 {
-        Some(format!(
-            "开盘五分钟量比基准：已补齐 {} 只，等待开盘五分钟结束或补齐中 {pending} 只，失败 {failed} 只；基准未完整的股票暂不提示量比新高{}",
-            values
-                .values()
-                .filter(|value| value.opening_high.is_some())
-                .count(),
-            first_error
-                .map(|error| format!("。首条错误：{error}（60 秒后重试）"))
-                .unwrap_or_default()
-        ))
-    } else {
-        None
-    };
+    let mut status = Some(format!(
+        "{}已补齐 {} · 待补齐 {pending} · 失败 {failed}{}",
+        if state.paused { "已暂停 · " } else { "" },
+        values
+            .values()
+            .filter(|value| value.opening_high.is_some())
+            .count(),
+        first_error
+            .map(|error| format!("。{error}（60 秒后重试）"))
+            .unwrap_or_default()
+    ));
     if approximate > 0 {
-        let message = format!(
-            "其中 {approximate} 只使用 MSN 延迟分时近似基准（含返回的盘前量，分钟口径可能与腾讯/东财不同）；盘中当前量比仍使用实时累计量。"
-        );
+        let message = format!("MSN 近似基准 {approximate} 只。");
         status = Some(match status {
             Some(status) => format!("{status}。{message}"),
             None => message,
         });
+    }
+    if let Some(error) = &state.persistence_error {
+        status = Some(format!("{}。落盘提示：{error}", status.unwrap_or_default()));
     }
     Ok(VolumeRatioSnapshot {
         values,
@@ -584,6 +697,120 @@ pub fn snapshot(
 mod tests {
     use super::*;
     use lianghua_provider::crawler::volume_ratio::TencentVolumeRatioPoint;
+
+    #[test]
+    fn persisted_baselines_restore_opening_high_and_isolate_trade_dates() {
+        let directory = std::env::temp_dir().join(format!(
+            "volume-ratio-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let source_path = directory.to_string_lossy().into_owned();
+        let mut cache = Cache {
+            source_path: source_path.clone(),
+            date: "20261013".into(),
+            ..Default::default()
+        };
+        cache.restore().unwrap();
+        let baseline = Baseline {
+            data: TencentVolumeRatioData {
+                trade_date: cache.date.clone(),
+                average_daily_volume: 2400.0,
+                volume_to_hands: 1.0,
+                points: ["0930", "0931", "0932", "0933", "0934", "0935"]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, time)| TencentVolumeRatioPoint {
+                        time: time.into(),
+                        trading_minutes: (index as f64).max(1.0),
+                        volume_ratio: 2.0,
+                    })
+                    .collect(),
+            },
+            source: 1,
+            observed_high: 7.0,
+            observed_opening_high: 3.0,
+            next_point: 6,
+            loaded_at: Instant::now(),
+        };
+        cache
+            .entries
+            .insert("000001.SZ".into(), Entry::Pending(Some(baseline)));
+        cache.dirty.insert("000001.SZ".into());
+        cache.persist().unwrap();
+        drop(cache);
+        let mut restored = Cache {
+            source_path: source_path.clone(),
+            date: "20261013".into(),
+            ..Default::default()
+        };
+        restored.restore().unwrap();
+        let Entry::Ready(baseline) = restored.entries.get("000001.SZ").unwrap() else {
+            panic!("未恢复基准")
+        };
+        assert!(baseline.data.opening_window_complete());
+        assert_eq!(
+            (baseline.observed_high, baseline.observed_opening_high),
+            (0.0, 3.0)
+        );
+        assert_eq!(baseline.next_point, 0);
+        assert_eq!(baseline.source, 1);
+        restored
+            .entries
+            .get_mut("000001.SZ")
+            .unwrap()
+            .apply_quote(&SinaQuote {
+                time: "09:36:00".into(),
+                vol: 100.0,
+                date: "20261013".into(),
+                ts_code: "000001.SZ".into(),
+                name: String::new(),
+                open: 0.0,
+                high: 0.0,
+                low: 0.0,
+                pre_close: 0.0,
+                price: 0.0,
+                amount: 0.0,
+                change_pct: None,
+            })
+            .unwrap();
+        let Entry::Ready(baseline) = restored.entries.get("000001.SZ").unwrap() else {
+            unreachable!()
+        };
+        assert_eq!(baseline.observed_high, 2.0);
+        restored
+            .store
+            .as_ref()
+            .unwrap()
+            .execute(
+                "INSERT INTO baselines_v2 VALUES ('broken', '20261013', X'FF')",
+                [],
+            )
+            .unwrap();
+        drop(restored);
+        let mut restored = Cache {
+            source_path: source_path.clone(),
+            date: "20261013".into(),
+            ..Default::default()
+        };
+        restored.restore().unwrap();
+        assert_eq!(restored.entries.len(), 1);
+        assert!(restored.persistence_error.is_some());
+        drop(restored);
+        let mut next_day = Cache {
+            source_path,
+            date: "20261014".into(),
+            ..Default::default()
+        };
+        next_day.restore().unwrap();
+        assert!(next_day.entries.is_empty());
+        drop(next_day);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn sources_have_independent_rate_limits_and_cooldowns() {
@@ -796,6 +1023,14 @@ mod tests {
             next_point: 0,
             loaded_at: Instant::now(),
         };
+        baseline.data.points.splice(
+            1..1,
+            (1..=5).map(|minute| TencentVolumeRatioPoint {
+                time: format!("093{minute}"),
+                trading_minutes: minute as f64,
+                volume_ratio: 1.0,
+            }),
+        );
         let mut quote = SinaQuote {
             date: "20261009".to_string(),
             time: "10:00:00".to_string(),
@@ -935,6 +1170,17 @@ mod tests {
         assert_eq!(baseline.apply_quote(&quote).unwrap().opening_high, None);
         quote.time = "09:36:00".to_string();
         quote.vol = 300.0;
+        // 已有 09:35 末点但中间缺分钟，仍不能确认开盘高点。
+        assert_eq!(baseline.apply_quote(&quote).unwrap().opening_high, None);
+        baseline.data.points.splice(
+            1..1,
+            (1..=3).map(|minute| TencentVolumeRatioPoint {
+                time: format!("093{minute}"),
+                trading_minutes: minute as f64,
+                volume_ratio: 1.0,
+            }),
+        );
+        baseline.next_point = 0;
         assert_eq!(
             baseline.apply_quote(&quote),
             Some(VolumeRatioValue {
