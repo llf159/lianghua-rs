@@ -24,6 +24,7 @@ import {
   filterConceptItems,
   splitConceptText,
   useConceptExclusions,
+  isStBoard,
 } from "../../shared/conceptExclusions";
 import { readStoredRealtimeQuoteProvider } from "../../shared/realtimeSettings";
 import {
@@ -32,6 +33,7 @@ import {
   writeStoredIntradayMonitorWatchlistEnabled,
   writeStoredIntradayMonitorWatchlist,
 } from "../../shared/intradayMonitorWatchlist";
+import { readStoredDefaultBoardFilter } from "../../shared/defaultBoardFilter";
 import { STOCK_PICK_BOARD_OPTIONS } from "../../shared/stockPickShared";
 import {
   TableSortButton,
@@ -525,7 +527,7 @@ function createEmptyHitRecordsByPeriod(): SpeedHitRecordsByPeriod {
 }
 
 export default function AllMarketMonitorPage() {
-  const { excludedConcepts } = useConceptExclusions();
+  const { excludedConcepts, excludeStBoard } = useConceptExclusions();
   const [sourcePath, setSourcePath] = useState("");
   const [enabled, setEnabled] = useState(false);
   const [templateDisplayMode, setTemplateDisplayMode] =
@@ -627,7 +629,7 @@ export default function AllMarketMonitorPage() {
   const [sceneStageThreshold, setSceneStageThreshold] =
     useState<SceneStageThreshold>(() => readLocalStorageSceneStageThreshold());
   const [boardFilter, setBoardFilter] = useState<BoardFilter>(() =>
-    readStoredIntradayMonitorWatchlistEnabled() ? "自选" : "全部",
+    readStoredIntradayMonitorWatchlistEnabled() ? "自选" : readStoredDefaultBoardFilter(),
   );
   const [topLimitText, setTopLimitText] = useState(() =>
     String(readLocalStorageNumber(LS_KEY_TOP_LIMIT, DEFAULT_TOP_LIMIT)),
@@ -1328,7 +1330,11 @@ export default function AllMarketMonitorPage() {
         row.realtime_price != null &&
         row.realtime_price > 0 &&
         row.realtime_trade_date === latestDate &&
-        isFiniteNumber(row.realtime_change_pct),
+        isFiniteNumber(row.realtime_change_pct) &&
+        (!excludeStBoard || !isStBoard(row.board)) &&
+        (boardFilter === "自选"
+          ? watchlistCodeSet.has(row.ts_code)
+          : boardFilter === "全部" || row.board === boardFilter),
     );
     return {
       concept: summarizeGroups(validRows, "concept", (row) =>
@@ -1338,7 +1344,7 @@ export default function AllMarketMonitorPage() {
         row.industry?.trim() ?? "",
       ]),
     };
-  }, [rows, excludedConcepts]);
+  }, [rows, excludedConcepts, excludeStBoard, boardFilter, watchlistCodeSet]);
   const selectedGroup = groupSelection
     ? marketGroups[groupSelection.kind].find(
         (group) => group.name === groupSelection.name,
