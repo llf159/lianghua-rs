@@ -92,6 +92,7 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
         }));
     };
 
+    drop(source_conn);
     let latest_metadata = query_latest_cyq_chen_metadata(&cyq_chen_db)?;
     let config = latest_metadata
         .as_ref()
@@ -983,6 +984,14 @@ pub fn rebuild_cyq_chen_all_with_progress(
         remove_cyq_chen_db_artifacts(&rebuild_db);
         return Err(error);
     }
+    drop(reader);
+    drop(source_conn);
+    crate::data::download_state::complete_chip_rebuild(
+        source_dir,
+        "chen",
+        &start_date,
+        &end_date,
+    )?;
     if let Some(progress_cb) = progress_cb {
         progress_cb(DownloadProgress {
             phase: "done".to_string(),
@@ -1718,6 +1727,14 @@ bias = 0.5
         rebuild_cyq_chen_all(source_path, config, Some("20260401"), Some("20260403"))
             .expect("seed cyq chen");
 
+        let source = Connection::open(crate::data::source_db_path(source_path)).unwrap();
+        crate::data::download_state::mark_chip_repairs_required(
+            &source,
+            &std::collections::HashSet::from(["000001.SZ".to_string()]),
+        )
+        .unwrap();
+        drop(source);
+
         fs::write(
             chip_change_rule_path(source_path),
             r#"
@@ -1749,6 +1766,20 @@ bias = 0.5
             })
             .expect("read min trade date");
         assert_eq!(min_trade_date.as_deref(), Some("20260402"));
+
+        drop(conn);
+        let source = crate::data::download_state::open_source_db_readonly(source_path).unwrap();
+        assert!(
+            crate::data::download_state::load_pending_chip_repairs_for_model(&source, "chen")
+                .unwrap()
+                .is_empty()
+        );
+        drop(source);
+        let maintained_rows = snapshot_rows_for_compare(source_path);
+        let maintained_bins = summary.bin_rows;
+        let rebuilt = rebuild_cyq_chen_all(source_path, config, None, None).unwrap();
+        assert_eq!(snapshot_rows_for_compare(source_path), maintained_rows);
+        assert_eq!(rebuilt.bin_rows, maintained_bins);
 
         fs::remove_dir_all(source_dir).expect("cleanup temp dir");
     }

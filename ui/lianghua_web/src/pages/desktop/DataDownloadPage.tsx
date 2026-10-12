@@ -528,7 +528,7 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
   const latestDbTradeDate = formatTradeDate(status?.sourceDb.maxTradeDate)
   const progressTiming = useProgressTiming(busyAction === 'running', progress, getProgressWorkflow)
   const resolvedIncrementalStartDate =
-    inputDateToCompact(startDateInput) || status?.sourceDb.minTradeDate || '20240101'
+    status?.sourceDb.minTradeDate || status?.missingStockRepair.suggestedStartDate || ''
   const shownProgressPercent = useAnimatedProgressPercent(busyAction === 'running', progressPercent)
   const phaseStep = getPhaseStep(progress?.action, progress?.phase, getProgressWorkflow)
   const phaseLabel = getProgressTaskLabel(
@@ -1263,11 +1263,11 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
                     <span>补救回补起点</span>
                     <input
                       type="date"
-                      value={startDateInput}
-                      onChange={(event) => setStartDateInput(event.target.value)}
+                      value={resolvedIncrementalStartDate ? formatTradeDate(resolvedIncrementalStartDate) : ''}
+                      readOnly
                     />
                     <small>
-                      为空时，默认取当前原始库最早日期
+                      自动使用当前原始库最早日期
                       {status?.sourceDb.minTradeDate ? ` ${formatTradeDate(status.sourceDb.minTradeDate)}` : ''}。
                     </small>
                   </label>
