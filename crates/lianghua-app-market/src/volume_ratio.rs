@@ -193,15 +193,8 @@ impl Cache {
             .and_then(|value| value.parse::<u16>().ok());
         if status.is_some_and(|status| status == 429 || (500..=599).contains(&status)) {
             self.throttle_source(source, now);
-        } else if error.contains("请求东财分时失败") || error.contains("请求腾讯分时失败")
-            || error.contains("读取东财分时失败") || error.contains("读取腾讯分时行情响应失败")
-        {
-            // 网络故障单独冷却，不把连接失败当成 HTTP 拒绝，也不缩短既有冷却。
-            self.cooldown_until[source] = Some(
-                self.cooldown_until[source].unwrap_or(now)
-                    .max(now + Duration::from_secs(15))
-            );
         }
+        // 超时、断连与读取失败只重试该股；没有 HTTP 状态不能推断全源限流。
     }
 
     fn set_paused(&mut self, paused: bool) {
@@ -259,7 +252,7 @@ pub fn snapshot(
     let (workers, http) = WORKERS
         .get_or_init(|| {
             let workers = rayon::ThreadPoolBuilder::new()
-                .num_threads(4)
+                .num_threads(8)
                 .thread_name(|index| format!("volume-ratio-{index}"))
                 .build()
                 .map_err(|e| format!("创建量比补齐线程失败: {e}"))?;
@@ -504,7 +497,9 @@ mod tests {
         }
         let mut cache = Cache::default();
         cache.handle_fetch_error(1, "请求东财分时失败（请求超时）", now);
-        assert_eq!(cache.cooldown_until[1], Some(now + Duration::from_secs(15)));
+        assert_eq!(cache.cooldown_until[1], None);
+        cache.handle_fetch_error(1, "读取东财分时失败: UnexpectedEof", now);
+        assert_eq!(cache.cooldown_until[1], None);
         assert_eq!(cache.request_interval_ms[1], 0);
         assert_eq!(cache.reserve_source(now), (0, Duration::ZERO));
 
