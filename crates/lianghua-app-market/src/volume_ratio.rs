@@ -163,7 +163,7 @@ impl Cache {
         let wait = deadlines[source].saturating_duration_since(now);
         if wait.is_zero() {
             let interval = self.request_interval_ms[source]
-                .max(if source == 0 { 250 } else { 100 });
+                .max(100);
             self.next_request_at[source] = Some(now + Duration::from_millis(interval));
         }
         (source, wait)
@@ -172,7 +172,7 @@ impl Cache {
     fn throttle_source(&mut self, source: usize, now: Instant) {
         self.cooldown_until[source] = Some(now + Duration::from_secs(60));
         self.request_interval_ms[source] = self.request_interval_ms[source]
-            .max(if source == 0 { 250 } else { 100 })
+            .max(100)
             .saturating_mul(2).min(2000);
     }
 
@@ -458,10 +458,10 @@ mod tests {
         let now = Instant::now();
         assert_eq!(cache.reserve_source(now), (0, Duration::ZERO));
         assert_eq!(cache.reserve_source(now), (1, Duration::ZERO));
-        assert_eq!(cache.reserve_source(now), (1, Duration::from_millis(100)));
+        assert_eq!(cache.reserve_source(now), (0, Duration::from_millis(100)));
         cache.throttle_source(0, now);
         assert_eq!(cache.reserve_source(now + Duration::from_millis(100)), (1, Duration::ZERO));
-        assert_eq!(cache.request_interval_ms[0], 500);
+        assert_eq!(cache.request_interval_ms[0], 200);
         assert_eq!(cache.request_interval_ms[1], 0);
         cache.throttle_source(1, now);
         assert_eq!(cache.request_interval_ms[1], 200);
