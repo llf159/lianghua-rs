@@ -24,13 +24,17 @@ export default function DatabaseIntegrityPanel({ report, busy, checking, error, 
       </div>
       {error ? <div className="data-download-error" role="alert">{error}</div> : null}
       {checking ? <p role="status">正在检查…</p> : null}
-      {!report && !checking ? <p className="database-integrity-hint">尚未检查。</p> : null}
+      {!report && !checking ? <p className="database-integrity-hint">检查未完成修复、历史覆盖缺口及已有结果的重算状态。</p> : null}
       {report ? <>
         <div className={`database-integrity-summary ${report.sourceReady ? 'is-ready' : 'is-blocked'}`} role="status">
           <strong>{report.sourceReady ? '原始行情检查通过' : '原始行情检查未通过，暂停后续重算'}</strong>
           <span>{report.checks.length} 个检测项目 · {report.stockCount.toLocaleString()} 只股票 · {report.rowCount.toLocaleString()} 行行情</span>
           <small>检查时间：{new Date(report.checkedAt).toLocaleString()} · 有效交易日：{report.targetTradeDate ?? '未知'}</small>
         </div>
+        <details className="database-integrity-hint">
+          <summary>检测范围与判断依据</summary>
+          {report.limitations.map((limitation) => <p key={limitation}>{limitation}</p>)}
+        </details>
         <div className="database-integrity-checks">
           {report.checks.map((check) => {
             const checkIssues = issues.filter((issue) => issue.checkId === check.id)

@@ -1089,6 +1089,57 @@ fn merge_summary(total: &mut DownloadSummary, batch: DownloadSummary) {
     total.failed_items.extend(batch.failed_items);
 }
 
+// 按组件的记账口径在落库精度下比较；新增和删除行也参与。
+fn changed_stock_input_ranges(
+    conn: &Connection,
+    ts_code: Option<&str>,
+    start_date: &str,
+    end_date: &str,
+    component: &str,
+) -> Result<Vec<(String, String, String)>, String> {
+    let columns = match component {
+        "concept" => "ts_code, trade_date, pct_chg, amount, tor".to_string(),
+        "ranking" => crate::data::STOCK_DATA_KEY_COLUMN_DEFS
+            .iter()
+            .map(|(name, _)| *name)
+            .chain(
+                crate::data::STOCK_DATA_RUNTIME_FIELDS
+                    .iter()
+                    .map(|field| field.db_column)
+                    .filter(|name| {
+                        !matches!(
+                            *name,
+                            "open" | "high" | "low" | "close" | "pre_close" | "change"
+                        )
+                    }),
+            )
+            .collect::<Vec<_>>()
+            .join(", "),
+        "chip" => "*".to_string(),
+        _ => return Err(format!("不支持的行情输入对比组件: {component}")),
+    };
+    // 评分记账不因复权价格及价格派生指标缩放而产生；筹码续算保留价格基准维护。
+    let mut stmt = conn.prepare(&format!("WITH old_rows AS (
+        SELECT {columns} FROM stock_data WHERE adj_type='qfq' AND trade_date BETWEEN ? AND ? AND (? IS NULL OR ts_code=?)
+    ), new_rows AS (
+        SELECT {columns} FROM stock_data_stage WHERE adj_type='qfq' AND trade_date BETWEEN ? AND ? AND (? IS NULL OR ts_code=?)
+    ), differences AS (
+        (SELECT * FROM old_rows EXCEPT ALL SELECT * FROM new_rows)
+        UNION ALL
+        (SELECT * FROM new_rows EXCEPT ALL SELECT * FROM old_rows)
+    ) SELECT ts_code, MIN(trade_date), MAX(trade_date) FROM differences GROUP BY ts_code"))
+        .map_err(|e| format!("准备行情输入对比失败: {e}"))?;
+    stmt.query_map(
+        duckdb::params![
+            start_date, end_date, ts_code, ts_code, start_date, end_date, ts_code, ts_code
+        ],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )
+    .map_err(|e| format!("对比行情输入失败: {e}"))?
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(|e| format!("读取行情输入差异失败: {e}"))
+}
+
 fn write_prepared_stock_batch(
     conn: &Connection,
     prepared_items: &[PreparedStockDownload],
@@ -1100,7 +1151,7 @@ fn write_prepared_stock_batch(
 
     with_transaction(conn, |tx| {
         let pending_repairs = load_pending_stock_repairs(tx)?;
-        let mut chip_repairs = HashSet::new();
+        let mut chip_repairs = HashMap::<String, String>::new();
         let indicator_names = (|prepared_items: &[PreparedStockDownload]| -> Vec<String> {
             let mut names = HashSet::new();
             let mut ordered = Vec::new();
@@ -1119,16 +1170,15 @@ fn write_prepared_stock_batch(
         reset_stock_data_stage_table(tx)?;
 
         for item in prepared_items {
-            let (history_end, replaces_rows): (Option<String>, bool) = if item.adj_type
-                == AdjType::Qfq
-            {
+            let history_end: Option<String> = if item.adj_type == AdjType::Qfq {
                 tx.query_row(
-                    "SELECT MAX(trade_date), COUNT(*) FILTER (WHERE trade_date BETWEEN ? AND ?) > 0 FROM stock_data WHERE ts_code=? AND adj_type='qfq'",
-                    duckdb::params![item.start_date, item.end_date, item.ts_code],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                ).map_err(|e| format!("读取覆盖前行情范围失败: {e}"))?
+                    "SELECT MAX(trade_date) FROM stock_data WHERE ts_code=? AND adj_type='qfq'",
+                    [&item.ts_code],
+                    |row| row.get(0),
+                )
+                .map_err(|e| format!("读取覆盖前行情范围失败: {e}"))?
             } else {
-                (None, false)
+                None
             };
             append_stage_pro_bar_rows(tx, item.adj_type, &item.rows, &item.indicators)?;
             if item.adj_type == AdjType::Qfq {
@@ -1156,45 +1206,58 @@ fn write_prepared_stock_batch(
                     mark_derived_components_rebuild_required(tx, &["concept"], &start, &end)?;
                 }
             }
-            delete_one_stock_range(
-                tx,
-                item.ts_code.as_str(),
-                item.adj_type,
-                item.start_date.as_str(),
-                item.end_date.as_str(),
-            )?;
             let pending = pending_repairs
                 .iter()
                 .find(|pending| pending.ts_code == item.ts_code);
             if item.adj_type == AdjType::Qfq {
-                if !item.rows.is_empty() || replaces_rows {
-                    // 普通增量也即时记账；覆盖历史会影响后续连续计算，范围延至已保存末日。
+                for (_, start, last_changed) in changed_stock_input_ranges(
+                    tx,
+                    Some(&item.ts_code),
+                    &item.start_date,
+                    &item.end_date,
+                    "ranking",
+                )? {
                     let end = history_end
                         .as_deref()
-                        .map_or(item.end_date.as_str(), |date| {
-                            date.max(item.end_date.as_str())
-                        });
+                        .map_or(last_changed.as_str(), |date| date.max(&last_changed));
                     mark_derived_components_rebuild_required(
                         tx,
                         &["ranking", "similarity"],
-                        &item.start_date,
+                        &start,
                         end,
                     )?;
                 }
-                if mark_chip_repair
-                    || pending.is_some()
-                    || history_end
-                        .as_deref()
-                        .is_some_and(|date| item.start_date.as_str() <= date)
-                        && (!item.rows.is_empty() || replaces_rows)
-                {
-                    chip_repairs.insert(item.ts_code.clone());
+                for (code, start, _) in changed_stock_input_ranges(
+                    tx,
+                    Some(&item.ts_code),
+                    &item.start_date,
+                    &item.end_date,
+                    "chip",
+                )? {
+                    if mark_chip_repair
+                        || pending.is_some()
+                        || history_end
+                            .as_deref()
+                            .is_some_and(|date| start.as_str() <= date)
+                    {
+                        chip_repairs.insert(code, start);
+                    }
                 }
             }
+
+            delete_one_stock_range(
+                tx,
+                &item.ts_code,
+                item.adj_type,
+                &item.start_date,
+                &item.end_date,
+            )?;
         }
 
         flush_stock_data_stage_table(tx)?;
-        mark_chip_repairs_required(tx, &chip_repairs)?;
+        for (code, start) in &chip_repairs {
+            mark_chip_repairs_required(tx, &HashSet::from([code.clone()]), start)?;
+        }
         for item in prepared_items {
             if item.adj_type == AdjType::Qfq && !item.rows.is_empty() {
                 if let Some(pending) = pending_repairs
@@ -1286,12 +1349,10 @@ fn prepare_stock_repairs(
                         )
                         .map_err(|e| format!("读取已记录修复范围失败: {e}"))?;
                     mark_derived_rebuild_required(tx, &start, &end)?;
+                    mark_chip_repairs_required(tx, &HashSet::from([ts_code.clone()]), &start)?;
                 }
                 delete_one_stock_all_rows(tx, ts_code, adj_type)?;
             }
-        }
-        if delete_existing && adj_type == AdjType::Qfq {
-            mark_chip_repairs_required(tx, ts_codes)?;
         }
         Ok(())
     })
@@ -1325,32 +1386,22 @@ where
         } else {
             None
         };
-        let mut chip_repairs = HashSet::new();
+        let mut chip_repairs = HashMap::<String, String>::new();
         for batch in batches {
+            append_stage_pro_bar_rows(tx, adj_type, &batch.rows, &batch.indicators)?;
             if adj_type == AdjType::Qfq {
-                let rewrites_history = history_end
-                    .as_deref()
-                    .is_some_and(|date| batch.trade_date.as_str() <= date);
-                if rewrites_history {
-                    // 包含被删除、上游未再返回的股票，不能只记新返回的代码。
-                    let mut stmt = tx
-                        .prepare(
-                            "SELECT ts_code FROM stock_data WHERE adj_type='qfq' AND trade_date=?",
-                        )
-                        .map_err(|e| format!("准备覆盖行情股票查询失败: {e}"))?;
-                    let codes = stmt
-                        .query_map([&batch.trade_date], |row| row.get::<_, String>(0))
-                        .map_err(|e| format!("查询覆盖行情股票失败: {e}"))?
-                        .collect::<Result<Vec<_>, _>>()
-                        .map_err(|e| format!("读取覆盖行情股票失败: {e}"))?;
-                    chip_repairs.extend(codes);
-                    chip_repairs.extend(batch.rows.iter().map(|row| row.ts_code.clone()));
-                }
-                if !batch.rows.is_empty() || rewrites_history {
+                let changed = changed_stock_input_ranges(
+                    tx,
+                    None,
+                    &batch.trade_date,
+                    &batch.trade_date,
+                    "ranking",
+                )?;
+                if !changed.is_empty() {
                     let end = history_end
                         .as_deref()
                         .map_or(batch.trade_date.as_str(), |date| {
-                            date.max(batch.trade_date.as_str())
+                            date.max(&batch.trade_date)
                         });
                     mark_derived_components_rebuild_required(
                         tx,
@@ -1358,6 +1409,16 @@ where
                         &batch.trade_date,
                         end,
                     )?;
+                }
+                if !changed_stock_input_ranges(
+                    tx,
+                    None,
+                    &batch.trade_date,
+                    &batch.trade_date,
+                    "concept",
+                )?
+                .is_empty()
+                {
                     mark_derived_components_rebuild_required(
                         tx,
                         &["concept"],
@@ -1365,13 +1426,33 @@ where
                         &batch.trade_date,
                     )?;
                 }
+                if history_end
+                    .as_deref()
+                    .is_some_and(|date| batch.trade_date.as_str() <= date)
+                {
+                    for (code, start, _) in changed_stock_input_ranges(
+                        tx,
+                        None,
+                        &batch.trade_date,
+                        &batch.trade_date,
+                        "chip",
+                    )? {
+                        chip_repairs
+                            .entry(code)
+                            .and_modify(|date| *date = date.clone().min(start.clone()))
+                            .or_insert(start);
+                    }
+                }
             }
-            delete_trade_date_rows(tx, adj_type, batch.trade_date.as_str())?;
-            append_stage_pro_bar_rows(tx, adj_type, &batch.rows, &batch.indicators)?;
+
+            delete_trade_date_rows(tx, adj_type, &batch.trade_date)?;
         }
 
         flush_stock_data_stage_table(tx)?;
-        mark_chip_repairs_required(tx, &chip_repairs)
+        for (code, start) in &chip_repairs {
+            mark_chip_repairs_required(tx, &HashSet::from([code.clone()]), start)?;
+        }
+        Ok(())
     })?;
 
     // 整段增量在同一事务提交，事务内追加/flush 不代表已持久化。
@@ -3246,14 +3327,14 @@ mod tests {
     }
 
     #[test]
-    fn concept_journal_ignores_repricing_but_tracks_input_changes() {
+    fn derived_journal_ignores_repricing_but_tracks_input_changes() {
         let directory = temp_source_dir("concept-input-changes");
         fs::create_dir_all(&directory).unwrap();
         let source = directory.to_str().unwrap();
         init_stock_data_db(source_db_path(source).to_str().unwrap()).unwrap();
         let conn = Connection::open(source_db_path(source)).unwrap();
-        conn.execute_batch("INSERT INTO stock_data(ts_code,trade_date,adj_type,close,pct_chg,amount,tor)
-            VALUES ('000001.SZ','20260105','qfq',10,2.5,10000,1),('000001.SZ','20260106','qfq',10,2.5,10000,1)").unwrap();
+        conn.execute_batch("INSERT INTO stock_data(ts_code,trade_date,adj_type,close,pct_chg,vol,amount,tor)
+            VALUES ('000001.SZ','20260105','qfq',10,2.5,1000,10000,1),('000001.SZ','20260106','qfq',10,2.5,1000,10000,1)").unwrap();
         let row = ProBarRow {
             ts_code: "000001.SZ".to_string(),
             trade_date: "20260105".to_string(),
@@ -3300,8 +3381,7 @@ mod tests {
         write_prepared_stock_batch(&conn, std::slice::from_ref(&prepared), true).unwrap();
         assert!(load_pending_stock_repairs(&conn).unwrap().is_empty());
         let dirty = crate::data::download_state::load_pending_derived_rebuilds(&conn).unwrap();
-        assert_eq!(dirty.len(), 2);
-        assert!(dirty.iter().all(|item| item.component != "concept"));
+        assert!(dirty.is_empty());
         assert_eq!(
             conn.query_row(
                 "SELECT close FROM stock_data WHERE trade_date='20260105'",
@@ -3312,6 +3392,50 @@ mod tests {
             5.0
         );
 
+        conn.execute("DELETE FROM pending_chip_repair", []).unwrap();
+        write_prepared_stock_batch(&conn, std::slice::from_ref(&prepared), false).unwrap();
+        assert!(
+            crate::data::download_state::load_pending_derived_rebuilds(&conn)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            crate::data::download_state::load_pending_chip_repairs_for_model(&conn, "chen")
+                .unwrap()
+                .is_empty()
+        );
+        prepared.rows[0].close = 2.5;
+        prepared
+            .indicators
+            .insert("MA5".to_string(), vec![Some(2.5), Some(5.0)]);
+        write_prepared_stock_batch(&conn, std::slice::from_ref(&prepared), true).unwrap();
+        assert!(
+            crate::data::download_state::load_pending_derived_rebuilds(&conn)
+                .unwrap()
+                .is_empty()
+        );
+        let daily = PendingTradeDateBatch {
+            trade_date: prepared.rows[0].trade_date.clone(),
+            rows: vec![{
+                let mut row = prepared.rows[0].clone();
+                row.close = 1.25;
+                row
+            }],
+            indicators: HashMap::from([("MA5".to_string(), vec![Some(1.25)])]),
+        };
+        write_incremental_trade_date_batches(
+            &conn,
+            &[daily],
+            AdjType::Qfq,
+            &["MA5".to_string()],
+            |_| {},
+        )
+        .unwrap();
+        assert!(
+            crate::data::download_state::load_pending_derived_rebuilds(&conn)
+                .unwrap()
+                .is_empty()
+        );
         for field in ["pct_chg", "amount", "tor"] {
             match field {
                 "pct_chg" => prepared.rows[0].pct_chg = 3.0,
@@ -3335,6 +3459,9 @@ mod tests {
                 [],
             )
             .unwrap();
+        }
+        for series in prepared.indicators.values_mut() {
+            series.pop();
         }
         prepared.rows.pop();
         write_prepared_stock_batch(&conn, std::slice::from_ref(&prepared), false).unwrap();
@@ -3477,6 +3604,28 @@ mod tests {
                 .unwrap()
             );
         }
+        write_incremental_trade_date_batches(
+            &conn,
+            std::slice::from_ref(&batch),
+            AdjType::Qfq,
+            &[],
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM completed_chip_repair", [], |row| row
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+            2
+        );
+        assert!(
+            crate::data::download_state::load_pending_derived_rebuilds(&conn)
+                .unwrap()
+                .iter()
+                .all(|item| item.start_date == "20260106")
+        );
         let mut rewrite = batch;
         rewrite.trade_date = "20260105".to_string();
         rewrite.rows[0].trade_date = "20260105".to_string();

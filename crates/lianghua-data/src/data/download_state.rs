@@ -457,16 +457,50 @@ pub fn clear_pending_derived_rebuild(
 pub fn mark_chip_repairs_required(
     conn: &Connection,
     codes: &HashSet<String>,
+    start_date: &str,
 ) -> Result<(), String> {
     if codes.is_empty() {
         return Ok(());
     }
     conn.execute_batch("CREATE TABLE IF NOT EXISTS pending_chip_repair(ts_code VARCHAR PRIMARY KEY); CREATE TABLE IF NOT EXISTS completed_chip_repair(ts_code VARCHAR, model VARCHAR, PRIMARY KEY(ts_code, model))")
         .map_err(|e| format!("创建筹码修复记录失败: {e}"))?;
+    let columns = conn.prepare("SELECT column_name FROM information_schema.columns WHERE table_name='pending_chip_repair'").map_err(|e| e.to_string())?
+        .query_map([], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?
+        .collect::<Result<HashSet<_>, _>>().map_err(|e| e.to_string())?;
+    if ["start_date", "chen_start_date", "legacy_start_date"]
+        .iter()
+        .any(|column| !columns.contains(*column))
+    {
+        let start = if columns.contains("start_date") {
+            "COALESCE(start_date, '00000000')"
+        } else {
+            "'00000000'"
+        };
+        let chen = if columns.contains("chen_start_date") {
+            "chen_start_date"
+        } else {
+            start
+        };
+        let legacy = if columns.contains("legacy_start_date") {
+            "legacy_start_date"
+        } else {
+            start
+        };
+        // 在调用方事务中换表，避免同事务多次 ALTER/UPDATE 的 DuckDB 目录冲突。
+        conn.execute_batch(&format!("CREATE TABLE pending_chip_repair_upgrade(ts_code VARCHAR PRIMARY KEY, start_date VARCHAR, chen_start_date VARCHAR, legacy_start_date VARCHAR);
+            INSERT INTO pending_chip_repair_upgrade SELECT ts_code, {start}, {chen}, {legacy} FROM pending_chip_repair;
+            DROP TABLE pending_chip_repair;
+            ALTER TABLE pending_chip_repair_upgrade RENAME TO pending_chip_repair")).map_err(|e| format!("升级筹码维护起点记录失败: {e}"))?;
+    }
     for code in codes {
+        let (chen_completed, legacy_completed): (bool, bool) = conn.query_row("SELECT EXISTS(SELECT 1 FROM completed_chip_repair WHERE ts_code=? AND model='chen'), EXISTS(SELECT 1 FROM completed_chip_repair WHERE ts_code=? AND model='legacy')", [code, code], |row| Ok((row.get(0)?, row.get(1)?))).map_err(|e| e.to_string())?;
         conn.execute(
-            "INSERT OR REPLACE INTO pending_chip_repair VALUES (?)",
-            [code],
+            "INSERT INTO pending_chip_repair(ts_code, start_date, chen_start_date, legacy_start_date) VALUES (?, ?, ?, ?)
+             ON CONFLICT(ts_code) DO UPDATE SET
+             start_date=LEAST(COALESCE(pending_chip_repair.start_date, '00000000'), excluded.start_date),
+             chen_start_date=CASE WHEN ? THEN excluded.chen_start_date ELSE LEAST(COALESCE(pending_chip_repair.chen_start_date, '00000000'), excluded.chen_start_date) END,
+             legacy_start_date=CASE WHEN ? THEN excluded.legacy_start_date ELSE LEAST(COALESCE(pending_chip_repair.legacy_start_date, '00000000'), excluded.legacy_start_date) END",
+            duckdb::params![code, start_date, start_date, start_date, chen_completed, legacy_completed],
         )
         .map_err(|e| format!("记录筹码待修复股票失败: {e}"))?;
         conn.execute("DELETE FROM completed_chip_repair WHERE ts_code=?", [code])
@@ -615,7 +649,8 @@ mod tests {
         let conn = Connection::open(source_db_path(source)).unwrap();
         conn.execute_batch("CREATE TABLE stock_data(ts_code VARCHAR, trade_date VARCHAR, adj_type VARCHAR);
             INSERT INTO stock_data VALUES ('000001.SZ', '20260401', 'qfq'), ('000001.SZ', '20260408', 'qfq')").unwrap();
-        mark_chip_repairs_required(&conn, &HashSet::from(["000001.SZ".to_string()])).unwrap();
+        mark_chip_repairs_required(&conn, &HashSet::from(["000001.SZ".to_string()]), "00000000")
+            .unwrap();
         drop(conn);
 
         complete_chip_rebuild(source, "chen", "20260402", "20260408").unwrap();
@@ -641,6 +676,20 @@ mod tests {
             1
         );
         drop(conn);
+        let conn = Connection::open(source_db_path(source)).unwrap();
+        mark_chip_repairs_required(&conn, &HashSet::from(["000001.SZ".to_string()]), "20260408")
+            .unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT chen_start_date, legacy_start_date FROM pending_chip_repair",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            )
+            .unwrap(),
+            ("20260408".to_string(), "00000000".to_string())
+        );
+        drop(conn);
+        complete_chip_rebuild(source, "chen", "20260401", "20260408").unwrap();
         complete_chip_rebuild(source, "legacy", "20260401", "20260408").unwrap();
         let conn = open_source_db_readonly(source).unwrap();
         assert!(

@@ -5,9 +5,7 @@ use chrono::{Local, Timelike};
 use duckdb::{AccessMode, Config, Connection};
 use serde::{Deserialize, Serialize};
 
-use crate::data::download_state::{
-    load_listing_history_gaps, load_pending_stock_repairs, load_qfq_price_link_issues,
-};
+use crate::data::download_state::{load_listing_history_gaps, load_pending_stock_repairs};
 use crate::data::{load_stock_list, load_trade_date_list, source_db_path};
 use lianghua_download::download::runner::INDEX_TS_CODES;
 
@@ -69,8 +67,9 @@ pub fn check_databases(source_path: &str) -> Result<DatabaseCheckReport, String>
         checks: Vec::new(), issues: Vec::new(),
         limitations: vec![
             "历史起点按 max(stock_list.csv 上市日，全库历史起点) 对照，仅作提示；停牌、恢复上市也可能导致起点偏晚。".to_string(),
-            "复权衔接覆盖最近 60 个已保存交易日，只作提示；差异化分红、上游修订等也可能导致不衔接。".to_string(),
-            "已有概念/行业和相似度结果按当前策略抽样重算关键数值，缺失不报错，不能证明全库正确；策略或基础资料变化也可能导致差异。".to_string(),
+            "下载已检查增量价格衔接并持久登记补救计划；计算事务保证结果整体提交，不重复检查价格衔接、重复行、排名及结果表间完整性，也不复用正式算法抽样重算。".to_string(),
+            "只提示影响已有结果的待重算区间；缺失结果和纯新增日期允许存在。策略、指标配置及成分资料变化仍由相应计算入口处理。".to_string(),
+            "检测只读，不证明全库数值正确；文件读取失败单独报告，不自动删除或覆盖数据库。".to_string(),
         ],
     };
     let stocks = load_stock_list(source_path)?;
@@ -115,6 +114,22 @@ pub fn check_databases(source_path: &str) -> Result<DatabaseCheckReport, String>
     let first = ranges.values().map(|(first, _, _)| first).min().cloned();
     let last = ranges.values().map(|(_, last, _)| last).max().cloned();
     let end = last.clone().into_iter().chain(target.clone()).max();
+    report.checks.push(DatabaseCheck {
+        id: "source".to_string(),
+        title: "前复权行情可用性".to_string(),
+        status: if report.row_count > 0 {
+            "passed"
+        } else {
+            "error"
+        }
+        .to_string(),
+        summary: if report.row_count > 0 {
+            "已有行情可读取"
+        } else {
+            "没有前复权行情，请先下载"
+        }
+        .to_string(),
+    });
     for gap in load_listing_history_gaps(source_path, &source)? {
         let mut issue = stock_issue(
             &gap.ts_code,
@@ -155,64 +170,11 @@ pub fn check_databases(source_path: &str) -> Result<DatabaseCheckReport, String>
     }
     report.checks.push(DatabaseCheck {
         id: "truncated".to_string(),
-        title: "行情历史".to_string(),
+        title: "历史起点与未完成修复".to_string(),
         status: "passed".to_string(),
         summary: format!("{} 只股票", report.stock_count),
     });
-    let links = match load_qfq_price_link_issues(&source) {
-        Ok(links) => links,
-        Err(error) => {
-            eprintln!("复权衔接检查未完成：{error}");
-            report.issues.push(DatabaseIssue {
-                id: "price-link-unavailable".to_string(),
-                check_id: "price-link".to_string(),
-                database: "stock_data.db".to_string(),
-                severity: "error".to_string(),
-                title: "复权衔接检查未完成".to_string(),
-                comparisons: vec![DatabaseComparison {
-                    label: "检查状态".to_string(),
-                    expected: "完成".to_string(),
-                    actual: "未完成".to_string(),
-                }],
-                ts_code: None,
-                stock_name: None,
-                start_date: None,
-                end_date: None,
-                repair_action: None,
-                blocks_derived: true,
-            });
-            Vec::new()
-        }
-    };
-    for link in links {
-        let code = link.ts_code;
-        let mut issue = stock_issue(
-            &code,
-            &names,
-            "price-link",
-            "复权衔接待核验",
-            link.samples
-                .into_iter()
-                .map(|(date, expected, actual)| DatabaseComparison {
-                    label: format!("{date} 前收盘"),
-                    expected: format!("{expected:.4}"),
-                    actual: format!("{actual:.4}"),
-                })
-                .collect(),
-            first.clone(),
-            end.clone(),
-        );
-        issue.severity = "warning".to_string();
-        issue.blocks_derived = false;
-        report.issues.push(issue);
-    }
-    report.checks.push(DatabaseCheck {
-        id: "price-link".to_string(),
-        title: "复权价格衔接".to_string(),
-        status: "passed".to_string(),
-        summary: "最近 60 个交易日".to_string(),
-    });
-    for code in INDEX_TS_CODES {
+    for code in INDEX_TS_CODES.into_iter().filter(|_| last.is_some()) {
         let range: (Option<String>, Option<String>) = source.query_row("SELECT MIN(trade_date), MAX(trade_date) FROM stock_data WHERE adj_type='ind' AND ts_code=?", [code], |row| Ok((row.get(0)?, row.get(1)?))).map_err(|e| e.to_string())?;
         let mut stmt = source
             .prepare(
@@ -282,80 +244,46 @@ pub fn check_databases(source_path: &str) -> Result<DatabaseCheckReport, String>
     report.checks.push(DatabaseCheck {
         id: "index".to_string(),
         title: "指数日期与缺口".to_string(),
-        status: "passed".to_string(),
-        summary: format!("{} 个指数", INDEX_TS_CODES.len()),
+        status: if calendar.is_empty() || last.is_none() {
+            "incomplete"
+        } else {
+            "passed"
+        }
+        .to_string(),
+        summary: if calendar.is_empty() {
+            "缺少交易日历，无法核验交易日缺口；请刷新基础资料".to_string()
+        } else if last.is_none() {
+            "没有前复权行情，无法确定指数覆盖范围".to_string()
+        } else {
+            format!("{} 个指数，按已保存行情范围核验", INDEX_TS_CODES.len())
+        },
     });
-    // 不做评分数值抽检，只展示下载事务明确留下、且与已有结果重叠的欠账。
-    for (component, file, label) in [
-        ("concept", "concept_performance.db", "概念／行业表现"),
-        ("ranking", "scoring_result.db", "评分／排名"),
-        ("similarity", "strategy_similarity.db", "走势相似度"),
-    ] {
-        if !crate::data::download_state::pending_rebuild_affects_saved_results(
-            source_path,
-            component,
-        )? {
-            continue;
-        }
-        let ranges = crate::data::download_state::load_pending_derived_rebuild_ranges(
-            source_path,
-            component,
-        )?;
-        let check_id = format!("maintenance:{component}");
-        for item in ranges {
-            report.issues.push(DatabaseIssue {
-                id: format!("pending-derived:{component}:{}", item.start_date),
-                check_id: check_id.clone(),
-                database: file.to_string(),
-                severity: "warning".to_string(),
-                title: format!("行情变更后{label}待重算"),
-                comparisons: vec![DatabaseComparison {
-                    label: "后续计算状态".to_string(),
-                    expected: if component == "concept" {
-                        "重算受影响区间的概念／行业表现；再次更新行情也会补做未完成的重算"
-                    } else if component == "ranking" {
-                        "在排名计算页覆盖待重算区间"
-                    } else {
-                        "先重算评分，再在相似榜计算页按日重算需要使用的历史结果"
-                    }
-                    .to_string(),
-                    actual: format!(
-                        "{} 至 {} 尚未完成；只计算最新一天不会清除其他历史欠账",
-                        item.start_date, item.end_date
-                    ),
-                }],
-                ts_code: None,
-                stock_name: None,
-                start_date: Some(item.start_date),
-                end_date: Some(item.end_date),
-                repair_action: (component != "similarity").then(|| component.to_string()),
-                blocks_derived: false,
-            });
-        }
-        report.checks.push(DatabaseCheck {
-            id: check_id,
-            title: format!("行情变更后的{label}重算状态"),
-            status: "warning".to_string(),
-            summary: "已有结果受影响；与缺失结果、抽样差异分别判断".to_string(),
-        });
-    }
-    for (file, table, component, label) in [
+    // 跨库提交无法原子清账：结果提交后中断仍可能留下欠账，按已有结果判断。
+    // 每个结果库独立报告读取失败，避免一个坏文件吞掉其他项目。
+    for (component, file, table, label) in [
         (
+            "concept",
             "concept_performance.db",
             "concept_performance",
-            "concept",
-            "概念/行业表现",
+            "概念／行业表现",
         ),
         (
+            "ranking",
+            "scoring_result.db",
+            "score_summary",
+            "评分／排名",
+        ),
+        (
+            "similarity",
             "strategy_similarity.db",
             "strategy_trigger_similarity_rank",
-            "similarity",
             "走势相似度",
         ),
     ] {
+        let check_id = format!("maintenance:{component}");
         let mut check = DatabaseCheck {
-            id: component.to_string(),
-            title: format!("{label}抽样重算"),
+            id: check_id.clone(),
+            title: format!("{label}读取与重算状态"),
             status: "skipped".to_string(),
             summary: "数据库未生成".to_string(),
         };
@@ -364,17 +292,12 @@ pub fn check_databases(source_path: &str) -> Result<DatabaseCheckReport, String>
             report.checks.push(check);
             continue;
         }
-        if crate::data::download_state::pending_rebuild_affects_saved_results(
-            source_path,
-            component,
-        )? {
-            check.summary = "行情变更后待重算，完成后再抽样核验".to_string();
-            report.checks.push(check);
-            continue;
-        }
         let inspected = (|| -> Result<(), String> {
-            let conn = open_check_connection(&path)?;
-            let exists: bool = conn
+            let results = open_check_connection(&path)?;
+            results
+                .execute_batch("BEGIN TRANSACTION")
+                .map_err(|e| e.to_string())?;
+            let exists: bool = results
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name=?)",
                     [table],
@@ -385,96 +308,63 @@ pub fn check_databases(source_path: &str) -> Result<DatabaseCheckReport, String>
                 check.summary = "结果表未生成".to_string();
                 return Ok(());
             }
-            let samples = conn
-                .prepare(&format!(
-                    "SELECT DISTINCT trade_date FROM {table} ORDER BY trade_date"
-                ))
-                .map_err(|e| e.to_string())?
-                .query_map([], |row| row.get::<_, String>(0))
-                .map_err(|e| e.to_string())?
-                .collect::<Result<Vec<_>, _>>()
+            // 读取日期以确认已有结果可访问，不检查由计算事务保证的行数和表间关系。
+            let saved_range: (Option<String>, Option<String>) = results
+                .query_row(
+                    &format!("SELECT MIN(trade_date), MAX(trade_date) FROM {table}"),
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
                 .map_err(|e| e.to_string())?;
-            if samples.is_empty() {
+            if saved_range.0.is_none() {
                 check.summary = "暂无结果数据".to_string();
                 return Ok(());
             }
-            let dates = [
-                samples[0].clone(),
-                samples[samples.len() / 2].clone(),
-                samples[samples.len() - 1].clone(),
-            ]
-            .into_iter()
-            .collect::<std::collections::BTreeSet<_>>();
-            let mut compared = 0;
-            let mut differences = Vec::new();
-            let mut failures = Vec::new();
-            for date in &dates {
-                let values = match super::integrity_samples::recompute_samples(
-                    source_path,
-                    &conn,
-                    component,
-                    date,
-                ) {
-                    Ok(values) => values,
-                    Err(error) => {
-                        eprintln!("{label} {date} 抽样未完成：{error}");
-                        failures.push(DatabaseComparison {
-                            label: format!("{date} 检查状态"),
-                            expected: "完成".to_string(),
-                            actual: "未完成".to_string(),
-                        });
-                        continue;
-                    }
-                };
-                for (key, saved, computed) in values {
-                    compared += 1;
-                    if !saved.is_finite()
-                        || !computed.is_finite()
-                        || (saved - computed).abs() > 1e-6_f64.max(computed.abs() * 1e-8)
-                    {
-                        differences.push(DatabaseComparison {
-                            label: format!("{date} {key}"),
-                            expected: computed.to_string(),
-                            actual: saved.to_string(),
-                        });
-                    }
+            check.status = "passed".to_string();
+            check.summary = "已有结果可读取，无受影响的重算欠账".to_string();
+            let ranges = crate::data::download_state::load_pending_derived_rebuild_ranges(
+                source_path,
+                component,
+            )?;
+            for item in ranges {
+                let affects_saved: bool = results
+                    .query_row(
+                        &format!(
+                            "SELECT EXISTS(SELECT 1 FROM {table} WHERE trade_date BETWEEN ? AND ?)"
+                        ),
+                        [&item.start_date, &item.end_date],
+                        |row| row.get(0),
+                    )
+                    .map_err(|e| e.to_string())?;
+                if !affects_saved {
+                    continue;
                 }
-            }
-            check.status = if failures.is_empty() {
-                "passed"
-            } else {
-                "incomplete"
-            }
-            .to_string();
-            check.summary = format!("{} 个日期 · {compared} 个数值", dates.len());
-            if !failures.is_empty() {
+                check.summary = "已有结果受行情变更影响，待重算".to_string();
                 report.issues.push(DatabaseIssue {
-                    id: format!("sample-unavailable:{component}"),
-                    check_id: component.to_string(),
+                    id: format!("pending-derived:{component}:{}", item.start_date),
+                    check_id: check_id.clone(),
                     database: file.to_string(),
                     severity: "warning".to_string(),
-                    title: format!("{label}部分抽样未完成"),
-                    comparisons: failures,
+                    title: format!("行情变更后{label}待重算"),
+                    comparisons: vec![DatabaseComparison {
+                        label: "后续计算状态".to_string(),
+                        expected: if component == "concept" {
+                            "重算受影响区间的概念／行业表现；再次更新行情也会补做未完成的重算"
+                        } else if component == "ranking" {
+                            "在排名计算页覆盖待重算区间"
+                        } else {
+                            "先重算评分，再在相似榜计算页按日重算需要使用的历史结果"
+                        }
+                        .to_string(),
+                        actual: format!(
+                            "{} 至 {} 尚未完成；只计算最新一天不会清除其他历史欠账",
+                            item.start_date, item.end_date
+                        ),
+                    }],
                     ts_code: None,
                     stock_name: None,
-                    start_date: None,
-                    end_date: None,
-                    repair_action: None,
-                    blocks_derived: false,
-                });
-            }
-            if !differences.is_empty() {
-                report.issues.push(DatabaseIssue {
-                    id: format!("derived:{component}"),
-                    check_id: component.to_string(),
-                    database: file.to_string(),
-                    severity: "warning".to_string(),
-                    title: format!("{label}抽样重算结果不一致"),
-                    comparisons: differences,
-                    ts_code: None,
-                    stock_name: None,
-                    start_date: samples.first().cloned(),
-                    end_date: samples.last().cloned(),
+                    start_date: Some(item.start_date),
+                    end_date: Some(item.end_date),
                     repair_action: (component != "similarity").then(|| component.to_string()),
                     blocks_derived: false,
                 });
@@ -482,19 +372,18 @@ pub fn check_databases(source_path: &str) -> Result<DatabaseCheckReport, String>
             Ok(())
         })();
         if let Err(error) = inspected {
-            eprintln!("{label}抽样未完成：{error}");
             check.status = "incomplete".to_string();
-            check.summary = "未完成抽样".to_string();
+            check.summary = "读取失败，请查看问题详情".to_string();
             report.issues.push(DatabaseIssue {
-                id: format!("sample-unavailable:{component}"),
-                check_id: component.to_string(),
+                id: format!("unreadable:{component}"),
+                check_id,
                 database: file.to_string(),
-                severity: "warning".to_string(),
-                title: format!("{label}抽样未完成"),
+                severity: "error".to_string(),
+                title: format!("{label}读取失败"),
                 comparisons: vec![DatabaseComparison {
-                    label: "检查状态".to_string(),
-                    expected: "完成".to_string(),
-                    actual: "未完成".to_string(),
+                    label: "数据库读取".to_string(),
+                    expected: "可读取已有结果及重算状态".to_string(),
+                    actual: error,
                 }],
                 ts_code: None,
                 stock_name: None,
@@ -519,13 +408,6 @@ pub fn check_databases(source_path: &str) -> Result<DatabaseCheckReport, String>
                 "warning"
             }
             .to_string();
-        }
-        if check.id == "price-link"
-            && issues
-                .iter()
-                .any(|issue| issue.id == "price-link-unavailable")
-        {
-            check.status = "incomplete".to_string();
         }
     }
     report.source_ready =
@@ -770,7 +652,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn database_check_uses_listing_dates_and_keeps_price_links_advisory() {
+    fn database_check_reports_only_uncovered_risks_and_isolates_unreadable_results() {
         let directory = std::env::temp_dir().join(format!(
             "lianghua-integrity-{}",
             std::time::SystemTime::now()
@@ -824,16 +706,6 @@ mod tests {
         );
         assert!(
             report
-                .issues
-                .iter()
-                .any(|issue| issue.id == "price-link:689009.SH"
-                    && !issue.blocks_derived
-                    && issue.comparisons.len() == 1
-                    && issue.comparisons[0].expected == "41.3600"
-                    && issue.comparisons[0].actual == "41.3800")
-        );
-        assert!(
-            report
                 .checks
                 .iter()
                 .any(|check| check.id == "truncated" && check.status == "warning")
@@ -842,13 +714,13 @@ mod tests {
             report
                 .checks
                 .iter()
-                .any(|check| check.id == "price-link" && check.status == "warning")
+                .any(|check| check.id == "maintenance:concept" && check.status == "skipped")
         );
         assert!(
-            report
+            !report
                 .checks
                 .iter()
-                .any(|check| check.id == "concept" && check.status == "skipped")
+                .any(|check| matches!(check.id.as_str(), "price-link" | "concept" | "similarity"))
         );
         assert!(
             !report
@@ -895,26 +767,19 @@ mod tests {
         let derived = Connection::open(directory.join("concept_performance.db")).unwrap();
         derived.execute_batch("CREATE TABLE concept_performance(trade_date VARCHAR, performance_type VARCHAR, concept VARCHAR, performance_pct DOUBLE); INSERT INTO concept_performance VALUES ('20260806','industry','X',2)").unwrap();
         drop(derived);
-        assert!(
-            !check_databases(path)
-                .unwrap()
-                .issues
-                .iter()
-                .any(|issue| issue.id == "derived:concept"
-                    || issue.id == "sample-unavailable:concept")
-        );
+        // 原算法重算同一输入不是独立校验；不再对数值差异抽检。
         let derived = Connection::open(directory.join("concept_performance.db")).unwrap();
         derived
             .execute_batch("UPDATE concept_performance SET performance_pct=999")
             .unwrap();
         drop(derived);
-        assert!(check_databases(path).unwrap().issues.iter().any(|issue| {
-            issue.id == "derived:concept"
-                && issue
-                    .comparisons
-                    .iter()
-                    .any(|comparison| comparison.expected == "2" && comparison.actual == "999")
-        }));
+        assert!(
+            check_databases(path)
+                .unwrap()
+                .checks
+                .iter()
+                .any(|check| check.id == "maintenance:concept" && check.status == "passed")
+        );
         let derived_before = std::fs::read(directory.join("concept_performance.db")).unwrap();
         let before = std::fs::read(directory.join("stock_data.db")).unwrap();
         check_databases(path).unwrap();
@@ -937,7 +802,7 @@ mod tests {
         drop(results);
         let source = Connection::open(directory.join("stock_data.db")).unwrap();
         source.execute_batch("CREATE TABLE pending_derived_rebuild(component VARCHAR PRIMARY KEY, start_date VARCHAR, end_date VARCHAR);
-            INSERT INTO pending_derived_rebuild VALUES ('ranking','20260801','20260809')").unwrap();
+            INSERT INTO pending_derived_rebuild VALUES ('ranking','20260801','20260809'), ('concept','20260807','20260807')").unwrap();
         drop(source);
         let before = std::fs::read(directory.join("stock_data.db")).unwrap();
         let report = check_databases(path).unwrap();
@@ -954,6 +819,30 @@ mod tests {
         assert_eq!(
             before,
             std::fs::read(directory.join("stock_data.db")).unwrap()
+        );
+        assert!(
+            !report
+                .issues
+                .iter()
+                .any(|issue| issue.id.starts_with("pending-derived:concept:"))
+        );
+        // 单个结果库损坏不能让行情状态和其他组件欠账消失。
+        std::fs::write(directory.join("concept_performance.db"), b"not a database").unwrap();
+        let report = check_databases(path).unwrap();
+        assert!(report.source_ready);
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.id == "unreadable:concept"
+                    && issue.repair_action.is_none()
+                    && issue.comparisons[0].actual.contains("失败"))
+        );
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.id == "pending-derived:ranking:20260806")
         );
         std::fs::remove_dir_all(directory).unwrap();
     }

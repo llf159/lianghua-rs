@@ -257,27 +257,110 @@ fn ensure_scoring_dependencies_ready(
     source_dir: &str,
     rules: &[CachedRule],
     used_chip_keys: &HashSet<String>,
+    start_date: &str,
     end_date: &str,
+    warmup_need: usize,
+    ts_code: Option<&str>,
+    adj_type: &str,
 ) -> Result<(), String> {
-    if used_chip_keys.is_empty() && !scoring_uses_similarity_rank(rules) {
+    if adj_type != "qfq" {
+        return Ok(());
+    }
+    let uses_similarity = scoring_uses_similarity_rank(rules);
+    if used_chip_keys.is_empty() && !uses_similarity {
         return Ok(());
     }
     let source = crate::data::download_state::open_source_db_readonly(source_dir)?;
-    if !used_chip_keys.is_empty()
-        && !crate::data::download_state::load_pending_chip_repairs_for_model(&source, "chen")?
-            .is_empty()
-    {
-        return Err("评分策略使用新筹码字段，但行情修复后的新筹码尚未修复，禁止使用旧筹码计算评分。请先修复新筹码。".to_string());
+    let pending_chips = if used_chip_keys.is_empty() {
+        Vec::new()
+    } else {
+        crate::data::download_state::load_pending_chip_repairs_for_model(&source, "chen")?
+    };
+    let pending_similarity = if uses_similarity {
+        crate::data::download_state::load_pending_derived_rebuilds(&source)?
+            .into_iter()
+            .filter(|item| item.component == "similarity")
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    if pending_chips.is_empty() && pending_similarity.is_empty() {
+        return Ok(());
     }
-    if scoring_uses_similarity_rank(rules)
-        && crate::data::download_state::pending_rebuild_affects_saved_results_in_range(
-            source_dir,
+    let query_start = calc_query_start_date(source_dir, warmup_need, start_date)?;
+    let need_rows = calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?;
+    let conn = duckdb::Connection::open_in_memory().map_err(|e| e.to_string())?;
+    conn.execute_batch(&format!(
+        "ATTACH '{}' AS source (READ_ONLY)",
+        source_db_path(source_dir)
+            .to_string_lossy()
+            .replace('\'', "''")
+    ))
+    .map_err(|e| e.to_string())?;
+    // 与正式加载一致：本次股票池、预热区间和停牌股票的尾部补足行都参与检查。
+    conn.execute("CREATE TEMP TABLE scoring_inputs AS WITH ranked AS (
+        SELECT ts_code, trade_date, ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY trade_date DESC) AS tail_index
+        FROM source.stock_data WHERE adj_type='qfq' AND trade_date<=? AND (? IS NULL OR ts_code=?)
+        AND ts_code IN (SELECT DISTINCT ts_code FROM source.stock_data WHERE adj_type='qfq' AND trade_date BETWEEN ? AND ?)
+    ) SELECT ts_code, trade_date FROM ranked WHERE trade_date>=? OR tail_index<=?",
+        duckdb::params![end_date, ts_code, ts_code, start_date, end_date, query_start, need_rows as i64])
+        .map_err(|e| format!("读取评分实际输入日期失败: {e}"))?;
+    for (alias, path, table) in [
+        (
+            "chips",
+            crate::data::cyq_chen_db_path(source_dir),
+            "cyq_chen_snapshot",
+        ),
+        (
             "similarity",
-            "00000000",
-            end_date,
-        )?
-    {
-        return Err("评分策略使用 S_RANK，但旧相似度已因行情修复失效。需先使用不依赖 S_RANK 的策略重建评分及相似度，再恢复该规则计算；禁止用旧结果重算。".to_string());
+            crate::data::similarity_db_path(source_dir),
+            "strategy_trigger_similarity_summary",
+        ),
+    ] {
+        if !path.exists()
+            || (alias == "chips" && pending_chips.is_empty())
+            || (alias == "similarity" && pending_similarity.is_empty())
+        {
+            continue;
+        }
+        conn.execute_batch(&format!(
+            "ATTACH '{}' AS {alias} (READ_ONLY)",
+            path.to_string_lossy().replace('\'', "''")
+        ))
+        .map_err(|e| e.to_string())?;
+        let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_catalog=? AND table_name=?)", [alias, table], |row| row.get(0)).map_err(|e| e.to_string())?;
+        if !exists {
+            continue;
+        }
+        if alias == "chips" {
+            let has_start: bool = source.query_row("SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='pending_chip_repair' AND column_name='start_date')", [], |row| row.get(0)).map_err(|e| e.to_string())?;
+            let has_model_start: bool = source.query_row("SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='pending_chip_repair' AND column_name='chen_start_date')", [], |row| row.get(0)).map_err(|e| e.to_string())?;
+            for code in &pending_chips {
+                let changed_start: String = if has_model_start {
+                    source.query_row("SELECT COALESCE(chen_start_date, '00000000') FROM pending_chip_repair WHERE ts_code=?", [code], |row| row.get(0)).map_err(|e| e.to_string())?
+                } else if has_start {
+                    source.query_row("SELECT COALESCE(start_date, '00000000') FROM pending_chip_repair WHERE ts_code=?", [code], |row| row.get(0)).map_err(|e| e.to_string())?
+                } else {
+                    "00000000".to_string()
+                };
+                let affected: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM chips.cyq_chen_snapshot saved JOIN scoring_inputs input USING(ts_code, trade_date) WHERE saved.adj_type='qfq' AND saved.ts_code=? AND saved.trade_date>=?)", [code, &changed_start], |row| row.get(0)).map_err(|e| e.to_string())?;
+                if affected {
+                    return Err(format!(
+                        "本次评分会读取 {code} 的待修复新筹码（变更起点 {changed_start}，00000000 表示旧记录起点未知），请先修复该股票的新筹码。"
+                    ));
+                }
+            }
+        } else {
+            for pending in &pending_similarity {
+                let affected: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM similarity.strategy_trigger_similarity_summary saved JOIN scoring_inputs input USING(ts_code, trade_date) WHERE saved.trade_date BETWEEN ? AND ?)", [&pending.start_date, &pending.end_date], |row| row.get(0)).map_err(|e| e.to_string())?;
+                if affected {
+                    return Err(format!(
+                        "本次评分使用 S_RANK，实际输入与相似度待重算区间 {} 至 {} 重叠；请先使用不依赖 S_RANK 的策略重建所需评分及相似度。",
+                        pending.start_date, pending.end_date
+                    ));
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -291,7 +374,16 @@ pub fn preview_scoring_runtime_warnings(
     let warmup_need = warmup_rows_estimate(source_dir, strategy_path)?;
     let rules_cache = cache_rule_build(source_dir, strategy_path)?;
     let used_cyq_chen_keys = collect_scoring_used_cyq_chen_runtime_keys(&rules_cache);
-    ensure_scoring_dependencies_ready(source_dir, &rules_cache, &used_cyq_chen_keys, end_date)?;
+    ensure_scoring_dependencies_ready(
+        source_dir,
+        &rules_cache,
+        &used_cyq_chen_keys,
+        start_date,
+        end_date,
+        warmup_need,
+        None,
+        "qfq",
+    )?;
     Ok(preview_optional_cyq_chen_injection_warnings(
         source_dir,
         start_date,
@@ -437,7 +529,16 @@ pub fn scoring_all_to_db(
     let need_rows = calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?;
     let rules_cache = cache_rule_build(source_dir, strategy_path)?;
     let used_cyq_chen_keys = collect_scoring_used_cyq_chen_runtime_keys(&rules_cache);
-    ensure_scoring_dependencies_ready(source_dir, &rules_cache, &used_cyq_chen_keys, end_date)?;
+    ensure_scoring_dependencies_ready(
+        source_dir,
+        &rules_cache,
+        &used_cyq_chen_keys,
+        start_date,
+        end_date,
+        warmup_need,
+        None,
+        adj_type,
+    )?;
     let uses_similarity_rank = scoring_uses_similarity_rank(&rules_cache);
     let warnings = preview_optional_cyq_chen_injection_warnings(
         source_dir,
@@ -656,7 +757,16 @@ pub fn scoring_all_to_memory_with_mode(
     let need_rows = calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?;
     let rules_cache = cache_rule_build(source_dir, strategy_path)?;
     let used_cyq_chen_keys = collect_scoring_used_cyq_chen_runtime_keys(&rules_cache);
-    ensure_scoring_dependencies_ready(source_dir, &rules_cache, &used_cyq_chen_keys, end_date)?;
+    ensure_scoring_dependencies_ready(
+        source_dir,
+        &rules_cache,
+        &used_cyq_chen_keys,
+        start_date,
+        end_date,
+        warmup_need,
+        None,
+        adj_type,
+    )?;
     let uses_similarity_rank = scoring_uses_similarity_rank(&rules_cache);
     let warnings = preview_optional_cyq_chen_injection_warnings(
         source_dir,
@@ -768,7 +878,16 @@ pub fn scoring_single_period(
     let need_rows = calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?;
     let rules_cache = cache_rule_build(source_dir, strategy_path)?;
     let used_cyq_chen_keys = collect_scoring_used_cyq_chen_runtime_keys(&rules_cache);
-    ensure_scoring_dependencies_ready(source_dir, &rules_cache, &used_cyq_chen_keys, end_date)?;
+    ensure_scoring_dependencies_ready(
+        source_dir,
+        &rules_cache,
+        &used_cyq_chen_keys,
+        start_date,
+        end_date,
+        warmup_need,
+        Some(ts_code),
+        adj_type,
+    )?;
     let uses_similarity_rank = scoring_uses_similarity_rank(&rules_cache);
     let required_runtime_keys = collect_scoring_runtime_keys(&rules_cache);
     let dr = DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
@@ -839,6 +958,148 @@ mod tests {
             assigned_names,
             combination: None,
         }
+    }
+
+    #[test]
+    fn dependency_gate_only_blocks_saved_inputs_in_the_actual_stock_and_date_scope() {
+        let directory = std::env::temp_dir().join(format!(
+            "lianghua-scoring-scope-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.to_str().unwrap();
+        std::fs::write(
+            directory.join("trade_calendar.csv"),
+            "cal_date\n20260105\n20260106\n20260107\n20260108\n20260109\n",
+        )
+        .unwrap();
+        let source = duckdb::Connection::open(source_db_path(path)).unwrap();
+        source.execute_batch("CREATE TABLE stock_data(ts_code VARCHAR, trade_date VARCHAR, adj_type VARCHAR);
+            INSERT INTO stock_data VALUES ('A','20260105','qfq'),('A','20260109','qfq'),('B','20260109','qfq');
+            CREATE TABLE pending_derived_rebuild(component VARCHAR, start_date VARCHAR, end_date VARCHAR);
+            INSERT INTO pending_derived_rebuild VALUES ('similarity','20260105','20260105');
+            CREATE TABLE pending_chip_repair(ts_code VARCHAR PRIMARY KEY, start_date VARCHAR);
+            INSERT INTO pending_chip_repair VALUES ('A','20260109')").unwrap();
+        drop(source);
+        let saved = duckdb::Connection::open(crate::data::similarity_db_path(path)).unwrap();
+        saved.execute_batch("CREATE TABLE strategy_trigger_similarity_summary(ts_code VARCHAR, trade_date VARCHAR, rank INTEGER);
+            INSERT INTO strategy_trigger_similarity_summary VALUES ('A','20260105',1),('A','20260109',1)").unwrap();
+        drop(saved);
+        let saved = duckdb::Connection::open(crate::data::cyq_chen_db_path(path)).unwrap();
+        saved.execute_batch("CREATE TABLE cyq_chen_snapshot(ts_code VARCHAR, trade_date VARCHAR, adj_type VARCHAR);
+            INSERT INTO cyq_chen_snapshot VALUES ('A','20260105','qfq'),('A','20260109','qfq')").unwrap();
+        drop(saved);
+        let rules = vec![cached_rule("similarity", "S_RANK > 0")];
+        // 不读取早期日期不会受早期欠账影响；停牌预热回退到该日期时仍阻止。
+        ensure_scoring_dependencies_ready(
+            path,
+            &rules,
+            &HashSet::new(),
+            "20260109",
+            "20260109",
+            0,
+            Some("A"),
+            "qfq",
+        )
+        .unwrap();
+        assert!(
+            ensure_scoring_dependencies_ready(
+                path,
+                &rules,
+                &HashSet::new(),
+                "20260109",
+                "20260109",
+                1,
+                Some("A"),
+                "qfq"
+            )
+            .unwrap_err()
+            .contains("S_RANK")
+        );
+        let chip_keys = HashSet::from(["CYQ_TPR".to_string()]);
+        ensure_scoring_dependencies_ready(
+            path,
+            &[],
+            &chip_keys,
+            "20260105",
+            "20260105",
+            0,
+            Some("A"),
+            "qfq",
+        )
+        .unwrap();
+        ensure_scoring_dependencies_ready(
+            path,
+            &[],
+            &chip_keys,
+            "20260109",
+            "20260109",
+            0,
+            Some("B"),
+            "qfq",
+        )
+        .unwrap();
+        assert!(
+            ensure_scoring_dependencies_ready(
+                path,
+                &[],
+                &chip_keys,
+                "20260109",
+                "20260109",
+                0,
+                Some("A"),
+                "qfq"
+            )
+            .unwrap_err()
+            .contains("新筹码")
+        );
+        let source = duckdb::Connection::open(source_db_path(path)).unwrap();
+        source.execute_batch("ALTER TABLE pending_chip_repair ADD COLUMN chen_start_date VARCHAR; UPDATE pending_chip_repair SET chen_start_date='20260110'").unwrap();
+        drop(source);
+        // 新模型已经修好的早期数据，不继承旧模型更早的欠账。
+        ensure_scoring_dependencies_ready(
+            path,
+            &[],
+            &chip_keys,
+            "20260109",
+            "20260109",
+            0,
+            Some("A"),
+            "qfq",
+        )
+        .unwrap();
+        let source = duckdb::Connection::open(source_db_path(path)).unwrap();
+        source
+            .execute(
+                "UPDATE pending_chip_repair SET chen_start_date='20260109'",
+                [],
+            )
+            .unwrap();
+        drop(source);
+        // 缺结果沿用空值注入；并非读取失效的旧值。
+        let saved = duckdb::Connection::open(crate::data::cyq_chen_db_path(path)).unwrap();
+        saved
+            .execute(
+                "DELETE FROM cyq_chen_snapshot WHERE trade_date='20260109'",
+                [],
+            )
+            .unwrap();
+        drop(saved);
+        ensure_scoring_dependencies_ready(
+            path,
+            &[],
+            &chip_keys,
+            "20260109",
+            "20260109",
+            0,
+            Some("A"),
+            "qfq",
+        )
+        .unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

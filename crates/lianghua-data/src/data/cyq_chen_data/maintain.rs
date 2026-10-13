@@ -1745,6 +1745,7 @@ bias = 0.5
         crate::data::download_state::mark_chip_repairs_required(
             &source,
             &std::collections::HashSet::from(["000001.SZ".to_string()]),
+            "00000000",
         )
         .unwrap();
         drop(source);

@@ -89,10 +89,15 @@ export default function DownloadComputePage() {
       const reachesTarget = (latestTradeDate: string | null | undefined) =>
         Boolean(targetTradeDate && latestTradeDate && latestTradeDate >= targetTradeDate)
       const latestSimilarityDate = rankingStatus.similarityRankDb.maxTradeDate
-      const latestSimilarityInvalidated = downloadStatus.similarityResultsInvalidated &&
+      const targetRankingInvalidated = downloadStatus.rankingResultsInvalidated &&
         (downloadStatus.pendingDerivedRebuilds ?? []).some((item) =>
-          item.component === 'similarity' && latestSimilarityDate &&
-          item.startDate <= latestSimilarityDate && item.endDate >= latestSimilarityDate,
+          item.component === 'ranking' && targetTradeDate &&
+          item.startDate <= targetTradeDate && item.endDate >= targetTradeDate,
+        )
+      const targetSimilarityInvalidated = downloadStatus.similarityResultsInvalidated &&
+        (downloadStatus.pendingDerivedRebuilds ?? []).some((item) =>
+          item.component === 'similarity' && targetTradeDate &&
+          item.startDate <= targetTradeDate && item.endDate >= targetTradeDate,
         )
       setDailyCompletion({
         loading: false,
@@ -100,9 +105,9 @@ export default function DownloadComputePage() {
         download:
           reachesTarget(downloadStatus.sourceDb.maxTradeDate) &&
           downloadStatus.missingStockRepair.missingCount === 0,
-        ranking: !rankingStrategyChanged && !downloadStatus.rankingResultsInvalidated && reachesTarget(rankingStatus.resultDb.maxTradeDate),
+        ranking: !rankingStrategyChanged && !targetRankingInvalidated && reachesTarget(rankingStatus.resultDb.maxTradeDate),
         similarity:
-          !rankingStrategyChanged && !downloadStatus.rankingResultsInvalidated && !latestSimilarityInvalidated && reachesTarget(latestSimilarityDate),
+          !rankingStrategyChanged && !targetRankingInvalidated && !targetSimilarityInvalidated && reachesTarget(latestSimilarityDate),
         rankingStrategyChanged,
         error: '',
       })

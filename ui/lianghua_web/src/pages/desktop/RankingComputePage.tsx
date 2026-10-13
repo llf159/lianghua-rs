@@ -1474,7 +1474,7 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
             </small>
           </div>
 
-          <div className={`ranking-compute-summary-item${isResultStale || isResultDiscontinuous ? ' is-warning' : ''}`}>
+          <div className={`ranking-compute-summary-item${isResultDiscontinuous ? ' is-warning' : ''}`}>
             <span>排名结果库</span>
             <strong>{describeDbRange(status?.resultDb)}</strong>
             <small>
@@ -1483,8 +1483,10 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
                 : '读取中...'}
             </small>
             {isResultStale ? (
-              <small className="ranking-compute-summary-alert">
-                结果库为空或落后于原始行情库，请补算
+              <small>
+                {status?.resultDb.maxTradeDate
+                  ? '末尾行情尚未计算，可增量补算；连续性只检查已有结果区间。'
+                  : '暂无排名结果，请按需要选择计算区间。'}
               </small>
             ) : null}
           </div>

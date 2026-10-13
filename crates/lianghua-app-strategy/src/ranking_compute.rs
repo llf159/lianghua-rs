@@ -595,14 +595,6 @@ fn get_rank_compute_status_inner(
         }
         (_, Some(source_max), _) => Some(source_max.to_string()),
     };
-    let suggested_start_date = suggested_start_date
-        .into_iter()
-        .chain(
-            pending_ranking_rebuilds
-                .iter()
-                .map(|item| item.start_date.clone()),
-        )
-        .min();
 
     Ok(RankComputeStatus {
         source_path: source_path.trim().to_string(),
@@ -956,7 +948,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ranking_suggestions_include_historical_rebuild_debt() {
+    fn ranking_suggestions_stay_incremental_with_historical_rebuild_debt() {
         let directory = std::env::temp_dir().join(format!(
             "lianghua-ranking-debt-{}",
             std::time::SystemTime::now()
@@ -968,12 +960,12 @@ mod tests {
         let source = directory.to_str().unwrap();
         std::fs::write(
             directory.join("trade_calendar.csv"),
-            "cal_date\n20260105\n20260106\n20260109\n",
+            "cal_date\n20260102\n20260105\n20260106\n20260109\n20260112\n",
         )
         .unwrap();
         let conn = duckdb::Connection::open(source_db_path(source)).unwrap();
         conn.execute_batch("CREATE TABLE stock_data(ts_code VARCHAR, trade_date VARCHAR, adj_type VARCHAR);
-            INSERT INTO stock_data VALUES ('A','20260105','qfq'),('A','20260106','qfq'),('A','20260109','qfq'),('INDEX','20100101','ind');
+            INSERT INTO stock_data VALUES ('A','20260102','qfq'),('A','20260105','qfq'),('A','20260106','qfq'),('A','20260109','qfq'),('A','20260112','qfq'),('INDEX','20100101','ind');
             CREATE TABLE pending_derived_rebuild(component VARCHAR PRIMARY KEY, start_date VARCHAR, end_date VARCHAR);
             INSERT INTO pending_derived_rebuild VALUES ('ranking','20260101','20260111')").unwrap();
         drop(conn);
@@ -986,17 +978,31 @@ mod tests {
             .unwrap();
         drop(results);
         let status = get_ranking_compute_status(source, None).unwrap();
-        assert_eq!(status.suggested_start_date.as_deref(), Some("20260105"));
-        assert_eq!(status.suggested_end_date.as_deref(), Some("20260109"));
-        assert_eq!(status.source_db.min_trade_date.as_deref(), Some("20260105"));
+        assert_eq!(status.suggested_start_date.as_deref(), Some("20260112"));
+        assert_eq!(status.suggested_end_date.as_deref(), Some("20260112"));
+        assert_eq!(status.source_db.min_trade_date.as_deref(), Some("20260102"));
         assert_eq!(status.pending_ranking_rebuilds.len(), 1);
+        assert!(status.result_db_continuity.is_continuous);
+        assert_eq!(status.result_db_continuity.missing_trade_dates_count, 0);
+        assert_eq!(status.result_db_continuity.expected_trade_dates, 3);
         crate::data::download_state::clear_pending_derived_rebuild(
-            source, "ranking", "20260105", "20260109",
+            source, "ranking", "20260102", "20260109",
         )
         .unwrap();
         let status = get_ranking_compute_status(source, None).unwrap();
         assert!(status.pending_ranking_rebuilds.is_empty());
-        assert_eq!(status.suggested_start_date.as_deref(), Some("20260109"));
+        assert_eq!(status.suggested_start_date.as_deref(), Some("20260112"));
+        let results = duckdb::Connection::open(result_db_path(source)).unwrap();
+        results
+            .execute("DELETE FROM score_summary WHERE trade_date='20260106'", [])
+            .unwrap();
+        drop(results);
+        let status = get_ranking_compute_status(source, None).unwrap();
+        assert!(!status.result_db_continuity.is_continuous);
+        assert_eq!(
+            status.result_db_continuity.missing_trade_dates_sample,
+            vec!["20260106"]
+        );
         std::fs::remove_dir_all(directory).unwrap();
     }
 }
