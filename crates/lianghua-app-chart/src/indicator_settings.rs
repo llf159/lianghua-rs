@@ -4,11 +4,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use duckdb::Connection;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    data::source_db_path,
+    data::{open_db_readonly, source_db_path},
     indicator::{
         ChartIndicatorConfig, ChartMarkerKind, ChartMarkerLineStyle, ChartPanelConfig,
         ChartPanelKind, ChartPanelRole, ChartSeriesKind, ChartTooltipFormat,
@@ -486,7 +485,7 @@ fn load_stock_data_columns_if_available(
         return Ok(None);
     }
 
-    let conn = Connection::open(&db_path).map_err(|error| {
+    let conn = open_db_readonly(&db_path).map_err(|error| {
         format!(
             "打开 stock_data.db 失败: path={}, err={error}",
             db_path.display()
@@ -516,6 +515,50 @@ fn load_stock_data_columns_if_available(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn column_query_does_not_checkpoint_active_writer() {
+        let source_dir = std::env::temp_dir().join(format!(
+            "lianghua-chart-columns-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&source_dir).unwrap();
+        let db_path = source_db_path(source_dir.to_str().unwrap());
+        let writer = duckdb::Connection::open(&db_path).unwrap();
+        writer
+            .execute_batch(
+                "CREATE TABLE stock_data (close DOUBLE); INSERT INTO stock_data VALUES (10);",
+            )
+            .unwrap();
+        let db_before = fs::read(&db_path).unwrap();
+        let wal_path = db_path.with_extension("db.wal");
+        let wal_before = fs::read(&wal_path).unwrap();
+
+        let columns = load_stock_data_columns_if_available(source_dir.to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        assert!(columns.contains("close"));
+        assert_eq!(fs::read(&db_path).unwrap(), db_before);
+        assert_eq!(fs::read(&wal_path).unwrap(), wal_before);
+        writer
+            .execute("INSERT INTO stock_data VALUES (20)", [])
+            .unwrap();
+        drop(writer);
+        let reader = open_db_readonly(&db_path).unwrap();
+        assert_eq!(
+            reader
+                .query_row("SELECT sum(close) FROM stock_data", [], |row| row
+                    .get::<_, f64>(0))
+                .unwrap(),
+            30.0
+        );
+        drop(reader);
+        fs::remove_dir_all(source_dir).unwrap();
+    }
 
     #[test]
     fn marker_provider_render_fields_round_trip_through_settings_text() {

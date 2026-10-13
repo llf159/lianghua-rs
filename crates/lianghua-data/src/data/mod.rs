@@ -714,7 +714,13 @@ impl DataReader {
             .map_err(|e| format!("预编译批量查询SQL失败:{e}"))?;
         let mut rows = stmt
             .query(params![adj_type, start_date, end_date])
-            .map_err(|e| format!("执行批量查询失败:{e}"))?;
+            .map_err(|e| {
+                format!(
+                    "执行批量查询失败: 原始行情库={}, adj_type={adj_type}, 区间={start_date}-{end_date}, 股票={}: {e}",
+                    self.conn.path().map_or_else(|| "<内存>".to_string(), |path| path.display().to_string()),
+                    ts_codes.join(",")
+                )
+            })?;
 
         let mut result: HashMap<String, RowData> = HashMap::new();
         while let Some(row) = rows.next().map_err(|e| format!("读取批量数据行失败:{e}"))? {

@@ -295,7 +295,8 @@ pub(super) fn query_cyq_chen_meta_value(
     db_path: &Path,
     key: &str,
 ) -> Result<Option<String>, String> {
-    let conn = Connection::open(db_path).map_err(|e| format!("打开新筹码库失败:{e}"))?;
+    let conn =
+        crate::data::open_db_readonly(db_path).map_err(|e| format!("打开新筹码库失败:{e}"))?;
     let table_exists = conn
         .query_row(
             "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
@@ -350,7 +351,8 @@ pub(super) fn write_cyq_chen_meta(
 pub(super) fn query_latest_cyq_chen_metadata(
     db_path: &Path,
 ) -> Result<Option<(String, ChenChipConfig)>, String> {
-    let conn = Connection::open(db_path).map_err(|e| format!("打开新筹码库失败:{e}"))?;
+    let conn =
+        crate::data::open_db_readonly(db_path).map_err(|e| format!("打开新筹码库失败:{e}"))?;
     let table_exists = conn
         .query_row(
             "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
@@ -488,7 +490,13 @@ mod tests {
              INSERT INTO cyq_chen_snapshot VALUES ('20260401', 120, 1.0);",
         )
         .unwrap();
+        // 状态查询不能重放 WAL 后把另一个写实例的目录 checkpoint 回正式文件。
+        let db_before = fs::read(&db_path).unwrap();
+        let wal_path = db_path.with_extension("db.wal");
+        let wal_before = fs::read(&wal_path).unwrap();
         let status = query_cyq_chen_strategy_maintenance_status(source_path).unwrap();
+        assert_eq!(fs::read(&db_path).unwrap(), db_before);
+        assert_eq!(fs::read(&wal_path).unwrap(), wal_before);
         assert!(status.has_data);
         assert!(status.strategy_changed);
         let tables: i64 = conn

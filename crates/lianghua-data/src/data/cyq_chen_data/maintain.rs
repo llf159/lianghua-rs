@@ -124,7 +124,7 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
                     .as_str(),
             )
     {
-        let conn = Connection::open(&cyq_chen_db).map_err(|e| e.to_string())?;
+        let conn = crate::data::open_db_readonly(&cyq_chen_db).map_err(|e| e.to_string())?;
         let first_date: String = conn
             .query_row(
                 "SELECT MIN(trade_date) FROM cyq_chen_snapshot WHERE adj_type = ?",
@@ -143,7 +143,7 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
         .map(Some);
     }
     if latest_metadata.is_some() {
-        let conn = Connection::open(&cyq_chen_db).map_err(|e| e.to_string())?;
+        let conn = crate::data::open_db_readonly(&cyq_chen_db).map_err(|e| e.to_string())?;
         let mut statement = conn.prepare(
             "SELECT history.ts_code FROM
              (SELECT ts_code, MAX(trade_date) AS latest FROM cyq_chen_snapshot WHERE adj_type = ? GROUP BY ts_code) history
@@ -218,10 +218,14 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
     let total_share_map = load_total_share_map(source_dir).unwrap_or_default();
     let reader = DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
     let ts_codes = reader.list_ts_code(DEFAULT_ADJ_TYPE, &load_start_date, &end_date)?;
-    let cyq_chen_db_str = cyq_chen_db
-        .to_str()
-        .ok_or_else(|| "筹码库路径不是有效UTF-8".to_string())?
-        .to_string();
+    let state_db = std::sync::Mutex::new(
+        Connection::open(&cyq_chen_db).map_err(|e| format!("打开新筹码库失败:{e}"))?,
+    );
+    let writer_conn = state_db
+        .lock()
+        .map_err(|_| "新筹码数据库连接锁异常".to_string())?
+        .try_clone()
+        .map_err(|e| format!("克隆新筹码写入连接失败:{e}"))?;
     if let Some(progress_cb) = progress_cb {
         progress_cb(DownloadProgress {
             phase: "compute_cyq_chen".to_string(),
@@ -237,86 +241,100 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
         });
     }
 
-    let (tx, rx) = sync_channel(CYQ_CHEN_QUEUE_BOUND);
-    let abort_tx = tx.clone();
-    let write_start_date = start_date.clone();
-    let write_end_date = end_date.clone();
-    let writer_strategy_hash = strategy_hash.clone();
-    let writer_handle = thread::spawn(move || {
-        write_cyq_chen_incremental_batches_from_channel(
-            &cyq_chen_db_str,
-            rx,
-            config,
-            &write_start_date,
-            &write_end_date,
-            writer_strategy_hash,
-        )
-    });
-
-    let finished_stock_count = std::sync::atomic::AtomicUsize::new(0);
-    let compute_result = ts_codes.par_chunks(CYQ_CHEN_GROUP_SIZE).try_for_each_init(
-        || DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys),
-        |worker_reader, ts_group| -> Result<(), String> {
-            let worker_reader = worker_reader.as_ref().map_err(Clone::clone)?;
-            let state_conn =
-                Connection::open(&cyq_chen_db).map_err(|e| format!("打开新筹码库状态失败:{e}"))?;
-            let progress_stock_done = |ts_code: &str| {
-                if let Some(progress_cb) = progress_cb {
-                    let finished =
-                        finished_stock_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                    progress_cb(DownloadProgress {
-                        phase: "compute_cyq_chen".to_string(),
-                        finished,
-                        total: ts_codes.len(),
-                        current_label: Some(ts_code.to_string()),
-                        message: format!(
-                            "新筹码增量计算中，已计算 {finished} / {} 只股票。",
-                            ts_codes.len()
-                        ),
-                    });
-                }
-            };
-            let batch = compute_cyq_chen_stock_group_batch(
-                worker_reader,
-                Some(&state_conn),
-                &load_start_date,
-                &start_date,
-                &end_date,
-                &chip_config,
+    // 独立只读实例也不参与写实例的块管理；续算状态必须与写线程共享实例。
+    // scope 保证异常退出也先结束写线程，再释放 try_clone 借用的主数据库句柄。
+    let (compute_result, writer_result) = thread::scope(|scope| {
+        let (tx, rx) = sync_channel(CYQ_CHEN_QUEUE_BOUND);
+        let abort_tx = tx.clone();
+        let write_start_date = start_date.clone();
+        let write_end_date = end_date.clone();
+        let writer_strategy_hash = strategy_hash.clone();
+        let writer_handle = scope.spawn(move || {
+            write_cyq_chen_incremental_batches_from_channel(
+                writer_conn,
+                rx,
                 config,
-                &st_list,
-                &total_share_map,
-                ts_group,
-                Some(&progress_stock_done),
-            )?;
-            tx.send(CyqChenWriteMessage::Batch(batch))
-                .map_err(|e| format!("发送新筹码增量批次失败:{e}"))?;
-            Ok(())
-        },
-    );
+                &write_start_date,
+                &write_end_date,
+                writer_strategy_hash,
+            )
+        });
 
-    if let Err(err) = &compute_result {
-        let _ = abort_tx.send(CyqChenWriteMessage::Abort(err.clone()));
-    }
-    drop(abort_tx);
-    drop(tx);
+        let finished_stock_count = std::sync::atomic::AtomicUsize::new(0);
+        let compute_result = ts_codes.par_chunks(CYQ_CHEN_GROUP_SIZE).try_for_each_init(
+            || -> Result<(DataReader, Connection), String> {
+                let state_conn = state_db
+                    .lock()
+                    .map_err(|_| "新筹码数据库连接锁异常".to_string())?
+                    .try_clone()
+                    .map_err(|e| format!("克隆新筹码状态读取连接失败:{e}"))?;
+                let worker_reader =
+                    DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
+                Ok((worker_reader, state_conn))
+            },
+            |worker_reader, ts_group| -> Result<(), String> {
+                let (worker_reader, state_conn) = worker_reader.as_ref().map_err(Clone::clone)?;
+                let progress_stock_done = |ts_code: &str| {
+                    if let Some(progress_cb) = progress_cb {
+                        let finished = finished_stock_count
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                            + 1;
+                        progress_cb(DownloadProgress {
+                            phase: "compute_cyq_chen".to_string(),
+                            finished,
+                            total: ts_codes.len(),
+                            current_label: Some(ts_code.to_string()),
+                            message: format!(
+                                "新筹码增量计算中，已计算 {finished} / {} 只股票。",
+                                ts_codes.len()
+                            ),
+                        });
+                    }
+                };
+                let batch = compute_cyq_chen_stock_group_batch(
+                    worker_reader,
+                    Some(state_conn),
+                    &load_start_date,
+                    &start_date,
+                    &end_date,
+                    &chip_config,
+                    config,
+                    &st_list,
+                    &total_share_map,
+                    ts_group,
+                    Some(&progress_stock_done),
+                )?;
+                tx.send(CyqChenWriteMessage::Batch(batch))
+                    .map_err(|e| format!("发送新筹码增量批次失败:{e}"))?;
+                Ok(())
+            },
+        );
 
-    if compute_result.is_ok() {
-        if let Some(progress_cb) = progress_cb {
-            progress_cb(DownloadProgress {
-                phase: "compute_cyq_chen".to_string(),
-                finished: ts_codes.len(),
-                total: ts_codes.len(),
-                current_label: None,
-                message: "筹码计算已结束，正在等待写入、事务提交及结果库收尾。".to_string(),
-            });
+        if let Err(err) = &compute_result {
+            let _ = abort_tx.send(CyqChenWriteMessage::Abort(err.clone()));
         }
-    }
+        drop(abort_tx);
+        drop(tx);
 
-    let writer_result = match writer_handle.join() {
-        Ok(result) => result,
-        Err(_) => Err("筹码库写线程异常退出".to_string()),
-    };
+        if compute_result.is_ok() {
+            if let Some(progress_cb) = progress_cb {
+                progress_cb(DownloadProgress {
+                    phase: "compute_cyq_chen".to_string(),
+                    finished: ts_codes.len(),
+                    total: ts_codes.len(),
+                    current_label: None,
+                    message: "筹码计算已结束，正在等待写入、事务提交及结果库收尾。".to_string(),
+                });
+            }
+        }
+
+        let writer_result = match writer_handle.join() {
+            Ok(result) => result,
+            Err(_) => Err("筹码库写线程异常退出".to_string()),
+        };
+
+        (compute_result, writer_result)
+    });
 
     let (snapshot_rows, bin_rows) = finish_cyq_chen_write(compute_result, writer_result)?;
     Ok(Some(CyqChenRebuildSummary {
@@ -427,7 +445,8 @@ pub fn repair_cyq_chen_stocks_if_db_exists(
         String,
     > {
         init_cyq_chen_db(db_path)?;
-        let conn = Connection::open(db_path).map_err(|e| format!("打开新筹码库失败:{e}"))?;
+        let conn =
+            crate::data::open_db_readonly(db_path).map_err(|e| format!("打开新筹码库失败:{e}"))?;
         let table_exists = conn
             .query_row(
                 "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
@@ -1576,7 +1595,7 @@ bias = 0.5
         drop(tx);
 
         let error = write_cyq_chen_incremental_batches_from_channel(
-            cyq_chen_db.to_str().expect("utf8 db path"),
+            Connection::open(&cyq_chen_db).unwrap(),
             rx,
             config,
             "20260407",

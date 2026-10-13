@@ -1182,14 +1182,13 @@ fn write_cyq_chen_batch_groups(
 }
 
 pub(super) fn write_cyq_chen_incremental_batches_from_channel(
-    db_path: &str,
+    mut conn: Connection,
     rx: Receiver<CyqChenWriteMessage>,
     config: ChenChipConfig,
     start_date: &str,
     end_date: &str,
     strategy_hash: String,
 ) -> Result<(usize, usize), String> {
-    let mut conn = Connection::open(db_path).map_err(|e| format!("打开筹码库失败:{e}"))?;
     let write_result = (|| -> Result<(usize, usize), String> {
         let tx = conn
             .transaction()
