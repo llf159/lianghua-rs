@@ -13,7 +13,11 @@
 
 在「设置 → WebDAV 云同步」填写地址 `https://dav.jianguoyun.com/dav/`、账号邮箱和[坚果云第三方应用密码](https://help.jianguoyun.com/?p=2064)。默认在网盘下建立 `lianghua-rs` 子文件夹，凭据保存在本机应用目录，不上传。
 
-在「原数据 → 管理」点击「同步云端」手动双向同步；「云端数据管理」可按路径筛选、查看历史版本、恢复/启用版本和删除选定云端版本。
+在「原数据 → 管理」点击「下载云端」仅接收云端当前版本，适合手机接收电脑的数据；替换前在本地备份，云端有冲突的分组跳过，网络等待期间发生的本机编辑保留。该操作不上传本机内容、不修改云端索引、不合并分支、不清理云端历史。点击「双向同步」则上传本机改动并接收云端版本。「云端数据管理」可按路径筛选、查看历史版本、恢复/启用版本和删除选定云端版本；「恢复/启用」会保存本机改动到云端并合并分支，属于会修改云端的操作。
+
+Android 和 Windows 安装包内置 DuckDB parquet 扩展，读取或备份榜单快照无需临时联网安装扩展。Android 若旧版本报 `Extension Autoloading Error` / `Can't find the home directory`，请安装更新后的 APK；仅设置主目录不能补齐安装包缺失的扩展。重新打包命令：在 `ui/lianghua_web/src-tauri` 执行 `cargo tauri android build --ci --target aarch64 --apk`。
+
+Tauri 构建使用 `src-tauri/rust-toolchain.toml` 固定 Rust 1.95.0，Android CI 使用同版本。此配置用于绕过本机 Rust 1.94.0 / LLVM 21 在 Android Release 代码生成阶段出现的 SIGBUS，目前未重新编译验证。缺工具链时执行 `rustup toolchain install 1.95.0 --profile minimal --target aarch64-linux-android`；在 `src-tauri` 执行 `rustup show active-toolchain` 和 `rustc -vV` 检查，应显示 Rust 1.95.0 / LLVM 22。上述安装和版本检查均不编译项目。
 
 - 同步打分策略、筹码策略、全部策略备份及备注、计算时的策略快照、指标定义和图表指标文件；同步持久化的选股/验证/监控模板、自选名单及通用设置。
 - 总榜只有一个数据库快照包，内部包含最近5个已有结果交易日的汇总、规则和场景明细；相似榜另一个数据库快照包，内部只包含最新1天的排名、汇总、元数据和参数。旧的无冲突数据库快照版本会清理，本地其他日期保留。

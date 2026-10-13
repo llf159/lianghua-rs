@@ -497,6 +497,7 @@ pub fn sync(
     app_data: &Path,
     source: &Path,
     settings: BTreeMap<String, String>,
+    download_only: bool,
     progress: impl Fn(&str),
 ) -> Result<SyncResult, String> {
     let config = get_config(app_data)?;
@@ -509,9 +510,17 @@ pub fn sync(
     };
     progress("正在读取本地策略、配置和按日榜单");
     let snapshots = local_snapshots(app_data, source, &settings)?;
-    progress("正在连接云端并取得同步锁");
+    progress(if download_only {
+        "正在读取云端目录"
+    } else {
+        "正在连接云端并取得同步锁"
+    });
     let mut dav = dav::Dav::new(&config)?;
-    dav.acquire()?;
+    if download_only {
+        dav.read_manifest()?;
+    } else {
+        dav.acquire()?;
+    }
     let original_manifest = dav.manifest.clone();
     let mut result = SyncResult::default();
     let mut retained_days = BTreeSet::new();
@@ -524,7 +533,7 @@ pub fn sync(
             .collect();
         retained_days.extend(keys.into_iter().rev().take(count));
     }
-    for (path, bytes) in &snapshots {
+    for (path, bytes) in snapshots.iter().filter(|_| !download_only) {
         progress(&format!("核对并上传：{path}"));
         if (path.starts_with("ranking/") || path.starts_with("similarity/"))
             && !database::is_snapshot(path)
@@ -589,7 +598,9 @@ pub fn sync(
         );
         result.uploaded += 1;
     }
-    dav.manifest.prune();
+    if !download_only {
+        dav.manifest.prune();
+    }
     // 先提交云端，再应用本地。中断后基线可以重建，已上传版本仍可恢复。
     if dav.manifest != original_manifest {
         progress("正在提交云端目录");
@@ -617,7 +628,7 @@ pub fn sync(
         let bytes = dav.download(&version.hash, &local.join("objects"))?;
         let _guard = SOURCE_ACCESS
             .try_write()
-            .map_err(|_| "数据操作正在进行，云端已保存；请完成后再次同步以接收下载")?;
+            .map_err(|_| "数据操作正在进行，请完成后再次同步以接收下载")?;
         // 网络请求期间本地可能被编辑；数据库快照和配置分组重新导出核对。
         let current = current_bytes(app_data, source, &path, &settings)?;
         if !path.starts_with("settings/")
@@ -651,14 +662,16 @@ pub fn sync(
         &state_path,
         &serde_json::to_vec(&state).map_err(|e| e.to_string())?,
     )?;
-    progress("正在清理过期榜单");
-    dav.garbage_collect()?;
-    if !dav.manifest.garbage.is_empty() {
-        result
-            .warnings
-            .push("部分过期榜单清理失败，下次同步会重试".into());
+    if !download_only {
+        progress("正在清理过期榜单");
+        dav.garbage_collect()?;
+        if !dav.manifest.garbage.is_empty() {
+            result
+                .warnings
+                .push("部分过期榜单清理失败，下次同步会重试".into());
+        }
+        dav.release()?;
     }
-    dav.release()?;
     result.uploaded_bytes = dav.uploaded_bytes;
     result.downloaded_bytes = dav.downloaded_bytes;
     result.transferred_bytes = dav.uploaded_bytes + dav.downloaded_bytes;
@@ -873,21 +886,34 @@ fn apply(
 
 fn target_path(app_data: &Path, source: &Path, path: &str) -> Result<PathBuf, String> {
     validate_path(path)?;
-    let target = if let Some(relative) = path.strip_prefix("source/") {
-        source.join(relative)
+    let (root, target) = if let Some(relative) = path.strip_prefix("source/") {
+        (source, source.join(relative))
     } else {
-        app_data.join("watch_observe.json")
+        (app_data, app_data.join("watch_observe.json"))
     };
-    // 防止本机已有符号链接把云端恢复导向仓库之外。
+    // 只检查本地同步根目录及其内部；上级目录可能是 Android 的系统路径别名。
     let mut current = target.as_path();
     loop {
-        if fs::symlink_metadata(current).is_ok_and(|m| m.file_type().is_symlink()) {
-            return Err("同步目标包含符号链接，已停止恢复".into());
+        match fs::symlink_metadata(current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!(
+                    "本地同步目标包含符号链接：{}；已停止恢复",
+                    current.display()
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "检查本地同步路径失败 {}：{error}",
+                    current.display()
+                ));
+            }
         }
-        let Some(parent) = current.parent() else {
+        if current == root {
             break;
-        };
-        current = parent;
+        }
+        current = current.parent().ok_or("本地同步目标不在同步根目录内")?;
     }
     Ok(target)
 }

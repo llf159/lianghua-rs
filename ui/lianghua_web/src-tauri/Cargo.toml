@@ -44,10 +44,10 @@ duckdb = { version = "1.4.4", features = ["appender-arrow"] }
 libc = "0.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-duckdb = { version = "1.4.4", features = ["bundled", "appender-arrow"] }
+duckdb = { version = "1.4.4", features = ["bundled", "appender-arrow", "parquet"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
-duckdb = { version = "1.4.4", features = ["bundled", "appender-arrow"] }
+duckdb = { version = "1.4.4", features = ["bundled", "appender-arrow", "parquet"] }
 libc = "0.2"
 jni = "0.21.1"
 rustls-platform-verifier = "0.6.2"

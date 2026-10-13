@@ -19,6 +19,8 @@ fn two_devices_keep_conflicts_deduplicate_and_recover() {
     let objects = Arc::new(Mutex::new(BTreeMap::<String, Vec<u8>>::new()));
     let object_puts = Arc::new(Mutex::new(0usize));
     let requests = Arc::new(Mutex::new(0usize));
+    let mutations = Arc::new(Mutex::new(0usize));
+    let worker_mutations = mutations.clone();
     let worker_requests = requests.clone();
     let worker_stop = stopped.clone();
     let worker_objects = objects.clone();
@@ -36,6 +38,9 @@ fn two_devices_keep_conflicts_deduplicate_and_recover() {
             reader.read_line(&mut first).unwrap();
             let parts: Vec<_> = first.split_whitespace().collect();
             let (method, path) = (parts[0], parts[1]);
+            if matches!(method, "PUT" | "DELETE" | "MKCOL") {
+                *worker_mutations.lock().unwrap() += 1;
+            }
             assert!(path.starts_with("/dav/lianghua-rs/"));
             let mut headers = BTreeMap::new();
             loop {
@@ -128,8 +133,51 @@ fn two_devices_keep_conflicts_deduplicate_and_recover() {
     save_config(&app_a, config.clone()).unwrap();
     save_config(&app_b, config.clone()).unwrap();
     fs::write(source_a.join("score_rule.toml"), "version = 1\n").unwrap();
-    let first = sync(&app_a, &source_a, BTreeMap::new(), |_| {}).unwrap();
+    let first = sync(&app_a, &source_a, BTreeMap::new(), false, |_| {}).unwrap();
     assert_eq!(first.uploaded, 1);
+    // 接收端已有自己的内容，只下载时先本地备份，不向云端写入任何请求。
+    let app_download = temp.path().join("app-download");
+    let source_download = temp.path().join("source-download");
+    save_config(&app_download, config.clone()).unwrap();
+    fs::create_dir_all(&source_download).unwrap();
+    fs::write(source_download.join("score_rule.toml"), "version = 99\n").unwrap();
+    let mutations_before = *mutations.lock().unwrap();
+    let received = sync(
+        &app_download,
+        &source_download,
+        BTreeMap::new(),
+        true,
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(received.uploaded, 0);
+    assert_eq!(received.uploaded_bytes, 0);
+    assert_eq!(received.downloaded, 1);
+    assert_eq!(
+        fs::read_to_string(source_download.join("score_rule.toml")).unwrap(),
+        "version = 1\n"
+    );
+    let backup = fs::read_dir(source_download.join("strategy_backups"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert_eq!(
+        fs::read_to_string(backup.join("score_rule.toml")).unwrap(),
+        "version = 99\n"
+    );
+    let repeated = sync(
+        &app_download,
+        &source_download,
+        BTreeMap::new(),
+        true,
+        |_| {},
+    )
+    .unwrap();
+    // 本地新增的自动备份属于策略包；再次接收可以核对包，但不得上传它。
+    assert_eq!(repeated.uploaded, 0);
+    assert_eq!(*mutations.lock().unwrap(), mutations_before);
     // 损坏的下载不落盘，恢复云端对象后可以重试。
     let first_snapshot = local_snapshots(&app_a, &source_a, &BTreeMap::new()).unwrap();
     let object_path = format!(
@@ -141,21 +189,37 @@ fn two_devices_keep_conflicts_deduplicate_and_recover() {
         .unwrap()
         .insert(object_path.clone(), encode(b"damaged").unwrap())
         .unwrap();
-    assert!(sync(&app_b, &source_b, BTreeMap::new(), |_| {}).is_err());
+    assert!(sync(&app_b, &source_b, BTreeMap::new(), false, |_| {}).is_err());
     assert!(!source_b.join("score_rule.toml").exists());
     objects.lock().unwrap().insert(object_path, original_object);
-    let second = sync(&app_b, &source_b, BTreeMap::new(), |_| {}).unwrap();
+    let second = sync(&app_b, &source_b, BTreeMap::new(), false, |_| {}).unwrap();
     assert_eq!(second.downloaded, 1);
     let requests_before = *requests.lock().unwrap();
-    let unchanged = sync(&app_a, &source_a, BTreeMap::new(), |_| {}).unwrap();
+    let unchanged = sync(&app_a, &source_a, BTreeMap::new(), false, |_| {}).unwrap();
     assert_eq!(*requests.lock().unwrap() - requests_before, 5);
     assert_eq!(unchanged.uploaded, 0);
     assert_eq!(*object_puts.lock().unwrap(), 1);
     fs::write(source_a.join("score_rule.toml"), "version = 2\n").unwrap();
     fs::write(source_b.join("score_rule.toml"), "version = 3\n").unwrap();
-    sync(&app_a, &source_a, BTreeMap::new(), |_| {}).unwrap();
-    let conflict = sync(&app_b, &source_b, BTreeMap::new(), |_| {}).unwrap();
+    sync(&app_a, &source_a, BTreeMap::new(), false, |_| {}).unwrap();
+    let conflict = sync(&app_b, &source_b, BTreeMap::new(), false, |_| {}).unwrap();
     assert_eq!(conflict.conflicts, ["bundles/strategies.zip"]);
+    let mutations_before = *mutations.lock().unwrap();
+    let conflicted_download = sync(
+        &app_download,
+        &source_download,
+        BTreeMap::new(),
+        true,
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(conflicted_download.conflicts, ["bundles/strategies.zip"]);
+    assert_eq!(conflicted_download.downloaded, 0);
+    assert_eq!(
+        fs::read_to_string(source_download.join("score_rule.toml")).unwrap(),
+        "version = 1\n"
+    );
+    assert_eq!(*mutations.lock().unwrap(), mutations_before);
     assert_eq!(
         fs::read_to_string(source_a.join("score_rule.toml")).unwrap(),
         "version = 2\n"
@@ -201,7 +265,7 @@ fn two_devices_keep_conflicts_deduplicate_and_recover() {
         1
     );
     // 恢复产生的本地自动备份也确认到策略包后，再检查云端删除不重传。
-    sync(&app_b, &source_b, BTreeMap::new(), |_| {}).unwrap();
+    sync(&app_b, &source_b, BTreeMap::new(), false, |_| {}).unwrap();
     // 锁住云端时另一个客户端拒绝修改；过时 ETag 无法覆盖目录。
     let mut lock = dav::Dav::new(&config).unwrap();
     lock.acquire().unwrap();
@@ -217,7 +281,7 @@ fn two_devices_keep_conflicts_deduplicate_and_recover() {
         .find(|v| v.path == selected.path && v.is_head)
         .unwrap();
     delete_cloud(&app_b, &head.path, &head.version.id).unwrap();
-    sync(&app_b, &source_b, BTreeMap::new(), |_| {}).unwrap();
+    sync(&app_b, &source_b, BTreeMap::new(), false, |_| {}).unwrap();
     assert!(
         list_cloud(&app_b)
             .unwrap()
@@ -237,7 +301,7 @@ fn two_devices_keep_conflicts_deduplicate_and_recover() {
         ("lh_intraday_monitor_watchlist_v1".into(), "[]".into()),
     ]);
     let before = *object_puts.lock().unwrap();
-    sync(&app_a, &source_a, preferences.clone(), |_| {}).unwrap();
+    sync(&app_a, &source_a, preferences.clone(), false, |_| {}).unwrap();
     assert_eq!(*object_puts.lock().unwrap() - before, 3);
     let heads = list_cloud(&app_a).unwrap();
     for path in [
@@ -250,7 +314,7 @@ fn two_devices_keep_conflicts_deduplicate_and_recover() {
     let app_c = temp.path().join("app-c");
     let source_c = temp.path().join("source-c");
     save_config(&app_c, config.clone()).unwrap();
-    let received = sync(&app_c, &source_c, BTreeMap::new(), |_| {}).unwrap();
+    let received = sync(&app_c, &source_c, BTreeMap::new(), false, |_| {}).unwrap();
     assert_eq!(received.settings, preferences);
     assert_eq!(
         fs::read_to_string(source_c.join("ind.toml")).unwrap(),
@@ -259,7 +323,7 @@ fn two_devices_keep_conflicts_deduplicate_and_recover() {
     assert!(app_c.join("watch_observe.json").exists());
     fs::write(source_a.join("ind.toml"), "period = 21\n").unwrap();
     let before = *object_puts.lock().unwrap();
-    sync(&app_a, &source_a, preferences, |_| {}).unwrap();
+    sync(&app_a, &source_a, preferences, false, |_| {}).unwrap();
     assert_eq!(*object_puts.lock().unwrap() - before, 1);
     stopped.store(true, Ordering::Relaxed);
     let _ = TcpStream::connect(address);
@@ -354,6 +418,40 @@ fn database_snapshot_keeps_five_dates_and_preserves_other_local_history() {
             .count(),
         1
     );
+}
+
+#[test]
+#[cfg(unix)]
+fn local_sync_paths_allow_system_aliases_and_reject_links_inside_roots() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().unwrap();
+    let real = temp.path().join("real");
+    let alias = temp.path().join("alias");
+    fs::create_dir_all(real.join("app")).unwrap();
+    fs::create_dir_all(real.join("source")).unwrap();
+    symlink(&real, &alias).unwrap();
+    let app = alias.join("app");
+    let source = alias.join("source");
+    assert_eq!(
+        target_path(&app, &source, "source/strategy_backups/new/score_rule.toml").unwrap(),
+        source.join("strategy_backups/new/score_rule.toml")
+    );
+    assert_eq!(
+        target_path(&app, &source, "app/watch_observe.json").unwrap(),
+        app.join("watch_observe.json")
+    );
+
+    // 根目录内部的链接即使目标尚不存在，也不能用于恢复。
+    symlink(temp.path().join("missing"), source.join("score_rule.toml")).unwrap();
+    assert!(target_path(&app, &source, "source/score_rule.toml").is_err());
+    symlink(&real, source.join("strategy_backups")).unwrap();
+    assert!(target_path(&app, &source, "source/strategy_backups/new/meta.json").is_err());
+    symlink(temp.path().join("missing"), app.join("watch_observe.json")).unwrap();
+    assert!(target_path(&app, &source, "app/watch_observe.json").is_err());
+    let linked_root = alias.join("linked-source");
+    symlink(real.join("source"), &linked_root).unwrap();
+    assert!(target_path(&app, &linked_root, "source/ind.toml").is_err());
 }
 
 #[test]

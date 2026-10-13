@@ -7,7 +7,7 @@
 .cloud-error { color: #b43c3c; }
 .cloud-conflicts { padding: 12px; border-radius: 8px; background: #fff5df; color: #82580e; }
 .cloud-manager { border-top: 1px solid #dce3eb; margin-top: 16px; padding-top: 16px; }
-.cloud-item-list { max-height: 640px; overflow-y: auto; overscroll-behavior-y: contain; }
+.cloud-item-list-history { max-height: 640px; overflow-y: auto; overscroll-behavior-y: contain; }
 .cloud-item { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 0; border-bottom: 1px solid #e3e8ef; }
 .cloud-item-main { display: grid; gap: 6px; min-width: 0; overflow-wrap: anywhere; }
 .cloud-item-main span { font-size: 12px; color: #68798b; }

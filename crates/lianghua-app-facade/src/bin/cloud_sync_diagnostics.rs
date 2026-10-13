@@ -25,19 +25,19 @@ fn main() -> Result<(), String> {
                 cloud_sync::test_connection(app_a.path())?;
                 fs::write(source_a.path().join("score_rule.toml"), "version = 1\n").map_err(|e| e.to_string())?;
                 fs::write(source_a.path().join("ind.toml"), "period = 20\n").map_err(|e| e.to_string())?;
-                let first = cloud_sync::sync(app_a.path(), source_a.path(), BTreeMap::new(), |stage| eprintln!("{stage}"))?;
-                let received = cloud_sync::sync(app_b.path(), source_b.path(), BTreeMap::new(), |stage| eprintln!("{stage}"))?;
+                let first = cloud_sync::sync(app_a.path(), source_a.path(), BTreeMap::new(), false, |stage| eprintln!("{stage}"))?;
+                let received = cloud_sync::sync(app_b.path(), source_b.path(), BTreeMap::new(), false, |stage| eprintln!("{stage}"))?;
                 let duplicate_started = std::time::Instant::now();
-                let duplicate = cloud_sync::sync(app_a.path(), source_a.path(), BTreeMap::new(), |stage| eprintln!("{stage}"))?;
+                let duplicate = cloud_sync::sync(app_a.path(), source_a.path(), BTreeMap::new(), false, |stage| eprintln!("{stage}"))?;
                 let duplicate_elapsed_ms = duplicate_started.elapsed().as_millis();
                 if first.uploaded != 2 || received.downloaded != 2 || duplicate.uploaded != 0 { return Err("真实同步结果不符合预期".into()); }
                 fs::write(source_a.path().join("score_rule.toml"), "version = 2\n").map_err(|e| e.to_string())?;
                 fs::write(source_b.path().join("score_rule.toml"), "version = 3\n").map_err(|e| e.to_string())?;
-                let changed = cloud_sync::sync(app_a.path(), source_a.path(), BTreeMap::new(), |_| {})?;
+                let changed = cloud_sync::sync(app_a.path(), source_a.path(), BTreeMap::new(), false, |_| {})?;
                 let selected = cloud_sync::list_cloud(app_a.path())?.into_iter().find(|item| item.path == "bundles/strategies.zip" && item.is_head).ok_or("云端缺少策略版本")?;
-                let conflict = cloud_sync::sync(app_b.path(), source_b.path(), BTreeMap::new(), |_| {})?;
+                let conflict = cloud_sync::sync(app_b.path(), source_b.path(), BTreeMap::new(), false, |_| {})?;
                 if conflict.conflicts != ["bundles/strategies.zip"] { return Err("真实云端未保留冲突分支".into()); }
-                let restored = cloud_sync::restore(app_b.path(), source_b.path(), &selected.path, &selected.version.id, BTreeMap::new(), |_| {})?;
+                let restored = cloud_sync::restore(app_b.path(), source_b.path(), &selected.path, &selected.version.id, BTreeMap::new(), false, |_| {})?;
                 let versions = cloud_sync::list_cloud(app_b.path())?;
                 if versions.iter().filter(|item| item.path == "bundles/strategies.zip" && item.is_head).count() != 1 || !source_b.path().join("strategy_backups").exists() { return Err("真实恢复校验失败".into()); }
                 println!("{}", serde_json::json!({"connection":"passed","four_bundle_layout":"passed","upload":"passed","download":"passed","deduplication":"passed","conflict":"passed","restore_and_backup":"passed","uploaded_bytes":first.uploaded_bytes+received.uploaded_bytes+duplicate.uploaded_bytes+changed.uploaded_bytes+conflict.uploaded_bytes+restored.uploaded_bytes,"unchanged_sync_uploaded_bytes":duplicate.uploaded_bytes,"unchanged_sync_elapsed_ms":duplicate_elapsed_ms}));

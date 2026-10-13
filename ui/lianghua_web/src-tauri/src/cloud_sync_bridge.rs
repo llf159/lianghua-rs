@@ -46,6 +46,7 @@ pub async fn test_cloud_sync_connection(app: tauri::AppHandle) -> Result<(), Str
 pub async fn run_cloud_sync(
     app: tauri::AppHandle,
     settings: BTreeMap<String, String>,
+    download_only: Option<bool>,
 ) -> Result<SyncResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = CLOUD_TASK.try_lock().map_err(|_| "云端操作正在进行")?;
@@ -54,6 +55,7 @@ pub async fn run_cloud_sync(
             &app.path().app_data_dir().map_err(|e| e.to_string())?,
             &source,
             settings,
+            download_only.unwrap_or(false),
             |message| {
                 let _ = app.emit("cloud-sync-progress", message);
             },

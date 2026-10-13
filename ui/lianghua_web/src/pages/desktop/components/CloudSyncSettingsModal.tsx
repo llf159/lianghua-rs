@@ -19,7 +19,7 @@ export default function CloudSyncSettingsModal({ onClose }: { onClose: () => voi
       await saveCloudConfig(config)
       setConfig(await getCloudConfig())
       if (test) await testCloudConnection()
-      setNotice(test ? '配置已保存，云端连接及同步锁验证通过。' : '配置已保存。到数据管理页点击“同步云端”开始同步。')
+      setNotice(test ? '配置已保存，云端连接及同步锁验证通过。' : '配置已保存。到数据管理页点击“下载云端”接收数据，或点击“双向同步”上传并接收。')
     } catch (e) { setError(String(e)) } finally { setBusy(false) }
   }
   return (

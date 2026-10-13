@@ -29,7 +29,7 @@ export default function CloudSyncPanel({ disabled, onSynced, onBusyChange }: { d
     const subscription = listen<string>('cloud-sync-progress', event => { if (!cancelled) setProgress(event.payload) })
     return () => { cancelled = true; void subscription.then(unlisten => unlisten()) }
   }, [])
-  async function operate(kind: 'sync' | 'list' | 'restore' | 'delete' | 'estimate', item?: CloudItem) {
+  async function operate(kind: 'sync' | 'download' | 'list' | 'restore' | 'delete' | 'estimate', item?: CloudItem) {
     if (busy || disabled) return
     setBusy(true); onBusyChange(true); setError(''); setNotice(''); setProgress(kind === 'list' ? '正在读取云端目录…' : '正在准备…')
     try {
@@ -42,7 +42,7 @@ export default function CloudSyncPanel({ disabled, onSynced, onBusyChange }: { d
         setNotice(`已删除云端版本：${item.path}；本地副本保留。`)
         setItems(await listCloudData())
       } else {
-        const result = await syncCloud(kind === 'restore' ? item : undefined)
+        const result = await syncCloud(kind === 'restore' ? item : undefined, kind === 'download')
         setConflicts(result.conflicts)
         setNotice(`完成：上传 ${result.uploaded} 项，接收 ${result.downloaded} 项，跳过 ${result.skipped} 项；上传流量 ${bytes(result.uploadedBytes)}，下载 ${bytes(result.downloadedBytes)}。${result.warnings.length ? ` ${result.warnings.join('；')}` : ''}`)
         onSynced()
@@ -57,12 +57,14 @@ export default function CloudSyncPanel({ disabled, onSynced, onBusyChange }: { d
       <div className="settings-head">
         <div><h3>云端同步</h3><p className="settings-section-note">策略、自选、指标图表配置、浏览习惯分四个包；总榜一个近五日快照，相似榜一个最新一天快照。</p></div>
         <div className="settings-actions">
-          <button className="settings-primary-btn" type="button" disabled={busy || disabled} onClick={() => void operate('sync')}>{busy ? '处理中…' : '同步云端'}</button>
+          <button className="settings-primary-btn" type="button" disabled={busy || disabled} onClick={() => void operate('download')}>下载云端</button>
+          <button className="settings-secondary-btn" type="button" disabled={busy || disabled} onClick={() => void operate('sync')}>双向同步</button>
           <button className="settings-secondary-btn" type="button" disabled={busy || disabled} onClick={() => void operate('list')}>云端数据管理</button>
           <button className="settings-secondary-btn" type="button" disabled={busy || disabled} onClick={() => void operate('estimate')}>测算上传量</button>
           <button className="settings-secondary-btn" type="button" disabled={busy || disabled} onClick={() => setSettings(true)}>连接配置</button>
         </div>
       </div>
+      <p className="settings-section-note">下载云端：仅接收云端当前版本，替换前备份本地文件；云端有冲突的分组会跳过。双向同步会同时上传本机改动。</p>
       {progress && <p className="cloud-notice" role="status">{progress}</p>}
       {notice && <p className="cloud-notice" role="status">{notice}</p>}
       {estimate && <div className="cloud-notice" role="status">
@@ -78,10 +80,12 @@ export default function CloudSyncPanel({ disabled, onSynced, onBusyChange }: { d
         <div className="settings-actions">
           <input aria-label="筛选云端文件" placeholder="按路径筛选策略、日期或配置" value={filter} onChange={e => setFilter(e.target.value)} />
           <label><input type="checkbox" checked={showHistory} onChange={e => setShowHistory(e.target.checked)} /> 显示历史版本</label>
+          <button className="settings-secondary-btn" type="button" disabled={busy || disabled} onClick={() => void operate('list')}>刷新列表</button>
           <button className="settings-secondary-btn" type="button" disabled={busy} onClick={() => setManager(false)}>收起</button>
         </div>
+        <p className="settings-section-note">云端当前 {items.filter(item => item.isHead).length} 项，筛选后显示 {visible.length} 项；相似榜{items.some(item => item.isHead && item.path.startsWith('similarity/')) ? '已存在' : '未发现'}。</p>
         <p className="settings-section-note">恢复前备份本地文件；冲突时不会自动覆盖。删除只影响云端选定版本。</p>
-        {visible.length === 0 ? <p>暂无匹配数据。首次配置后点击“同步云端”。</p> : <div className="cloud-item-list">{visible.map(item => <article className="cloud-item" key={`${item.path}:${item.version.id}`}>
+        {visible.length === 0 ? <p>暂无匹配数据。可点击“下载云端”接收已有数据，或点击“双向同步”上传本机内容。</p> : <div className={`cloud-item-list${showHistory ? ' cloud-item-list-history' : ''}`}>{visible.map(item => <article className="cloud-item" key={`${item.path}:${item.version.id}`}>
           <div className="cloud-item-main"><strong>{cloudPathLabel(item.path)}</strong><span>{item.path}</span><span>{item.conflict && item.isHead ? '待解决冲突 · ' : item.isHead ? '当前版本 · ' : '历史版本 · '}{new Date(item.version.createdAt).toLocaleString()}</span><span>原始 {bytes(item.version.size)} · 单文件压缩 {bytes(item.version.compressedSize)} · {item.version.hash.slice(0, 12)}</span></div>
           <div className="settings-actions"><button className="settings-secondary-btn" type="button" disabled={busy || disabled} onClick={() => { setSelected(item); setAction('restore') }}>恢复 / 启用</button><button className="settings-danger-btn" type="button" disabled={busy || disabled} onClick={() => { setSelected(item); setAction('delete') }}>删除云端版本</button></div>
         </article>)}</div>}
