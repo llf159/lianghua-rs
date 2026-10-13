@@ -1506,11 +1506,7 @@ fn normalize_stock_rows_like_pro_bar(rows: &mut [ProBarRow]) {
     for row in rows.iter_mut() {
         let change = row.close - row.pre_close;
         row.change = pro_bar_format(change, 2);
-        row.pct_chg = if row.pre_close.abs() < f64::EPSILON {
-            0.0
-        } else {
-            pro_bar_format(change / row.pre_close * 100.0, 2)
-        };
+        // 保留数据源涨幅；按分取整后的复权价格反算会随复权基准变化。
     }
 }
 
@@ -1692,7 +1688,7 @@ mod tests {
     }
 
     #[test]
-    fn qfq_rows_match_tushare_pro_bar_price_rounding_before_change() {
+    fn qfq_price_rounding_preserves_source_pct_chg() {
         let mut rows = vec![
             probar_row("000739.SZ", "20180104", 6.56, 6.50),
             probar_row("000739.SZ", "20260429", 18.47, 18.58),
@@ -1711,13 +1707,14 @@ mod tests {
         ])
         .expect("adj factor map");
 
+        rows[0].pct_chg = 0.9231;
         apply_adj_to_rows(&mut rows, &AdjType::Qfq, &adj_map).expect("apply qfq");
         normalize_stock_rows_like_pro_bar(&mut rows);
 
         assert_eq!(rows[0].close, 5.70);
         assert_eq!(rows[0].pre_close, 5.64);
         assert_eq!(rows[0].change, 0.06);
-        assert_eq!(rows[0].pct_chg, 1.06);
+        assert_eq!(rows[0].pct_chg, 0.9231);
     }
 
     #[test]
@@ -1728,13 +1725,14 @@ mod tests {
     }
 
     #[test]
-    fn pct_chg_uses_unformatted_change_between_formatted_prices() {
+    fn normalization_preserves_source_pct_chg() {
         let mut rows = vec![probar_row("000739.SZ", "20040116", 0.99, 0.96)];
+        rows[0].pct_chg = 3.125;
 
         normalize_stock_rows_like_pro_bar(&mut rows);
 
         assert_eq!(rows[0].change, 0.03);
-        assert_eq!(rows[0].pct_chg, 3.13);
+        assert_eq!(rows[0].pct_chg, 3.125);
     }
 
     #[test]

@@ -30,7 +30,8 @@ use crate::{
         },
         download_state::{
             ensure_stock_data_ready_for_derived, load_pending_stock_repairs,
-            mark_chip_repairs_required, mark_derived_rebuild_required,
+            mark_chip_repairs_required, mark_derived_components_rebuild_required,
+            mark_derived_rebuild_required,
         },
         load_stock_list, load_ths_concepts_list, load_trade_date_list, source_db_path,
         stock_list_path, trade_calendar_path,
@@ -1129,6 +1130,32 @@ fn write_prepared_stock_batch(
             } else {
                 (None, false)
             };
+            append_stage_pro_bar_rows(tx, item.adj_type, &item.rows, &item.indicators)?;
+            if item.adj_type == AdjType::Qfq {
+                // 比较暂存表中的实际落库精度，避免浮点或 DECIMAL 转换产生假差异。
+                // 概念只依赖当日输入，价格和递推指标不参与；缺行也算变化。
+                let (start, end): (Option<String>, Option<String>) = tx.query_row(
+                    "WITH old_inputs AS (
+                        SELECT trade_date, pct_chg, amount, tor FROM stock_data
+                        WHERE ts_code=? AND adj_type='qfq' AND trade_date BETWEEN ? AND ?
+                    ), new_inputs AS (
+                        SELECT trade_date, pct_chg, amount, tor FROM stock_data_stage
+                        WHERE ts_code=? AND adj_type='qfq' AND trade_date BETWEEN ? AND ?
+                    )
+                    SELECT MIN(COALESCE(o.trade_date,n.trade_date)), MAX(COALESCE(o.trade_date,n.trade_date))
+                    FROM old_inputs o FULL OUTER JOIN new_inputs n USING (trade_date)
+                    WHERE o.trade_date IS NULL OR n.trade_date IS NULL
+                        OR o.pct_chg IS DISTINCT FROM n.pct_chg
+                        OR o.amount IS DISTINCT FROM n.amount
+                        OR o.tor IS DISTINCT FROM n.tor",
+                    duckdb::params![item.ts_code, item.start_date, item.end_date,
+                        item.ts_code, item.start_date, item.end_date],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                ).map_err(|e| format!("比较概念输入变更范围失败: {e}"))?;
+                if let (Some(start), Some(end)) = (start, end) {
+                    mark_derived_components_rebuild_required(tx, &["concept"], &start, &end)?;
+                }
+            }
             delete_one_stock_range(
                 tx,
                 item.ts_code.as_str(),
@@ -1136,7 +1163,6 @@ fn write_prepared_stock_batch(
                 item.start_date.as_str(),
                 item.end_date.as_str(),
             )?;
-            append_stage_pro_bar_rows(tx, item.adj_type, &item.rows, &item.indicators)?;
             let pending = pending_repairs
                 .iter()
                 .find(|pending| pending.ts_code == item.ts_code);
@@ -1148,7 +1174,12 @@ fn write_prepared_stock_batch(
                         .map_or(item.end_date.as_str(), |date| {
                             date.max(item.end_date.as_str())
                         });
-                    mark_derived_rebuild_required(tx, &item.start_date, end)?;
+                    mark_derived_components_rebuild_required(
+                        tx,
+                        &["ranking", "similarity"],
+                        &item.start_date,
+                        end,
+                    )?;
                 }
                 if mark_chip_repair
                     || pending.is_some()
@@ -1321,7 +1352,18 @@ where
                         .map_or(batch.trade_date.as_str(), |date| {
                             date.max(batch.trade_date.as_str())
                         });
-                    mark_derived_rebuild_required(tx, &batch.trade_date, end)?;
+                    mark_derived_components_rebuild_required(
+                        tx,
+                        &["ranking", "similarity"],
+                        &batch.trade_date,
+                        end,
+                    )?;
+                    mark_derived_components_rebuild_required(
+                        tx,
+                        &["concept"],
+                        &batch.trade_date,
+                        &batch.trade_date,
+                    )?;
                 }
             }
             delete_trade_date_rows(tx, adj_type, batch.trade_date.as_str())?;
@@ -2514,16 +2556,16 @@ fn download_pending_all_market_after_basic_data(
             adj_type,
             start_date,
             effective_trade_date,
-            true,
+            false,
         )?;
         emit_progress(
             progress_cb,
             "write_db",
             written_steps,
             write_total,
-            Some(format!("清理 {} 只断点股票", failed_ts_codes.len())),
+            Some(format!("登记 {} 只断点股票", failed_ts_codes.len())),
             format!(
-                "已在独立事务中删除 {} 只断点股票的全部历史行情，后续将逐只补救。",
+                "已持久登记 {} 只断点股票待补救，后续逐只拉取并在提交时替换旧行情。",
                 failed_ts_codes.len()
             ),
         );
@@ -2693,7 +2735,7 @@ fn download_pending_all_market_after_basic_data(
     checkpoint_stock_data(&conn)?;
     if total.failed_count > 0 {
         return Err(format!(
-            "复权异常股票仍有 {} 只未补回，已停止后续计算；删除记录和成功写入的数据已保留，请先执行缺失股票补全。失败原因：{}",
+            "复权异常股票仍有 {} 只未补回，已停止后续计算；待补救记录和成功写入的数据已保留，请先执行缺失股票补全。失败原因：{}",
             total.failed_count,
             total
                 .failed_items
@@ -3204,6 +3246,112 @@ mod tests {
     }
 
     #[test]
+    fn concept_journal_ignores_repricing_but_tracks_input_changes() {
+        let directory = temp_source_dir("concept-input-changes");
+        fs::create_dir_all(&directory).unwrap();
+        let source = directory.to_str().unwrap();
+        init_stock_data_db(source_db_path(source).to_str().unwrap()).unwrap();
+        let conn = Connection::open(source_db_path(source)).unwrap();
+        conn.execute_batch("INSERT INTO stock_data(ts_code,trade_date,adj_type,close,pct_chg,amount,tor)
+            VALUES ('000001.SZ','20260105','qfq',10,2.5,10000,1),('000001.SZ','20260106','qfq',10,2.5,10000,1)").unwrap();
+        let row = ProBarRow {
+            ts_code: "000001.SZ".to_string(),
+            trade_date: "20260105".to_string(),
+            open: 5.0,
+            high: 5.0,
+            low: 5.0,
+            close: 5.0,
+            pre_close: 5.0,
+            change: 0.0,
+            pct_chg: 2.500001,
+            vol: 1000.0,
+            amount: 10000.001,
+            turnover_rate: Some(1.000001),
+            volume_ratio: None,
+            moneyflow: None,
+        };
+        let mut next_row = row.clone();
+        next_row.trade_date = "20260106".to_string();
+        let mut prepared = PreparedStockDownload {
+            ts_code: row.ts_code.clone(),
+            start_date: "20260105".to_string(),
+            end_date: "20260106".to_string(),
+            adj_type: AdjType::Qfq,
+            rows: vec![row, next_row],
+            indicators: HashMap::new(),
+        };
+        // 自动复权补救保留旧输入，失败时由持久计划阻断后续计算。
+        prepare_stock_repairs(
+            &conn,
+            &HashSet::from([prepared.ts_code.clone()]),
+            AdjType::Qfq,
+            &prepared.start_date,
+            &prepared.end_date,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM stock_data", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(load_pending_stock_repairs(&conn).unwrap().len(), 1);
+        write_prepared_stock_batch(&conn, std::slice::from_ref(&prepared), true).unwrap();
+        assert!(load_pending_stock_repairs(&conn).unwrap().is_empty());
+        let dirty = crate::data::download_state::load_pending_derived_rebuilds(&conn).unwrap();
+        assert_eq!(dirty.len(), 2);
+        assert!(dirty.iter().all(|item| item.component != "concept"));
+        assert_eq!(
+            conn.query_row(
+                "SELECT close FROM stock_data WHERE trade_date='20260105'",
+                [],
+                |row| row.get::<_, f64>(0)
+            )
+            .unwrap(),
+            5.0
+        );
+
+        for field in ["pct_chg", "amount", "tor"] {
+            match field {
+                "pct_chg" => prepared.rows[0].pct_chg = 3.0,
+                "amount" => prepared.rows[0].amount = 11000.0,
+                "tor" => prepared.rows[0].turnover_rate = Some(1.1),
+                _ => unreachable!(),
+            }
+            write_prepared_stock_batch(&conn, std::slice::from_ref(&prepared), false).unwrap();
+            let dirty = crate::data::download_state::load_pending_derived_rebuilds(&conn).unwrap();
+            let concept = dirty
+                .iter()
+                .find(|item| item.component == "concept")
+                .unwrap();
+            assert_eq!(
+                (&concept.start_date[..], &concept.end_date[..]),
+                ("20260105", "20260105"),
+                "{field}"
+            );
+            conn.execute(
+                "DELETE FROM pending_derived_rebuild WHERE component='concept'",
+                [],
+            )
+            .unwrap();
+        }
+        prepared.rows.pop();
+        write_prepared_stock_batch(&conn, std::slice::from_ref(&prepared), false).unwrap();
+        let dirty = crate::data::download_state::load_pending_derived_rebuilds(&conn).unwrap();
+        let concept = dirty
+            .iter()
+            .find(|item| item.component == "concept")
+            .unwrap();
+        assert_eq!(
+            (&concept.start_date[..], &concept.end_date[..]),
+            ("20260106", "20260106")
+        );
+        drop(conn);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn concept_maintenance_covers_history_and_retries_without_new_market_dates() {
         let directory = temp_source_dir("concept-maintenance-retry");
         fs::create_dir_all(&directory).unwrap();
@@ -3392,11 +3540,22 @@ mod tests {
             .unwrap(),
             0
         );
-        assert!(
-            crate::data::download_state::load_pending_derived_rebuilds(&conn)
-                .unwrap()
+        let dirty = crate::data::download_state::load_pending_derived_rebuilds(&conn).unwrap();
+        assert_eq!(
+            dirty
                 .iter()
-                .all(|item| item.start_date == "20260105" && item.end_date == "20260106")
+                .map(|item| (
+                    item.component.as_str(),
+                    item.start_date.as_str(),
+                    item.end_date.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("concept", "20260105", "20260105"),
+                ("concept", "20260106", "20260106"),
+                ("ranking", "20260105", "20260106"),
+                ("similarity", "20260105", "20260106"),
+            ]
         );
         for component in ["ranking", "similarity"] {
             assert!(
@@ -3490,19 +3649,22 @@ mod tests {
                 .is_empty()
         );
         conn.execute_batch("INSERT INTO stock_data(ts_code, trade_date, adj_type, close) VALUES ('000001.SZ','20260109','qfq',10)").unwrap();
-        // 非主动修复入口覆盖旧数据也即时记账，影响范围不能只停在改动当天。
+        // 连续计算延至旧末日，概念只重算输入变化当天。
         write_prepared_stock_batch(&conn, &[valid], false).unwrap();
         assert_eq!(
             crate::data::download_state::load_pending_chip_repairs_for_model(&conn, "chen")
                 .unwrap(),
             vec!["000001.SZ"]
         );
-        assert!(
-            crate::data::download_state::load_pending_derived_rebuilds(&conn)
-                .unwrap()
-                .iter()
-                .all(|item| item.start_date == "20260105" && item.end_date == "20260109")
-        );
+        let dirty = crate::data::download_state::load_pending_derived_rebuilds(&conn).unwrap();
+        assert_eq!(dirty.len(), 3);
+        assert!(dirty.iter().all(|item| item.start_date == "20260105"
+            && item.end_date
+                == if item.component == "concept" {
+                    "20260105"
+                } else {
+                    "20260109"
+                }));
         fs::remove_dir_all(source_dir).ok();
     }
 }

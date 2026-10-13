@@ -350,8 +350,22 @@ pub fn mark_derived_rebuild_required(
     start_date: &str,
     end_date: &str,
 ) -> Result<(), String> {
+    mark_derived_components_rebuild_required(
+        conn,
+        &["concept", "ranking", "similarity"],
+        start_date,
+        end_date,
+    )
+}
+
+pub fn mark_derived_components_rebuild_required(
+    conn: &Connection,
+    components: &[&str],
+    start_date: &str,
+    end_date: &str,
+) -> Result<(), String> {
     ensure_derived_rebuild_table(conn)?;
-    for component in ["concept", "ranking", "similarity"] {
+    for component in components {
         let (first, last): (String, String) = conn.query_row(
             "SELECT LEAST(COALESCE(MIN(start_date), ?), ?), GREATEST(COALESCE(MAX(end_date), ?), ?) FROM pending_derived_rebuild WHERE component=? AND start_date <= ? AND end_date >= ?",
             duckdb::params![start_date, start_date, end_date, end_date, component, end_date, start_date],
