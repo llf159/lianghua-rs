@@ -100,6 +100,7 @@ pub struct RankComputeStatus {
     pub cyq_chen_bucket_pct: Option<f64>,
     pub suggested_start_date: Option<String>,
     pub suggested_end_date: Option<String>,
+    pub pending_ranking_rebuilds: Vec<crate::data::download_state::PendingDerivedRebuild>,
 }
 
 #[derive(Clone, Serialize)]
@@ -183,8 +184,13 @@ fn query_trade_date_range(
         });
     }
 
+    let filter = if table_name == "stock_data" {
+        " WHERE adj_type='qfq'"
+    } else {
+        ""
+    };
     let sql = format!(
-        "SELECT MIN(trade_date), MAX(trade_date), COUNT(DISTINCT trade_date), COUNT(*) FROM {table_name}"
+        "SELECT MIN(trade_date), MAX(trade_date), COUNT(DISTINCT trade_date), COUNT(*) FROM {table_name}{filter}"
     );
     let mut stmt = conn
         .prepare(&sql)
@@ -538,7 +544,17 @@ fn get_rank_compute_status_inner(
             .map_err(|e| format!("读取 cyq_chen.db 参数失败: {e}"))
         })(&cyq_chen_db)?;
 
-    let suggested_end_date = source_db_range.max_trade_date.clone();
+    let pending_ranking_rebuilds = if source_db.exists() {
+        crate::data::download_state::load_pending_derived_rebuild_ranges(source_path, "ranking")?
+    } else {
+        Vec::new()
+    };
+    let suggested_end_date = source_db_range
+        .max_trade_date
+        .iter()
+        .chain(pending_ranking_rebuilds.iter().map(|item| &item.end_date))
+        .max()
+        .cloned();
     let suggested_start_date = match (
         source_db_range.min_trade_date.as_deref(),
         source_db_range.max_trade_date.as_deref(),
@@ -569,7 +585,7 @@ fn get_rank_compute_status_inner(
                 }
 
                 conn.query_row(
-                    "SELECT MIN(trade_date) FROM stock_data WHERE trade_date > ?",
+                    "SELECT MIN(trade_date) FROM stock_data WHERE adj_type='qfq' AND trade_date > ?",
                     [after_trade_date],
                     |row| row.get::<_, Option<String>>(0),
                 )
@@ -579,6 +595,14 @@ fn get_rank_compute_status_inner(
         }
         (_, Some(source_max), _) => Some(source_max.to_string()),
     };
+    let suggested_start_date = suggested_start_date
+        .into_iter()
+        .chain(
+            pending_ranking_rebuilds
+                .iter()
+                .map(|item| item.start_date.clone()),
+        )
+        .min();
 
     Ok(RankComputeStatus {
         source_path: source_path.trim().to_string(),
@@ -602,6 +626,7 @@ fn get_rank_compute_status_inner(
         cyq_chen_bucket_pct,
         suggested_start_date,
         suggested_end_date,
+        pending_ranking_rebuilds,
     })
 }
 
@@ -924,4 +949,54 @@ pub fn run_ranking_tiebreak_fill(
         warnings: Vec::new(),
         status,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ranking_suggestions_include_historical_rebuild_debt() {
+        let directory = std::env::temp_dir().join(format!(
+            "lianghua-ranking-debt-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let source = directory.to_str().unwrap();
+        std::fs::write(
+            directory.join("trade_calendar.csv"),
+            "cal_date\n20260105\n20260106\n20260109\n",
+        )
+        .unwrap();
+        let conn = duckdb::Connection::open(source_db_path(source)).unwrap();
+        conn.execute_batch("CREATE TABLE stock_data(ts_code VARCHAR, trade_date VARCHAR, adj_type VARCHAR);
+            INSERT INTO stock_data VALUES ('A','20260105','qfq'),('A','20260106','qfq'),('A','20260109','qfq'),('INDEX','20100101','ind');
+            CREATE TABLE pending_derived_rebuild(component VARCHAR PRIMARY KEY, start_date VARCHAR, end_date VARCHAR);
+            INSERT INTO pending_derived_rebuild VALUES ('ranking','20260101','20260111')").unwrap();
+        drop(conn);
+        let results = duckdb::Connection::open(result_db_path(source)).unwrap();
+        results
+            .execute_batch(
+                "CREATE TABLE score_summary(trade_date VARCHAR);
+            INSERT INTO score_summary VALUES ('20260105'),('20260106'),('20260109')",
+            )
+            .unwrap();
+        drop(results);
+        let status = get_ranking_compute_status(source, None).unwrap();
+        assert_eq!(status.suggested_start_date.as_deref(), Some("20260105"));
+        assert_eq!(status.suggested_end_date.as_deref(), Some("20260109"));
+        assert_eq!(status.source_db.min_trade_date.as_deref(), Some("20260105"));
+        assert_eq!(status.pending_ranking_rebuilds.len(), 1);
+        crate::data::download_state::clear_pending_derived_rebuild(
+            source, "ranking", "20260105", "20260109",
+        )
+        .unwrap();
+        let status = get_ranking_compute_status(source, None).unwrap();
+        assert!(status.pending_ranking_rebuilds.is_empty());
+        assert_eq!(status.suggested_start_date.as_deref(), Some("20260109"));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 }

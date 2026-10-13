@@ -31,7 +31,7 @@ use crate::{
         },
         download_state::{
             ensure_stock_data_ready_for_derived, load_missing_stock_codes,
-            load_unfinished_stock_repairs, open_source_db_readonly,
+            load_pending_stock_repairs, open_source_db_readonly,
         },
         dragon_tiger_db_path, ind_toml_path, load_stock_list, load_ths_concepts_list,
         load_trade_date_list, source_db_path, stock_list_path, ths_concepts_path,
@@ -102,6 +102,8 @@ pub struct DataDownloadStatus {
     pub ths_concepts: DataDownloadFileStatus,
     pub missing_stock_repair: DataDownloadMissingStockRepairStatus,
     pub pending_derived_rebuilds: Vec<crate::data::download_state::PendingDerivedRebuild>,
+    pub ranking_results_invalidated: bool,
+    pub similarity_results_invalidated: bool,
     pub cyq_chen_maintenance: DataDownloadCyqChenMaintenanceStatus,
     pub daily_target_trade_date: Option<String>,
     pub planned_action: String,
@@ -895,7 +897,7 @@ fn scan_missing_stock_codes(
     };
     let pending_repairs = conn
         .as_ref()
-        .map(|conn| load_unfinished_stock_repairs(source_path, conn))
+        .map(|conn| load_pending_stock_repairs(conn))
         .transpose()?
         .unwrap_or_default();
     if !source_db.exists || (source_db.row_count == 0 && pending_repairs.is_empty()) {
@@ -984,8 +986,7 @@ pub fn get_data_download_status(source_path: &str) -> Result<DataDownloadStatus,
         return Err("数据目录为空，请先到数据管理页确认当前目录".to_string());
     }
 
-    let source_db =
-        query_trade_date_range(&source_db_path(trimmed), "stock_data.db", "stock_data")?;
+    let source_db = query_stock_data_adj_type_range(trimmed, "qfq")?;
     let concept_performance_db = query_trade_date_range(
         &concept_performance_db_path(trimmed),
         "concept_performance.db",
@@ -1117,11 +1118,25 @@ pub fn get_data_download_status(source_path: &str) -> Result<DataDownloadStatus,
     });
 
     let pending_derived_rebuilds = if source_db.exists {
-        let conn = open_source_db_readonly(trimmed)?;
-        crate::data::download_state::load_pending_derived_rebuilds(&conn)?
+        let mut pending = Vec::new();
+        for component in ["concept", "ranking", "similarity"] {
+            pending.extend(
+                crate::data::download_state::load_pending_derived_rebuild_ranges(
+                    trimmed, component,
+                )?,
+            );
+        }
+        pending
     } else {
         Vec::new()
     };
+    let ranking_results_invalidated = source_db.exists
+        && crate::data::download_state::pending_rebuild_affects_saved_results(trimmed, "ranking")?;
+    let similarity_results_invalidated = source_db.exists
+        && crate::data::download_state::pending_rebuild_affects_saved_results(
+            trimmed,
+            "similarity",
+        )?;
     Ok(DataDownloadStatus {
         source_path: trimmed.to_string(),
         source_db,
@@ -1132,6 +1147,8 @@ pub fn get_data_download_status(source_path: &str) -> Result<DataDownloadStatus,
         ths_concepts,
         missing_stock_repair,
         pending_derived_rebuilds,
+        ranking_results_invalidated,
+        similarity_results_invalidated,
         cyq_chen_maintenance,
         daily_target_trade_date,
         planned_action,
@@ -2368,9 +2385,16 @@ mod tests {
             .unwrap();
         let conn = Connection::open(source_db_path(source)).unwrap();
         conn.execute_batch("CREATE TABLE pending_stock_repair (ts_code VARCHAR PRIMARY KEY, start_date VARCHAR, end_date VARCHAR); INSERT INTO pending_stock_repair VALUES ('000001.SZ', '20110104', '20260106')").unwrap();
+        conn.execute(
+            "INSERT INTO stock_data (ts_code, trade_date, adj_type) VALUES ('000001.SH', '20260107', 'ind')",
+            [],
+        )
+        .unwrap();
         fs::write(stock_list_path(source), "ts_code,symbol,name,area,industry,list_date,trade_date\n000001.SZ,1,A,,,19900101,20260106\n").unwrap();
         let status = get_data_download_status(source).unwrap();
         assert_eq!(status.source_db.row_count, 0);
+        assert_eq!(status.source_db.max_trade_date, None);
+        assert_eq!(status.planned_action, "first-download");
         assert!(status.missing_stock_repair.ready);
         assert_eq!(status.missing_stock_repair.missing_count, 1);
         assert_eq!(

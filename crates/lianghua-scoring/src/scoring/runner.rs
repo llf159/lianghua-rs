@@ -257,6 +257,7 @@ fn ensure_scoring_dependencies_ready(
     source_dir: &str,
     rules: &[CachedRule],
     used_chip_keys: &HashSet<String>,
+    end_date: &str,
 ) -> Result<(), String> {
     if used_chip_keys.is_empty() && !scoring_uses_similarity_rank(rules) {
         return Ok(());
@@ -269,9 +270,11 @@ fn ensure_scoring_dependencies_ready(
         return Err("评分策略使用新筹码字段，但行情修复后的新筹码尚未修复，禁止使用旧筹码计算评分。请先修复新筹码。".to_string());
     }
     if scoring_uses_similarity_rank(rules)
-        && crate::data::download_state::pending_rebuild_affects_saved_results(
+        && crate::data::download_state::pending_rebuild_affects_saved_results_in_range(
             source_dir,
             "similarity",
+            "00000000",
+            end_date,
         )?
     {
         return Err("评分策略使用 S_RANK，但旧相似度已因行情修复失效。需先使用不依赖 S_RANK 的策略重建评分及相似度，再恢复该规则计算；禁止用旧结果重算。".to_string());
@@ -288,7 +291,7 @@ pub fn preview_scoring_runtime_warnings(
     let warmup_need = warmup_rows_estimate(source_dir, strategy_path)?;
     let rules_cache = cache_rule_build(source_dir, strategy_path)?;
     let used_cyq_chen_keys = collect_scoring_used_cyq_chen_runtime_keys(&rules_cache);
-    ensure_scoring_dependencies_ready(source_dir, &rules_cache, &used_cyq_chen_keys)?;
+    ensure_scoring_dependencies_ready(source_dir, &rules_cache, &used_cyq_chen_keys, end_date)?;
     Ok(preview_optional_cyq_chen_injection_warnings(
         source_dir,
         start_date,
@@ -434,7 +437,7 @@ pub fn scoring_all_to_db(
     let need_rows = calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?;
     let rules_cache = cache_rule_build(source_dir, strategy_path)?;
     let used_cyq_chen_keys = collect_scoring_used_cyq_chen_runtime_keys(&rules_cache);
-    ensure_scoring_dependencies_ready(source_dir, &rules_cache, &used_cyq_chen_keys)?;
+    ensure_scoring_dependencies_ready(source_dir, &rules_cache, &used_cyq_chen_keys, end_date)?;
     let uses_similarity_rank = scoring_uses_similarity_rank(&rules_cache);
     let warnings = preview_optional_cyq_chen_injection_warnings(
         source_dir,
@@ -610,9 +613,11 @@ pub fn scoring_all_to_db(
         );
     })(&profile);
     drop(dr);
-    crate::data::download_state::clear_pending_derived_rebuild(
-        source_dir, "ranking", start_date, end_date,
-    )?;
+    if adj_type == "qfq" {
+        crate::data::download_state::clear_pending_derived_rebuild(
+            source_dir, "ranking", start_date, end_date,
+        )?;
+    }
     Ok(profile)
 }
 
@@ -651,7 +656,7 @@ pub fn scoring_all_to_memory_with_mode(
     let need_rows = calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?;
     let rules_cache = cache_rule_build(source_dir, strategy_path)?;
     let used_cyq_chen_keys = collect_scoring_used_cyq_chen_runtime_keys(&rules_cache);
-    ensure_scoring_dependencies_ready(source_dir, &rules_cache, &used_cyq_chen_keys)?;
+    ensure_scoring_dependencies_ready(source_dir, &rules_cache, &used_cyq_chen_keys, end_date)?;
     let uses_similarity_rank = scoring_uses_similarity_rank(&rules_cache);
     let warnings = preview_optional_cyq_chen_injection_warnings(
         source_dir,
@@ -763,7 +768,7 @@ pub fn scoring_single_period(
     let need_rows = calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?;
     let rules_cache = cache_rule_build(source_dir, strategy_path)?;
     let used_cyq_chen_keys = collect_scoring_used_cyq_chen_runtime_keys(&rules_cache);
-    ensure_scoring_dependencies_ready(source_dir, &rules_cache, &used_cyq_chen_keys)?;
+    ensure_scoring_dependencies_ready(source_dir, &rules_cache, &used_cyq_chen_keys, end_date)?;
     let uses_similarity_rank = scoring_uses_similarity_rank(&rules_cache);
     let required_runtime_keys = collect_scoring_runtime_keys(&rules_cache);
     let dr = DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;

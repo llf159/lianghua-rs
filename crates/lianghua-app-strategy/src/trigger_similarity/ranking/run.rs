@@ -2,7 +2,7 @@ use crate::trigger_similarity::ranking::samples::{
     assign_ranks, build_ranking_samples_for_chunk, load_outcome_selected_anchors,
 };
 use crate::trigger_similarity::ranking::store::{
-    config_key, ensure_ranking_tables, load_active_config_record, load_data_signature,
+    config_key, ensure_ranking_tables, file_stamp, load_active_config_record, load_data_signature,
     parse_active_config_key, parse_config_key, stable_content_signature,
 };
 use crate::trigger_similarity::*;
@@ -155,19 +155,34 @@ fn compute_strategy_trigger_similarity_ranking(
     if sample_codes.is_none() {
         crate::data::download_state::ensure_stock_data_ready_for_derived(&source_path)?;
     }
-    if sample_codes.is_none()
-        && crate::data::download_state::pending_rebuild_affects_saved_results(
-            &source_path,
-            "ranking",
-        )?
-    {
-        return Err(
-            "行情修复后评分/排名尚未重算，不能使用旧评分计算相似度。请先重算受影响区间。"
-                .to_string(),
-        );
-    }
     let conn = open_ranking_conn(&source_path)?;
     let resolved_trade_date = resolve_existing_trade_date(&conn, trade_date)?;
+    if sample_codes.is_none()
+        && crate::data::download_state::pending_rebuild_affects_saved_results_in_range(
+            &source_path,
+            "ranking",
+            "00000000",
+            &resolved_trade_date,
+        )?
+    {
+        let ranges = crate::data::download_state::load_pending_derived_rebuild_ranges(
+            &source_path,
+            "ranking",
+        )?;
+        return Err(format!(
+            "行情变更后仍有评分/排名待重算，不能使用旧评分计算相似度。剩余区间：{}。请在排名计算页覆盖这些区间重算；只重算最新一天不能清除历史欠账。",
+            ranges
+                .iter()
+                .filter(|item| item.start_date <= resolved_trade_date)
+                .map(|item| format!(
+                    "{} 至 {}",
+                    item.start_date,
+                    item.end_date.as_str().min(resolved_trade_date.as_str())
+                ))
+                .collect::<Vec<_>>()
+                .join("、")
+        ));
+    }
     let active_config = get_strategy_trigger_similarity_active_config(&conn)?;
     let window_trade_days = window_trade_days
         .map(|v| v as usize)
@@ -1306,6 +1321,36 @@ fn compute_strategy_trigger_similarity_ranking(
         label: "原子写入排行榜".to_string(),
         elapsed_ms: elapsed_ms(phase),
     });
+    if !initial_signature.starts_with(&format!(
+        "{ALGORITHM_VERSION}|stock={}|stock_list=",
+        file_stamp(&crate::data::source_db_path(&source_path))?
+    )) {
+        return Err("相似榜提交期间行情库发生更新，未清除待重算记录，请重新计算。".to_string());
+    }
+    let cleared = crate::data::download_state::clear_pending_derived_rebuild(
+        &source_path,
+        "similarity",
+        &resolved_trade_date,
+        &resolved_trade_date,
+    )?;
+    if cleared {
+        // 清账只改维护记录；仅同步与本次行情水位相同的快照。
+        // 行情变更前的旧快照不匹配此前缀，仍保留旧签名及欠账。
+        let (previous, _) = initial_signature
+            .split_once("|stock_list=")
+            .ok_or("相似度签名格式无效")?;
+        let previous = format!("{previous}|stock_list=");
+        let current = format!(
+            "{ALGORITHM_VERSION}|stock={}|stock_list=",
+            file_stamp(&crate::data::source_db_path(&source_path))?
+        );
+        let results = Connection::open(similarity_db_path(&source_path))
+            .map_err(|e| format!("同步相似度维护签名失败: {e}"))?;
+        results.execute(
+            "UPDATE strategy_trigger_similarity_rank_meta SET data_signature=replace(data_signature, ?, ?) WHERE starts_with(data_signature, ?)",
+            params![previous, current, previous],
+        ).map_err(|e| format!("保存相似度维护签名失败: {e}"))?;
+    }
     set_ranking_progress("read-result", "正在读取排行榜结果", 0, 0);
 
     let page = get_strategy_trigger_similarity_ranking_page(
@@ -1324,12 +1369,6 @@ fn compute_strategy_trigger_similarity_ranking(
         Some(sample_gap_trade_days as u32),
     )?;
     set_ranking_progress("completed", "走势相似排行榜计算完成", 1, 1);
-    crate::data::download_state::clear_pending_derived_rebuild(
-        &source_path,
-        "similarity",
-        "00000000",
-        "99999999",
-    )?;
     Ok((Some(page), Vec::new()))
 }
 
@@ -1530,6 +1569,8 @@ mod tests {
                 [],
             )
             .expect("simulate recalculated historical qfq value");
+        market.execute_batch("CREATE TABLE pending_derived_rebuild(component VARCHAR PRIMARY KEY, start_date VARCHAR, end_date VARCHAR);
+            INSERT INTO pending_derived_rebuild VALUES ('similarity','20240101','20240110')").unwrap();
         drop(market);
         let result = Connection::open(source_dir.join("scoring_result.db"))
             .expect("reopen result db for daily scoring rebuild simulation");
@@ -1651,6 +1692,20 @@ mod tests {
         )
         .expect("read ranking");
         assert!(reread.is_fresh);
+        let remaining = crate::data::download_state::load_pending_derived_rebuild_ranges(
+            &source_path,
+            "similarity",
+        )
+        .unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].end_date, "20240109");
+        assert!(
+            crate::data::download_state::pending_rebuild_affects_saved_results(
+                &source_path,
+                "similarity"
+            )
+            .unwrap()
+        );
         assert_eq!(reread.items.len(), computed.items.len());
 
         let searched = get_strategy_trigger_similarity_ranking_page(

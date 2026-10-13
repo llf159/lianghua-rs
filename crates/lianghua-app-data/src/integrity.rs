@@ -285,6 +285,60 @@ pub fn check_databases(source_path: &str) -> Result<DatabaseCheckReport, String>
         status: "passed".to_string(),
         summary: format!("{} 个指数", INDEX_TS_CODES.len()),
     });
+    // 不做评分数值抽检，只展示下载事务明确留下、且与已有结果重叠的欠账。
+    for (component, file, label) in [
+        ("concept", "concept_performance.db", "概念／行业表现"),
+        ("ranking", "scoring_result.db", "评分／排名"),
+        ("similarity", "strategy_similarity.db", "走势相似度"),
+    ] {
+        if !crate::data::download_state::pending_rebuild_affects_saved_results(
+            source_path,
+            component,
+        )? {
+            continue;
+        }
+        let ranges = crate::data::download_state::load_pending_derived_rebuild_ranges(
+            source_path,
+            component,
+        )?;
+        let check_id = format!("maintenance:{component}");
+        for item in ranges {
+            report.issues.push(DatabaseIssue {
+                id: format!("pending-derived:{component}:{}", item.start_date),
+                check_id: check_id.clone(),
+                database: file.to_string(),
+                severity: "warning".to_string(),
+                title: format!("行情变更后{label}待重算"),
+                comparisons: vec![DatabaseComparison {
+                    label: "后续计算状态".to_string(),
+                    expected: if component == "concept" {
+                        "重算受影响区间的概念／行业表现；再次更新行情也会补做未完成的重算"
+                    } else if component == "ranking" {
+                        "在排名计算页覆盖待重算区间"
+                    } else {
+                        "先重算评分，再在相似榜计算页按日重算需要使用的历史结果"
+                    }
+                    .to_string(),
+                    actual: format!(
+                        "{} 至 {} 尚未完成；只计算最新一天不会清除其他历史欠账",
+                        item.start_date, item.end_date
+                    ),
+                }],
+                ts_code: None,
+                stock_name: None,
+                start_date: Some(item.start_date),
+                end_date: Some(item.end_date),
+                repair_action: (component != "similarity").then(|| component.to_string()),
+                blocks_derived: false,
+            });
+        }
+        report.checks.push(DatabaseCheck {
+            id: check_id,
+            title: format!("行情变更后的{label}重算状态"),
+            status: "warning".to_string(),
+            summary: "已有结果受影响；与缺失结果、抽样差异分别判断".to_string(),
+        });
+    }
     for (file, table, component, label) in [
         (
             "concept_performance.db",
@@ -307,6 +361,14 @@ pub fn check_databases(source_path: &str) -> Result<DatabaseCheckReport, String>
         };
         let path = Path::new(source_path).join(file);
         if !path.exists() {
+            report.checks.push(check);
+            continue;
+        }
+        if crate::data::download_state::pending_rebuild_affects_saved_results(
+            source_path,
+            component,
+        )? {
+            check.summary = "行情变更后待重算，完成后再抽样核验".to_string();
             report.checks.push(check);
             continue;
         }
@@ -413,7 +475,7 @@ pub fn check_databases(source_path: &str) -> Result<DatabaseCheckReport, String>
                     stock_name: None,
                     start_date: samples.first().cloned(),
                     end_date: samples.last().cloned(),
-                    repair_action: Some(component.to_string()),
+                    repair_action: (component != "similarity").then(|| component.to_string()),
                     blocks_derived: false,
                 });
             }
@@ -562,13 +624,13 @@ pub fn repair_database_issues(
     {
         return Err("一次修复只能选择同一种问题类型".to_string());
     }
-    if !matches!(action, "stock" | "market" | "index") && !report.source_ready {
+    if !matches!(action, "stock" | "index") && !report.source_ready {
         return Err("原始行情检查未通过，禁止修复后续数据库；请先处理所有行情异常。".to_string());
     }
     let mut summary = DownloadSummary::default();
     let mut details = Vec::new();
     match action {
-        "stock" | "market" | "index" => {
+        "stock" | "index" => {
             if input.token.trim().is_empty() {
                 return Err("请先填写 Tushare Token。".to_string());
             }
@@ -582,29 +644,17 @@ pub fn repair_database_issues(
                     .end_date
                     .as_ref()
                     .ok_or_else(|| "缺少可用历史终点，请先刷新交易日历。".to_string())?;
-                let codes = if action == "market" {
-                    load_stock_list(&input.source_path)?
-                        .into_iter()
-                        .filter(|row| row.get(5).is_none_or(|date| date <= end))
-                        .filter_map(|row| row.first().cloned())
-                        .collect::<Vec<_>>()
-                } else {
-                    vec![
-                        issue
-                            .ts_code
-                            .clone()
-                            .ok_or_else(|| "缺少受影响代码".to_string())?,
-                    ]
-                };
-                for code in codes {
-                    plans
-                        .entry(code)
-                        .and_modify(|range| {
-                            range.0 = range.0.clone().min(start.clone());
-                            range.1 = range.1.clone().max(end.clone());
-                        })
-                        .or_insert((start.clone(), end.clone()));
-                }
+                let code = issue
+                    .ts_code
+                    .clone()
+                    .ok_or_else(|| "缺少受影响代码".to_string())?;
+                plans
+                    .entry(code)
+                    .and_modify(|range| {
+                        range.0 = range.0.clone().min(start.clone());
+                        range.1 = range.1.clone().max(end.clone());
+                    })
+                    .or_insert((start.clone(), end.clone()));
             }
             let start_date = plans
                 .values()
@@ -696,75 +746,6 @@ pub fn repair_database_issues(
                     &input.source_path,
                 )?;
             summary.success_count = 1;
-        }
-        "chip" | "legacy-chip" => {
-            ensure_stock_data_ready_for_derived(&input.source_path)?;
-            let source = crate::data::download_state::open_source_db_readonly(&input.source_path)?;
-            let model = if action == "chip" { "chen" } else { "legacy" };
-            let codes =
-                crate::data::download_state::load_pending_chip_repairs_for_model(&source, model)?;
-            drop(source);
-            let callback = |mut progress: DownloadProgress| {
-                progress.phase = "maintain_cyq_incremental".to_string();
-                // 局部修复与其余增量有不同股票池，不能把局部 100% 当成整库完成。
-                progress.finished = 0;
-                progress.total = 0;
-                if let Some(cb) = progress_cb {
-                    cb(progress);
-                }
-            };
-            if action == "chip" {
-                if !codes.is_empty() {
-                    let repaired = crate::data::cyq_chen_data::repair_cyq_chen_stocks_if_db_exists(
-                        &input.source_path,
-                        &codes,
-                        true,
-                        Some(&callback),
-                    )?
-                    .ok_or_else(|| {
-                        "新筹码局部修复未执行，请在计算任务中重建筹码库。".to_string()
-                    })?;
-                    summary.saved_rows += repaired.snapshot_rows + repaired.bin_rows;
-                }
-                if let Some(updated) =
-                    crate::data::cyq_chen_data::maintain_cyq_chen_incremental_if_db_exists(
-                        &input.source_path,
-                        true,
-                        Some(&callback),
-                    )?
-                {
-                    summary.saved_rows += updated.snapshot_rows + updated.bin_rows;
-                }
-            } else {
-                if !codes.is_empty() {
-                    let repaired = crate::data::cyq_data::repair_cyq_stocks_if_db_exists(
-                        &input.source_path,
-                        &codes,
-                        Some(&callback),
-                    )?
-                    .ok_or_else(|| {
-                        "旧筹码局部修复未执行，请在计算任务中重建筹码库。".to_string()
-                    })?;
-                    summary.saved_rows += repaired.snapshot_rows + repaired.bin_rows;
-                }
-                if let Some(updated) = crate::data::cyq_data::maintain_cyq_incremental_if_db_exists(
-                    &input.source_path,
-                )? {
-                    summary.saved_rows += updated.snapshot_rows + updated.bin_rows;
-                }
-            }
-            if !codes.is_empty() {
-                let source = Connection::open(source_db_path(&input.source_path))
-                    .map_err(|e| e.to_string())?;
-                crate::data::download_state::clear_completed_chip_repairs(
-                    &source,
-                    &input.source_path,
-                    model,
-                    &codes,
-                )?;
-            }
-            summary.success_count = codes.len().max(1);
-            details.push("按当前筹码策略修复；策略已变化时执行全量重建".to_string());
         }
         _ => return Err("该结果需使用页面中的评分/相似度计算入口重算。".to_string()),
     }
@@ -908,7 +889,7 @@ mod tests {
         std::fs::write(directory.join("stock_list.csv"), "ts_code,symbol,name,area,industry,list_date,trade_date,total_share,float_share,total_mv\n689009.SH,689009,九号公司,,X,20201029,20260807,1,1,100\n000002.SZ,2,B,,X,20201029,20260807,1,1,100\n").unwrap();
         let source = Connection::open(directory.join("stock_data.db")).unwrap();
         source
-            .execute_batch("UPDATE stock_data SET pct_chg=2")
+            .execute_batch("UPDATE stock_data SET pct_chg=2, amount=10000, tor=1")
             .unwrap();
         drop(source);
         let derived = Connection::open(directory.join("concept_performance.db")).unwrap();
@@ -946,6 +927,34 @@ mod tests {
             std::fs::read(directory.join("concept_performance.db")).unwrap()
         );
         assert!(!directory.join("cyq.db").exists());
+        let results = Connection::open(directory.join("scoring_result.db")).unwrap();
+        results
+            .execute_batch(
+                "CREATE TABLE score_summary(trade_date VARCHAR);
+            INSERT INTO score_summary VALUES ('20260806'),('20260807')",
+            )
+            .unwrap();
+        drop(results);
+        let source = Connection::open(directory.join("stock_data.db")).unwrap();
+        source.execute_batch("CREATE TABLE pending_derived_rebuild(component VARCHAR PRIMARY KEY, start_date VARCHAR, end_date VARCHAR);
+            INSERT INTO pending_derived_rebuild VALUES ('ranking','20260801','20260809')").unwrap();
+        drop(source);
+        let before = std::fs::read(directory.join("stock_data.db")).unwrap();
+        let report = check_databases(path).unwrap();
+        assert!(report.source_ready);
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.id == "pending-derived:ranking:20260806"
+                    && issue.repair_action.as_deref() == Some("ranking")
+                    && !issue.blocks_derived
+                    && issue.end_date.as_deref() == Some("20260807"))
+        );
+        assert_eq!(
+            before,
+            std::fs::read(directory.join("stock_data.db")).unwrap()
+        );
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

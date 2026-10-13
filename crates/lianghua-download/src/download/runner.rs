@@ -268,6 +268,20 @@ fn sync_gaini_bx_range(
     // duckdb-rs 的独立 open 不共享数据库实例；概念重建稍后会另开源库写清单。
     // 消费下载连接，保证旧实例关闭后才能开始重建，避免旧目录/块缓存覆盖新写入。
     drop(source_writer);
+    let pending =
+        crate::data::download_state::load_pending_derived_rebuild_ranges(source_dir, "concept")?;
+    let start_date = pending
+        .iter()
+        .map(|item| item.start_date.as_str())
+        .chain([start_date])
+        .min()
+        .unwrap_or(start_date);
+    let end_date = pending
+        .iter()
+        .map(|item| item.end_date.as_str())
+        .chain([end_date])
+        .max()
+        .unwrap_or(end_date);
     emit_progress(
         progress_cb,
         "rebuild_concept_performance",
@@ -276,7 +290,8 @@ fn sync_gaini_bx_range(
         Some(format!("{start_date}-{end_date}")),
         format!("开始重建概念表现区间 {} ~ {}。", start_date, end_date),
     );
-    let bx_row_count = rebuild_concept_performance_range(source_dir, start_date, end_date)?;
+    let bx_row_count = rebuild_concept_performance_range(source_dir, start_date, end_date)
+        .map_err(|error| format!("行情已提交，但概念/行业表现 {start_date} 至 {end_date} 重建失败；待重算记录保留，下次更新会继续补算。{error}"))?;
     emit_progress(
         progress_cb,
         "rebuild_concept_performance",
@@ -2093,20 +2108,30 @@ fn download_pending_all_market_after_basic_data(
     let last_saved_trade_date = load_latest_trade_date(source_dir, adj_type)?
         .ok_or_else(|| "数据库里还没有可用于增量的历史数据，请先做首次下载".to_string())?;
 
-    if last_saved_trade_date.as_str() >= effective_trade_date {
-        return Ok(DownloadSummary::default());
-    }
-
-    let trade_dates = load_trade_date_list(source_dir)?;
-    let pending_trade_dates: Vec<String> = trade_dates
-        .iter()
-        .filter(|d| d.as_str() > last_saved_trade_date.as_str())
-        .filter(|d| d.as_str() <= effective_trade_date)
-        .cloned()
-        .collect();
+    let pending_trade_dates = if last_saved_trade_date.as_str() >= effective_trade_date {
+        Vec::new()
+    } else {
+        load_trade_date_list(source_dir)?
+            .into_iter()
+            .filter(|date| date > &last_saved_trade_date && date.as_str() <= effective_trade_date)
+            .collect::<Vec<_>>()
+    };
 
     if pending_trade_dates.is_empty() {
-        return Ok(DownloadSummary::default());
+        let mut summary = DownloadSummary::default();
+        let pending = crate::data::download_state::load_pending_derived_rebuild_ranges(
+            source_dir, "concept",
+        )?;
+        if let (Some(first), Some(last)) = (pending.first(), pending.last()) {
+            summary.concept_performance_rows = sync_gaini_bx_range(
+                crate::data::download_state::open_source_db_readonly(source_dir)?,
+                source_dir,
+                &first.start_date,
+                &last.end_date,
+                progress_cb,
+            )?;
+        }
+        return Ok(summary);
     }
     let total_trade_dates = pending_trade_dates.len();
     emit_progress(
@@ -3176,6 +3201,66 @@ mod tests {
         );
         drop(conn);
         fs::remove_dir_all(source_dir).ok();
+    }
+
+    #[test]
+    fn concept_maintenance_covers_history_and_retries_without_new_market_dates() {
+        let directory = temp_source_dir("concept-maintenance-retry");
+        fs::create_dir_all(&directory).unwrap();
+        let source = directory.to_str().unwrap();
+        fs::write(stock_list_path(source), "ts_code,symbol,name,area,industry,list_date,trade_date\n000001.SZ,1,A,,X,19900101,20260106\n").unwrap();
+        init_stock_data_db(source_db_path(source).to_str().unwrap()).unwrap();
+        let conn = Connection::open(source_db_path(source)).unwrap();
+        conn.execute_batch("INSERT INTO stock_data(ts_code,trade_date,adj_type,pct_chg,amount,tor)
+            VALUES ('000001.SZ','20260105','qfq',1,10000,1),('000001.SZ','20260106','qfq',2,10000,1)").unwrap();
+        drop(conn);
+        rebuild_concept_performance_range(source, "20260105", "20260106").unwrap();
+        let conn = Connection::open(source_db_path(source)).unwrap();
+        conn.execute_batch("UPDATE stock_data SET pct_chg=7 WHERE trade_date='20260105'")
+            .unwrap();
+        mark_derived_rebuild_required(&conn, "20260104", "20260107").unwrap();
+        // 本轮只新增/更新末日，仍需覆盖历史复权修复留下的概念欠账。
+        sync_gaini_bx_range(conn, source, "20260106", "20260106", None).unwrap();
+        let results = Connection::open(crate::data::concept_performance_db_path(source)).unwrap();
+        assert_eq!(results.query_row("SELECT performance_pct FROM concept_performance WHERE trade_date='20260105' AND performance_type='industry' AND concept='X'", [], |row| row.get::<_, f64>(0)).unwrap(), 7.0);
+        drop(results);
+        let conn = Connection::open(source_db_path(source)).unwrap();
+        conn.execute_batch("UPDATE stock_data SET tor=NULL; UPDATE stock_data SET pct_chg=9 WHERE trade_date='20260105'").unwrap();
+        mark_derived_rebuild_required(&conn, "20260104", "20260107").unwrap();
+        let error = sync_gaini_bx_range(conn, source, "20260106", "20260106", None).unwrap_err();
+        assert!(error.contains("行情已提交"));
+        assert!(
+            !crate::data::download_state::load_pending_derived_rebuild_ranges(source, "concept")
+                .unwrap()
+                .is_empty()
+        );
+        let conn = Connection::open(source_db_path(source)).unwrap();
+        conn.execute_batch("UPDATE stock_data SET tor=1").unwrap();
+        drop(conn);
+        let config = DownloadRuntimeConfig {
+            source_dir: source.to_string(),
+            adj_type: AdjType::Qfq,
+            token: String::new(),
+            start_date: "20260105".to_string(),
+            end_date: "20260106".to_string(),
+            threads: 1,
+            retry_times: 0,
+            limit_calls_per_min: 1,
+            include_turnover: true,
+            allow_stale_stock_list: false,
+        };
+        let summary =
+            download_pending_all_market_after_basic_data(&config, "20260106", None).unwrap();
+        assert!(summary.concept_performance_rows > 0);
+        assert!(
+            crate::data::download_state::load_pending_derived_rebuild_ranges(source, "concept")
+                .unwrap()
+                .is_empty()
+        );
+        let results = Connection::open(crate::data::concept_performance_db_path(source)).unwrap();
+        assert_eq!(results.query_row("SELECT performance_pct FROM concept_performance WHERE trade_date='20260105' AND performance_type='industry' AND concept='X'", [], |row| row.get::<_, f64>(0)).unwrap(), 9.0);
+        drop(results);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

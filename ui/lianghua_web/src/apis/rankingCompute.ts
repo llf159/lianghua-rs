@@ -50,6 +50,7 @@ export type RankingComputeStatus = {
   cyqChenBucketPct: number | null
   suggestedStartDate: string | null
   suggestedEndDate: string | null
+  pendingRankingRebuilds: Array<{ component: string; startDate: string; endDate: string }>
 }
 
 export type RankComputeTimingItem = {

@@ -20,7 +20,6 @@ import {
 import DataTaskProgress from '../../shared/DataTaskProgress'
 import DatabaseIntegrityPanel from './components/DatabaseIntegrityPanel'
 import { runRankingScoreCalculation } from '../../apis/rankingCompute'
-import { runStrategyTriggerSimilarityRanking, getStrategyTriggerSimilarityRankingProgress } from '../../apis/strategyTriggerSimilarity'
 import {
   calcProgressPercent,
   formatProgressDuration,
@@ -189,11 +188,9 @@ function formatPhaseLabel(phase: string | null | undefined) {
 function getProgressWorkflow(action: string | null | undefined) {
   switch (action) {
     case 'repair-database':
-      return [{ key: 'database_repair', label: '针对性修复', phases: [['audit_recheck', 'repair_stock_history', 'repair_index_history', 'rebuild_concept_performance', 'maintain_cyq_incremental']] }] as ProgressWorkflowStep[]
+      return [{ key: 'database_repair', label: '针对性修复', phases: [['audit_recheck', 'repair_stock_history', 'repair_index_history', 'rebuild_concept_performance']] }] as ProgressWorkflowStep[]
     case 'score':
       return ['score_prepare', 'score_compute', 'score_write'] as ProgressWorkflowStep[]
-    case 'repair-similarity':
-      return ['prepare', 'select-templates', 'candidate-fingerprints', 'target-fingerprints', 'candidate-index', 'ranking', 'validate', 'write', 'read-result'] as ProgressWorkflowStep[]
     case 'first-download':
       return [
         {
@@ -871,68 +868,38 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
     setAuditRepairConfirm(null)
     if (busyActionRef.current !== 'idle' || !issues.length) return
     const action = issues[0].repairAction
-    if (['stock', 'market', 'index'].includes(action ?? '') && !token.trim()) {
+    if (['stock', 'index'].includes(action ?? '') && !token.trim()) {
       setAuditError('请先填写上方共用的 Tushare Token。')
       return
     }
     const startDate = issues[0].startDate
     const endDate = issues[0].endDate
-    if (action === 'update') {
-      await onRunDownload()
-    } else {
-      await runDataTask('main', async (downloadId) => {
-        // 重算前重新检查，避免使用已经过期的检查结果。
-        if (action === 'ranking' || action === 'similarity') {
-          const current = await checkDatabases(sourcePath)
-          if (!current.sourceReady) throw new Error('原始行情检查未通过，请先修复行情。')
-          if (!startDate || !endDate) throw new Error('缺少需要重算的历史区间。')
-          const currentIssue = current.issues.find((item) => item.id === issues[0].id)
-          if (!currentIssue) throw new Error('该问题已不存在，请重新检查。')
-          if (action === 'similarity' && current.issues.some((item) => item.repairAction === 'ranking')) {
-            throw new Error('评分／排名需要先修复，不能使用旧评分重算相似度。')
-          }
-          let warnings: string[] = []
-          let elapsedMs = 0
-          if (action === 'ranking') {
-            const result = await runRankingScoreCalculation(sourcePath, currentIssue.startDate ?? startDate, currentIssue.endDate ?? endDate, undefined, downloadId)
-            warnings = result.warnings
-            elapsedMs = result.elapsedMs
-          } else {
-            const started = Date.now()
-            let polling = false
-            const timer = window.setInterval(() => {
-              if (polling) return
-              polling = true
-              void getStrategyTriggerSimilarityRankingProgress().then((sample) => {
-                if (activeDownloadIdRef.current !== downloadId || !sample || sample.startedAtEpochSeconds < Math.floor(started / 1000)) return
-                const next: DataDownloadProgress = {
-                  downloadId, action: 'repair-similarity', actionLabel: '相似度修复',
-                  phase: sample.phase, finished: sample.completed, total: sample.total,
-                  elapsedMs: Date.now() - started, currentLabel: null, message: sample.message,
-                }
-                setProgress(next)
-                const value = calcProgressPercent(next, getProgressWorkflow, ['done'])
-                if (value !== null) setProgressPercent((previous) => Math.max(previous ?? 0, value))
-              }).catch(() => {}).finally(() => { polling = false })
-            }, 500)
-            try {
-              await runStrategyTriggerSimilarityRanking({ sourcePath, tradeDate: currentIssue.endDate ?? endDate })
-              elapsedMs = Date.now() - started
-            } finally { window.clearInterval(timer) }
-          }
-          return {
-            action: 'repair-database', actionLabel: action === 'ranking' ? '评分／排名修复' : '相似度修复',
-            elapsedMs, summary: { successCount: 1, failedCount: 0, savedRows: 0, conceptPerformanceRows: 0, failedItems: [] },
-            completionDetails: ['按当前生效策略重算', ...warnings], status: await getDataDownloadStatus(sourcePath),
-          }
-        }
-        return repairDatabaseIssues(downloadId, {
-          sourcePath, issueIds: issues.map((issue) => issue.id), token: token.trim(),
-          threads: Math.max(1, Number(threads) || 1), retryTimes: Math.max(0, Number(retryTimes) || 0),
-          limitCallsPerMin: Math.max(1, Number(limitCallsPerMin) || 1), includeTurnover,
+    await runDataTask('main', async (downloadId) => {
+      // 重算前重新检查，避免使用已经过期的检查结果。
+      if (action === 'ranking') {
+        const current = await checkDatabases(sourcePath)
+        if (!current.sourceReady) throw new Error('原始行情检查未通过，请先修复行情。')
+        if (!startDate || !endDate) throw new Error('缺少需要重算的历史区间。')
+        const currentIssues = issues.map((issue) => {
+          const currentIssue = current.issues.find((item) => item.id === issue.id)
+          if (!currentIssue) throw new Error('检查结果已变化，请重新检查。')
+          return currentIssue
         })
+        const rebuildStart = currentIssues.map((item) => item.startDate ?? startDate).sort()[0]
+        const rebuildEnd = currentIssues.map((item) => item.endDate ?? endDate).sort().at(-1) ?? endDate
+        const result = await runRankingScoreCalculation(sourcePath, rebuildStart, rebuildEnd, undefined, downloadId)
+        return {
+          action: 'repair-database', actionLabel: '评分／排名修复',
+          elapsedMs: result.elapsedMs, summary: { successCount: 1, failedCount: 0, savedRows: 0, conceptPerformanceRows: 0, failedItems: [] },
+          completionDetails: ['按当前生效策略重算', ...result.warnings], status: await getDataDownloadStatus(sourcePath),
+        }
+      }
+      return repairDatabaseIssues(downloadId, {
+        sourcePath, issueIds: issues.map((issue) => issue.id), token: token.trim(),
+        threads: Math.max(1, Number(threads) || 1), retryTimes: Math.max(0, Number(retryTimes) || 0),
+        limitCallsPerMin: Math.max(1, Number(limitCallsPerMin) || 1), includeTurnover,
       })
-    }
+    })
     busyActionRef.current = 'idle'
     await onCheckDatabases()
   }
@@ -1367,11 +1334,9 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
       <ConfirmDialog
         open={Boolean(auditRepairConfirm)}
         title="执行针对性修复"
-        message={auditRepairConfirm?.[0].repairAction === 'stock' || auditRepairConfirm?.[0].repairAction === 'market'
-          ? `将按所选问题重拉 ${auditRepairConfirm?.[0].repairAction === 'market' ? '全市场' : `${new Set(auditRepairConfirm?.map((issue) => issue.tsCode)).size} 只股票的`}完整历史并重算指标。异常旧行情会先删除并保存待补回记录，失败后可继续修复；行业、筹码和排名在行情检查通过后另行重算。`
-          : auditRepairConfirm?.[0].repairAction === 'chip' || auditRepairConfirm?.[0].repairAction === 'legacy-chip'
-            ? '先局部修复待补救股票，再维护增量；新筹码策略已变化时按当前策略全量重建。提交成功后自动复查。'
-            : '将按当前生效策略和检查给出的区间修复所选数据库，成功提交后自动复查。评分和相似度修复会重新生成对应结果。'}
+        message={auditRepairConfirm?.[0].repairAction === 'stock'
+          ? `将按所选问题重拉 ${new Set(auditRepairConfirm?.map((issue) => issue.tsCode)).size} 只股票的完整历史并重算指标。异常旧行情会先删除并保存待补回记录，失败后可继续修复；行业、筹码和排名在行情检查通过后另行重算。`
+          : '将按当前生效策略和检查给出的区间修复所选数据库，成功提交后自动复查。走势相似度请在计算页按日重算。'}
         confirmText="开始修复"
         busy={isBusy}
         onConfirm={() => auditRepairConfirm && void onRepairDatabaseIssues(auditRepairConfirm)}

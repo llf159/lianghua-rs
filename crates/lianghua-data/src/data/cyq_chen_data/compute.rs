@@ -959,19 +959,42 @@ pub(super) fn append_prepared_cyq_chen_batch_rows(
     bin_app: &mut Appender<'_>,
     batch: PreparedCyqChenWriteBatch,
 ) -> Result<(usize, usize), String> {
-    let mut checkpoint_stmt = conn
-        .prepare_cached("INSERT OR REPLACE INTO cyq_chen_checkpoint (ts_code, adj_type, trade_date, bins, feature_state) VALUES (?, ?, ?, ?, ?)")
-        .map_err(|e| format!("准备新筹码续算检查点写入失败:{e}"))?;
-    for (ts_code, trade_date, bins, feature_state) in batch.checkpoints {
-        checkpoint_stmt
-            .execute(params![
-                ts_code,
-                DEFAULT_ADJ_TYPE,
-                trade_date,
-                bins,
-                feature_state
-            ])
-            .map_err(|e| format!("写入新筹码续算检查点失败: {e}"))?;
+    if !batch.checkpoints.is_empty() {
+        // 大字符串列的逐股 MERGE 更新成本高，删除和追加仍由调用方的事务一起提交。
+        conn.execute(
+            &format!(
+                "DELETE FROM cyq_chen_checkpoint WHERE adj_type = ? AND ts_code IN ({})",
+                std::iter::repeat_n("?", batch.checkpoints.len())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            duckdb::params_from_iter(
+                std::iter::once(DEFAULT_ADJ_TYPE).chain(
+                    batch
+                        .checkpoints
+                        .iter()
+                        .map(|(ts_code, _, _, _)| ts_code.as_str()),
+                ),
+            ),
+        )
+        .map_err(|e| format!("清理新筹码续算检查点失败: {e}"))?;
+        let mut checkpoint_app = conn
+            .appender("cyq_chen_checkpoint")
+            .map_err(|e| format!("创建新筹码续算检查点写入器失败: {e}"))?;
+        for (ts_code, trade_date, bins, feature_state) in batch.checkpoints {
+            checkpoint_app
+                .append_row(params![
+                    ts_code,
+                    DEFAULT_ADJ_TYPE,
+                    trade_date,
+                    bins,
+                    feature_state
+                ])
+                .map_err(|e| format!("追加新筹码续算检查点失败: {e}"))?;
+        }
+        checkpoint_app
+            .flush()
+            .map_err(|e| format!("刷新新筹码续算检查点失败: {e}"))?;
     }
     if let Some(snapshot_batch) = batch.snapshot_batch {
         snapshot_app

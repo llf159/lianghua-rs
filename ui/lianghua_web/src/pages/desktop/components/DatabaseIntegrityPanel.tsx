@@ -35,9 +35,8 @@ export default function DatabaseIntegrityPanel({ report, busy, checking, error, 
           {report.checks.map((check) => {
             const checkIssues = issues.filter((issue) => issue.checkId === check.id)
             const repairIssues = checkIssues.filter((issue) => issue.repairAction !== null)
-            const requiresSource = repairIssues.some((issue) => issue.repairAction !== null && !['stock', 'market', 'index', 'update'].includes(issue.repairAction))
-            const requiresRanking = repairIssues.some((issue) => issue.repairAction === 'similarity') && issues.some((issue) => issue.repairAction === 'ranking')
-            const disabled = busy || !repairIssues.length || (requiresSource && !report.sourceReady) || requiresRanking
+            const requiresSource = repairIssues.some((issue) => issue.repairAction !== null && !['stock', 'index'].includes(issue.repairAction))
+            const disabled = busy || !repairIssues.length || (requiresSource && !report.sourceReady)
             const repairButton = <button
               type="button"
               className="data-download-secondary-btn database-integrity-repair"

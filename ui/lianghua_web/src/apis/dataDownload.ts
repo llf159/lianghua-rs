@@ -86,6 +86,8 @@ export type DataDownloadStatus = {
   thsConcepts: DataDownloadFileStatus
   missingStockRepair: DataDownloadMissingStockRepairStatus
   pendingDerivedRebuilds: Array<{ component: string; startDate: string; endDate: string }>
+  rankingResultsInvalidated: boolean
+  similarityResultsInvalidated: boolean
   cyqChenMaintenance: DataDownloadCyqChenMaintenanceStatus
   dailyTargetTradeDate: string | null
   plannedAction: string

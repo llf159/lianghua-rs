@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use duckdb::{AccessMode, Config, Connection};
 
-use super::{cyq_chen_db_path, load_stock_list, result_db_path, source_db_path, stock_list_path};
+use super::{load_stock_list, result_db_path, source_db_path, stock_list_path};
 
 pub struct PendingStockRepair {
     pub ts_code: String,
@@ -34,119 +34,6 @@ pub fn load_pending_stock_repairs(conn: &Connection) -> Result<Vec<PendingStockR
     .map_err(|e| format!("查询行情待补救记录失败: {e}"))?
     .collect::<Result<Vec<_>, _>>()
     .map_err(|e| format!("读取行情待补救记录失败: {e}"))
-}
-
-pub fn load_unfinished_stock_repairs(
-    source_dir: &str,
-    conn: &Connection,
-) -> Result<Vec<PendingStockRepair>, String> {
-    let mut pending = load_pending_stock_repairs(conn)?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT ts_code, MIN(trade_date) FROM stock_data WHERE adj_type='qfq' GROUP BY ts_code",
-        )
-        .map_err(|e| format!("准备股票历史范围检查失败: {e}"))?;
-    let mut legacy = stmt
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-        })
-        .map_err(|e| format!("检查股票历史范围失败: {e}"))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("读取股票历史范围失败: {e}"))?;
-    let legacy_exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name='pending_chip_repair')", [], |row| row.get(0)).map_err(|e| e.to_string())?;
-    if legacy_exists {
-        let mut stmt = conn
-            .prepare("SELECT ts_code FROM pending_chip_repair")
-            .map_err(|e| e.to_string())?;
-        let codes = stmt
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(|e| e.to_string())?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?;
-        for code in codes {
-            if !legacy.iter().any(|(saved, _)| saved == &code) {
-                legacy.push((code, None));
-            }
-        }
-    }
-    if legacy.is_empty() {
-        return Ok(pending);
-    }
-    let (start_date, end_date): (Option<String>, Option<String>) = conn
-        .query_row(
-            "SELECT MIN(trade_date), MAX(trade_date) FROM stock_data WHERE adj_type = 'qfq'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .map_err(|e| format!("读取旧补救日期范围失败: {e}"))?;
-    let (Some(start_date), Some(end_date)) = (start_date, end_date) else {
-        return Ok(pending);
-    };
-    let mut historical_dates = HashMap::<String, String>::new();
-    for (path, table) in [
-        (result_db_path(source_dir), "score_summary"),
-        (cyq_chen_db_path(source_dir), "cyq_chen_snapshot"),
-        (super::cyq_db_path(source_dir), "cyq_snapshot"),
-    ] {
-        if !path.exists() {
-            continue;
-        }
-        let config = Config::default()
-            .access_mode(AccessMode::ReadOnly)
-            .map_err(|e| format!("配置旧补救检查只读连接失败: {e}"))?;
-        let derived = Connection::open_with_flags(&path, config)
-            .map_err(|e| format!("只读检查旧补救历史失败, path={}: {e}", path.display()))?;
-        let exists: bool = derived
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name = ?)",
-                [table],
-                |row| row.get(0),
-            )
-            .map_err(|e| format!("检查旧补救历史表失败: {e}"))?;
-        if !exists {
-            continue;
-        }
-        let mut stmt = derived
-            .prepare(&format!(
-                "SELECT ts_code, MIN(trade_date) FROM {table} GROUP BY ts_code"
-            ))
-            .map_err(|e| format!("准备历史证据查询失败: {e}"))?;
-        let dates = stmt
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(|e| format!("查询历史证据失败: {e}"))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| format!("读取历史证据失败: {e}"))?;
-        for (code, date) in dates {
-            historical_dates
-                .entry(code)
-                .and_modify(|first| {
-                    if date < *first {
-                        *first = date.clone();
-                    }
-                })
-                .or_insert(date);
-        }
-    }
-    for (code, first_date) in legacy {
-        if historical_dates
-            .get(&code)
-            .is_some_and(|historical| first_date.as_ref().is_none_or(|first| first > historical))
-            && !pending.iter().any(|item| item.ts_code == code)
-        {
-            pending.push(PendingStockRepair {
-                ts_code: code.clone(),
-                start_date: historical_dates
-                    .get(&code)
-                    .map(|history| history.clone().min(start_date.clone()))
-                    .unwrap_or_else(|| start_date.clone()),
-                end_date: end_date.clone(),
-            });
-        }
-    }
-    pending.sort_by(|a, b| a.ts_code.cmp(&b.ts_code));
-    Ok(pending)
 }
 
 pub fn load_missing_stock_codes(
@@ -272,7 +159,7 @@ pub fn ensure_stock_data_ready_for_derived(source_dir: &str) -> Result<(), Strin
     Ok(())
 }
 
-#[derive(Clone, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PendingDerivedRebuild {
     pub component: String,
@@ -290,7 +177,7 @@ pub fn load_pending_derived_rebuilds(
     if !exists {
         return Ok(Vec::new());
     }
-    let mut stmt = conn.prepare("SELECT component, start_date, end_date FROM pending_derived_rebuild ORDER BY component")
+    let mut stmt = conn.prepare("SELECT component, start_date, end_date FROM pending_derived_rebuild ORDER BY component, start_date")
         .map_err(|e| format!("读取后续库待重算记录失败: {e}"))?;
     stmt.query_map([], |row| {
         Ok(PendingDerivedRebuild {
@@ -304,25 +191,105 @@ pub fn load_pending_derived_rebuilds(
     .map_err(|e| format!("读取后续库待重算记录失败: {e}"))
 }
 
+// 下载请求可能含休市日或早于已有历史；只保留实际行情及旧结果涉及的日期。
+pub fn load_pending_derived_rebuild_ranges(
+    source_dir: &str,
+    component: &str,
+) -> Result<Vec<PendingDerivedRebuild>, String> {
+    let source = open_source_db_readonly(source_dir)?;
+    let pending = load_pending_derived_rebuilds(&source)?
+        .into_iter()
+        .filter(|item| item.component == component)
+        .collect::<Vec<_>>();
+    if pending.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (path, table) = match component {
+        "concept" => (
+            super::concept_performance_db_path(source_dir),
+            "concept_performance",
+        ),
+        "ranking" => (result_db_path(source_dir), "score_summary"),
+        "similarity" => (
+            super::similarity_db_path(source_dir),
+            "strategy_trigger_similarity_rank",
+        ),
+        _ => return Err(format!("不支持的待重算组件: {component}")),
+    };
+    let results = if path.exists() {
+        let conn = super::open_db_readonly(path.to_str().ok_or("结果库路径不是有效 UTF-8")?)
+            .map_err(|e| format!("打开待重算结果库失败: {e}"))?;
+        let exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name=?)",
+                [table],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("检查待重算结果表失败: {e}"))?;
+        exists.then_some(conn)
+    } else {
+        None
+    };
+    let mut ranges = Vec::new();
+    for mut item in pending {
+        let (mut first, mut last): (Option<String>, Option<String>) = source.query_row(
+            "SELECT MIN(trade_date), MAX(trade_date) FROM stock_data WHERE adj_type='qfq' AND trade_date BETWEEN ? AND ?",
+            [&item.start_date, &item.end_date], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).map_err(|e| format!("读取待重算行情日期失败: {e}"))?;
+        if let Some(results) = &results {
+            let (saved_first, saved_last): (Option<String>, Option<String>) = results.query_row(
+                &format!("SELECT MIN(trade_date), MAX(trade_date) FROM {table} WHERE trade_date BETWEEN ? AND ?"),
+                [&item.start_date, &item.end_date], |row| Ok((row.get(0)?, row.get(1)?)),
+            ).map_err(|e| format!("读取待重算结果日期失败: {e}"))?;
+            first = first.into_iter().chain(saved_first).min();
+            last = last.into_iter().chain(saved_last).max();
+        }
+        if let (Some(first), Some(last)) = (first, last) {
+            item.start_date = first;
+            item.end_date = last;
+            ranges.push(item);
+        }
+    }
+    Ok(ranges)
+}
+
 // 新增日期待计算不代表旧结果失效；依赖门禁只拦截与已保存结果重叠的变更。
 pub fn pending_rebuild_affects_saved_results(
     source_dir: &str,
     component: &str,
 ) -> Result<bool, String> {
+    pending_rebuild_affects_saved_results_in_range(source_dir, component, "00000000", "99999999")
+}
+
+pub fn pending_rebuild_affects_saved_results_in_range(
+    source_dir: &str,
+    component: &str,
+    start_date: &str,
+    end_date: &str,
+) -> Result<bool, String> {
     let source = open_source_db_readonly(source_dir)?;
     let pending = load_pending_derived_rebuilds(&source)?;
-    let Some(pending) = pending.iter().find(|item| item.component == component) else {
+    let pending = pending
+        .iter()
+        .filter(|item| {
+            item.component == component
+                && item.start_date.as_str() <= end_date
+                && item.end_date.as_str() >= start_date
+        })
+        .collect::<Vec<_>>();
+    if pending.is_empty() {
         return Ok(false);
-    };
+    }
     let table = match component {
+        "concept" => "concept_performance",
         "ranking" => "score_summary",
         "similarity" => "strategy_trigger_similarity_rank",
         _ => return Err(format!("不支持的结果依赖: {component}")),
     };
-    let path = if component == "similarity" {
-        super::similarity_db_path(source_dir)
-    } else {
-        result_db_path(source_dir)
+    let path = match component {
+        "concept" => super::concept_performance_db_path(source_dir),
+        "similarity" => super::similarity_db_path(source_dir),
+        _ => result_db_path(source_dir),
     };
     if !path.exists() {
         return Ok(false);
@@ -342,13 +309,40 @@ pub fn pending_rebuild_affects_saved_results(
     if !exists {
         return Ok(false);
     }
-    results
-        .query_row(
-            &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE trade_date BETWEEN ? AND ?)"),
-            [&pending.start_date, &pending.end_date],
-            |row| row.get(0),
-        )
-        .map_err(|e| format!("检查已保存结果是否失效失败: {e}"))
+    for pending in pending {
+        let affects_saved: bool = results
+            .query_row(
+                &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE trade_date BETWEEN ? AND ?)"),
+                [
+                    pending.start_date.as_str().max(start_date),
+                    pending.end_date.as_str().min(end_date),
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("检查已保存结果是否失效失败: {e}"))?;
+        if affects_saved {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+// 调用方提供事务；旧版单区间主键升级后可以记住分段重算的完成情况。
+fn ensure_derived_rebuild_table(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS pending_derived_rebuild (component VARCHAR NOT NULL, start_date VARCHAR NOT NULL, end_date VARCHAR NOT NULL, PRIMARY KEY(component, start_date))")
+        .map_err(|e| format!("创建后续库待重算记录失败: {e}"))?;
+    let legacy: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM duckdb_constraints() WHERE table_name='pending_derived_rebuild' AND constraint_type='PRIMARY KEY' AND len(constraint_column_names)=1)",
+        [], |row| row.get(0),
+    ).map_err(|e| format!("检查待重算记录版本失败: {e}"))?;
+    if legacy {
+        conn.execute_batch("CREATE TABLE pending_derived_rebuild_upgrade (component VARCHAR NOT NULL, start_date VARCHAR NOT NULL, end_date VARCHAR NOT NULL, PRIMARY KEY(component, start_date));
+            INSERT INTO pending_derived_rebuild_upgrade SELECT * FROM pending_derived_rebuild;
+            DROP TABLE pending_derived_rebuild;
+            ALTER TABLE pending_derived_rebuild_upgrade RENAME TO pending_derived_rebuild")
+            .map_err(|e| format!("升级待重算区间记录失败: {e}"))?;
+    }
+    Ok(())
 }
 
 pub fn mark_derived_rebuild_required(
@@ -356,12 +350,20 @@ pub fn mark_derived_rebuild_required(
     start_date: &str,
     end_date: &str,
 ) -> Result<(), String> {
-    conn.execute_batch("CREATE TABLE IF NOT EXISTS pending_derived_rebuild (component VARCHAR PRIMARY KEY, start_date VARCHAR NOT NULL, end_date VARCHAR NOT NULL)")
-        .map_err(|e| format!("创建后续库待重算记录失败: {e}"))?;
+    ensure_derived_rebuild_table(conn)?;
     for component in ["concept", "ranking", "similarity"] {
-        conn.execute("INSERT INTO pending_derived_rebuild VALUES (?, ?, ?) ON CONFLICT (component) DO UPDATE SET start_date = LEAST(pending_derived_rebuild.start_date, excluded.start_date), end_date = GREATEST(pending_derived_rebuild.end_date, excluded.end_date)",
-            duckdb::params![component, start_date, end_date])
-            .map_err(|e| format!("记录后续库待重算区间失败: {e}"))?;
+        let (first, last): (String, String) = conn.query_row(
+            "SELECT LEAST(COALESCE(MIN(start_date), ?), ?), GREATEST(COALESCE(MAX(end_date), ?), ?) FROM pending_derived_rebuild WHERE component=? AND start_date <= ? AND end_date >= ?",
+            duckdb::params![start_date, start_date, end_date, end_date, component, end_date, start_date],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).map_err(|e| format!("合并后续库待重算区间失败: {e}"))?;
+        conn.execute("DELETE FROM pending_derived_rebuild WHERE component=? AND start_date <= ? AND end_date >= ?",
+            duckdb::params![component, last, first]).map_err(|e| format!("更新后续库待重算区间失败: {e}"))?;
+        conn.execute(
+            "INSERT INTO pending_derived_rebuild VALUES (?, ?, ?)",
+            duckdb::params![component, first, last],
+        )
+        .map_err(|e| format!("记录后续库待重算区间失败: {e}"))?;
     }
     Ok(())
 }
@@ -371,24 +373,70 @@ pub fn clear_pending_derived_rebuild(
     component: &str,
     start_date: &str,
     end_date: &str,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let check = open_source_db_readonly(source_dir)?;
-    let required = load_pending_derived_rebuilds(&check)?
-        .into_iter()
-        .any(|item| {
-            item.component == component
-                && start_date <= item.start_date.as_str()
-                && end_date >= item.end_date.as_str()
-        });
+    let pending = load_pending_derived_rebuilds(&check)?;
     drop(check);
-    if !required {
-        return Ok(());
+    let original = pending
+        .into_iter()
+        .filter(|item| item.component == component)
+        .collect::<Vec<_>>();
+    if original.is_empty() {
+        return Ok(false);
     }
-    let conn = Connection::open(source_db_path(source_dir))
+    let mut remaining = Vec::new();
+    for item in load_pending_derived_rebuild_ranges(source_dir, component)? {
+        if item.end_date.as_str() < start_date || item.start_date.as_str() > end_date {
+            remaining.push(item);
+            continue;
+        }
+        if item.start_date.as_str() < start_date {
+            let previous = chrono::NaiveDate::parse_from_str(start_date, "%Y%m%d")
+                .ok()
+                .and_then(|date| date.pred_opt())
+                .ok_or("重算开始日期无效")?;
+            remaining.push(PendingDerivedRebuild {
+                component: component.to_string(),
+                start_date: item.start_date.clone(),
+                end_date: previous.format("%Y%m%d").to_string(),
+            });
+        }
+        if item.end_date.as_str() > end_date {
+            let next = chrono::NaiveDate::parse_from_str(end_date, "%Y%m%d")
+                .ok()
+                .and_then(|date| date.succ_opt())
+                .ok_or("重算结束日期无效")?;
+            remaining.push(PendingDerivedRebuild {
+                component: component.to_string(),
+                start_date: next.format("%Y%m%d").to_string(),
+                end_date: item.end_date,
+            });
+        }
+    }
+    if remaining == original {
+        return Ok(false);
+    }
+    let mut conn = Connection::open(source_db_path(source_dir))
         .map_err(|e| format!("清除待重算记录时打开原始库失败: {e}"))?;
-    conn.execute("DELETE FROM pending_derived_rebuild WHERE component = ? AND start_date >= ? AND end_date <= ?",
-        duckdb::params![component, start_date, end_date]).map_err(|e| format!("清除后续库待重算记录失败: {e}"))?;
-    Ok(())
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("开启待重算记录事务失败: {e}"))?;
+    ensure_derived_rebuild_table(&tx)?;
+    tx.execute(
+        "DELETE FROM pending_derived_rebuild WHERE component=?",
+        [component],
+    )
+    .map_err(|e| format!("清除后续库待重算记录失败: {e}"))?;
+    for item in remaining {
+        tx.execute(
+            "INSERT INTO pending_derived_rebuild VALUES (?, ?, ?)",
+            duckdb::params![component, item.start_date, item.end_date],
+        )
+        .map_err(|e| format!("保存未完成的重算区间失败: {e}"))?;
+    }
+    tx.commit()
+        .map_err(|e| format!("提交待重算记录失败: {e}"))?;
+    Ok(true)
 }
 
 // 调用方须与行情写入共用事务，避免源数据与修复记账只提交一方。
@@ -591,7 +639,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_chip_repair_detects_truncated_source_history() {
+    fn old_derived_history_does_not_imply_unfinished_stock_repair() {
         let source_dir = std::env::temp_dir().join(format!(
             "lianghua-legacy-repair-{}",
             std::time::SystemTime::now()
@@ -608,13 +656,86 @@ mod tests {
         let scoring = Connection::open(result_db_path(source)).unwrap();
         scoring.execute_batch("CREATE TABLE score_summary(ts_code VARCHAR, trade_date VARCHAR); INSERT INTO score_summary VALUES ('000400.SZ', '20110104')").unwrap();
         drop(scoring);
-        let pending = load_unfinished_stock_repairs(source, &conn).unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].ts_code, "000400.SZ");
-        assert_eq!(pending[0].start_date, "20100104");
-        assert_eq!(pending[0].end_date, "20261009");
+        assert!(load_pending_stock_repairs(&conn).unwrap().is_empty());
+        ensure_stock_data_ready_for_derived(source).unwrap();
         drop(conn);
         std::fs::remove_dir_all(source_dir).unwrap();
+    }
+
+    #[test]
+    fn derived_rebuild_completion_tracks_actual_dates_and_partial_ranges() {
+        let directory = std::env::temp_dir().join(format!(
+            "lianghua-derived-ranges-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let source = directory.to_str().unwrap();
+        let conn = Connection::open(source_db_path(source)).unwrap();
+        conn.execute_batch("CREATE TABLE stock_data(trade_date VARCHAR, adj_type VARCHAR);
+            INSERT INTO stock_data VALUES ('20260105','qfq'),('20260106','qfq'),('20260107','qfq'),('20260109','qfq');
+            CREATE TABLE pending_derived_rebuild(component VARCHAR PRIMARY KEY, start_date VARCHAR, end_date VARCHAR);
+            INSERT INTO pending_derived_rebuild VALUES ('ranking','20260101','20260111')").unwrap();
+        drop(conn);
+        let results = Connection::open(result_db_path(source)).unwrap();
+        results
+            .execute_batch(
+                "CREATE TABLE score_summary(trade_date VARCHAR);
+            INSERT INTO score_summary VALUES ('20260105'),('20260106'),('20260107'),('20260109')",
+            )
+            .unwrap();
+        drop(results);
+        assert!(pending_rebuild_affects_saved_results(source, "ranking").unwrap());
+        assert!(
+            !pending_rebuild_affects_saved_results_in_range(
+                source, "ranking", "20260101", "20260104"
+            )
+            .unwrap()
+        );
+        assert!(
+            !pending_rebuild_affects_saved_results_in_range(
+                source, "ranking", "20260110", "20260111"
+            )
+            .unwrap()
+        );
+        // 从中间开始重算时，前后欠账均须保留，且旧版单区间表自动升级。
+        clear_pending_derived_rebuild(source, "ranking", "20260106", "20260107").unwrap();
+        let ranges = load_pending_derived_rebuild_ranges(source, "ranking").unwrap();
+        assert_eq!(
+            ranges
+                .iter()
+                .map(|item| (item.start_date.as_str(), item.end_date.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("20260105", "20260105"), ("20260109", "20260109")]
+        );
+        clear_pending_derived_rebuild(source, "ranking", "20260105", "20260105").unwrap();
+        assert!(pending_rebuild_affects_saved_results(source, "ranking").unwrap());
+        clear_pending_derived_rebuild(source, "ranking", "20260109", "20260109").unwrap();
+        assert!(!pending_rebuild_affects_saved_results(source, "ranking").unwrap());
+        let conn = Connection::open(source_db_path(source)).unwrap();
+        mark_derived_rebuild_required(&conn, "20260101", "20260111").unwrap();
+        drop(conn);
+        // 只需覆盖真实交易日，无须重算请求范围内的休市日。
+        clear_pending_derived_rebuild(source, "ranking", "20260105", "20260109").unwrap();
+        assert!(
+            load_pending_derived_rebuild_ranges(source, "ranking")
+                .unwrap()
+                .is_empty()
+        );
+        let conn = Connection::open(source_db_path(source)).unwrap();
+        mark_derived_rebuild_required(&conn, "20260112", "20260112").unwrap();
+        conn.execute_batch("INSERT INTO stock_data VALUES ('20260112','qfq')")
+            .unwrap();
+        drop(conn);
+        assert!(!pending_rebuild_affects_saved_results(source, "ranking").unwrap());
+        // 再次覆盖历史，不能沿用上次已完成的状态。
+        let conn = Connection::open(source_db_path(source)).unwrap();
+        mark_derived_rebuild_required(&conn, "20260105", "20260112").unwrap();
+        drop(conn);
+        assert!(pending_rebuild_affects_saved_results(source, "ranking").unwrap());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

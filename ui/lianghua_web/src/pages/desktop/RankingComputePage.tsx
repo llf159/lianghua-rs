@@ -1579,6 +1579,11 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
             <span>排名计算</span>
             <strong>score_summary / rule_details / scene_details + 排名</strong>
             <small>按区间重算总分、明细和排名。</small>
+            {(status?.pendingRankingRebuilds ?? []).length > 0 ? (
+              <small className="ranking-compute-summary-alert">
+                行情变更后待重算：{status?.pendingRankingRebuilds.map((item) => `${formatTradeDate(item.startDate)} 至 ${formatTradeDate(item.endDate)}`).join('、')}。需覆盖这些区间；局部计算成功会保留其余欠账。
+              </small>
+            ) : null}
           </div>
         </div>
 

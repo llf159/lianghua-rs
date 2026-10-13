@@ -105,7 +105,24 @@ pub fn rebuild_concept_performance_all(source_dir: &str) -> Result<usize, String
     drop(stmt);
     drop(source_conn);
     match (ks_rq, js_rq) {
-        (Some(ks_rq), Some(js_rq)) => rebuild_concept_performance_range(source_dir, &ks_rq, &js_rq),
+        (Some(ks_rq), Some(js_rq)) => {
+            let pending = crate::data::download_state::load_pending_derived_rebuild_ranges(
+                source_dir, "concept",
+            )?;
+            let ks_rq = pending
+                .iter()
+                .map(|item| item.start_date.as_str())
+                .chain([ks_rq.as_str()])
+                .min()
+                .unwrap_or(&ks_rq);
+            let js_rq = pending
+                .iter()
+                .map(|item| item.end_date.as_str())
+                .chain([js_rq.as_str()])
+                .max()
+                .unwrap_or(&js_rq);
+            rebuild_concept_performance_range(source_dir, ks_rq, js_rq)
+        }
         _ => {
             let bx_db = concept_performance_db_path(source_dir);
             init_concept_performance_db(&bx_db)?;
@@ -381,7 +398,7 @@ fn calc_gdnm_bx_rows(
             .collect::<Vec<_>>()
             .join("；");
         return Err(format!(
-            "概念/行业表现基础行情数据异常，{} 个交易日没有可用于计算的有效数据，前 {} 项: {}",
+            "概念/行业表现无法加权，{} 个交易日没有可用于计算的有效数据，前 {} 项: {}。计算需要有效涨跌幅、正成交额和正换手率；请确认已勾选下载换手率，并补齐这些日期的行情后再重算。",
             empty_dates.len(),
             empty_dates.len().min(DATA_ISSUE_SAMPLE_LIMIT),
             sample
@@ -1261,22 +1278,20 @@ ts_code,concepts_code,concepts_name,stock_name
     }
 
     #[test]
-    fn rebuild_concept_performance_range_rejects_sparse_invalid_daily_rows() {
+    fn rebuild_concept_performance_range_skips_sparse_invalid_daily_rows() {
         let source_dir = linshi_mulu();
         create_dir_all(&source_dir).expect("create dir");
         xieru_stock_list(&source_dir);
         xieru_gdnm_csv(&source_dir);
         xieru_source_db_with_sparse_invalid_pct(&source_dir);
 
-        let error = rebuild_concept_performance_range(
+        let rows = rebuild_concept_performance_range(
             source_dir.to_str().expect("utf8 path"),
             "20240102",
             "20240102",
         )
-        .expect_err("invalid source rows must block downstream computation");
-
-        assert!(error.contains("禁止"));
-        assert!(!source_dir.join("concept_performance.db").exists());
+        .expect("valid rows should still participate in weighted performance");
+        assert_eq!(rows, 5);
 
         let _ = remove_dir_all(source_dir);
     }
@@ -1296,7 +1311,7 @@ ts_code,concepts_code,concepts_name,stock_name
         )
         .expect_err("all invalid pct rows on a day should fail");
 
-        assert!(error.contains("禁止"));
+        assert!(error.contains("没有可用于计算的有效数据"));
         assert!(!source_dir.join("concept_performance.db").exists());
 
         let _ = remove_dir_all(source_dir);
