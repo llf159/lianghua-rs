@@ -85,6 +85,9 @@ fn android_storage_allowed() -> Result<bool, String> {
 #[cfg(target_os = "android")]
 #[tauri::command]
 pub fn request_android_warehouse_access() -> Result<bool, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     if android_storage_allowed()? {
         return Ok(true);
     }
@@ -246,11 +249,17 @@ fn move_source_directory(
 
 #[tauri::command]
 pub fn get_warehouse_root(app: tauri::AppHandle) -> Result<String, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     Ok(warehouse_root(&app)?.display().to_string())
 }
 
 #[tauri::command]
 pub fn set_warehouse_root(app: tauri::AppHandle, path: String) -> Result<String, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     let trimmed = path.trim();
     if trimmed.is_empty() {
         return Err("empty warehouse root".into());
@@ -296,6 +305,9 @@ pub async fn move_warehouse_source(
     target_root: String,
 ) -> Result<WarehouseMoveResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         let trimmed = target_root.trim();
         if trimmed.is_empty() {
             return Err("empty warehouse root".into());

@@ -27,3 +27,5 @@ cd ui/lianghua_web/src-tauri
 cargo tauri android build --ci --debug --target aarch64 --apk
 cargo tauri android build --ci --target aarch64 --apk
 ```
+
+- 问题：云同步截取榜单或恢复数据库快照时，普通 IPC 下载、计算及策略保存可能同时访问同一文件；解决方案选择：普通本地 IPC 任务持 SOURCE_ACCESS 共享锁，普通同步只在快照与应用下载时尝试独占，网络传输阶段释放独占锁；手动恢复从读取待保留的本地内容到提交恢复持续独占；解释：保留原有任务之间的并行，让同步在已有任务运行时提示稍后重试，避免普通同步长期网络等待阻塞本地编辑；明确恢复时则优先确保本地未同步内容不会在保留和替换之间被修改。新增访问仓库或持久配置的 IPC 入口需要继续参与此门禁。

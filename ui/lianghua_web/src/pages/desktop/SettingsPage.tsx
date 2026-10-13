@@ -19,6 +19,7 @@ import { filterConceptItems, useConceptExclusions } from '../../shared/conceptEx
 import ChartIndicatorSettingsModal from './components/ChartIndicatorSettingsModal'
 import StrategySyntaxGuideModal from './components/StrategySyntaxGuideModal'
 import AlgorithmGuideModal from './components/AlgorithmGuideModal'
+import CloudSyncSettingsModal from './components/CloudSyncSettingsModal'
 import {
   CHART_DEFAULT_VISIBLE_BARS_MAX,
   CHART_DEFAULT_VISIBLE_BARS_MIN,
@@ -128,6 +129,7 @@ export default function SettingsPage() {
   const [activeModal, setActiveModal] = useState<SettingsModalType>(null)
   const [isSyntaxGuideOpen, setIsSyntaxGuideOpen] = useState(false)
   const [isAlgorithmGuideOpen, setIsAlgorithmGuideOpen] = useState(false)
+  const [isCloudSyncSettingsOpen, setIsCloudSyncSettingsOpen] = useState(false)
   const [chartMainRatioInput, setChartMainRatioInput] = useState(() =>
     readStoredChartMainWidthRatio().toFixed(2),
   )
@@ -697,7 +699,12 @@ export default function SettingsPage() {
           </div>
         </div>
 
+        {isCloudSyncSettingsOpen && <CloudSyncSettingsModal onClose={() => setIsCloudSyncSettingsOpen(false)} />}
         <div className="settings-list">
+          <button className="settings-list-item" type="button" onClick={() => setIsCloudSyncSettingsOpen(true)}>
+            <div className="settings-list-item-main"><strong>WebDAV 云同步</strong><span>坚果云连接、账号及独立同步文件夹。</span></div>
+            <span className="settings-list-item-value">配置</span>
+          </button>
           <button className="settings-list-item" type="button" onClick={openConceptEditor}>
             <div className="settings-list-item-main">
               <strong>概念排除</strong>

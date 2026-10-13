@@ -19,6 +19,7 @@ import {
   type ManagedSourceStatus,
 } from '../../apis/managedSource'
 import './css/DataImportPage.css'
+import CloudSyncPanel from './components/CloudSyncPanel'
 
 type BusyAction =
   | 'idle'
@@ -121,6 +122,7 @@ export default function DataImportPage() {
   const isMobileClient = !directoryImportSupported
   const visibleManagedFiles = MANAGED_SOURCE_FILES
   const [status, setStatus] = useState<ManagedSourceStatus | null>(null)
+  const [cloudBusy, setCloudBusy] = useState(false)
   const [busyAction, setBusyAction] = useState<BusyAction>('loading')
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
@@ -142,7 +144,7 @@ export default function DataImportPage() {
 
   const importedCount = status?.items.filter((item) => item.isImported).length ?? 0
   const visibleStatusItems = status?.items ?? []
-  const isBusy = busyAction !== 'idle'
+  const isBusy = cloudBusy || busyAction !== 'idle'
 
   const updateBusyAction = useCallback((nextBusyAction: BusyAction) => {
     busyActionRef.current = nextBusyAction
@@ -416,6 +418,7 @@ export default function DataImportPage() {
 
   return (
     <div className="settings-page">
+      <CloudSyncPanel disabled={busyAction !== 'idle'} onBusyChange={setCloudBusy} onSynced={() => void onRefresh()} />
       <section className="settings-card">
         <div className="settings-head">
           <div>

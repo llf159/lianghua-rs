@@ -347,6 +347,9 @@ fn delete_managed_result_db_inner(data_root: &Path, source_dir: &str) -> Result<
 
 #[tauri::command]
 pub fn delete_managed_result_db(app: tauri::AppHandle, source_dir: String) -> Result<(), String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     let data_root = crate::warehouse::warehouse_root(&app)?;
     delete_managed_result_db_inner(&data_root, &source_dir)
 }
@@ -930,6 +933,9 @@ pub fn allow_import_path(
     directory: bool,
     recursive: bool,
 ) -> Result<(), String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     let trimmed = path.trim();
     if trimmed.is_empty() {
         return Err("empty import path".into());
@@ -961,6 +967,9 @@ pub async fn copy_import_file_to_appdata(
     let import_id_for_error = import_id.clone();
     let app_for_copy = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         copy_import_file_to_appdata_inner(
             app_for_copy,
             source_path,
@@ -1000,6 +1009,9 @@ pub async fn preview_managed_source_stock_data(
     let limit = limit.unwrap_or(100).clamp(20, 500);
     let data_root = crate::warehouse::warehouse_root(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         core_preview_managed_source_stock_data(&data_root, source_dir, trade_date, ts_code, limit)
     })
     .await
@@ -1018,6 +1030,9 @@ pub async fn preview_managed_source_dataset(
     let limit = limit.unwrap_or(100).clamp(20, 500);
     let data_root = crate::warehouse::warehouse_root(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         core_preview_managed_source_dataset(
             &data_root, source_dir, dataset_id, trade_date, ts_code, limit,
         )
@@ -1032,6 +1047,9 @@ pub fn export_managed_source_directory(
     source_dir: String,
     destination_dir: String,
 ) -> Result<ManagedSourceExportResult, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     let destination_dir = destination_dir.trim();
     if destination_dir.is_empty() {
         return Err("empty export destination".into());
@@ -1079,6 +1097,9 @@ pub fn export_managed_source_directory_mobile(
     source_dir: String,
     destination_file: String,
 ) -> Result<ManagedSourceExportResult, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     let destination_file = destination_file.trim();
     if destination_file.is_empty() {
         return Err("empty export destination file".into());
@@ -1137,6 +1158,9 @@ pub async fn export_managed_source_file(
     destination_file: String,
 ) -> Result<ManagedSourceFileExportResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         (|app: tauri::AppHandle,
           source_dir: String,
           file_id: String,
@@ -1214,6 +1238,9 @@ pub async fn import_managed_source_zip(
     source_path: String,
 ) -> Result<ManagedSourceZipImportResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         (|app: tauri::AppHandle,
           source_dir: String,
           source_path: String|
@@ -1353,6 +1380,9 @@ pub fn get_managed_strategy_assets_status(
     app: tauri::AppHandle,
     source_dir: String,
 ) -> Result<ManagedStrategyAssetsStatus, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     let data_root = crate::warehouse::warehouse_root(&app)?;
     get_managed_strategy_assets_status_inner(&data_root, &source_dir)
 }
@@ -1364,6 +1394,9 @@ pub async fn import_managed_strategy_backup(
     source_path: String,
 ) -> Result<ManagedStrategyBackupItem, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         (|app: tauri::AppHandle,
           source_dir: String,
           source_path: String|
@@ -1538,6 +1571,9 @@ pub async fn backup_managed_active_strategy(
 ) -> Result<ManagedStrategyBackupItem, String> {
     let data_root = crate::warehouse::warehouse_root(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         (|data_root: &Path, source_dir: String| -> Result<ManagedStrategyBackupItem, String> {
             backup_active_strategy_with_meta(
                 data_root,
@@ -1558,6 +1594,9 @@ pub async fn auto_backup_managed_active_strategy_on_entry(
 ) -> Result<Option<ManagedStrategyBackupItem>, String> {
     let data_root = crate::warehouse::warehouse_root(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         (|data_root: &Path,
           source_dir: String|
          -> Result<Option<ManagedStrategyBackupItem>, String> {
@@ -1621,6 +1660,9 @@ pub async fn get_managed_strategy_backup_diff(
 ) -> Result<ManagedStrategyBackupDiff, String> {
     let data_root = crate::warehouse::warehouse_root(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         (|data_root: &Path,
           source_dir: String,
           backup_id: String|
@@ -1851,6 +1893,9 @@ pub async fn create_managed_empty_strategy_backup(
 ) -> Result<ManagedStrategyBackupItem, String> {
     let data_root = crate::warehouse::warehouse_root(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         (|data_root: &Path, source_dir: String| -> Result<ManagedStrategyBackupItem, String> {
             let source_root = resolve_source_root(data_root, &source_dir)?;
             let backup_id = current_strategy_backup_id();
@@ -1918,6 +1963,9 @@ pub async fn activate_managed_strategy_backup(
 ) -> Result<ManagedStrategyAssetsStatus, String> {
     let data_root = crate::warehouse::warehouse_root(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         (|data_root: &Path,
           source_dir: String,
           backup_id: String|
@@ -1956,6 +2004,9 @@ pub async fn delete_managed_strategy_backup(
 ) -> Result<ManagedStrategyAssetsStatus, String> {
     let data_root = crate::warehouse::warehouse_root(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         (|data_root: &Path,
           source_dir: String,
           backup_id: String|
@@ -1991,6 +2042,9 @@ pub async fn update_managed_strategy_backup_description(
 ) -> Result<ManagedStrategyAssetsStatus, String> {
     let data_root = crate::warehouse::warehouse_root(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         (|data_root: &Path,
           source_dir: String,
           backup_id: String,
@@ -2030,6 +2084,9 @@ pub async fn export_managed_strategy_backup_file(
     destination_file: String,
 ) -> Result<ManagedSourceFileExportResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         (|app: tauri::AppHandle,
           source_dir: String,
           backup_id: String,
@@ -2095,6 +2152,9 @@ pub async fn export_managed_strategy_bundle(
     destination_file: String,
 ) -> Result<ManagedStrategyBundleExportResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         (|app: tauri::AppHandle,
           source_dir: String,
           destination_file: String|

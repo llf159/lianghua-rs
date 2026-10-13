@@ -1,3 +1,4 @@
+mod cloud_sync_bridge;
 mod data_download_bridge;
 mod eastmoney_session;
 mod managed_source_bridge;
@@ -544,11 +545,17 @@ fn normalize_watch_observe_rows_payload(
 
 #[tauri::command]
 fn list_stock_lookup_rows(source_path: String) -> Result<Vec<StockLookupRow>, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_list_stock_lookup_rows(&source_path)
 }
 
 #[tauri::command]
 fn get_stock_pick_options(source_path: String) -> Result<StockPickOptionsData, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_get_stock_pick_options(&source_path)
 }
 
@@ -556,6 +563,9 @@ fn get_stock_pick_options(source_path: String) -> Result<StockPickOptionsData, S
 fn get_chart_indicator_settings(
     source_path: String,
 ) -> Result<ChartIndicatorSettingsPayload, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_get_chart_indicator_settings(&source_path)
 }
 
@@ -564,6 +574,9 @@ fn validate_chart_indicator_settings(
     source_path: String,
     text: String,
 ) -> Result<ChartIndicatorValidationResult, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_validate_chart_indicator_settings(&source_path, &text)
 }
 
@@ -572,6 +585,9 @@ fn save_chart_indicator_settings(
     source_path: String,
     text: String,
 ) -> Result<ChartIndicatorSettingsPayload, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_save_chart_indicator_settings(&source_path, &text)
 }
 
@@ -579,6 +595,9 @@ fn save_chart_indicator_settings(
 fn reset_chart_indicator_settings(
     source_path: String,
 ) -> Result<ChartIndicatorSettingsPayload, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_reset_chart_indicator_settings(&source_path)
 }
 
@@ -587,6 +606,9 @@ fn get_ranking_compute_status(
     source_path: String,
     strategy_path: Option<String>,
 ) -> Result<RankComputeStatus, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_get_ranking_compute_status(&source_path, strategy_path.as_deref())
 }
 
@@ -597,6 +619,9 @@ fn preview_ranking_score_calculation_warnings(
     start_date: String,
     end_date: String,
 ) -> Result<Vec<String>, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_preview_ranking_score_calculation_warnings(
         &source_path,
         strategy_path.as_deref(),
@@ -615,6 +640,9 @@ fn get_rank_overview(
     total_mv_min: Option<f64>,
     total_mv_max: Option<f64>,
 ) -> Result<Vec<OverviewRow>, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_get_rank_overview(
         source_path,
         trade_date,
@@ -628,9 +656,14 @@ fn get_rank_overview(
 
 #[tauri::command]
 async fn get_rank_trade_date_options(source_path: String) -> Result<Vec<String>, String> {
-    tauri::async_runtime::spawn_blocking(move || core_get_rank_trade_date_options(source_path))
-        .await
-        .map_err(|error| error.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        core_get_rank_trade_date_options(source_path)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -644,6 +677,9 @@ fn get_rank_overview_page(
     total_mv_min: Option<f64>,
     total_mv_max: Option<f64>,
 ) -> Result<OverviewPageData, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_get_rank_overview_page(
         source_path,
         rank_date,
@@ -666,6 +702,9 @@ fn get_convolution_rank_page(
     total_mv_min: Option<f64>,
     total_mv_max: Option<f64>,
 ) -> Result<ConvolutionRankPageData, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_get_convolution_rank_page(
         source_path,
         trade_date,
@@ -684,6 +723,9 @@ async fn run_convolution_rank_compute(
     end_date: String,
 ) -> Result<ConvolutionRankComputeResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         core_run_convolution_rank_compute(&source_path, &start_date, &end_date)
     })
     .await
@@ -692,6 +734,9 @@ async fn run_convolution_rank_compute(
 
 #[tauri::command]
 fn get_scene_rank_trade_date_options(source_path: String) -> Result<Vec<String>, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_get_scene_rank_trade_date_options(&source_path)
 }
 
@@ -705,6 +750,9 @@ fn get_scene_rank_overview_page(
     total_mv_min: Option<f64>,
     total_mv_max: Option<f64>,
 ) -> Result<SceneOverviewPageData, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_get_scene_rank_overview_page(
         &source_path,
         rank_date,
@@ -728,6 +776,9 @@ fn get_intraday_monitor_page(
     total_mv_min: Option<f64>,
     total_mv_max: Option<f64>,
 ) -> Result<IntradayMonitorPageData, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_get_intraday_monitor_page(
         &source_path,
         rank_mode,
@@ -750,6 +801,9 @@ async fn refresh_intraday_monitor_realtime(
     realtime_provider: Option<String>,
 ) -> Result<IntradayMonitorPageData, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         core_refresh_intraday_monitor_realtime(
             &source_path,
             rows,
@@ -770,6 +824,9 @@ async fn refresh_intraday_monitor_template_tags(
     rank_mode_configs: Vec<IntradayMonitorRankModeConfig>,
 ) -> Result<IntradayMonitorPageData, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         core_refresh_intraday_monitor_template_tags(
             &source_path,
             rows,
@@ -783,6 +840,9 @@ async fn refresh_intraday_monitor_template_tags(
 
 #[tauri::command]
 fn get_expression_capabilities() -> ExpressionCapabilitiesData {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_get_expression_capabilities()
 }
 
@@ -791,11 +851,17 @@ fn validate_intraday_monitor_template_expression(
     source_path: Option<String>,
     expression: String,
 ) -> Result<IntradayMonitorTemplateValidationData, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_validate_intraday_monitor_template_expression(source_path.as_deref(), expression)
 }
 
 #[tauri::command]
 fn set_all_market_volume_ratio_paused(paused: bool) -> Result<(), String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     market::volume_ratio::set_fetch_paused(paused)
 }
 
@@ -813,6 +879,9 @@ async fn get_all_market_monitor_snapshot(
     volume_ratio_fetch_enabled: Option<bool>,
 ) -> Result<AllMarketMonitorSnapshotData, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         core_get_all_market_monitor_snapshot(
             &source_path,
             realtime_provider,
@@ -832,6 +901,9 @@ async fn get_all_market_monitor_snapshot(
 
 #[tauri::command]
 fn get_strategy_manage_page(source_path: String) -> Result<StrategyManagePageData, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_get_strategy_manage_page(&source_path)
 }
 
@@ -841,6 +913,9 @@ fn set_strategy_manage_scene_enabled(
     name: String,
     enabled: bool,
 ) -> Result<StrategyManagePageData, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_set_strategy_manage_scene_enabled(&source_path, &name, enabled)
 }
 
@@ -850,6 +925,9 @@ fn set_strategy_manage_rule_enabled(
     name: String,
     enabled: bool,
 ) -> Result<StrategyManagePageData, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_set_strategy_manage_rule_enabled(&source_path, &name, enabled)
 }
 
@@ -862,6 +940,9 @@ async fn get_stock_detail_page(
     prev_rank_days: Option<u32>,
 ) -> Result<StockDetailPageData, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         core_get_stock_detail_page(
             source_path,
             trade_date,
@@ -882,6 +963,9 @@ async fn get_stock_detail_kline_indicators(
     watermark_name: Option<String>,
 ) -> Result<StockDetailKlineIndicatorsData, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         core_get_stock_detail_kline_indicators(
             source_path,
             ts_code,
@@ -900,6 +984,9 @@ async fn get_stock_detail_overview(
     ts_code: String,
 ) -> Result<StockDetailOverviewData, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         core_get_stock_detail_overview(source_path, trade_date, ts_code)
     })
     .await
@@ -913,6 +1000,9 @@ async fn get_stock_detail_strategy_snapshot(
     ts_code: String,
 ) -> Result<StockDetailStrategySnapshotData, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         core_get_stock_detail_strategy_snapshot(source_path, trade_date, ts_code)
     })
     .await
@@ -927,6 +1017,9 @@ async fn get_stock_detail_prev_ranks(
     prev_rank_days: Option<u32>,
 ) -> Result<StockDetailPrevRanksData, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         core_get_stock_detail_prev_ranks(source_path, trade_date, ts_code, prev_rank_days)
     })
     .await
@@ -940,6 +1033,9 @@ async fn get_stock_detail_cyq(
     chip_model: Option<String>,
 ) -> Result<StockDetailCyqData, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         core_get_stock_detail_cyq(source_path, ts_code, chip_model)
     })
     .await
@@ -954,6 +1050,9 @@ async fn get_stock_detail_realtime(
     realtime_provider: Option<String>,
 ) -> Result<StockDetailRealtimeData, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         core_get_stock_detail_realtime(source_path, ts_code, chart_window_days, realtime_provider)
     })
     .await
@@ -966,6 +1065,9 @@ async fn get_stock_detail_intraday(
     ts_code: String,
 ) -> Result<lianghua_provider::crawler::intraday::TencentIntradayData, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         core_get_stock_detail_intraday(source_path, ts_code)
     })
     .await
@@ -979,6 +1081,9 @@ async fn get_stock_detail_intraday_snapshot(
     chart_window_days: Option<u32>,
 ) -> Result<StockDetailIntradaySnapshotData, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         core_get_stock_detail_intraday_snapshot(source_path, ts_code, chart_window_days)
     })
     .await
@@ -993,6 +1098,9 @@ async fn get_stock_similarity_page(
     limit: Option<u32>,
 ) -> Result<StockSimilarityPageData, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         core_get_stock_similarity_page(source_path, trade_date, ts_code, limit)
     })
     .await
@@ -1001,6 +1109,9 @@ async fn get_stock_similarity_page(
 
 #[tauri::command]
 fn list_strategy_trigger_similarity_benchmark_index_codes() -> Vec<String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_list_strategy_trigger_similarity_benchmark_index_codes()
 }
 
@@ -1016,6 +1127,9 @@ async fn get_strategy_trigger_similarity_page(
     limit: Option<u32>,
 ) -> Result<StrategyTriggerSimilarityPageData, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         core_get_strategy_trigger_similarity_page(
             source_path,
             trade_date,
@@ -1048,6 +1162,9 @@ async fn get_strategy_trigger_similarity_ranking_page(
     sample_gap_trade_days: Option<u32>,
 ) -> Result<StrategyTriggerRankingPageData, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         core_get_strategy_trigger_similarity_ranking_page(
             source_path,
             trade_date,
@@ -1070,6 +1187,9 @@ async fn get_strategy_trigger_similarity_ranking_page(
 
 #[tauri::command]
 fn get_strategy_trigger_similarity_ranking_progress() -> Option<StrategyTriggerRankingProgress> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_get_strategy_trigger_similarity_ranking_progress()
 }
 
@@ -1090,6 +1210,9 @@ async fn run_strategy_trigger_similarity_ranking(
 ) -> Result<StrategyTriggerRankingPageData, String> {
     let _display_sleep_inhibitor = SimilarityDisplaySleepInhibitor::acquire();
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         core_run_strategy_trigger_similarity_ranking(
             source_path,
             trade_date,
@@ -1116,6 +1239,9 @@ async fn get_strategy_statistics_page(
     analysis_trade_date: Option<String>,
 ) -> Result<StrategyStatisticsPageData, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         core_get_strategy_statistics_page(source_path, strategy_name, analysis_trade_date)
     })
     .await
@@ -1126,6 +1252,9 @@ async fn get_strategy_statistics_page(
 fn get_strategy_paper_validation_defaults(
     source_path: String,
 ) -> Result<StrategyPaperValidationDefaultsData, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_get_strategy_paper_validation_defaults(&source_path)
 }
 
@@ -1134,6 +1263,9 @@ fn validate_strategy_paper_validation_template_expressions(
     buy_expression: String,
     sell_expression: String,
 ) -> Result<StrategyPaperValidationTemplateValidationData, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_validate_strategy_paper_validation_template_expressions(buy_expression, sell_expression)
 }
 
@@ -1154,6 +1286,9 @@ async fn run_strategy_paper_validation(
     sell_expression: String,
 ) -> Result<StrategyPaperValidationData, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         run_with_heap_trim(|| {
             core_run_strategy_paper_validation(
                 &source_path,
@@ -1183,6 +1318,9 @@ async fn get_scene_statistics_page(
     analysis_trade_date: Option<String>,
 ) -> Result<SceneStatisticsPageData, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         core_get_scene_statistics_page(source_path, scene_name, analysis_trade_date)
     })
     .await
@@ -1196,6 +1334,9 @@ async fn get_strategy_statistics_detail(
     analysis_trade_date: Option<String>,
 ) -> Result<StrategyStatisticsDetailData, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         core_get_strategy_statistics_detail(source_path, strategy_name, analysis_trade_date)
     })
     .await
@@ -1209,6 +1350,9 @@ async fn get_strategy_triggered_stocks(
     analysis_trade_date: String,
 ) -> Result<Vec<TriggeredStockRow>, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         core_get_strategy_triggered_stocks(source_path, strategy_name, analysis_trade_date)
     })
     .await
@@ -1220,6 +1364,9 @@ async fn get_strategy_dimension_research_defaults(
     source_path: String,
 ) -> Result<StrategyDimensionResearchDefaultsData, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         core_get_strategy_dimension_research_defaults(source_path)
     })
     .await
@@ -1237,6 +1384,9 @@ async fn run_strategy_dimension_research(
     holding_period: Option<usize>,
 ) -> Result<StrategyDimensionResearchData, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         core_run_strategy_dimension_research(
             source_path,
             start_date,
@@ -1255,6 +1405,9 @@ async fn run_strategy_dimension_research(
 fn get_scene_layer_backtest_defaults(
     source_path: String,
 ) -> Result<SceneLayerBacktestDefaultsData, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_get_scene_layer_backtest_defaults(source_path)
 }
 
@@ -1262,6 +1415,9 @@ fn get_scene_layer_backtest_defaults(
 fn get_rule_layer_backtest_defaults(
     source_path: String,
 ) -> Result<RuleLayerBacktestDefaultsData, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_get_rule_layer_backtest_defaults(source_path)
 }
 
@@ -1271,6 +1427,9 @@ async fn get_cached_rule_layer_backtest_detail(
     rule_name: String,
 ) -> Result<serde_json::Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         core_get_cached_rule_layer_backtest_detail(source_path, rule_name)
     })
     .await
@@ -1283,6 +1442,9 @@ async fn get_market_structure(
     reference_trade_date: Option<String>,
 ) -> Result<MarketStructureData, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         core_get_market_structure(source_path, reference_trade_date)
     })
     .await
@@ -1302,6 +1464,9 @@ async fn get_market_analysis(
     min_board_stock_count: Option<usize>,
 ) -> Result<MarketAnalysisData, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         core_get_market_analysis(
             source_path,
             lookback_period,
@@ -1324,6 +1489,9 @@ async fn get_dragon_tiger_market_data(
     reference_trade_date: Option<String>,
 ) -> Result<DragonTigerMarketData, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         core_get_dragon_tiger_market_data(source_path, reference_trade_date)
     })
     .await
@@ -1337,6 +1505,9 @@ async fn get_dragon_tiger_stock_detail(
     trade_date: String,
 ) -> Result<DragonTigerStockDetailData, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         core_get_dragon_tiger_stock_detail(source_path, ts_code, trade_date)
     })
     .await
@@ -1349,6 +1520,9 @@ async fn get_dragon_tiger_seat_statistics(
     exalter: String,
 ) -> Result<DragonTigerSeatStatisticsData, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         core_get_dragon_tiger_seat_statistics(source_path, exalter)
     })
     .await
@@ -1365,6 +1539,9 @@ async fn get_market_contribution(
     reference_trade_date: Option<String>,
 ) -> Result<MarketContributionData, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         core_get_market_contribution(
             source_path,
             scope,
@@ -1398,6 +1575,9 @@ async fn run_scene_layer_backtest(
     total_mv_max: Option<f64>,
 ) -> Result<SceneLayerBacktestData, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         run_with_heap_trim(|| {
             core_run_scene_layer_backtest(
                 source_path,
@@ -1444,6 +1624,9 @@ async fn run_rule_layer_backtest(
     total_mv_max: Option<f64>,
 ) -> Result<RuleLayerBacktestData, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         run_with_heap_trim(|| {
             core_run_rule_layer_backtest(
                 source_path,
@@ -1490,6 +1673,9 @@ async fn run_rank_layer_backtest(
     exclude_st_board: Option<bool>,
 ) -> Result<RankLayerBacktestData, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         run_with_heap_trim(|| {
             core_run_rank_layer_backtest(
                 source_path,
@@ -1535,6 +1721,9 @@ async fn run_transient_scene_layer_backtest(
     total_mv_max: Option<f64>,
 ) -> Result<SceneLayerBacktestData, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         run_with_heap_trim(|| {
             core_run_transient_scene_layer_backtest(
                 source_path,
@@ -1581,6 +1770,9 @@ async fn run_transient_rule_layer_backtest(
     total_mv_max: Option<f64>,
 ) -> Result<RuleLayerBacktestData, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         run_with_heap_trim(|| {
             core_run_transient_rule_layer_backtest(
                 source_path,
@@ -1627,6 +1819,9 @@ async fn run_transient_rank_layer_backtest(
     exclude_st_board: Option<bool>,
 ) -> Result<RankLayerBacktestData, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         run_with_heap_trim(|| {
             core_run_transient_rank_layer_backtest(
                 source_path,
@@ -1656,6 +1851,9 @@ async fn run_transient_rank_layer_backtest(
 fn get_validation_core_rule_options(
     source_path: String,
 ) -> Result<Vec<ValidationCoreRuleOption>, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_get_validation_core_rule_options(&source_path)
 }
 
@@ -1688,6 +1886,9 @@ async fn run_rule_expression_validation(
     core_rule_names: Option<Vec<String>>,
 ) -> Result<RuleExpressionValidationData, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         run_with_heap_trim(|| {
             core_run_rule_expression_validation(
                 source_path,
@@ -1728,6 +1929,9 @@ fn check_strategy_manage_scene_draft(
     original_name: Option<String>,
     draft: StrategyManageSceneDraft,
 ) -> Result<String, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_check_strategy_manage_scene_draft(&source_path, original_name.as_deref(), draft)
 }
 
@@ -1736,6 +1940,9 @@ fn create_strategy_manage_scene(
     source_path: String,
     draft: StrategyManageSceneDraft,
 ) -> Result<StrategyManagePageData, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_create_strategy_manage_scene(&source_path, draft)
 }
 
@@ -1745,6 +1952,9 @@ fn update_strategy_manage_scene(
     original_name: String,
     draft: StrategyManageSceneDraft,
 ) -> Result<StrategyManagePageData, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_update_strategy_manage_scene(&source_path, &original_name, draft)
 }
 
@@ -1753,6 +1963,9 @@ fn remove_strategy_manage_scene(
     source_path: String,
     name: String,
 ) -> Result<StrategyManagePageData, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_remove_strategy_manage_scene(&source_path, &name)
 }
 
@@ -1762,6 +1975,9 @@ fn check_strategy_manage_rule_draft(
     original_name: Option<String>,
     draft: StrategyManageRuleDraft,
 ) -> Result<String, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_check_strategy_manage_rule_draft(&source_path, original_name.as_deref(), draft)
 }
 
@@ -1770,6 +1986,9 @@ fn create_strategy_manage_rule(
     source_path: String,
     draft: StrategyManageRuleDraft,
 ) -> Result<StrategyManagePageData, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_create_strategy_manage_rule(&source_path, draft)
 }
 
@@ -1778,6 +1997,9 @@ fn remove_strategy_manage_rules(
     source_path: String,
     names: Vec<String>,
 ) -> Result<StrategyManagePageData, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_remove_strategy_manage_rules(&source_path, &names)
 }
 
@@ -1787,6 +2009,9 @@ fn update_strategy_manage_rule(
     original_name: String,
     draft: StrategyManageRuleDraft,
 ) -> Result<StrategyManagePageData, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_update_strategy_manage_rule(&source_path, &original_name, draft)
 }
 
@@ -1796,6 +2021,9 @@ fn save_strategy_manage_refactor_file(
     file_name: String,
     draft: StrategyManageRefactorDraft,
 ) -> Result<String, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_save_strategy_manage_refactor_file(&source_path, &file_name, draft)
 }
 
@@ -1812,6 +2040,9 @@ async fn run_ranking_score_calculation(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         let started_at = Instant::now();
         let action = "score".to_string();
         let action_label = "排名计算".to_string();
@@ -1926,9 +2157,14 @@ async fn run_ranking_score_calculation(
 async fn run_concept_performance_compute(
     source_path: String,
 ) -> Result<ConceptPerformanceComputeResult, String> {
-    tauri::async_runtime::spawn_blocking(move || core_run_concept_performance_compute(&source_path))
-        .await
-        .map_err(|error| error.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        core_run_concept_performance_compute(&source_path)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -1944,6 +2180,9 @@ async fn run_cyq_compute(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         let started_at = Instant::now();
         let action = "cyq".to_string();
         let action_label = "筹码计算".to_string();
@@ -2050,6 +2289,9 @@ async fn run_cyq_chen_compute(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         let started_at = Instant::now();
         let action = "cyq-chen".to_string();
         let action_label = "新筹码计算".to_string();
@@ -2154,9 +2396,14 @@ async fn run_cyq_chen_compute(
 async fn run_cyq_chen_single_stock_test(
     request: CyqChenSingleStockRequest,
 ) -> Result<CyqChenSingleStockData, String> {
-    tauri::async_runtime::spawn_blocking(move || core_run_cyq_chen_single_stock_test(request))
-        .await
-        .map_err(|error| error.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        core_run_cyq_chen_single_stock_test(request)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 fn cyq_chen_active_strategy_path(source_path: &str) -> PathBuf {
@@ -2277,6 +2524,9 @@ fn append_cyq_chen_directory_to_zip<W: Write + Seek>(
 
 #[tauri::command]
 fn get_cyq_chen_strategy_page(source_path: String) -> Result<CyqChenStrategyPageData, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_get_cyq_chen_strategy_page(&source_path)
 }
 
@@ -2285,16 +2535,25 @@ fn save_cyq_chen_strategy_file(
     source_path: String,
     draft: CyqChenStrategyFileDraft,
 ) -> Result<CyqChenStrategyPageData, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_save_cyq_chen_strategy_file(&source_path, draft)
 }
 
 #[tauri::command]
 fn check_cyq_chen_strategy_file_draft(draft: CyqChenStrategyFileDraft) -> Result<String, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_check_cyq_chen_strategy_file_draft(draft)
 }
 
 #[tauri::command]
 fn backup_cyq_chen_strategy_file(source_path: String) -> Result<CyqChenStrategyPageData, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_backup_cyq_chen_strategy_file(&source_path)
 }
 
@@ -2302,6 +2561,9 @@ fn backup_cyq_chen_strategy_file(source_path: String) -> Result<CyqChenStrategyP
 fn auto_backup_cyq_chen_strategy_file_on_entry(
     source_path: String,
 ) -> Result<Option<CyqChenStrategyPageData>, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_auto_backup_cyq_chen_strategy_file_on_entry(&source_path)
 }
 
@@ -2309,6 +2571,9 @@ fn auto_backup_cyq_chen_strategy_file_on_entry(
 fn create_empty_cyq_chen_strategy_backup(
     source_path: String,
 ) -> Result<CyqChenStrategyPageData, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_create_empty_cyq_chen_strategy_backup(&source_path)
 }
 
@@ -2319,6 +2584,9 @@ async fn import_cyq_chen_strategy_backup(
     source_file: String,
 ) -> Result<CyqChenStrategyPageData, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         let source_file = source_file.trim();
         if source_file.is_empty() {
             return Err("导入文件为空".to_string());
@@ -2354,6 +2622,9 @@ fn delete_cyq_chen_strategy_backup(
     source_path: String,
     backup_id: String,
 ) -> Result<CyqChenStrategyPageData, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_delete_cyq_chen_strategy_backup(&source_path, &backup_id)
 }
 
@@ -2364,6 +2635,9 @@ async fn export_cyq_chen_active_strategy_file(
     destination_file: String,
 ) -> Result<CyqChenStrategyFileExportResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         let source_path = source_path.trim();
         if source_path.is_empty() {
             return Err("数据目录为空，请先确认当前数据源".to_string());
@@ -2386,6 +2660,9 @@ async fn export_cyq_chen_strategy_backup_file(
     destination_file: String,
 ) -> Result<CyqChenStrategyFileExportResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         let source_path = source_path.trim();
         if source_path.is_empty() {
             return Err("数据目录为空，请先确认当前数据源".to_string());
@@ -2417,6 +2694,9 @@ async fn export_cyq_chen_strategy_bundle(
     destination_file: String,
 ) -> Result<CyqChenStrategyBundleExportResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         (|app: tauri::AppHandle,
           source_path: String,
           destination_file: String|
@@ -2484,6 +2764,9 @@ fn get_cyq_chen_strategy_backup_diff(
     source_path: String,
     backup_id: String,
 ) -> Result<CyqChenStrategyBackupDiff, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_get_cyq_chen_strategy_backup_diff(&source_path, &backup_id)
 }
 
@@ -2492,6 +2775,9 @@ fn activate_cyq_chen_strategy_backup(
     source_path: String,
     backup_id: String,
 ) -> Result<CyqChenStrategyPageData, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_activate_cyq_chen_strategy_backup(&source_path, &backup_id)
 }
 
@@ -2501,6 +2787,9 @@ async fn run_ranking_tiebreak_fill(
     strategy_path: Option<String>,
 ) -> Result<RankComputeRunResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         core_run_ranking_tiebreak_fill(&source_path, strategy_path.as_deref())
     })
     .await
@@ -2518,6 +2807,9 @@ async fn validate_expression_stock_pick_template_expression(
     }
 
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         core_validate_expression_stock_pick_template_expression(&source_path, expression)
     })
     .await
@@ -2541,6 +2833,9 @@ async fn run_expression_stock_pick(
     }
 
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         core_run_expression_stock_pick(
             &source_path,
             board,
@@ -2570,6 +2865,9 @@ fn run_concept_stock_pick(
     exclude_concepts: Vec<String>,
     match_mode: String,
 ) -> Result<ConceptStockPickResultData, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_run_concept_stock_pick(
         &source_path,
         board,
@@ -2587,6 +2885,9 @@ fn run_concept_stock_pick(
 
 #[tauri::command]
 fn resolve_watch_observe_watch_date(source_path: String) -> Result<String, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_resolve_current_watch_observe_date(&source_path)
 }
 
@@ -2603,6 +2904,9 @@ async fn list_watch_observe_rows(
         None => read_watch_observe_storage(&app)?,
     };
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         core_hydrate_watch_observe_rows(
             source_path.as_deref(),
             &stored_rows,
@@ -2627,6 +2931,9 @@ async fn refresh_watch_observe_rows(
         None => read_watch_observe_storage(&app)?,
     };
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         core_refresh_watch_observe_rows(
             source_path.as_deref(),
             &stored_rows,
@@ -2644,6 +2951,9 @@ fn upsert_watch_observe_row(
     source_path: Option<String>,
     row: WatchObserveUpsertPayload,
 ) -> Result<Vec<CoreWatchObserveRow>, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     let incoming = normalize_watch_observe_upsert_payload(row)?;
     let mut rows = read_watch_observe_storage(&app)?;
     if let Some(existing_index) = rows
@@ -2666,6 +2976,9 @@ fn merge_watch_observe_rows(
     source_path: Option<String>,
     rows: Vec<WatchObserveUpsertPayload>,
 ) -> Result<Vec<CoreWatchObserveRow>, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     let mut saved_rows = read_watch_observe_storage(&app)?;
 
     for incoming in rows {
@@ -2693,6 +3006,9 @@ fn update_watch_observe_tag(
     ts_code: String,
     tag: String,
 ) -> Result<Vec<CoreWatchObserveRow>, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     let normalized_ts_code =
         core_normalize_watch_observe_ts_code(&ts_code).ok_or_else(|| "自选代码无效".to_string())?;
     let mut rows = read_watch_observe_storage(&app)?;
@@ -2715,6 +3031,9 @@ fn update_watch_observe_marked_date(
     ts_code: String,
     marked_date: String,
 ) -> Result<Vec<CoreWatchObserveRow>, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     let normalized_ts_code =
         core_normalize_watch_observe_ts_code(&ts_code).ok_or_else(|| "自选代码无效".to_string())?;
     let normalized_marked_date = core_normalize_watch_observe_trade_date(&marked_date)
@@ -2738,6 +3057,9 @@ fn remove_watch_observe_rows(
     source_path: Option<String>,
     ts_codes: Vec<String>,
 ) -> Result<Vec<CoreWatchObserveRow>, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     let normalized_codes: Vec<String> = ts_codes
         .into_iter()
         .filter_map(|value| core_normalize_watch_observe_ts_code(&value))
@@ -2775,6 +3097,15 @@ pub fn run() {
 
     builder
         .invoke_handler(tauri::generate_handler![
+            cloud_sync_bridge::get_cloud_sync_config,
+            cloud_sync_bridge::get_cloud_sync_setting_keys,
+            cloud_sync_bridge::save_cloud_sync_config,
+            cloud_sync_bridge::test_cloud_sync_connection,
+            cloud_sync_bridge::run_cloud_sync,
+            cloud_sync_bridge::estimate_cloud_sync_upload,
+            cloud_sync_bridge::list_cloud_sync_data,
+            cloud_sync_bridge::restore_cloud_sync_version,
+            cloud_sync_bridge::delete_cloud_sync_version,
             warehouse::get_warehouse_root,
             warehouse::set_warehouse_root,
             warehouse::move_warehouse_source,

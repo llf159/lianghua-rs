@@ -4,5 +4,6 @@ use lianghua_download::download;
 use lianghua_provider::crawler;
 use lianghua_scoring::scoring;
 
+pub mod cloud_sync;
 pub mod cyq_chen;
 pub mod details;

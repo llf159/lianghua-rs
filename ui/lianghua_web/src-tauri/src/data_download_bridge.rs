@@ -175,11 +175,17 @@ fn format_completion_detail_tail(details: &[String]) -> String {
 
 #[tauri::command]
 pub fn get_data_download_status(source_path: String) -> Result<DataDownloadStatus, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_get_data_download_status(&source_path)
 }
 
 #[tauri::command]
 pub fn get_indicator_manage_page(source_path: String) -> Result<IndicatorManagePageData, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_get_indicator_manage_page(&source_path)
 }
 
@@ -188,6 +194,9 @@ pub fn save_indicator_manage_page(
     source_path: String,
     items: Vec<CoreIndicatorManageDraft>,
 ) -> Result<IndicatorManagePageData, String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
     core_save_indicator_manage_page(&source_path, items)
 }
 
@@ -201,11 +210,16 @@ pub async fn run_stock_data_indicator_columns_delete(
         return Err("download_id 不能为空".to_string());
     }
 
-    let prepared = core_prepare_stock_data_indicator_columns_delete_run(
-        CoreStockDataIndicatorColumnsDeleteRunInput {
-            source_path: request.source_path,
-        },
-    )?;
+    let prepared = {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        core_prepare_stock_data_indicator_columns_delete_run(
+            CoreStockDataIndicatorColumnsDeleteRunInput {
+                source_path: request.source_path,
+            },
+        )?
+    };
     let action = prepared.action.clone();
     let action_label = prepared.action_label.clone();
     emit_data_download_event(
@@ -224,6 +238,9 @@ pub async fn run_stock_data_indicator_columns_delete(
     );
 
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         let started_at = Instant::now();
         let result = (|| -> Result<DataDownloadRunResult, String> {
             let progress_app = app.clone();
@@ -300,11 +317,16 @@ pub async fn run_stock_data_indicator_columns_rebuild(
         return Err("download_id 不能为空".to_string());
     }
 
-    let prepared = core_prepare_stock_data_indicator_columns_rebuild_run(
-        CoreStockDataIndicatorColumnsRebuildRunInput {
-            source_path: request.source_path,
-        },
-    )?;
+    let prepared = {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        core_prepare_stock_data_indicator_columns_rebuild_run(
+            CoreStockDataIndicatorColumnsRebuildRunInput {
+                source_path: request.source_path,
+            },
+        )?
+    };
     let action = prepared.action.clone();
     let action_label = prepared.action_label.clone();
     emit_data_download_event(
@@ -323,6 +345,9 @@ pub async fn run_stock_data_indicator_columns_rebuild(
     );
 
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         let started_at = Instant::now();
         let result = (|| -> Result<DataDownloadRunResult, String> {
             let progress_app = app.clone();
@@ -401,19 +426,24 @@ pub async fn run_data_download(
         return Err("download_id 不能为空".to_string());
     }
 
-    let prepared = core_prepare_data_download_run(CoreDataDownloadRunInput {
-        source_path: request.source_path,
-        token: request.token,
-        start_date: request.start_date,
-        end_date: request.end_date,
-        threads: request.threads,
-        retry_times: request.retry_times,
-        limit_calls_per_min: request.limit_calls_per_min,
-        include_turnover: request.include_turnover,
-        allow_stale_stock_list: request.allow_stale_stock_list,
-        allow_cyq_chen_strategy_rebuild: request.allow_cyq_chen_strategy_rebuild,
-        chip_model: request.chip_model,
-    })?;
+    let prepared = {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        core_prepare_data_download_run(CoreDataDownloadRunInput {
+            source_path: request.source_path,
+            token: request.token,
+            start_date: request.start_date,
+            end_date: request.end_date,
+            threads: request.threads,
+            retry_times: request.retry_times,
+            limit_calls_per_min: request.limit_calls_per_min,
+            include_turnover: request.include_turnover,
+            allow_stale_stock_list: request.allow_stale_stock_list,
+            allow_cyq_chen_strategy_rebuild: request.allow_cyq_chen_strategy_rebuild,
+            chip_model: request.chip_model,
+        })?
+    };
     let action = prepared.action.clone();
     let action_label = prepared.action_label.clone();
     emit_data_download_event(
@@ -432,6 +462,9 @@ pub async fn run_data_download(
     );
 
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         let started_at = Instant::now();
         let result = (|| -> Result<DataDownloadRunResult, String> {
             let progress_app = app.clone();
@@ -508,14 +541,19 @@ pub async fn run_dragon_tiger_download(
         return Err("download_id 不能为空".to_string());
     }
 
-    let prepared = core_prepare_dragon_tiger_download_run(CoreDragonTigerDownloadRunInput {
-        source_path: request.source_path,
-        token: request.token,
-        start_date: request.start_date,
-        end_date: request.end_date,
-        retry_times: request.retry_times,
-        limit_calls_per_min: request.limit_calls_per_min,
-    })?;
+    let prepared = {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        core_prepare_dragon_tiger_download_run(CoreDragonTigerDownloadRunInput {
+            source_path: request.source_path,
+            token: request.token,
+            start_date: request.start_date,
+            end_date: request.end_date,
+            retry_times: request.retry_times,
+            limit_calls_per_min: request.limit_calls_per_min,
+        })?
+    };
     let action = prepared.action.clone();
     let action_label = prepared.action_label.clone();
     emit_data_download_event(
@@ -534,6 +572,9 @@ pub async fn run_dragon_tiger_download(
     );
 
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         let started_at = Instant::now();
         let result = (|| -> Result<DataDownloadRunResult, String> {
             let progress_app = app.clone();
@@ -611,10 +652,14 @@ pub async fn run_concept_most_related_repair(
         return Err("download_id 不能为空".to_string());
     }
 
-    let prepared =
+    let prepared = {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         core_prepare_concept_most_related_repair_run(CoreConceptMostRelatedRepairRunInput {
             source_path: request.source_path,
-        })?;
+        })?
+    };
     let action = prepared.action.clone();
     let action_label = prepared.action_label.clone();
     emit_data_download_event(
@@ -633,6 +678,9 @@ pub async fn run_concept_most_related_repair(
     );
 
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         let started_at = Instant::now();
         let result = (|| -> Result<DataDownloadRunResult, String> {
             let progress_app = app.clone();
@@ -707,14 +755,19 @@ pub async fn run_missing_stock_repair(
         return Err("download_id 不能为空".to_string());
     }
 
-    let prepared = core_prepare_missing_stock_repair_run(CoreMissingStockRepairRunInput {
-        source_path: request.source_path,
-        token: request.token,
-        threads: request.threads,
-        retry_times: request.retry_times,
-        limit_calls_per_min: request.limit_calls_per_min,
-        include_turnover: request.include_turnover,
-    })?;
+    let prepared = {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        core_prepare_missing_stock_repair_run(CoreMissingStockRepairRunInput {
+            source_path: request.source_path,
+            token: request.token,
+            threads: request.threads,
+            retry_times: request.retry_times,
+            limit_calls_per_min: request.limit_calls_per_min,
+            include_turnover: request.include_turnover,
+        })?
+    };
     let action = prepared.action.clone();
     let action_label = prepared.action_label.clone();
     emit_data_download_event(
@@ -733,6 +786,9 @@ pub async fn run_missing_stock_repair(
     );
 
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         let started_at = Instant::now();
         let result = (|| -> Result<DataDownloadRunResult, String> {
             let progress_app = app.clone();
@@ -809,14 +865,19 @@ pub async fn run_ths_concept_download(
         return Err("download_id 不能为空".to_string());
     }
 
-    let prepared = core_prepare_ths_concept_download_run(CoreThsConceptDownloadRunInput {
-        source_path: request.source_path,
-        retry_enabled: request.retry_enabled,
-        retry_times: request.retry_times,
-        retry_interval_secs: request.retry_interval_secs,
-        concurrent_enabled: request.concurrent_enabled,
-        worker_threads: request.worker_threads,
-    })?;
+    let prepared = {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        core_prepare_ths_concept_download_run(CoreThsConceptDownloadRunInput {
+            source_path: request.source_path,
+            retry_enabled: request.retry_enabled,
+            retry_times: request.retry_times,
+            retry_interval_secs: request.retry_interval_secs,
+            concurrent_enabled: request.concurrent_enabled,
+            worker_threads: request.worker_threads,
+        })?
+    };
     let action = prepared.action.clone();
     let action_label = prepared.action_label.clone();
     emit_data_download_event(
@@ -835,6 +896,9 @@ pub async fn run_ths_concept_download(
     );
 
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         let started_at = Instant::now();
         let result = (|| -> Result<DataDownloadRunResult, String> {
             let progress_app = app.clone();
@@ -911,10 +975,14 @@ pub async fn run_concept_performance_repair(
         return Err("download_id 不能为空".to_string());
     }
 
-    let prepared =
+    let prepared = {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         core_prepare_concept_performance_repair_run(CoreConceptPerformanceRepairRunInput {
             source_path: request.source_path,
-        })?;
+        })?
+    };
     let action = prepared.action.clone();
     let action_label = prepared.action_label.clone();
     emit_data_download_event(
@@ -933,6 +1001,9 @@ pub async fn run_concept_performance_repair(
     );
 
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         let started_at = Instant::now();
         let result = (|| -> Result<DataDownloadRunResult, String> {
             let progress_app = app.clone();
@@ -1002,6 +1073,9 @@ pub async fn check_databases(
     source_path: String,
 ) -> Result<lianghua_app_data::integrity::DatabaseCheckReport, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         lianghua_app_data::integrity::check_databases(&source_path)
     })
     .await
@@ -1018,6 +1092,9 @@ pub async fn repair_database_issues(
         return Err("download_id 不能为空".to_string());
     }
     tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         let started = Instant::now();
         let callback = |progress: CoreDownloadProgress| {
             emit_core_download_progress(
