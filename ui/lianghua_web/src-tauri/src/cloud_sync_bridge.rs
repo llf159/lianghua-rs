@@ -145,3 +145,28 @@ pub async fn estimate_cloud_sync_upload(
     .await
     .map_err(|e| e.to_string())?
 }
+
+#[tauri::command]
+pub async fn transfer_watchlist_cloud(
+    app: tauri::AppHandle,
+    settings: BTreeMap<String, String>,
+    watch_rows: Vec<lianghua_app_market::watch_observe::WatchObserveStoredRow>,
+    mode: cloud_sync::WatchlistTransferMode,
+) -> Result<cloud_sync::WatchlistTransferResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = CLOUD_TASK.try_lock().map_err(|_| "云端操作正在进行")?;
+        let source = crate::warehouse::warehouse_root(&app)?.join("source");
+        cloud_sync::transfer_watchlists(
+            &app.path().app_data_dir().map_err(|e| e.to_string())?,
+            &source,
+            settings,
+            Some(watch_rows),
+            mode,
+            |message| {
+                let _ = app.emit("cloud-sync-progress", message);
+            },
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}

@@ -41,7 +41,14 @@ import {
   pickDateValue,
 } from "../../shared/tradeDate";
 import "./css/WatchObservePage.css";
-import CloudSyncPanel from "./components/CloudSyncPanel";
+import {
+  listCloudData,
+  syncCloud,
+  type WatchlistTransferMode,
+} from "../../apis/cloudSync";
+import { listen } from "@tauri-apps/api/event";
+import "./css/CloudSync.css";
+import "./css/DataImportPage.css";
 
 type ViewMode = "db" | "realtime";
 type WatchObserveSortKey =
@@ -151,6 +158,60 @@ export default function WatchObservePage() {
     } satisfies PersistedWatchObserveState;
   }, []);
   const [cloudBusy, setCloudBusy] = useState(false);
+  const [cloudModalOpen, setCloudModalOpen] = useState(false);
+  const [cloudInfoLoading, setCloudInfoLoading] = useState(false);
+  const [cloudInfoError, setCloudInfoError] = useState(false);
+  const [cloudLastModified, setCloudLastModified] = useState<string | null>(
+    null,
+  );
+  const [cloudProgress, setCloudProgress] = useState("");
+  const [cloudAction, setCloudAction] = useState<WatchlistTransferMode | null>(
+    null,
+  );
+  const [cloudFeedback, setCloudFeedback] = useState<{
+    text: string;
+    kind: "success" | "warning" | "error";
+  } | null>(null);
+  const [cloudInfoRefresh, setCloudInfoRefresh] = useState(0);
+  useEffect(() => {
+    if (!cloudModalOpen) return;
+    let cancelled = false;
+    void listCloudData()
+      .then((items) => {
+        if (cancelled) return;
+        const dates = items
+          .filter(
+            (item) =>
+              item.isHead &&
+              (item.path === "bundles/watchlists.zip" ||
+                item.path === "app/watch_observe.json" ||
+                item.path.startsWith("settings/lh_intraday_monitor_watchlist")),
+          )
+          .map((item) => item.version.createdAt)
+          .filter((value) => Number.isFinite(Date.parse(value)));
+        dates.sort((left, right) => Date.parse(right) - Date.parse(left));
+        setCloudLastModified(dates[0] ?? null);
+      })
+      .catch((infoError) => {
+        if (!cancelled) {
+          setCloudInfoError(true);
+          setCloudFeedback({
+            kind: "error",
+            text: `读取云端失败：${String(infoError)}`,
+          });
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setCloudInfoLoading(false);
+      });
+    const subscription = listen<string>("cloud-sync-progress", (event) => {
+      if (!cancelled) setCloudProgress(event.payload);
+    });
+    return () => {
+      cancelled = true;
+      void subscription.then((unlisten) => unlisten());
+    };
+  }, [cloudModalOpen, cloudInfoRefresh]);
   const [rows, setRows] = useState<WatchObserveRow[]>(
     () => persistedState?.rows ?? [],
   );
@@ -623,7 +684,6 @@ export default function WatchObservePage() {
 
   return (
     <div className="watch-observe-page">
-      <CloudSyncPanel scope="watchlists" disabled={loading || refreshingRealtime || isDeleteMode} onBusyChange={setCloudBusy} onSynced={() => void loadDatabaseRows({ showLoading: false })} />
       <section className="watch-observe-card">
         <div className="watch-observe-section-head">
           <div>
@@ -631,6 +691,122 @@ export default function WatchObservePage() {
             <div className="watch-observe-tip">{topStatusText}</div>
           </div>
         </div>
+        <div className="watch-observe-table-toolbar">
+          <div className="watch-observe-table-toolbar-left">
+            <label className="watch-observe-filter-field">
+              <span>排名参考日</span>
+              <select
+                value={referenceTradeDate}
+                onChange={(event) => setReferenceTradeDate(event.target.value)}
+                disabled={
+                  cloudBusy ||
+                  dateOptionsLoading ||
+                  dateOptions.length === 0 ||
+                  refreshingRealtime
+                }
+              >
+                {dateOptions.length === 0 ? (
+                  <option value="">
+                    {dateOptionsLoading ? "读取中..." : "暂无可选日期"}
+                  </option>
+                ) : null}
+                {dateOptions.map((option) => (
+                  <option key={option} value={option}>
+                    {option}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            {viewMode === "realtime" ? (
+              <button
+                className="watch-observe-toolbar-btn watch-observe-toolbar-btn-secondary"
+                type="button"
+                disabled={cloudBusy || isDeleteMode}
+                onClick={() => void onRestoreDatabase()}
+              >
+                恢复数据库
+              </button>
+            ) : null}
+
+            {isDeleteMode ? (
+              <>
+                <button
+                  className="watch-observe-toolbar-btn watch-observe-toolbar-btn-secondary"
+                  type="button"
+                  onClick={onCancelDeleteMode}
+                >
+                  取消
+                </button>
+                <button
+                  className="watch-observe-toolbar-btn watch-observe-toolbar-btn-danger"
+                  type="button"
+                  onClick={onSaveDeleteChanges}
+                >
+                  保存
+                </button>
+              </>
+            ) : null}
+          </div>
+          <div className="watch-observe-table-toolbar-right">
+            <button
+              className="watch-observe-toolbar-btn watch-observe-toolbar-btn-danger"
+              type="button"
+              onClick={isDeleteMode ? undefined : onEnterDeleteMode}
+              disabled={
+                loading ||
+                rows.length === 0 ||
+                cloudBusy ||
+                isDeleteMode ||
+                refreshingRealtime
+              }
+            >
+              {isDeleteMode ? "删除中" : "删除"}
+            </button>
+            <button
+              className="watch-observe-toolbar-btn watch-observe-toolbar-btn-secondary"
+              type="button"
+              disabled={
+                loading || cloudBusy || refreshingRealtime || isDeleteMode
+              }
+              aria-busy={cloudBusy}
+              aria-haspopup="dialog"
+              aria-expanded={cloudModalOpen}
+              onClick={() => {
+                setCloudFeedback(null);
+                setCloudProgress("");
+                setCloudLastModified(null);
+                setCloudInfoLoading(true);
+                setCloudInfoError(false);
+                setCloudModalOpen(true);
+              }}
+            >
+              同步
+            </button>
+
+            <button
+              className={[
+                "watch-observe-toolbar-btn",
+                "watch-observe-toolbar-btn-primary",
+                refreshingRealtime ? "is-loading" : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
+              type="button"
+              disabled={
+                loading ||
+                rows.length === 0 ||
+                cloudBusy ||
+                refreshingRealtime ||
+                isDeleteMode
+              }
+              onClick={() => void onRefreshRealtime()}
+            >
+              {refreshingRealtime ? "刷新实时中" : "刷新实时"}
+            </button>
+          </div>
+        </div>
+
         {error ? <div className="watch-observe-empty">{error}</div> : null}
         {loading ? (
           <div className="watch-observe-empty">读取自选观察中...</div>
@@ -638,92 +814,6 @@ export default function WatchObservePage() {
           <div className="watch-observe-empty">暂无自选观察数据。</div>
         ) : (
           <>
-            <div className="watch-observe-table-toolbar">
-              <div className="watch-observe-table-toolbar-left">
-                <label className="watch-observe-filter-field">
-                  <span>排名参考日</span>
-                  <select
-                    value={referenceTradeDate}
-                    onChange={(event) =>
-                      setReferenceTradeDate(event.target.value)
-                    }
-                    disabled={
-                      cloudBusy ||
-                      dateOptionsLoading ||
-                      dateOptions.length === 0 ||
-                      refreshingRealtime
-                    }
-                  >
-                    {dateOptions.length === 0 ? (
-                      <option value="">
-                        {dateOptionsLoading ? "读取中..." : "暂无可选日期"}
-                      </option>
-                    ) : null}
-                    {dateOptions.map((option) => (
-                      <option key={option} value={option}>
-                        {option}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-
-                <button
-                  className={[
-                    "watch-observe-toolbar-btn",
-                    "watch-observe-toolbar-btn-primary",
-                    refreshingRealtime ? "is-loading" : "",
-                  ]
-                    .filter(Boolean)
-                    .join(" ")}
-                  type="button"
-                  disabled={cloudBusy || refreshingRealtime || isDeleteMode}
-                  onClick={() => void onRefreshRealtime()}
-                >
-                  {refreshingRealtime ? "刷新实时中" : "刷新实时"}
-                </button>
-
-                {viewMode === "realtime" ? (
-                  <button
-                    className="watch-observe-toolbar-btn watch-observe-toolbar-btn-secondary"
-                    type="button"
-                    disabled={cloudBusy || isDeleteMode}
-                    onClick={() => void onRestoreDatabase()}
-                  >
-                    恢复数据库
-                  </button>
-                ) : null}
-
-                {isDeleteMode ? (
-                  <>
-                    <button
-                      className="watch-observe-toolbar-btn watch-observe-toolbar-btn-secondary"
-                      type="button"
-                      onClick={onCancelDeleteMode}
-                    >
-                      取消
-                    </button>
-                    <button
-                      className="watch-observe-toolbar-btn watch-observe-toolbar-btn-danger"
-                      type="button"
-                      onClick={onSaveDeleteChanges}
-                    >
-                      保存
-                    </button>
-                  </>
-                ) : null}
-              </div>
-              <div className="watch-observe-table-toolbar-right">
-                <button
-                  className="watch-observe-toolbar-btn watch-observe-toolbar-btn-danger"
-                  type="button"
-                  onClick={isDeleteMode ? undefined : onEnterDeleteMode}
-                  disabled={cloudBusy || isDeleteMode || refreshingRealtime}
-                >
-                  {isDeleteMode ? "删除中" : "删除"}
-                </button>
-              </div>
-            </div>
-
             <div
               className={[
                 "watch-observe-table-wrap",
@@ -1098,6 +1188,139 @@ export default function WatchObservePage() {
           </>
         )}
       </section>
+      {cloudModalOpen ? (
+        <div
+          className="settings-modal-backdrop cloud-modal-overlay"
+          onClick={(event) => {
+            if (!cloudBusy && event.target === event.currentTarget)
+              setCloudModalOpen(false);
+          }}
+        >
+          <section
+            className="settings-modal cloud-watch-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="自选网盘同步"
+          >
+            <div className="cloud-config-head">
+              <div>
+                <h3>自选同步</h3>
+                <p>自选观察与监控自选</p>
+              </div>
+              <button
+                className="cloud-config-close"
+                type="button"
+                aria-label="关闭自选同步"
+                disabled={cloudBusy}
+                onClick={() => setCloudModalOpen(false)}
+              >
+                ×
+              </button>
+            </div>
+            <div className="cloud-watch-modified">
+              <span>云端最后修改</span>
+              <time dateTime={cloudLastModified ?? undefined}>
+                {cloudInfoLoading
+                  ? "读取中…"
+                  : cloudLastModified
+                    ? new Date(cloudLastModified).toLocaleString("zh-CN", {
+                        hour12: false,
+                      })
+                    : cloudInfoError
+                      ? "读取失败"
+                      : "暂无云端自选"}
+              </time>
+              <button
+                type="button"
+                disabled={cloudBusy || cloudInfoLoading}
+                aria-label="刷新云端修改时间"
+                onClick={() => {
+                  setCloudFeedback(null);
+                  setCloudInfoLoading(true);
+                  setCloudInfoError(false);
+                  setCloudLastModified(null);
+                  setCloudInfoRefresh((value) => value + 1);
+                }}
+              >
+                刷新
+              </button>
+            </div>
+            <div className="cloud-watch-actions">
+              {(
+                [
+                  ["upload", "上传", "本地替换云端"],
+                  ["download", "下载", "云端替换本地"],
+                  ["merge", "合并", "两端去重，本地信息优先"],
+                ] as const
+              ).map(([mode, label, description]) => (
+                <button
+                  key={mode}
+                  type="button"
+                  className={mode === "merge" ? "is-primary" : ""}
+                  disabled={cloudBusy || cloudInfoLoading}
+                  onClick={async () => {
+                    setCloudBusy(true);
+                    setCloudAction(mode);
+                    setCloudFeedback(null);
+                    setCloudProgress("准备中…");
+                    try {
+                      const result = await syncCloud(
+                        undefined,
+                        false,
+                        "watchlists",
+                        mode,
+                      );
+                      if (mode !== "upload")
+                        await loadDatabaseRows({ showLoading: false });
+                      setCloudLastModified(result.lastModified ?? null);
+                      setCloudFeedback({
+                        kind: result.warnings.length ? "warning" : "success",
+                        text: `${label}完成${result.warnings.length ? `；${result.warnings.join("；")}` : ""}`,
+                      });
+                    } catch (syncError) {
+                      setCloudFeedback({
+                        kind: "error",
+                        text: `${label}失败：${String(syncError)}`,
+                      });
+                    } finally {
+                      setCloudBusy(false);
+                      setCloudAction(null);
+                      setCloudProgress("");
+                    }
+                  }}
+                >
+                  <strong>
+                    {cloudAction === mode ? `${label}中…` : label}
+                  </strong>
+                  <span>{description}</span>
+                </button>
+              ))}
+            </div>
+            <p className="cloud-watch-hint">
+              合并保留两端股票；删除后选上传，让云端与本地一致。
+            </p>
+            {cloudBusy && cloudProgress ? (
+              <p className="cloud-notice cloud-progress" role="status">
+                {cloudProgress}
+              </p>
+            ) : null}
+            {cloudFeedback ? (
+              <p
+                className={
+                  cloudFeedback.kind === "error"
+                    ? "cloud-error"
+                    : cloudFeedback.kind === "warning"
+                      ? "cloud-warning"
+                      : "cloud-notice"
+                }
+                role={cloudFeedback.kind === "error" ? "alert" : "status"}
+              >
+                {cloudFeedback.text}
+              </p>
+            ) : null}
+          </section>
+        </div>
+      ) : null}
     </div>
   );
 }

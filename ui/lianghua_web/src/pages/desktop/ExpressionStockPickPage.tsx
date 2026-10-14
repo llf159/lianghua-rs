@@ -13,8 +13,8 @@ import { useStockPickOutletContext } from './StockPickPage'
 import { readJsonStorage, writeJsonStorage } from '../../shared/storage'
 import { readStoredDefaultBoardFilter } from '../../shared/defaultBoardFilter'
 import {
+  INTRADAY_MONITOR_BOARD_FILTER_STORAGE_KEY,
   writeStoredIntradayMonitorWatchlist,
-  writeStoredIntradayMonitorWatchlistEnabled,
 } from '../../shared/intradayMonitorWatchlist'
 import ExpressionStockPickTemplateManagerModal, {
   type ExpressionStockPickTemplate,
@@ -363,7 +363,11 @@ export default function ExpressionStockPickPage() {
     writeStoredIntradayMonitorWatchlist(
       buildStockCodeText(rows, true, ' ').split(/\s+/),
     )
-    writeStoredIntradayMonitorWatchlistEnabled(true)
+    try {
+      localStorage.setItem(INTRADAY_MONITOR_BOARD_FILTER_STORAGE_KEY, '自选')
+    } catch {
+      // localStorage unavailable
+    }
     navigate('/intraday-monitor')
   }
 

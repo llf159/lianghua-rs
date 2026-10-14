@@ -9,7 +9,7 @@ import {
   getAllMarketMonitorSnapshot,
   setAllMarketVolumeRatioPaused,
   openEastmoneyVerification,
-  useEastmoneyVerifiedSession,
+  useEastmoneyVerifiedSession as connectEastmoneySession,
   stopEastmoneyVerifiedSession,
   type StockLookupRow,
   type AllMarketIndexRow,
@@ -36,12 +36,10 @@ import {
 } from "../../shared/conceptExclusions";
 import { readStoredRealtimeQuoteProvider } from "../../shared/realtimeSettings";
 import {
-  readStoredIntradayMonitorWatchlistEnabled,
+  INTRADAY_MONITOR_BOARD_FILTER_STORAGE_KEY,
   readStoredIntradayMonitorWatchlist,
-  writeStoredIntradayMonitorWatchlistEnabled,
   writeStoredIntradayMonitorWatchlist,
 } from "../../shared/intradayMonitorWatchlist";
-import { readStoredDefaultBoardFilter } from "../../shared/defaultBoardFilter";
 import { STOCK_PICK_BOARD_OPTIONS } from "../../shared/stockPickShared";
 import {
   TableSortButton,
@@ -635,11 +633,24 @@ export default function AllMarketMonitorPage() {
   );
   const [sceneStageThreshold, setSceneStageThreshold] =
     useState<SceneStageThreshold>(() => readLocalStorageSceneStageThreshold());
-  const [boardFilter, setBoardFilter] = useState<BoardFilter>(() =>
-    readStoredIntradayMonitorWatchlistEnabled()
-      ? "自选"
-      : readStoredDefaultBoardFilter(),
-  );
+  const [boardFilter, setBoardFilter] = useState<BoardFilter>(() => {
+    try {
+      const stored = localStorage.getItem(
+        INTRADAY_MONITOR_BOARD_FILTER_STORAGE_KEY,
+      );
+      if (
+        stored === "自选" ||
+        STOCK_PICK_BOARD_OPTIONS.includes(
+          stored as (typeof STOCK_PICK_BOARD_OPTIONS)[number],
+        )
+      ) {
+        return stored as BoardFilter;
+      }
+    } catch {
+      // localStorage unavailable
+    }
+    return "全部";
+  });
   const [topLimitText, setTopLimitText] = useState(() =>
     String(readLocalStorageNumber(LS_KEY_TOP_LIMIT, DEFAULT_TOP_LIMIT)),
   );
@@ -765,7 +776,7 @@ export default function AllMarketMonitorPage() {
     () => new Set(watchlistCodes),
     [watchlistCodes],
   );
-  const watchlistEnabled = !searchStock && boardFilter === "自选";
+  const watchlistSelected = !searchStock && boardFilter === "自选";
   const [watchlistModalOpen, setWatchlistModalOpen] = useState(false);
   const templateEnabled = templateDisplayMode !== "off";
   const showTemplateHitsOnly = templateDisplayMode === "hits_only";
@@ -978,8 +989,15 @@ export default function AllMarketMonitorPage() {
   }, [sideListVisible]);
 
   useEffect(() => {
-    writeStoredIntradayMonitorWatchlistEnabled(watchlistEnabled);
-  }, [watchlistEnabled]);
+    try {
+      localStorage.setItem(
+        INTRADAY_MONITOR_BOARD_FILTER_STORAGE_KEY,
+        boardFilter,
+      );
+    } catch {
+      // localStorage unavailable
+    }
+  }, [boardFilter]);
 
   useEffect(() => {
     const intervalId = window.setInterval(() => {
@@ -1300,7 +1318,10 @@ export default function AllMarketMonitorPage() {
               await invoke("plugin:notification|notify", {
                 options: {
                   id: 3101,
-                  title: `日内量比新高 · ${hits.length} 只`,
+                  title:
+                    hits.length === 1
+                      ? hits[0].name || hits[0].ts_code
+                      : `${hits[0].name || hits[0].ts_code} 等 ${hits.length} 只`,
                   body:
                     hits
                       .slice(0, 5)
@@ -1934,7 +1955,7 @@ export default function AllMarketMonitorPage() {
                   模板 {enabledTemplates.length}/{templates.length}
                 </span>
               ) : null}
-              {watchlistEnabled ? (
+              {watchlistSelected ? (
                 <span>自选 {watchlistCodes.length}只</span>
               ) : null}
             </div>
@@ -2721,9 +2742,8 @@ export default function AllMarketMonitorPage() {
             <div className="all-market-hit-head">
               <div>
                 <h3>异动流水</h3>
-                <span>最新在前 · 同股同类合并计次</span>
               </div>
-              <strong>{visibleEvents.length}</strong>
+              <strong title="最新在前，同股同类合并计次">{visibleEvents.length}</strong>
             </div>
             <div className="all-market-volume-ratio-row">
               <div
@@ -2733,8 +2753,9 @@ export default function AllMarketMonitorPage() {
               >
                 <button
                   type="button"
-                  className={`all-market-toggle all-market-baseline-toggle${volumeRatioEnabled ? " is-active" : ""}`}
-                  aria-pressed={volumeRatioEnabled}
+                  className={`all-market-volume-switch${volumeRatioEnabled ? " is-active" : ""}`}
+                  role="switch"
+                  aria-checked={volumeRatioEnabled}
                   title="独立控制量比分时基准补齐，可在实时监控暂停时开启"
                   onClick={() => {
                     setVolumeRatioStatus(
@@ -2743,7 +2764,8 @@ export default function AllMarketMonitorPage() {
                     setVolumeRatioEnabled((value) => !value);
                   }}
                 >
-                  {volumeRatioEnabled ? "停止盘中量比拉取" : "开启盘中量比拉取"}
+                  <span>量比拉取</span>
+                  <span className="all-market-volume-switch-track" aria-hidden="true" />
                 </button>
                 <div
                   className="eastmoney-session-menu"
@@ -2808,7 +2830,7 @@ export default function AllMarketMonitorPage() {
                             setEastmoneySessionBusy(true);
                             setEastmoneySessionMessage("检查中…");
                             try {
-                              await useEastmoneyVerifiedSession();
+                              await connectEastmoneySession();
                               setEastmoneySessionMessage("已连接");
                             } catch (sessionError) {
                               setEastmoneySessionMessage(
@@ -2974,7 +2996,7 @@ export default function AllMarketMonitorPage() {
               {!visibleEvents.length ? (
                 <div className="all-market-hit-empty">
                   {rows.length === 0
-                    ? "开启监控后记录异动。"
+                    ? "等待监控异动"
                     : "当前筛选下暂无异动。"}
                 </div>
               ) : null}
@@ -3123,7 +3145,7 @@ export default function AllMarketMonitorPage() {
           }}
         >
           <section
-            className="settings-modal settings-modal-narrow"
+            className="settings-modal settings-modal-narrow all-market-config-modal"
             role="dialog"
             aria-modal="true"
             aria-label="实时监控配置项"
@@ -3131,9 +3153,6 @@ export default function AllMarketMonitorPage() {
             <div className="settings-modal-head">
               <div>
                 <h3 className="settings-subtitle-head">配置项</h3>
-                <p className="settings-section-note">
-                  按刷新、涨速异动、量比异动和展示排序分类配置。
-                </p>
               </div>
               <div className="settings-actions">
                 <button
@@ -3147,271 +3166,298 @@ export default function AllMarketMonitorPage() {
             </div>
 
             <div className="all-market-params-form">
-              <h4 className="all-market-config-heading">刷新</h4>
-              <label className="settings-field">
-                <span>实时监控刷新间隔（1–30秒）</span>
-                <input
-                  type="number"
-                  min="1"
-                  max="30"
-                  step="1"
-                  value={refreshSeconds}
-                  onChange={(event) =>
-                    setRefreshSeconds(
-                      Math.min(
-                        30,
-                        Math.max(1, Number(event.target.value) || 1),
+              <section className="all-market-config-section" aria-label="刷新">
+                <h4 className="all-market-config-heading">刷新</h4>
+                <label className="settings-field">
+                  <span>板块范围</span>
+                  <select
+                    value={boardFilter}
+                    onChange={(event) => {
+                      setSearchStock(null);
+                      setBoardFilter(event.target.value as BoardFilter);
+                    }}
+                  >
+                    {([...STOCK_PICK_BOARD_OPTIONS, "自选"] as const).map(
+                      (board) => (
+                        <option key={board} value={board}>
+                          {board}
+                        </option>
                       ),
-                    )
-                  }
-                />
-              </label>
-              <h4 className="all-market-config-heading">涨速异动</h4>
-              <label className="settings-field">
-                <span>涨速周期</span>
-                <select
-                  value={speedPeriod}
-                  onChange={(event) =>
-                    setSpeedPeriod(Number(event.target.value) as SpeedPeriod)
-                  }
-                >
-                  {SPEED_PERIOD_OPTIONS.map((value) => (
-                    <option key={value} value={value}>
-                      {value}秒
-                    </option>
-                  ))}
-                </select>
-              </label>
+                    )}
+                  </select>
+                  <small>同时筛选监控表格和异动流水</small>
+                </label>
+                <label className="settings-field">
+                  <span>刷新间隔（1–30 秒）</span>
+                  <input
+                    type="number"
+                    min="1"
+                    max="30"
+                    step="1"
+                    value={refreshSeconds}
+                    onChange={(event) =>
+                      setRefreshSeconds(
+                        Math.min(
+                          30,
+                          Math.max(1, Number(event.target.value) || 1),
+                        ),
+                      )
+                    }
+                  />
+                </label>
+              </section>
+              <section className="all-market-config-section" aria-label="涨速异动">
+                <h4 className="all-market-config-heading">涨速异动</h4>
+                <label className="settings-field">
+                  <span>涨速周期</span>
+                  <select
+                    value={speedPeriod}
+                    onChange={(event) =>
+                      setSpeedPeriod(Number(event.target.value) as SpeedPeriod)
+                    }
+                  >
+                    {SPEED_PERIOD_OPTIONS.map((value) => (
+                      <option key={value} value={value}>
+                        {value}秒
+                      </option>
+                    ))}
+                  </select>
+                </label>
 
-              <label className="settings-field">
-                <span>涨速命中阈值 %</span>
-                <input
-                  type="number"
-                  min="0.01"
-                  step="0.01"
-                  value={speedThresholdText}
-                  onChange={(event) =>
-                    setSpeedThresholdText(event.target.value)
-                  }
-                />
-              </label>
+                <label className="settings-field">
+                  <span>涨速命中阈值 %</span>
+                  <input
+                    type="number"
+                    min="0.01"
+                    step="0.01"
+                    value={speedThresholdText}
+                    onChange={(event) =>
+                      setSpeedThresholdText(event.target.value)
+                    }
+                  />
+                </label>
 
-              <label className="settings-field">
-                <span>低价校正最低档位</span>
-                <input
-                  type="number"
-                  min="0"
-                  step="1"
-                  inputMode="numeric"
-                  value={speedMinTicksText}
-                  onChange={(event) => setSpeedMinTicksText(event.target.value)}
-                />
-              </label>
+                <label className="settings-field">
+                  <span>低价校正最低档位</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    inputMode="numeric"
+                    value={speedMinTicksText}
+                    onChange={(event) => setSpeedMinTicksText(event.target.value)}
+                  />
+                </label>
+              </section>
+              <section className="all-market-config-section" aria-label="量比异动">
+                <h4 className="all-market-config-heading">量比异动</h4>
+                <label className="settings-field">
+                  <span>实体涨幅下限（%）</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.1"
+                    title="最新价相对开盘价的涨幅；0 不限制"
+                    value={volumeBodyMin}
+                    onChange={(event) =>
+                      setVolumeBodyMin(
+                        Math.max(0, Number(event.target.value) || 0),
+                      )
+                    }
+                  />
+                  <small>相对开盘价；0 不限</small>
+                </label>
+                <label className="settings-field">
+                  <span>排名上限</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    value={volumeRankMax}
+                    onChange={(event) =>
+                      setVolumeRankMax(
+                        Math.max(0, Math.floor(Number(event.target.value) || 0)),
+                      )
+                    }
+                  />
+                  <small title="缺失排名不通过">3日优 / 相似榜任一满足；0 不限</small>
+                </label>
+                <label className="settings-field">
+                  <span>排序 / 高亮阈值</span>
+                  <input
+                    type="number"
+                    min="0.01"
+                    step="0.01"
+                    value={volumeRatioThresholdText}
+                    onChange={(event) =>
+                      setVolumeRatioThresholdText(event.target.value)
+                    }
+                  />
+                </label>
 
-              <h4 className="all-market-config-heading">量比异动</h4>
-              <label className="settings-field">
-                <span>实体最短涨幅 %（0 不限制）</span>
-                <input
-                  type="number"
-                  min="0"
-                  step="0.1"
-                  value={volumeBodyMin}
-                  onChange={(event) =>
-                    setVolumeBodyMin(
-                      Math.max(0, Number(event.target.value) || 0),
-                    )
-                  }
-                />
-              </label>
-              <label className="settings-checkbox-inline">
-                <input
-                  type="checkbox"
-                  checked={volumeBodyAbsolute}
-                  onChange={(event) =>
-                    setVolumeBodyAbsolute(event.target.checked)
-                  }
-                />
-                <span>实体按绝对值判断</span>
-              </label>
-              <label className="settings-checkbox-inline">
-                <input
-                  type="checkbox"
-                  checked={volumeAboveAverage}
-                  onChange={(event) =>
-                    setVolumeAboveAverage(event.target.checked)
-                  }
-                />
-                <span>只看日内均价线上方</span>
-              </label>
-              <label className="settings-field">
-                <span>排名前 N（0 不限制）</span>
-                <input
-                  type="number"
-                  min="0"
-                  step="1"
-                  value={volumeRankMax}
-                  onChange={(event) =>
-                    setVolumeRankMax(
-                      Math.max(0, Math.floor(Number(event.target.value) || 0)),
-                    )
-                  }
-                />
-                <small>3日优或相似榜任一排名满足即可；缺失排名不通过。</small>
-              </label>
-              <p className="settings-section-note all-market-param-expression">
-                实体按最新价相对开盘价的涨幅判断。以上条件同时满足后，量比突破开盘五分钟高点并创日内新高才触发流水、高亮及通知。
-              </p>
-              <label className="settings-field">
-                <span>量比排序 / 高亮阈值</span>
-                <input
-                  type="number"
-                  min="0.01"
-                  step="0.01"
-                  value={volumeRatioThresholdText}
-                  onChange={(event) =>
-                    setVolumeRatioThresholdText(event.target.value)
-                  }
-                />
-              </label>
+                <label className="all-market-setting-switch">
+                  <input
+                    type="checkbox"
+                    role="switch"
+                    checked={volumeBodyAbsolute}
+                    onChange={(event) =>
+                      setVolumeBodyAbsolute(event.target.checked)
+                    }
+                  />
+                  <span>实体取绝对值</span>
+                </label>
+                <label className="all-market-setting-switch">
+                  <input
+                    type="checkbox"
+                    role="switch"
+                    checked={volumeAboveAverage}
+                    onChange={(event) =>
+                      setVolumeAboveAverage(event.target.checked)
+                    }
+                  />
+                  <span>仅均价线上方</span>
+                </label>
+                <p className="settings-section-note all-market-param-expression">
+                  满足筛选条件，突破开盘 5 分钟量比高点并创日内新高时触发。
+                </p>
+                <div className="all-market-param-expression" title="监控运行时通知，同轮异动合并发送">
+                  <label className="all-market-setting-switch">
+                    <input
+                      type="checkbox"
+                      role="switch"
+                      checked={volumeRatioNotifications}
+                      disabled={notificationBusy}
+                      onChange={async (event) => {
+                        if (!event.target.checked) {
+                          volumeRatioNotificationsRef.current = false;
+                          setVolumeRatioNotifications(false);
+                          setNotificationError("");
+                          return;
+                        }
+                        setNotificationBusy(true);
+                        try {
+                          const granted =
+                            (await isPermissionGranted()) ||
+                            (await requestPermission()) === "granted";
+                          volumeRatioNotificationsRef.current = granted;
+                          setVolumeRatioNotifications(granted);
+                          setNotificationError(
+                            granted
+                              ? ""
+                              : "系统未允许通知，请在系统设置中开启本应用通知权限",
+                          );
+                        } catch (permissionError) {
+                          setNotificationError(
+                            `申请系统通知权限失败: ${String(permissionError)}`,
+                          );
+                        } finally {
+                          setNotificationBusy(false);
+                        }
+                      }}
+                    />
+                    <span>系统通知</span>
+                  </label>
+                  {notificationError ? (
+                    <p role="alert">{notificationError}</p>
+                  ) : null}
+                </div>
+              </section>
+              <section className="all-market-config-section" aria-label="展示与排序">
+                <h4 className="all-market-config-heading">展示与排序</h4>
+                <label className="settings-field">
+                  <span>排名高亮阈值</span>
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    value={rankHighlightThresholdText}
+                    onChange={(event) =>
+                      setRankHighlightThresholdText(event.target.value)
+                    }
+                  />
+                </label>
 
-              <div className="all-market-param-expression">
+                <label className="settings-field">
+                  <span>场景等级阈值</span>
+                  <select
+                    value={sceneStageThreshold}
+                    onChange={(event) =>
+                      setSceneStageThreshold(
+                        event.target.value as SceneStageThreshold,
+                      )
+                    }
+                  >
+                    {SCENE_STAGE_THRESHOLD_OPTIONS.map((item) => (
+                      <option key={item.value} value={item.value}>
+                        {item.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="settings-field">
+                  <span>Top N</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    inputMode="numeric"
+                    value={topLimitText}
+                    onChange={(event) => setTopLimitText(event.target.value)}
+                  />
+                </label>
+
+                <label className="settings-field">
+                  <span>其他排序方向</span>
+                  <select
+                    value={otherSortDirection}
+                    onChange={(event) =>
+                      setOtherSortDirection(
+                        event.target.value === "asc" ? "asc" : "desc",
+                      )
+                    }
+                  >
+                    <option value="asc">小数/否在前</option>
+                    <option value="desc">大数/是在前</option>
+                  </select>
+                </label>
+
                 <label className="settings-checkbox-inline all-market-param-compact">
                   <input
                     type="checkbox"
-                    checked={volumeRatioNotifications}
-                    disabled={notificationBusy}
-                    onChange={async (event) => {
-                      if (!event.target.checked) {
-                        volumeRatioNotificationsRef.current = false;
-                        setVolumeRatioNotifications(false);
-                        setNotificationError("");
-                        return;
-                      }
-                      setNotificationBusy(true);
-                      try {
-                        const granted =
-                          (await isPermissionGranted()) ||
-                          (await requestPermission()) === "granted";
-                        volumeRatioNotificationsRef.current = granted;
-                        setVolumeRatioNotifications(granted);
-                        setNotificationError(
-                          granted
-                            ? ""
-                            : "系统未允许通知，请在系统设置中开启本应用通知权限",
-                        );
-                      } catch (permissionError) {
-                        setNotificationError(
-                          `申请系统通知权限失败: ${String(permissionError)}`,
-                        );
-                      } finally {
-                        setNotificationBusy(false);
-                      }
-                    }}
+                    checked={compactMode}
+                    onChange={(event) => setCompactMode(event.target.checked)}
                   />
-                  <span>量比异动系统通知</span>
+                  <span>开启紧凑模式</span>
                 </label>
-                <p className="settings-section-note">
-                  监控运行时，量比突破开盘五分钟高点并创日内新高便通知。同一轮多个触发合并发送。
-                </p>
-                {notificationError ? (
-                  <p role="alert">{notificationError}</p>
-                ) : null}
-              </div>
 
-              <h4 className="all-market-config-heading">展示与排序</h4>
-              <label className="settings-field">
-                <span>排名高亮阈值</span>
-                <input
-                  type="number"
-                  min="1"
-                  step="1"
-                  value={rankHighlightThresholdText}
-                  onChange={(event) =>
-                    setRankHighlightThresholdText(event.target.value)
-                  }
-                />
-              </label>
+                <label className="settings-checkbox-inline all-market-param-side-list">
+                  <input
+                    type="checkbox"
+                    checked={sideListVisible}
+                    onChange={(event) => setSideListVisible(event.target.checked)}
+                  />
+                  <span>显示侧边名单</span>
+                </label>
 
-              <label className="settings-field">
-                <span>场景等级阈值</span>
-                <select
-                  value={sceneStageThreshold}
-                  onChange={(event) =>
-                    setSceneStageThreshold(
-                      event.target.value as SceneStageThreshold,
-                    )
-                  }
-                >
-                  {SCENE_STAGE_THRESHOLD_OPTIONS.map((item) => (
-                    <option key={item.value} value={item.value}>
-                      {item.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label className="settings-field">
-                <span>Top N</span>
-                <input
-                  type="number"
-                  min="0"
-                  step="1"
-                  inputMode="numeric"
-                  value={topLimitText}
-                  onChange={(event) => setTopLimitText(event.target.value)}
-                />
-              </label>
-
-              <label className="settings-field">
-                <span>其他排序方向</span>
-                <select
-                  value={otherSortDirection}
-                  onChange={(event) =>
-                    setOtherSortDirection(
-                      event.target.value === "asc" ? "asc" : "desc",
-                    )
-                  }
-                >
-                  <option value="asc">小数/否在前</option>
-                  <option value="desc">大数/是在前</option>
-                </select>
-              </label>
-
-              <label className="settings-checkbox-inline all-market-param-compact">
-                <input
-                  type="checkbox"
-                  checked={compactMode}
-                  onChange={(event) => setCompactMode(event.target.checked)}
-                />
-                <span>开启紧凑模式</span>
-              </label>
-
-              <label className="settings-checkbox-inline all-market-param-side-list">
-                <input
-                  type="checkbox"
-                  checked={sideListVisible}
-                  onChange={(event) => setSideListVisible(event.target.checked)}
-                />
-                <span>显示侧边名单</span>
-              </label>
-
-              <label className="settings-field all-market-param-expression">
-                <span>其他排序表达式</span>
-                <textarea
-                  className="settings-textarea all-market-param-expression-textarea"
-                  value={otherSortExpression}
-                  onChange={(event) =>
-                    setOtherSortExpression(event.target.value)
-                  }
-                  placeholder="示例：RT_OP；C > RT_AVG；TOTAL_MV_YI"
-                />
-                <small className="all-market-param-expression-hint">
-                  默认使用实时最新一根；表达式需要 REF、MA、RANK
-                  或指标预热时会自动补历史。RANK/SCORE
-                  最新实时一根为空，上一交易日排名用
-                  REF(RANK,1)。提示:可用IF语句二次排序
-                </small>
-              </label>
+                <label className="settings-field all-market-param-expression">
+                  <span>其他排序表达式</span>
+                  <textarea
+                    className="settings-textarea all-market-param-expression-textarea"
+                    value={otherSortExpression}
+                    onChange={(event) =>
+                      setOtherSortExpression(event.target.value)
+                    }
+                    placeholder="示例：RT_OP；C > RT_AVG；TOTAL_MV_YI"
+                  />
+                  <small className="all-market-param-expression-hint">
+                    默认使用实时最新一根；表达式需要 REF、MA、RANK
+                    或指标预热时会自动补历史。RANK/SCORE
+                    最新实时一根为空，上一交易日排名用
+                    REF(RANK,1)。提示:可用IF语句二次排序
+                  </small>
+                </label>
+              </section>
             </div>
           </section>
         </div>

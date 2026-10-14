@@ -3,8 +3,7 @@ import { readJsonStorage, writeJsonStorage } from "./storage";
 
 export const INTRADAY_MONITOR_WATCHLIST_STORAGE_KEY =
   "lh_intraday_monitor_watchlist_v1";
-export const INTRADAY_MONITOR_WATCHLIST_ENABLED_STORAGE_KEY =
-  "lh_intraday_monitor_watchlist_enabled_v1";
+export const INTRADAY_MONITOR_BOARD_FILTER_STORAGE_KEY = "am_board_filter";
 
 export function normalizeIntradayMonitorWatchlistCodes(codes: string[]) {
   const seen = new Set<string>();
@@ -39,30 +38,4 @@ export function writeStoredIntradayMonitorWatchlist(codes: string[]) {
     normalized,
   );
   return normalized;
-}
-
-export function readStoredIntradayMonitorWatchlistEnabled() {
-  try {
-    return (
-      typeof window !== "undefined" &&
-      window.localStorage.getItem(
-        INTRADAY_MONITOR_WATCHLIST_ENABLED_STORAGE_KEY,
-      ) === "1"
-    );
-  } catch {
-    return false;
-  }
-}
-
-export function writeStoredIntradayMonitorWatchlistEnabled(enabled: boolean) {
-  try {
-    if (typeof window !== "undefined") {
-      window.localStorage.setItem(
-        INTRADAY_MONITOR_WATCHLIST_ENABLED_STORAGE_KEY,
-        enabled ? "1" : "0",
-      );
-    }
-  } catch {
-    // localStorage unavailable
-  }
 }

@@ -1,6 +1,12 @@
 mod bundles;
 mod database;
 mod dav;
+mod watchlists;
+
+pub use watchlists::{
+    TransferMode as WatchlistTransferMode, TransferResult as WatchlistTransferResult,
+    transfer as transfer_watchlists,
+};
 
 use chrono::Utc;
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
@@ -557,20 +563,7 @@ pub fn sync_scoped(
         let _guard = SOURCE_ACCESS
             .try_write()
             .map_err(|_| "数据操作正在进行，请完成后再同步")?;
-        let mut files = BTreeMap::new();
-        let watch = app_data.join("watch_observe.json");
-        if watch.exists() {
-            files.insert(
-                "app/watch_observe.json".into(),
-                fs::read(watch).map_err(|e| e.to_string())?,
-            );
-        }
-        for (key, value) in &settings {
-            let path = format!("settings/{key}");
-            if scope.includes(&path) {
-                files.insert(path, value.as_bytes().to_vec());
-            }
-        }
+        let files = watchlists::local_files(app_data, source, &settings)?;
         bundles::snapshots(&files)?
     } else {
         local_snapshots(app_data, source, &settings)?
@@ -1024,7 +1017,6 @@ pub fn setting_keys() -> &'static [&'static str] {
         "lh_strategy_paper_validation_templates_v1",
         "lh_intraday_monitor_realtime_templates_v1",
         "lh_intraday_monitor_watchlist_v1",
-        "lh_intraday_monitor_watchlist_enabled_v1",
         "lh_detail_cyq_model_v1",
         "lh_details_nav_long_press_interval_seconds_v1",
         "lh_details_similarity_nav_mode_v1",
@@ -1041,6 +1033,7 @@ pub fn setting_keys() -> &'static [&'static str] {
         "am_rank_highlight_threshold",
         "am_scene_stage_threshold",
         "am_top_limit",
+        "am_board_filter",
         "am_other_sort_expression",
         "am_other_sort_direction",
         "am_compact_mode",
@@ -1076,7 +1069,7 @@ fn validate_path(path: &str) -> Result<(), String> {
                 | "bundles/browser_settings.zip"
         )
     } else if let Some(key) = path.strip_prefix("settings/") {
-        allowed_setting(key)
+        allowed_setting(key) || key == "lh_intraday_monitor_watchlist_enabled_v1"
     } else if let Some(relative) = path.strip_prefix("source/") {
         matches!(
             relative,

@@ -91,6 +91,8 @@
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+  flex-wrap: wrap;
+  align-items: flex-end;
   margin-bottom: 10px;
 }
 
@@ -102,7 +104,12 @@
   flex-wrap: wrap;
 }
 
+.watch-observe-table-toolbar-right {
+  margin-left: auto;
+}
+
 .watch-observe-toolbar-btn {
+  min-height: 44px;
   border-radius: 8px;
   padding: 6px 14px;
   font-size: 13px;

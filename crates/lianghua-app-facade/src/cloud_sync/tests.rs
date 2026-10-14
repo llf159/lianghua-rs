@@ -41,7 +41,9 @@ fn two_devices_keep_conflicts_deduplicate_and_recover() {
             if matches!(method, "PUT" | "DELETE" | "MKCOL") {
                 *worker_mutations.lock().unwrap() += 1;
             }
-            assert!(path.starts_with("/dav/lianghua-rs/"));
+            assert!(
+                path.starts_with("/dav/lianghua-rs/") || path.starts_with("/dav/watch-transfer/")
+            );
             let mut headers = BTreeMap::new();
             loop {
                 let mut line = String::new();
@@ -375,6 +377,157 @@ fn two_devices_keep_conflicts_deduplicate_and_recover() {
     .unwrap();
     assert_eq!(*object_puts.lock().unwrap(), before);
     fs::write(app_a.join("watch_observe.json"), watch_before).unwrap();
+    // 自选弹窗的三个方向：上传不接收，下载不写云端，合并去重并收敛冲突。
+    let transfer_a = temp.path().join("transfer-a");
+    let transfer_b = temp.path().join("transfer-b");
+    let mut transfer_config = config.clone();
+    transfer_config.folder = "watch-transfer".into();
+    save_config(&transfer_a, transfer_config.clone()).unwrap();
+    save_config(&transfer_b, transfer_config).unwrap();
+    let first_rows = br#"[{"tsCode":"000001.SZ","name":"A","tag":"","concept":""}]"#;
+    let second_rows = br#"[{"tsCode":"600000.SH","name":"B","tag":"","concept":""}]"#;
+    fs::write(transfer_a.join("watch_observe.json"), "[]").unwrap();
+    fs::write(transfer_b.join("watch_observe.json"), "[]").unwrap();
+    let sent = transfer_watchlists(
+        &transfer_a,
+        &source_a,
+        BTreeMap::new(),
+        Some(serde_json::from_slice(first_rows).unwrap()),
+        WatchlistTransferMode::Upload,
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(sent.result.uploaded, 1);
+    assert_eq!(sent.result.downloaded, 0);
+    assert!(sent.last_modified.is_some());
+    assert_eq!(
+        fs::read(transfer_a.join("watch_observe.json")).unwrap(),
+        b"[]"
+    );
+    let before = *mutations.lock().unwrap();
+    let received = transfer_watchlists(
+        &transfer_b,
+        &source_b,
+        BTreeMap::new(),
+        Some(serde_json::from_slice(second_rows).unwrap()),
+        WatchlistTransferMode::Download,
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(*mutations.lock().unwrap(), before);
+    assert_eq!(received.result.uploaded_bytes, 0);
+    assert_eq!(received.last_modified, sent.last_modified);
+    let received_rows: Vec<lianghua_app_market::watch_observe::WatchObserveStoredRow> =
+        read_json(&transfer_b.join("watch_observe.json")).unwrap();
+    assert_eq!(received_rows.len(), 1);
+    assert_eq!(received_rows[0].ts_code, "000001.SZ");
+    let backup = fs::read_dir(source_b.join("cloud_sync_backups"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path().join("watchlists.zip"))
+        .find(|path| path.exists())
+        .unwrap();
+    let saved = bundles::unpack("bundles/watchlists.zip", &fs::read(backup).unwrap()).unwrap();
+    let saved_rows: Vec<lianghua_app_market::watch_observe::WatchObserveStoredRow> =
+        serde_json::from_slice(&saved["app/watch_observe.json"]).unwrap();
+    assert_eq!(saved_rows.len(), 1);
+    assert_eq!(saved_rows[0].ts_code, "600000.SH");
+    fs::write(transfer_b.join("watch_observe.json"), second_rows).unwrap();
+    let merged = transfer_watchlists(
+        &transfer_b,
+        &source_b,
+        BTreeMap::new(),
+        None,
+        WatchlistTransferMode::Merge,
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(merged.result.uploaded, 1);
+    let merged_rows: Vec<lianghua_app_market::watch_observe::WatchObserveStoredRow> =
+        read_json(&transfer_b.join("watch_observe.json")).unwrap();
+    assert_eq!(merged_rows.len(), 2);
+    let unchanged = transfer_watchlists(
+        &transfer_b,
+        &source_b,
+        merged.result.settings.clone(),
+        None,
+        WatchlistTransferMode::Merge,
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(unchanged.result.uploaded, 0);
+    assert_eq!(unchanged.last_modified, merged.last_modified);
+    // 旧设备从较早基线修改，产生两个分支；合并必须保留全部分支股票。
+    fs::write(
+        transfer_a.join("watch_observe.json"),
+        br#"[{"tsCode":"300001.SZ","name":"C","tag":"","concept":""}]"#,
+    )
+    .unwrap();
+    sync_scoped(
+        &transfer_a,
+        &source_a,
+        BTreeMap::new(),
+        false,
+        SyncScope::Watchlists,
+        |_| {},
+    )
+    .unwrap();
+    assert!(
+        transfer_watchlists(
+            &transfer_a,
+            &source_a,
+            BTreeMap::new(),
+            None,
+            WatchlistTransferMode::Download,
+            |_| {}
+        )
+        .err()
+        .unwrap()
+        .contains("多个版本")
+    );
+    transfer_watchlists(
+        &transfer_b,
+        &source_b,
+        merged.result.settings,
+        None,
+        WatchlistTransferMode::Merge,
+        |_| {},
+    )
+    .unwrap();
+    let merged_rows: Vec<lianghua_app_market::watch_observe::WatchObserveStoredRow> =
+        read_json(&transfer_b.join("watch_observe.json")).unwrap();
+    assert_eq!(merged_rows.len(), 3);
+    assert_eq!(
+        list_cloud(&transfer_a)
+            .unwrap()
+            .iter()
+            .filter(|item| item.path == "bundles/watchlists.zip" && item.is_head)
+            .count(),
+        1
+    );
+    // 明确上传空名单可传播删除，仍保留云端历史版本。
+    fs::write(transfer_b.join("watch_observe.json"), "[]").unwrap();
+    transfer_watchlists(
+        &transfer_b,
+        &source_b,
+        BTreeMap::new(),
+        None,
+        WatchlistTransferMode::Upload,
+        |_| {},
+    )
+    .unwrap();
+    transfer_watchlists(
+        &transfer_a,
+        &source_a,
+        BTreeMap::new(),
+        None,
+        WatchlistTransferMode::Download,
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read(transfer_a.join("watch_observe.json")).unwrap(),
+        b"[]"
+    );
     stopped.store(true, Ordering::Relaxed);
     let _ = TcpStream::connect(address);
     worker.join().unwrap();

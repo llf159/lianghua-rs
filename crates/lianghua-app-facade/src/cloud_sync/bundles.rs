@@ -9,7 +9,11 @@ pub(super) fn for_path(path: &str) -> Option<&'static str> {
     if path == "app/watch_observe.json"
         || matches!(
             path.strip_prefix("settings/"),
-            Some("lh_intraday_monitor_watchlist_v1" | "lh_intraday_monitor_watchlist_enabled_v1")
+            Some(
+                "lh_intraday_monitor_watchlist_v1"
+                    | "lh_intraday_monitor_watchlist_enabled_v1"
+                    | "am_board_filter"
+            )
         )
     {
         Some("bundles/watchlists.zip")
