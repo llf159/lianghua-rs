@@ -32,7 +32,7 @@ export function ExpressionSamplesCheck({
     <div className="expression-backtest-section">
       <h3>样本检查</h3>
       <p className="expression-backtest-caption">
-        正样本按残差收益从高到低、负样本从低到高展示；点击股票名称可在详情浮层查看个股，主研究结果本身不依赖浮层。
+        正样本按残差收益从高到低、负样本从低到高展示。
       </p>
       <div className="expression-backtest-tabs" role="tablist">
         <button

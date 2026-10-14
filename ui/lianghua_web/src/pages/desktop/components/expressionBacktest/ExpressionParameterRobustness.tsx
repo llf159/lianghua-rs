@@ -88,7 +88,7 @@ export function ExpressionParameterRobustness({
     <div className="expression-backtest-section">
       <h3>参数鲁棒性</h3>
       <p className="expression-backtest-caption">
-        默认按后端返回的参数枚举顺序展示，点击表头才排序；点击任意一行，下方 walk-forward、分层、
+        默认按参数枚举顺序展示；选中组合后，walk-forward、分层、
         重复性、增量与样本检查会全部切到该参数组合。系统不会自动挑选最佳参数，请比较相邻参数是否方向一致、
         是否只有单点异常突出。所有组合共用同一套 walk-forward calendar（同一次请求里 train/test 日期完全一致），
         样本不足的 fold 计入分母但不计为正窗口。

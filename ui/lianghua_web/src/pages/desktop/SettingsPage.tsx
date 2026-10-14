@@ -678,8 +678,7 @@ export default function SettingsPage() {
       <section className="settings-card">
         <div className="settings-head">
           <div>
-            <h2 className="settings-title">配置项</h2>
-            <p className="settings-section-note">每项设置单独编辑，点击条目打开对应设置弹窗。</p>
+            <h2 className="settings-title">设置</h2>
           </div>
           <div className="settings-actions">
             <button
@@ -1337,7 +1336,7 @@ export default function SettingsPage() {
             <div className="settings-modal-head">
               <div>
                 <h3 className="settings-subtitle-head">概念筛选</h3>
-                <p className="settings-section-note">点击概念可加入或移出排除名单，结果会即时保存。</p>
+                <p className="settings-section-note">更改即时保存。</p>
               </div>
               <div className="settings-actions">
                 <button

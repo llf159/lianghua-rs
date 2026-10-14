@@ -1531,7 +1531,7 @@ export default function SceneLayerBacktestPage() {
 
           {allRuleSummaries.length > 0 ? (
             <div className="scene-layer-layer-summary">
-              <h3>全部策略明细（点击表头排序）</h3>
+              <h3>全部策略明细</h3>
               <p className="scene-layer-caption">
                 衰减验证按策略方向归一化：正分策略上涨、负分策略下跌都记为正向超额；分别比较最近 20/40/60 个有效触发日与此前历史，Δ 为近期减此前。
               </p>

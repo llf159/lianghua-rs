@@ -859,7 +859,7 @@ export default function ChartIndicatorSettingsModal({ open, onClose, onLoaded }:
                   onDelete={deleteTooltip}
                 />
               ) : (
-                <div className="settings-empty-soft">选择一个序列、标记或浮窗字段后，在这里编辑详细参数。</div>
+                <div className="settings-empty-soft">未选择配置项</div>
               )}
 
               <div className="chart-indicator-preview">

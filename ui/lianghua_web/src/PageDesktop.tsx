@@ -16,7 +16,7 @@ const strategyTriggerSimilarityMenuItem = {
   label: "综合相似走势分析",
 };
 const marketAnalysisMenuItem = { path: "/market-analysis", label: "市场分析" };
-const settingsMenuItem = { path: "/settings", label: "配置项" };
+const settingsMenuItem = { path: "/settings", label: "设置" };
 
 const strategySubRoutes = [
   { path: "/strategy/rules", label: "打分策略" },

@@ -423,9 +423,6 @@ export default function DataImportPage() {
         <div className="settings-head">
           <div>
             <h2 className="settings-title">数据管理</h2>
-            <p className="settings-subtitle">
-              统一管理导入文件，支持目录扫描、压缩包恢复、单文件导入、导出和缓存迁移。
-            </p>
           </div>
 
           <div className="settings-actions">
@@ -500,7 +497,6 @@ export default function DataImportPage() {
       <section className="settings-card">
         <div className="settings-section-head">
           <h3 className="settings-subtitle-head">文件清单</h3>
-          <p className="settings-section-note">支持逐个导入、导出或删除文件。</p>
         </div>
 
         <div className="settings-file-groups">

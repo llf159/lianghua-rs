@@ -2442,9 +2442,6 @@ export default function StrategyTriggerPage() {
           >
             {loading ? "读取中..." : "读取统计"}
           </button>
-          <span className="strategy-trigger-tip">
-            点击“读取统计”更新总览；点击列表里的策略名或上方单策略可查看明细。
-          </span>
         </div>
         {error ? <div className="strategy-trigger-error">{error}</div> : null}
       </section>

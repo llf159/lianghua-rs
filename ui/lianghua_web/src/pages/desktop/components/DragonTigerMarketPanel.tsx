@@ -176,9 +176,6 @@ export default function DragonTigerMarketPanel({
       <div className="dragon-tiger-heading">
         <div>
           <h2 className="scene-layer-title">龙虎榜</h2>
-          <p className="scene-layer-caption">
-            点击股票查看当日买卖席位与历史上榜记录；行情入口保留在个股龙虎榜详情中。
-          </p>
         </div>
         <div className="dragon-tiger-view-controls">
           <label className="scene-layer-field">

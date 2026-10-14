@@ -326,11 +326,6 @@ export default function CloudSyncPanel({
             <div className="cloud-empty">
               <span aria-hidden="true">☁</span>
               <strong>{filter ? "没有匹配的数据" : "云端还没有数据"}</strong>
-              <p>
-                {filter
-                  ? "换个关键词，或关闭历史版本筛选后再试。"
-                  : "点击“双向同步”上传本机内容，或下载已有的云端数据。"}
-              </p>
             </div>
           ) : (
             <div

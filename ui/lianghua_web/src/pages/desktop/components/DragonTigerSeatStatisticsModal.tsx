@@ -144,7 +144,6 @@ export default function DragonTigerSeatStatisticsModal({
                     <span>偏好股票</span>
                     <strong>按上榜次数排序</strong>
                   </div>
-                  <small>点击股票名称查看行情</small>
                 </div>
                 <div className="dragon-tiger-detail-table-wrap">
                   <table className="dragon-tiger-detail-table dragon-tiger-seat-favorite-table">

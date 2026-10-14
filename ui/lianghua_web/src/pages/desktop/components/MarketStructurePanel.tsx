@@ -68,7 +68,7 @@ export default function MarketStructurePanel({
         <div>
           <h3>市场结构周期</h3>
           <p className="scene-layer-caption">
-            守住防线则持续，破位则改变，收回则重新核对；点击刷新后按当前参考日读取。
+            守住防线则持续，破位则改变，收回则重新核对。
           </p>
         </div>
         <button
@@ -105,7 +105,7 @@ export default function MarketStructurePanel({
       ) : null}
       {!loading && !data && !error ? (
         <p className="scene-layer-caption">
-          点击“刷新周期”读取当前参考日的结构。
+          尚未读取
         </p>
       ) : null}
       {data ? (

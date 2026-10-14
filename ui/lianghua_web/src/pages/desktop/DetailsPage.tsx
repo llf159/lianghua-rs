@@ -8452,7 +8452,6 @@ export default function DetailsPage({
           <div className="details-section-head details-section-head-strategy details-scene-overview-head">
             <div>
               <h3 className="details-subtitle">Scene 状态总览</h3>
-              <p className="details-note">点击场景查看状态、得分和策略变化。</p>
             </div>
             <div className="details-strategy-nav">
               <button

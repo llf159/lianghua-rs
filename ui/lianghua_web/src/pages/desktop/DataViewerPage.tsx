@@ -558,7 +558,7 @@ export default function DataViewerPage() {
             )}
           </>
         ) : (
-          <div className="settings-empty-soft">设置好筛选条件后，点击“查询数据”加载结果。</div>
+          <div className="settings-empty-soft">尚未查询</div>
         )}
       </section>
     </div>

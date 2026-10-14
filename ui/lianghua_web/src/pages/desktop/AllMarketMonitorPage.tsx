@@ -2183,8 +2183,8 @@ export default function AllMarketMonitorPage() {
                   {kind === "concept" ? "个组合" : "个行业"}
                 </span>
               </h3>
-              <p title="按当前行情池有效行情聚合 · 加权涨幅按总市值加权 · 点击组合联动列表">
-                等权 / 总市值加权 · 点击组合联动列表
+              <p title="按当前行情池有效行情聚合 · 加权涨幅按总市值加权">
+                等权 / 总市值加权
               </p>
             </div>
             <IntradayMarketGroupTable

@@ -1728,7 +1728,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
           <span>
             {normalizedSearchKeyword
               ? `匹配 ${filteredScenes.length} / ${scenes.length} 个 scene`
-              : '点击 scene 打开浮窗'}
+              : `${scenes.length} 个 scene`}
           </span>
         </div>
         {filteredScenes.length === 0 ? (
@@ -2684,7 +2684,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
           >
             <div className="strategy-manage-list-head strategy-manage-bulk-head">
               <strong>策略整体编辑</strong>
-              <span>候选池点选加入；Scene 方块内点 Rule 即移出；保存前只改临时草稿</span>
+              <span>保存前的修改为临时草稿</span>
             </div>
 
             <div className="strategy-manage-bulk-top-inline">
@@ -2727,7 +2727,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
             >
               <section className="strategy-manage-bulk-board-col strategy-manage-bulk-board-col-pool">
                 <div className="strategy-manage-list-head">
-                  <strong>候选 Rule 池（点击放入当前目标 Scene）</strong>
+                  <strong>候选 Rule 池</strong>
                   <span>{bulkFilteredRules.length} / {bulkCandidateRuleCount} 条候选</span>
                 </div>
                 <div className="strategy-manage-bulk-filter-bar strategy-manage-bulk-filter-bar-simple strategy-manage-bulk-filter-bar-compact">
@@ -2771,7 +2771,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
 
               <section className="strategy-manage-bulk-board-col strategy-manage-bulk-board-col-center strategy-manage-bulk-board-col-scenes">
                 <div className="strategy-manage-list-head">
-                  <strong>Scene 篮子区（点击 Scene 设为放入目标）</strong>
+                  <strong>Scene 篮子区</strong>
                   <span>{refactorRules.length} 条在篮子内</span>
                 </div>
                 <div className="strategy-manage-bulk-validation">
@@ -2865,7 +2865,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
                               onClick={() => removeRuleFromScene(index)}
                             >
                               <div className="strategy-manage-rule-card-name">{rule.name || '未命名 Rule'}</div>
-                              <div className="strategy-manage-tip">{rule.stage} · {rule.scope_way} · 点击移出</div>
+                              <div className="strategy-manage-tip">{rule.stage} · {rule.scope_way}</div>
                             </button>
                           ))}
                         </div>

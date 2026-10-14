@@ -693,7 +693,6 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
         <div className="strategy-asset-head">
           <div>
             <h3>策略资产中心</h3>
-            <p>排名策略和筹码策略分区管理，当前文件、备份和恢复动作集中在这里。</p>
           </div>
           <div className="strategy-asset-actions">
             <button className="strategy-asset-btn" type="button" onClick={() => void loadStatus()} disabled={isBusy}>
