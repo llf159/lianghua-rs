@@ -303,7 +303,7 @@ export default function IntradayChart({
       <div className="details-intraday-head">
         <div>
           <h3 className="details-subtitle">分时图</h3>
-          <span className="details-intraday-source">腾讯 · 当日分钟行情</span>
+          <span className="details-intraday-source">{data?.source === "eastmoney" ? "东财" : "腾讯"} · 当日分钟行情</span>
         </div>
         <div className="details-intraday-head-actions" role="group" aria-label="分时图操作">
           {expanded && points.length === 0 ? refreshButton : null}
@@ -358,7 +358,7 @@ export default function IntradayChart({
         <div className="details-intraday-ratio-notice">量比暂不可用：{data.volume_ratio_error}</div>
       ) : null}
       {expanded && !error && loading && points.length === 0 ? (
-        <div className="details-intraday-empty">正在读取腾讯分时行情...</div>
+        <div className="details-intraday-empty">正在读取分时行情...</div>
       ) : null}
       {expanded && !error && !loading && data && points.length === 0 ? (
         <div className="details-intraday-empty">当前接口未返回分钟数据</div>

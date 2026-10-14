@@ -1,5 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
-import { isPermissionGranted, requestPermission } from "@tauri-apps/plugin-notification";
+import {
+  isPermissionGranted,
+  requestPermission,
+} from "@tauri-apps/plugin-notification";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ensureManagedSourcePath } from "../../apis/managedSource";
 import {
@@ -51,7 +54,6 @@ import { readJsonStorage, writeJsonStorage } from "../../shared/storage";
 import "./css/AllMarketMonitorPage.css";
 import "./css/DataImportPage.css";
 
-const POLL_INTERVAL_MS = 1000;
 const HISTORY_KEEP_MS = 90_000;
 const DEFAULT_SPEED_PERIOD = 10;
 const DEFAULT_SPEED_THRESHOLD = 2;
@@ -634,7 +636,9 @@ export default function AllMarketMonitorPage() {
   const [sceneStageThreshold, setSceneStageThreshold] =
     useState<SceneStageThreshold>(() => readLocalStorageSceneStageThreshold());
   const [boardFilter, setBoardFilter] = useState<BoardFilter>(() =>
-    readStoredIntradayMonitorWatchlistEnabled() ? "自选" : readStoredDefaultBoardFilter(),
+    readStoredIntradayMonitorWatchlistEnabled()
+      ? "自选"
+      : readStoredDefaultBoardFilter(),
   );
   const [topLimitText, setTopLimitText] = useState(() =>
     String(readLocalStorageNumber(LS_KEY_TOP_LIMIT, DEFAULT_TOP_LIMIT)),
@@ -685,6 +689,56 @@ export default function AllMarketMonitorPage() {
     null,
   );
   const [showParams, setShowParams] = useState(false);
+  const [refreshSeconds, setRefreshSeconds] = useState(() =>
+    Math.min(30, Math.max(1, readLocalStorageNumber("am_refresh_seconds", 1))),
+  );
+  const [volumeBodyMin, setVolumeBodyMin] = useState(() =>
+    Math.max(0, readLocalStorageNumber("am_volume_body_min", 0)),
+  );
+  const [volumeBodyAbsolute, setVolumeBodyAbsolute] = useState(() =>
+    readLocalStorageBoolean("am_volume_body_absolute", false),
+  );
+  const [volumeAboveAverage, setVolumeAboveAverage] = useState(() =>
+    readLocalStorageBoolean("am_volume_above_average", false),
+  );
+  const [volumeRankMax, setVolumeRankMax] = useState(() =>
+    Math.max(0, readLocalStorageNumber("am_volume_rank_max", 0)),
+  );
+  const volumeConditionsRef = useRef({
+    volumeBodyMin,
+    volumeBodyAbsolute,
+    volumeAboveAverage,
+    volumeRankMax,
+  });
+  volumeConditionsRef.current = {
+    volumeBodyMin,
+    volumeBodyAbsolute,
+    volumeAboveAverage,
+    volumeRankMax,
+  };
+  useEffect(() => {
+    try {
+      for (const [key, value] of Object.entries({
+        am_refresh_seconds: refreshSeconds,
+        am_volume_body_min: volumeBodyMin,
+        am_volume_body_absolute: volumeBodyAbsolute,
+        am_volume_above_average: volumeAboveAverage,
+        am_volume_rank_max: volumeRankMax,
+      }))
+        localStorage.setItem(key, String(value));
+    } catch {
+      /* 存储不可用时仍允许本次设置 */
+    }
+  }, [
+    refreshSeconds,
+    volumeBodyMin,
+    volumeBodyAbsolute,
+    volumeAboveAverage,
+    volumeRankMax,
+  ]);
+  const [eventsHeld, setEventsHeld] = useState(false);
+  const [heldEvents, setHeldEvents] = useState<MonitorEvent[]>([]);
+  const eventListRef = useRef<HTMLDivElement>(null);
   const [volumeRatioNotifications, setVolumeRatioNotifications] = useState(() =>
     readLocalStorageBoolean("am_volume_ratio_notifications", false),
   );
@@ -695,7 +749,10 @@ export default function AllMarketMonitorPage() {
 
   useEffect(() => {
     try {
-      localStorage.setItem("am_volume_ratio_notifications", String(volumeRatioNotifications));
+      localStorage.setItem(
+        "am_volume_ratio_notifications",
+        String(volumeRatioNotifications),
+      );
     } catch {
       // localStorage unavailable
     }
@@ -746,7 +803,6 @@ export default function AllMarketMonitorPage() {
     () => templates.filter((template) => template.enabled),
     [templates],
   );
-  const isVolumeRatioBoard = primarySortKey === "realtime_vol_ratio";
   const showOtherSortColumn = primarySortKey === "other_sort_value";
   const showHitPanel = sideListVisible;
   const topLimit = useMemo(
@@ -979,7 +1035,9 @@ export default function AllMarketMonitorPage() {
     function onKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
         setEastmoneySessionOpen(false);
-        eastmoneySessionMenuRef.current?.querySelector<HTMLButtonElement>(".eastmoney-session-trigger")?.focus();
+        eastmoneySessionMenuRef.current
+          ?.querySelector<HTMLButtonElement>(".eastmoney-session-trigger")
+          ?.focus();
       }
     }
     document.addEventListener("pointerdown", onPointerDown);
@@ -1010,15 +1068,20 @@ export default function AllMarketMonitorPage() {
 
   useEffect(() => {
     volumeRatioEnabledRef.current = volumeRatioEnabled;
-    void setAllMarketVolumeRatioPaused(!volumeRatioEnabled).catch((pauseError) => {
-      setError(`切换盘中量比拉取失败: ${String(pauseError)}`);
-      setVolumeRatioEnabled(false);
-    });
+    void setAllMarketVolumeRatioPaused(!volumeRatioEnabled).catch(
+      (pauseError) => {
+        setError(`切换盘中量比拉取失败: ${String(pauseError)}`);
+        setVolumeRatioEnabled(false);
+      },
+    );
   }, [volumeRatioEnabled]);
 
-  useEffect(() => () => {
-    void setAllMarketVolumeRatioPaused(true).catch(() => {});
-  }, []);
+  useEffect(
+    () => () => {
+      void setAllMarketVolumeRatioPaused(true).catch(() => {});
+    },
+    [],
+  );
 
   const refreshSnapshot = useCallback(async () => {
     if (
@@ -1061,7 +1124,10 @@ export default function AllMarketMonitorPage() {
       if (enabledRef.current) {
         setMarketStatus(result.market_status_message ?? "");
       }
-      setVolumeRatioStatus(result.volume_ratio_status_message ?? (volumeRatioEnabledRef.current ? "等待分时数据" : ""));
+      setVolumeRatioStatus(
+        result.volume_ratio_status_message ??
+          (volumeRatioEnabledRef.current ? "等待分时数据" : ""),
+      );
       if (enabledRef.current && result.market_active === false) {
         if (!volumeRatioEnabledRef.current) {
           window.clearInterval(pollTimerRef.current);
@@ -1079,6 +1145,7 @@ export default function AllMarketMonitorPage() {
       const capturedAt = Date.now();
       const nextRows = result.rows ?? [];
       const nextIndexRows = result.index_rows ?? [];
+      const conditions = volumeConditionsRef.current;
       const nextVolumeRatioNewHighTimes = new Map<string, number>();
       const resetVolumeRatioCodes = new Set<string>();
       for (const row of nextRows) {
@@ -1103,6 +1170,15 @@ export default function AllMarketMonitorPage() {
         const dayHigh = newDay ? high : Math.max(high, previous.high);
         // 首次补齐时仅当前正处于新高才提示，避免把中途启动前的历史突破补报。
         if (
+          (conditions.volumeBodyMin === 0 ||
+            (isFiniteNumber(row.realtime_change_open_pct) &&
+              (conditions.volumeBodyAbsolute
+                ? Math.abs(row.realtime_change_open_pct)
+                : row.realtime_change_open_pct) >= conditions.volumeBodyMin)) &&
+          (!conditions.volumeAboveAverage || isAboveAvgPrice(row)) &&
+          (conditions.volumeRankMax === 0 ||
+            isRankHighlight(row.best_rank_3d, conditions.volumeRankMax) ||
+            isRankHighlight(row.similarity_rank, conditions.volumeRankMax)) &&
           openingReady &&
           isFiniteNumber(current) &&
           current > openingHigh &&
@@ -1211,8 +1287,13 @@ export default function AllMarketMonitorPage() {
       setFetchedCount(result.fetched_count ?? 0);
       setError("");
       setTemplateWarning(result.template_warning_message ?? "");
-      if (volumeRatioNotificationsRef.current && nextVolumeRatioNewHighTimes.size > 0) {
-        const hits = nextRows.filter((row) => nextVolumeRatioNewHighTimes.has(row.ts_code));
+      if (
+        volumeRatioNotificationsRef.current &&
+        nextVolumeRatioNewHighTimes.size > 0
+      ) {
+        const hits = nextRows.filter((row) =>
+          nextVolumeRatioNewHighTimes.has(row.ts_code),
+        );
         try {
           if (await isPermissionGranted()) {
             if (volumeRatioNotificationsRef.current && enabledRef.current) {
@@ -1220,14 +1301,25 @@ export default function AllMarketMonitorPage() {
                 options: {
                   id: 3101,
                   title: `日内量比新高 · ${hits.length} 只`,
-                  body: hits.slice(0, 5).map((row) => `${row.name} ${row.ts_code} 量比 ${formatNumber(row.realtime_vol_ratio)}`).join("；")
-                    + (hits.length > 5 ? `；另有 ${hits.length - 5} 只，详见异动记录` : ""),
+                  body:
+                    hits
+                      .slice(0, 5)
+                      .map(
+                        (row) =>
+                          `${row.name} ${row.ts_code} 量比 ${formatNumber(row.realtime_vol_ratio)}`,
+                      )
+                      .join("；") +
+                    (hits.length > 5
+                      ? `；另有 ${hits.length - 5} 只，详见异动记录`
+                      : ""),
                 },
               });
               setNotificationError("");
             }
           } else {
-            setNotificationError("系统通知权限已关闭，请在系统设置中允许本应用发送通知");
+            setNotificationError(
+              "系统通知权限已关闭，请在系统设置中允许本应用发送通知",
+            );
           }
         } catch (notifyError) {
           setNotificationError(`量比异动通知失败: ${String(notifyError)}`);
@@ -1260,13 +1352,19 @@ export default function AllMarketMonitorPage() {
       if (!inFlightRef.current) {
         void refreshSnapshot();
       }
-    }, POLL_INTERVAL_MS);
+    }, refreshSeconds * 1000);
     pollTimerRef.current = intervalId;
 
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [enabled, volumeRatioEnabled, refreshSnapshot, sourcePathTrimmed]);
+  }, [
+    enabled,
+    volumeRatioEnabled,
+    refreshSnapshot,
+    sourcePathTrimmed,
+    refreshSeconds,
+  ]);
 
   const speedMapsByPeriod = useMemo(() => {
     const now = Date.now();
@@ -1630,7 +1728,7 @@ export default function AllMarketMonitorPage() {
   ]);
 
   const visibleEvents = useMemo(() => {
-    const filtered = monitorEvents
+    const filtered = (eventsHeld ? heldEvents : monitorEvents)
       .filter((event) => {
         const row = event.record;
         return (
@@ -1649,6 +1747,8 @@ export default function AllMarketMonitorPage() {
     return filtered;
   }, [
     monitorEvents,
+    eventsHeld,
+    heldEvents,
     searchStock,
     hitPanelMode,
     speedPeriod,
@@ -1812,7 +1912,7 @@ export default function AllMarketMonitorPage() {
   const statusText = enabled
     ? loading
       ? "抓取中"
-      : "每秒刷新"
+      : `每${refreshSeconds}秒刷新`
     : rows.length > 0
       ? "已暂停，保留快照"
       : "已暂停";
@@ -1895,7 +1995,6 @@ export default function AllMarketMonitorPage() {
                 {enabled ? "爬虫运行中" : "爬虫已暂停"}
               </span>
             </button>
-
           </div>
         </div>
 
@@ -1965,7 +2064,7 @@ export default function AllMarketMonitorPage() {
                 className="all-market-params-btn"
                 onClick={() => setShowParams(true)}
               >
-                ⚙ 参数
+                ⚙ 配置项
               </button>
             </div>
           </div>
@@ -2050,67 +2149,6 @@ export default function AllMarketMonitorPage() {
         {templateWarning ? (
           <div className="all-market-warning">{templateWarning}</div>
         ) : null}
-        <div className="all-market-volume-ratio-row">
-          <div className="all-market-volume-ratio-controls" role="group" aria-label="量比分时抓取">
-            <button
-              type="button"
-              className={`all-market-toggle all-market-baseline-toggle${volumeRatioEnabled ? " is-active" : ""}`}
-              aria-pressed={volumeRatioEnabled}
-              title="独立控制量比分时基准补齐，可在实时监控暂停时开启"
-              onClick={() => {
-                setVolumeRatioStatus(volumeRatioEnabled ? "已暂停" : "准备拉取…");
-                setVolumeRatioEnabled((value) => !value);
-              }}
-            >
-              {volumeRatioEnabled ? "停止盘中量比拉取" : "开启盘中量比拉取"}
-            </button>
-            <div className="eastmoney-session-menu" ref={eastmoneySessionMenuRef}>
-              <button type="button" className="eastmoney-session-trigger" title="东方财富访问验证" aria-expanded={eastmoneySessionOpen} aria-controls="eastmoney-session-popover" onClick={() => setEastmoneySessionOpen((value) => !value)}>东财验证</button>
-              {eastmoneySessionOpen ? <div className="eastmoney-session-popover" id="eastmoney-session-popover">
-                <div className="eastmoney-session-popover-head">
-                  <strong>东财验证</strong>
-                  <button type="button" aria-label="关闭东财验证弹窗" onClick={() => setEastmoneySessionOpen(false)}>关闭</button>
-                </div>
-                <div className="eastmoney-session-actions" role="group" aria-label="东财验证操作" aria-busy={eastmoneySessionBusy}>
-                  <button className="all-market-toggle" type="button" disabled={eastmoneySessionBusy} onClick={async () => {
-                    setEastmoneySessionBusy(true);
-                    try {
-                      await openEastmoneyVerification();
-                      setEastmoneySessionMessage("验证后点击“检查连接”。");
-                    } catch (sessionError) {
-                      setEastmoneySessionMessage(String(sessionError));
-                    } finally { setEastmoneySessionBusy(false); }
-                  }}>打开验证页</button>
-                  <button className="all-market-toggle" type="button" disabled={eastmoneySessionBusy} onClick={async () => {
-                    setEastmoneySessionBusy(true);
-                    setEastmoneySessionMessage("检查中…");
-                    try {
-                      await useEastmoneyVerifiedSession();
-                      setEastmoneySessionMessage("已连接");
-                    } catch (sessionError) {
-                      setEastmoneySessionMessage(`连接失败：${String(sessionError)}`);
-                    } finally { setEastmoneySessionBusy(false); }
-                  }}>检查连接</button>
-                  <button className="all-market-toggle" type="button" disabled={eastmoneySessionBusy} onClick={async () => {
-                    setEastmoneySessionBusy(true);
-                    try {
-                      await stopEastmoneyVerifiedSession();
-                      setEastmoneySessionMessage("已停用");
-                    } catch (sessionError) {
-                      setEastmoneySessionMessage(String(sessionError));
-                    } finally { setEastmoneySessionBusy(false); }
-                  }}>停用会话</button>
-                </div>
-                {eastmoneySessionMessage ? <p role="status">{eastmoneySessionMessage}</p> : null}
-              </div> : null}
-            </div>
-          </div>
-          {volumeRatioEnabled || volumeRatioStatus ? (
-            <span className="all-market-volume-ratio-progress" role="status">
-              {volumeRatioStatus || "准备拉取…"}
-            </span>
-          ) : null}
-        </div>
       </section>
 
       <div className="all-market-group-grid">
@@ -2172,7 +2210,6 @@ export default function AllMarketMonitorPage() {
           }
         >
           <div className="all-market-table-head">
-            {isVolumeRatioBoard ? <h3>量比榜</h3> : null}
             <div
               className="all-market-board-tabs"
               role="group"
@@ -2688,6 +2725,137 @@ export default function AllMarketMonitorPage() {
               </div>
               <strong>{visibleEvents.length}</strong>
             </div>
+            <div className="all-market-volume-ratio-row">
+              <div
+                className="all-market-volume-ratio-controls"
+                role="group"
+                aria-label="量比分时抓取"
+              >
+                <button
+                  type="button"
+                  className={`all-market-toggle all-market-baseline-toggle${volumeRatioEnabled ? " is-active" : ""}`}
+                  aria-pressed={volumeRatioEnabled}
+                  title="独立控制量比分时基准补齐，可在实时监控暂停时开启"
+                  onClick={() => {
+                    setVolumeRatioStatus(
+                      volumeRatioEnabled ? "已暂停" : "准备拉取…",
+                    );
+                    setVolumeRatioEnabled((value) => !value);
+                  }}
+                >
+                  {volumeRatioEnabled ? "停止盘中量比拉取" : "开启盘中量比拉取"}
+                </button>
+                <div
+                  className="eastmoney-session-menu"
+                  ref={eastmoneySessionMenuRef}
+                >
+                  <button
+                    type="button"
+                    className="eastmoney-session-trigger"
+                    title="东方财富访问验证"
+                    aria-expanded={eastmoneySessionOpen}
+                    aria-controls="eastmoney-session-popover"
+                    onClick={() => setEastmoneySessionOpen((value) => !value)}
+                  >
+                    东财验证
+                  </button>
+                  {eastmoneySessionOpen ? (
+                    <div
+                      className="eastmoney-session-popover"
+                      id="eastmoney-session-popover"
+                    >
+                      <div className="eastmoney-session-popover-head">
+                        <strong>东财验证</strong>
+                        <button
+                          type="button"
+                          aria-label="关闭东财验证弹窗"
+                          onClick={() => setEastmoneySessionOpen(false)}
+                        >
+                          关闭
+                        </button>
+                      </div>
+                      <div
+                        className="eastmoney-session-actions"
+                        role="group"
+                        aria-label="东财验证操作"
+                        aria-busy={eastmoneySessionBusy}
+                      >
+                        <button
+                          className="all-market-toggle"
+                          type="button"
+                          disabled={eastmoneySessionBusy}
+                          onClick={async () => {
+                            setEastmoneySessionBusy(true);
+                            try {
+                              await openEastmoneyVerification();
+                              setEastmoneySessionMessage(
+                                "验证后点击“检查连接”。",
+                              );
+                            } catch (sessionError) {
+                              setEastmoneySessionMessage(String(sessionError));
+                            } finally {
+                              setEastmoneySessionBusy(false);
+                            }
+                          }}
+                        >
+                          打开验证页
+                        </button>
+                        <button
+                          className="all-market-toggle"
+                          type="button"
+                          disabled={eastmoneySessionBusy}
+                          onClick={async () => {
+                            setEastmoneySessionBusy(true);
+                            setEastmoneySessionMessage("检查中…");
+                            try {
+                              await useEastmoneyVerifiedSession();
+                              setEastmoneySessionMessage("已连接");
+                            } catch (sessionError) {
+                              setEastmoneySessionMessage(
+                                `连接失败：${String(sessionError)}`,
+                              );
+                            } finally {
+                              setEastmoneySessionBusy(false);
+                            }
+                          }}
+                        >
+                          检查连接
+                        </button>
+                        <button
+                          className="all-market-toggle"
+                          type="button"
+                          disabled={eastmoneySessionBusy}
+                          onClick={async () => {
+                            setEastmoneySessionBusy(true);
+                            try {
+                              await stopEastmoneyVerifiedSession();
+                              setEastmoneySessionMessage("已停用");
+                            } catch (sessionError) {
+                              setEastmoneySessionMessage(String(sessionError));
+                            } finally {
+                              setEastmoneySessionBusy(false);
+                            }
+                          }}
+                        >
+                          停用会话
+                        </button>
+                      </div>
+                      {eastmoneySessionMessage ? (
+                        <p role="status">{eastmoneySessionMessage}</p>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+              {volumeRatioEnabled || volumeRatioStatus ? (
+                <span
+                  className="all-market-volume-ratio-progress"
+                  role="status"
+                >
+                  {volumeRatioStatus || "准备拉取…"}
+                </span>
+              ) : null}
+            </div>
             <div
               className="all-market-event-tabs"
               role="group"
@@ -2707,6 +2875,8 @@ export default function AllMarketMonitorPage() {
                   className={hitPanelMode === kind ? "is-active" : ""}
                   aria-pressed={hitPanelMode === kind}
                   onClick={() => {
+                    setEventsHeld(false);
+                    eventListRef.current?.scrollTo({ top: 0 });
                     setHitPanelMode(kind);
                     setOpenHitTsCode(null);
                   }}
@@ -2715,7 +2885,29 @@ export default function AllMarketMonitorPage() {
                 </button>
               ))}
             </div>
-            <div className="all-market-hit-list">
+            {eventsHeld ? (
+              <button
+                type="button"
+                className="all-market-params-btn"
+                onClick={() => {
+                  setEventsHeld(false);
+                  eventListRef.current?.scrollTo({ top: 0 });
+                }}
+              >
+                正在查看历史 · 回到最新
+              </button>
+            ) : null}
+            <div
+              className="all-market-hit-list"
+              ref={eventListRef}
+              onScroll={(event) => {
+                const away = event.currentTarget.scrollTop > 8;
+                if (away && !eventsHeld) {
+                  setHeldEvents(visibleEvents);
+                  setEventsHeld(true);
+                } else if (!away && eventsHeld) setEventsHeld(false);
+              }}
+            >
               {visibleEvents.map((event) => {
                 const record = event.record;
                 return (
@@ -2934,13 +3126,13 @@ export default function AllMarketMonitorPage() {
             className="settings-modal settings-modal-narrow"
             role="dialog"
             aria-modal="true"
-            aria-label="实时监控参数"
+            aria-label="实时监控配置项"
           >
             <div className="settings-modal-head">
               <div>
-                <h3 className="settings-subtitle-head">监控参数</h3>
+                <h3 className="settings-subtitle-head">配置项</h3>
                 <p className="settings-section-note">
-                  调整实时监控的涨速计算与展示参数。
+                  按刷新、涨速异动、量比异动和展示排序分类配置。
                 </p>
               </div>
               <div className="settings-actions">
@@ -2955,6 +3147,26 @@ export default function AllMarketMonitorPage() {
             </div>
 
             <div className="all-market-params-form">
+              <h4 className="all-market-config-heading">刷新</h4>
+              <label className="settings-field">
+                <span>实时监控刷新间隔（1–30秒）</span>
+                <input
+                  type="number"
+                  min="1"
+                  max="30"
+                  step="1"
+                  value={refreshSeconds}
+                  onChange={(event) =>
+                    setRefreshSeconds(
+                      Math.min(
+                        30,
+                        Math.max(1, Number(event.target.value) || 1),
+                      ),
+                    )
+                  }
+                />
+              </label>
+              <h4 className="all-market-config-heading">涨速异动</h4>
               <label className="settings-field">
                 <span>涨速周期</span>
                 <select
@@ -2996,8 +3208,61 @@ export default function AllMarketMonitorPage() {
                 />
               </label>
 
+              <h4 className="all-market-config-heading">量比异动</h4>
               <label className="settings-field">
-                <span>量比榜 / 高亮阈值</span>
+                <span>实体最短涨幅 %（0 不限制）</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.1"
+                  value={volumeBodyMin}
+                  onChange={(event) =>
+                    setVolumeBodyMin(
+                      Math.max(0, Number(event.target.value) || 0),
+                    )
+                  }
+                />
+              </label>
+              <label className="settings-checkbox-inline">
+                <input
+                  type="checkbox"
+                  checked={volumeBodyAbsolute}
+                  onChange={(event) =>
+                    setVolumeBodyAbsolute(event.target.checked)
+                  }
+                />
+                <span>实体按绝对值判断</span>
+              </label>
+              <label className="settings-checkbox-inline">
+                <input
+                  type="checkbox"
+                  checked={volumeAboveAverage}
+                  onChange={(event) =>
+                    setVolumeAboveAverage(event.target.checked)
+                  }
+                />
+                <span>只看日内均价线上方</span>
+              </label>
+              <label className="settings-field">
+                <span>排名前 N（0 不限制）</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="1"
+                  value={volumeRankMax}
+                  onChange={(event) =>
+                    setVolumeRankMax(
+                      Math.max(0, Math.floor(Number(event.target.value) || 0)),
+                    )
+                  }
+                />
+                <small>3日优或相似榜任一排名满足即可；缺失排名不通过。</small>
+              </label>
+              <p className="settings-section-note all-market-param-expression">
+                实体按最新价相对开盘价的涨幅判断。以上条件同时满足后，量比突破开盘五分钟高点并创日内新高才触发流水、高亮及通知。
+              </p>
+              <label className="settings-field">
+                <span>量比排序 / 高亮阈值</span>
                 <input
                   type="number"
                   min="0.01"
@@ -3024,12 +3289,20 @@ export default function AllMarketMonitorPage() {
                       }
                       setNotificationBusy(true);
                       try {
-                        const granted = await isPermissionGranted() || await requestPermission() === "granted";
+                        const granted =
+                          (await isPermissionGranted()) ||
+                          (await requestPermission()) === "granted";
                         volumeRatioNotificationsRef.current = granted;
                         setVolumeRatioNotifications(granted);
-                        setNotificationError(granted ? "" : "系统未允许通知，请在系统设置中开启本应用通知权限");
+                        setNotificationError(
+                          granted
+                            ? ""
+                            : "系统未允许通知，请在系统设置中开启本应用通知权限",
+                        );
                       } catch (permissionError) {
-                        setNotificationError(`申请系统通知权限失败: ${String(permissionError)}`);
+                        setNotificationError(
+                          `申请系统通知权限失败: ${String(permissionError)}`,
+                        );
                       } finally {
                         setNotificationBusy(false);
                       }
@@ -3037,10 +3310,15 @@ export default function AllMarketMonitorPage() {
                   />
                   <span>量比异动系统通知</span>
                 </label>
-                <p className="settings-section-note">监控运行时，量比突破开盘五分钟高点并创日内新高便通知。同一轮多个触发合并发送。</p>
-                {notificationError ? <p role="alert">{notificationError}</p> : null}
+                <p className="settings-section-note">
+                  监控运行时，量比突破开盘五分钟高点并创日内新高便通知。同一轮多个触发合并发送。
+                </p>
+                {notificationError ? (
+                  <p role="alert">{notificationError}</p>
+                ) : null}
               </div>
 
+              <h4 className="all-market-config-heading">展示与排序</h4>
               <label className="settings-field">
                 <span>排名高亮阈值</span>
                 <input

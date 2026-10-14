@@ -46,7 +46,7 @@ export function listCloudData() {
 export function deleteCloudVersion(item: CloudItem) {
   return invoke<void>('delete_cloud_sync_version', { path: item.path, versionId: item.version.id })
 }
-export async function syncCloud(item?: CloudItem, downloadOnly = false) {
+export async function syncCloud(item?: CloudItem, downloadOnly = false, scope: 'management' | 'watchlists' = 'management') {
   const keys = await invoke<string[]>('get_cloud_sync_setting_keys')
   const settings: Record<string, string> = {}
   const before = new Map<string, string | null>()
@@ -57,7 +57,7 @@ export async function syncCloud(item?: CloudItem, downloadOnly = false) {
   }
   const result = await invoke<CloudSyncResult>(item ? 'restore_cloud_sync_version' : 'run_cloud_sync', {
     settings,
-    ...(item ? { path: item.path, versionId: item.version.id } : { downloadOnly }),
+    ...(item ? { path: item.path, versionId: item.version.id } : { downloadOnly, scope }),
   })
   // 不覆盖网络等待期间新增的本机编辑；下载版本仍保留在云端和已校验缓存。
   for (const [key, value] of Object.entries(result.settings)) {

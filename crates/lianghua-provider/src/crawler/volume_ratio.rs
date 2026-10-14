@@ -148,67 +148,8 @@ pub fn parse_eastmoney_volume_ratio(
     ts_code: &str,
     average_daily_volume: f64,
 ) -> Result<TencentVolumeRatioData, String> {
-    let response: serde_json::Value =
-        serde_json::from_str(raw).map_err(|e| format!("解析东财分时失败: {e}"))?;
-    if response["rc"].as_i64() != Some(0) {
-        return Err(format!("东财分时返回错误: {}", response["rc"]));
-    }
-    let symbol = ts_code_to_tencent_code(ts_code)?;
-    let data = &response["data"];
-    if data["code"].as_str() != Some(&symbol[2..])
-        || data["market"].as_i64() != Some(if symbol.starts_with("sh") { 1 } else { 0 })
-    {
-        return Err(format!("东财分时标的不匹配: {ts_code}"));
-    }
-    let rows = data["trends"].as_array().ok_or("东财分时缺少数据")?;
-    let mut trade_date = None;
-    let mut cumulative_vol = 0.0;
-    let mut cumulative_amount = 0.0;
-    let mut normalized = Vec::new();
-    let mut previous_time = String::new();
-    for row in rows {
-        let raw = row.as_str().ok_or("东财分时行不是文本")?;
-        let fields = raw.split(',').collect::<Vec<_>>();
-        if fields.len() < 7 {
-            return Err(format!("东财分时字段不足: {raw}"));
-        }
-        let (date, time) = fields[0].split_once(' ').ok_or("东财分时时间格式错误")?;
-        let date = super::intraday::normalize_trade_date(&date.replace('-', ""))?;
-        if trade_date
-            .as_ref()
-            .is_some_and(|previous| previous != &date)
-        {
-            return Err("东财单日分时包含多个日期".to_string());
-        }
-        trade_date = Some(date);
-        let time = time.replace(':', "");
-        if time.len() != 4
-            || !time.bytes().all(|value| value.is_ascii_digit())
-            || (!previous_time.is_empty() && time <= previous_time)
-        {
-            return Err("东财分时时间乱序或重复".to_string());
-        }
-        previous_time = time.clone();
-        let volume = super::intraday::parse_non_negative_f64(fields[5], "volume", raw)?;
-        let amount = super::intraday::parse_non_negative_f64(fields[6], "amount", raw)?;
-        // 09:26 的竞价量必须带到 09:30，午休之后也沿用上午累计量。
-        if time.as_str() <= "1500" {
-            cumulative_vol += volume;
-            cumulative_amount += amount;
-        }
-        if intraday_trading_minutes(&time).is_some() {
-            normalized.push(format!(
-                "{time} {} {cumulative_vol} {cumulative_amount}",
-                fields[2]
-            ));
-        }
-    }
-    let trade_date = trade_date.ok_or("东财分时为空")?;
-    let normalized = serde_json::json!({
-        "code": 0,
-        "data": {(symbol): {"data": {"date": trade_date, "data": normalized}}}
-    });
-    parse_tencent_volume_ratio(&normalized.to_string(), ts_code, average_daily_volume)
+    let normalized = super::intraday::normalize_eastmoney_intraday_text(raw, ts_code)?;
+    parse_tencent_volume_ratio(&normalized, ts_code, average_daily_volume)
 }
 
 pub fn fetch_eastmoney_volume_ratio(
@@ -216,29 +157,7 @@ pub fn fetch_eastmoney_volume_ratio(
     ts_code: &str,
     average_daily_volume: f64,
 ) -> Result<TencentVolumeRatioData, String> {
-    let symbol = ts_code_to_tencent_code(ts_code)?;
-    let secid = format!(
-        "{}.{}",
-        if symbol.starts_with("sh") { 1 } else { 0 },
-        &symbol[2..]
-    );
-    let raw = http
-        .get("https://push2.eastmoney.com/api/qt/stock/trends2/get")
-        .query(&[
-            ("secid", secid.as_str()),
-            ("fields1", "f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11"),
-            ("fields2", "f51,f52,f53,f54,f55,f56,f57,f58"),
-            ("ndays", "1"),
-            ("iscr", "1"),
-        ])
-        .header("Referer", "https://quote.eastmoney.com/")
-        .header("User-Agent", "Mozilla/5.0")
-        .send()
-        .map_err(|e| super::intraday::format_intraday_request_error("东财", ts_code, e))?
-        .error_for_status()
-        .map_err(|e| super::intraday::format_intraday_http_error("东财", ts_code, e))?
-        .text()
-        .map_err(|e| format!("读取东财分时失败: {e:?}"))?;
+    let raw = super::intraday::fetch_eastmoney_intraday_text(http, ts_code)?;
     parse_eastmoney_volume_ratio(&raw, ts_code, average_daily_volume)
 }
 
@@ -504,7 +423,7 @@ mod tests {
 
     #[test]
     fn eastmoney_cumulative_volume_matches_tencent_including_auction() {
-        let raw = r#"{"rc":0,"data":{"code":"000001","market":0,"trends":[
+        let raw = r#"{"rc":0,"data":{"code":"000001","market":0,"name":"平安银行","preClose":11.50,"trends":[
             "2026-10-12 09:26,11.62,11.62,11.62,11.62,7746,9000852,11.62",
             "2026-10-12 09:30,11.62,11.62,11.62,11.62,0,0,11.62",
             "2026-10-12 09:31,11.67,11.67,11.67,11.67,29180,34025034.96,11.65",
@@ -514,6 +433,18 @@ mod tests {
             "0930 11.62 7746 9000852", "0931 11.67 36926 43025886.96",
             "0935 11.69 99200 115804392.61"
         ]}}}}"#;
+        let normalized =
+            super::super::intraday::normalize_eastmoney_intraday_text(raw, "000001.SZ").unwrap();
+        let chart =
+            super::super::intraday::parse_tencent_intraday_text(&normalized, "000001.SZ").unwrap();
+        assert_eq!(chart.points[0].cumulative_vol, 7746.0);
+        let summary = chart.summary.unwrap();
+        assert_eq!(summary.pre_close, 11.50);
+        assert_eq!(summary.open, 11.62);
+        assert_eq!(summary.latest_price, 11.69);
+        assert_eq!(summary.high, 11.69);
+        assert_eq!(summary.low, 11.62);
+        assert!((summary.total_amount - 115804392.61).abs() < 1e-6);
         let em = parse_eastmoney_volume_ratio(raw, "000001.SZ", 100000.0).unwrap();
         let qq = parse_tencent_volume_ratio(qq, "000001.SZ", 100000.0).unwrap();
         assert!(!em.opening_window_complete());

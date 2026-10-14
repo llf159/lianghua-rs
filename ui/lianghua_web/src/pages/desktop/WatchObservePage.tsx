@@ -41,6 +41,7 @@ import {
   pickDateValue,
 } from "../../shared/tradeDate";
 import "./css/WatchObservePage.css";
+import CloudSyncPanel from "./components/CloudSyncPanel";
 
 type ViewMode = "db" | "realtime";
 type WatchObserveSortKey =
@@ -149,6 +150,7 @@ export default function WatchObservePage() {
         typeof parsed.refreshSummary === "string" ? parsed.refreshSummary : "",
     } satisfies PersistedWatchObserveState;
   }, []);
+  const [cloudBusy, setCloudBusy] = useState(false);
   const [rows, setRows] = useState<WatchObserveRow[]>(
     () => persistedState?.rows ?? [],
   );
@@ -621,6 +623,7 @@ export default function WatchObservePage() {
 
   return (
     <div className="watch-observe-page">
+      <CloudSyncPanel scope="watchlists" disabled={loading || refreshingRealtime || isDeleteMode} onBusyChange={setCloudBusy} onSynced={() => void loadDatabaseRows({ showLoading: false })} />
       <section className="watch-observe-card">
         <div className="watch-observe-section-head">
           <div>
@@ -645,6 +648,7 @@ export default function WatchObservePage() {
                       setReferenceTradeDate(event.target.value)
                     }
                     disabled={
+                      cloudBusy ||
                       dateOptionsLoading ||
                       dateOptions.length === 0 ||
                       refreshingRealtime
@@ -672,7 +676,7 @@ export default function WatchObservePage() {
                     .filter(Boolean)
                     .join(" ")}
                   type="button"
-                  disabled={refreshingRealtime || isDeleteMode}
+                  disabled={cloudBusy || refreshingRealtime || isDeleteMode}
                   onClick={() => void onRefreshRealtime()}
                 >
                   {refreshingRealtime ? "刷新实时中" : "刷新实时"}
@@ -682,7 +686,7 @@ export default function WatchObservePage() {
                   <button
                     className="watch-observe-toolbar-btn watch-observe-toolbar-btn-secondary"
                     type="button"
-                    disabled={isDeleteMode}
+                    disabled={cloudBusy || isDeleteMode}
                     onClick={() => void onRestoreDatabase()}
                   >
                     恢复数据库
@@ -713,7 +717,7 @@ export default function WatchObservePage() {
                   className="watch-observe-toolbar-btn watch-observe-toolbar-btn-danger"
                   type="button"
                   onClick={isDeleteMode ? undefined : onEnterDeleteMode}
-                  disabled={isDeleteMode || refreshingRealtime}
+                  disabled={cloudBusy || isDeleteMode || refreshingRealtime}
                 >
                   {isDeleteMode ? "删除中" : "删除"}
                 </button>

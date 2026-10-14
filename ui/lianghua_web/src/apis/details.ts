@@ -278,6 +278,7 @@ export type TencentIntradaySummary = {
 }
 
 export type TencentIntradayData = {
+  source?: 'tencent' | 'eastmoney'
   ts_code: string
   trade_date: string
   summary?: TencentIntradaySummary | null

@@ -37,6 +37,7 @@ pub struct TencentIntradaySummary {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TencentIntradayData {
+    pub source: &'static str,
     pub ts_code: String,
     pub trade_date: String,
     pub summary: Option<TencentIntradaySummary>,
@@ -256,6 +257,7 @@ pub fn parse_tencent_intraday_text(
     })(&wrapper.qt, &symbol)?;
 
     Ok(TencentIntradayData {
+        source: "tencent",
         ts_code: normalized_ts_code,
         trade_date,
         summary,
@@ -531,4 +533,153 @@ mod tests {
         assert!((8.0..=12.0).contains(&upper_change_pct));
         assert!((-12.0..=-8.0).contains(&lower_change_pct));
     }
+}
+
+pub fn normalize_eastmoney_intraday_text(raw: &str, ts_code: &str) -> Result<String, String> {
+    let response: serde_json::Value =
+        serde_json::from_str(raw).map_err(|e| format!("解析东财分时失败: {e}"))?;
+    if response["rc"].as_i64() != Some(0) {
+        return Err(format!("东财分时返回错误: {}", response["rc"]));
+    }
+    let symbol = ts_code_to_tencent_code(ts_code)?;
+    let data = &response["data"];
+    if data["code"].as_str() != Some(&symbol[2..])
+        || data["market"].as_i64() != Some(if symbol.starts_with("sh") { 1 } else { 0 })
+    {
+        return Err(format!("东财分时标的不匹配: {ts_code}"));
+    }
+    let rows = data["trends"].as_array().ok_or("东财分时缺少数据")?;
+    let mut trade_date = None;
+    let mut cumulative_vol = 0.0;
+    let mut cumulative_amount = 0.0;
+    let mut normalized = Vec::new();
+    let mut previous_time = String::new();
+    for row in rows {
+        let raw = row.as_str().ok_or("东财分时行不是文本")?;
+        let fields = raw.split(',').collect::<Vec<_>>();
+        if fields.len() < 7 {
+            return Err(format!("东财分时字段不足: {raw}"));
+        }
+        let (date, time) = fields[0].split_once(' ').ok_or("东财分时时间格式错误")?;
+        let date = normalize_trade_date(&date.replace('-', ""))?;
+        if trade_date
+            .as_ref()
+            .is_some_and(|previous| previous != &date)
+        {
+            return Err("东财单日分时包含多个日期".to_string());
+        }
+        trade_date = Some(date);
+        let time = time.replace(':', "");
+        if time.len() != 4
+            || !time.bytes().all(|value| value.is_ascii_digit())
+            || (!previous_time.is_empty() && time <= previous_time)
+        {
+            return Err("东财分时时间乱序或重复".to_string());
+        }
+        previous_time = time.clone();
+        let volume = parse_non_negative_f64(fields[5], "volume", raw)?;
+        let amount = parse_non_negative_f64(fields[6], "amount", raw)?;
+        // 09:26 的竞价量必须带到 09:30，午休之后也沿用上午累计量。
+        if time.as_str() <= "1500" {
+            cumulative_vol += volume;
+            cumulative_amount += amount;
+        }
+        if super::volume_ratio::intraday_trading_minutes(&time).is_some() {
+            normalized.push(format!(
+                "{time} {} {cumulative_vol} {cumulative_amount}",
+                fields[2]
+            ));
+        }
+    }
+    let trade_date = trade_date.ok_or("东财分时为空")?;
+    let mut qt = serde_json::Map::new();
+    if let Some(pre_close) = data["preClose"]
+        .as_f64()
+        .filter(|value| value.is_finite() && *value > 0.0)
+    {
+        let mut fields = vec![String::new(); 52];
+        fields[1] = data["name"].as_str().unwrap_or_default().to_string();
+        fields[4] = pre_close.to_string();
+        let mut open = None;
+        let mut high = f64::NEG_INFINITY;
+        let mut low = f64::INFINITY;
+        let mut latest = 0.0;
+        for row in rows {
+            let fields_row = row
+                .as_str()
+                .ok_or("东财分时行不是文本")?
+                .split(',')
+                .collect::<Vec<_>>();
+            let (_, time) = fields_row[0]
+                .split_once(' ')
+                .ok_or("东财分时时间格式错误")?;
+            if time > "15:00" {
+                continue;
+            }
+            let close =
+                parse_non_negative_f64(fields_row[2], "price", row.as_str().unwrap_or_default())?;
+            if time <= "09:30" {
+                open = Some(close);
+            }
+            if time >= "09:30" {
+                open.get_or_insert(close);
+                high = high.max(parse_non_negative_f64(
+                    fields_row[3],
+                    "high",
+                    fields_row[0],
+                )?);
+                low = low.min(parse_non_negative_f64(fields_row[4], "low", fields_row[0])?);
+                latest = close;
+            }
+        }
+        if let Some(open) = open.filter(|_| high.is_finite() && low.is_finite()) {
+            fields[3] = latest.to_string();
+            fields[5] = open.to_string();
+            fields[33] = high.to_string();
+            fields[34] = low.to_string();
+            fields[36] = cumulative_vol.to_string();
+            if cumulative_vol > 0.0 {
+                fields[51] = (cumulative_amount / (cumulative_vol * 100.0)).to_string();
+            }
+            // 腾讯汇总成交额以万元表示。
+            fields[37] = (cumulative_amount / 10000.0).to_string();
+            fields[32] = ((latest / pre_close - 1.0) * 100.0).to_string();
+            qt.insert(symbol.clone(), serde_json::json!(fields));
+        }
+    }
+    let normalized = serde_json::json!({
+        "code": 0,
+        "data": {(symbol): {"data": {"date": trade_date, "data": normalized}, "qt": qt}}
+    });
+    Ok(normalized.to_string())
+}
+
+pub fn fetch_eastmoney_intraday_text(
+    http: &reqwest::blocking::Client,
+    ts_code: &str,
+) -> Result<String, String> {
+    let symbol = ts_code_to_tencent_code(ts_code)?;
+    let secid = format!(
+        "{}.{}",
+        if symbol.starts_with("sh") { 1 } else { 0 },
+        &symbol[2..]
+    );
+    let raw = http
+        .get("https://push2.eastmoney.com/api/qt/stock/trends2/get")
+        .query(&[
+            ("secid", secid.as_str()),
+            ("fields1", "f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11"),
+            ("fields2", "f51,f52,f53,f54,f55,f56,f57,f58"),
+            ("ndays", "1"),
+            ("iscr", "1"),
+        ])
+        .header("Referer", "https://quote.eastmoney.com/")
+        .header("User-Agent", "Mozilla/5.0")
+        .send()
+        .map_err(|e| format_intraday_request_error("东财", ts_code, e))?
+        .error_for_status()
+        .map_err(|e| format_intraday_http_error("东财", ts_code, e))?
+        .text()
+        .map_err(|e| format!("读取东财分时失败: {e:?}"))?;
+    Ok(raw)
 }

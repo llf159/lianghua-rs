@@ -10,8 +10,8 @@ use lianghua_data::data::source_db_path;
 use lianghua_provider::crawler::{
     SinaQuote,
     volume_ratio::{
-        TencentVolumeRatioData, fetch_eastmoney_volume_ratio, fetch_msn_volume_ratio,
-        fetch_tencent_volume_ratio, intraday_trading_minutes,
+        TencentVolumeRatioData, fetch_msn_volume_ratio, fetch_tencent_volume_ratio,
+        intraday_trading_minutes,
     },
 };
 
@@ -276,17 +276,16 @@ impl Cache {
             .min_by_key(|&index| deadlines[index])?;
         let wait = deadlines[source].saturating_duration_since(now);
         if wait.is_zero() {
-            let interval =
-                self.request_interval_ms[source].max(if source == 2 { 500 } else { 100 });
+            let interval = self.request_interval_ms[source].max(if source == 2 { 40 } else { 60 });
             self.next_request_at[source] = Some(now + Duration::from_millis(interval));
         }
         Some((source, wait))
     }
 
     fn throttle_source(&mut self, source: usize, now: Instant) {
-        self.cooldown_until[source] = Some(now + Duration::from_secs(60));
+        self.cooldown_until[source] = Some(now + Duration::from_secs(20));
         self.request_interval_ms[source] = self.request_interval_ms[source]
-            .max(if source == 2 { 500 } else { 100 })
+            .max(if source == 2 { 40 } else { 60 })
             .saturating_mul(2)
             .min(2000);
     }
@@ -340,6 +339,20 @@ pub struct VolumeRatioSnapshot {
 static CACHE: OnceLock<Arc<Mutex<Cache>>> = OnceLock::new();
 type EastmoneyBrowserFetch = Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>;
 static EASTMONEY_BROWSER_FETCH: Mutex<Option<EastmoneyBrowserFetch>> = Mutex::new(None);
+
+pub fn fetch_eastmoney_intraday_text(
+    http: &reqwest::blocking::Client,
+    ts_code: &str,
+) -> Result<String, String> {
+    let fetch = EASTMONEY_BROWSER_FETCH
+        .lock()
+        .map_err(|_| "东财浏览器会话锁已损坏")?
+        .clone();
+    match fetch {
+        Some(fetch) => fetch(ts_code),
+        None => lianghua_provider::crawler::intraday::fetch_eastmoney_intraday_text(http, ts_code),
+    }
+}
 
 pub fn set_eastmoney_browser_fetch(fetch: Option<EastmoneyBrowserFetch>) -> Result<(), String> {
     *EASTMONEY_BROWSER_FETCH
@@ -519,16 +532,10 @@ pub fn snapshot(
                         } else if source == 2 {
                             fetch_msn_volume_ratio(&http, &ts_code, average)
                         } else {
-                            let browser_fetch = EASTMONEY_BROWSER_FETCH.lock()
-                                .map_err(|_| "东财浏览器会话锁已损坏".to_string())
-                                .map(|fetch| fetch.clone());
-                            browser_fetch.and_then(|fetch| match fetch {
-                                Some(fetch) => fetch(&ts_code).and_then(|raw| {
-                                    lianghua_provider::crawler::volume_ratio::parse_eastmoney_volume_ratio(
-                                        &raw, &ts_code, average,
-                                    )
-                                }),
-                                None => fetch_eastmoney_volume_ratio(&http, &ts_code, average),
+                            fetch_eastmoney_intraday_text(&http, &ts_code).and_then(|raw| {
+                                lianghua_provider::crawler::volume_ratio::parse_eastmoney_volume_ratio(
+                                    &raw, &ts_code, average,
+                                )
                             })
                         }
                     } else {
@@ -826,31 +833,31 @@ mod tests {
         );
         assert_eq!(
             cache.reserve_source(now, false, 0).unwrap(),
-            (0, Duration::from_millis(100))
+            (0, Duration::from_millis(60))
         );
         cache.throttle_source(0, now);
         assert_eq!(
             cache
-                .reserve_source(now + Duration::from_millis(100), false, 0)
+                .reserve_source(now + Duration::from_millis(60), false, 0)
                 .unwrap(),
             (1, Duration::ZERO)
         );
-        assert_eq!(cache.request_interval_ms[0], 200);
+        assert_eq!(cache.request_interval_ms[0], 120);
         assert_eq!(cache.request_interval_ms[1], 0);
         cache.throttle_source(1, now);
-        assert_eq!(cache.request_interval_ms[1], 200);
-        assert!(cache.reserve_source(now, false, 0).unwrap().1 >= Duration::from_secs(60));
+        assert_eq!(cache.request_interval_ms[1], 120);
+        assert!(cache.reserve_source(now, false, 0).unwrap().1 >= Duration::from_secs(20));
         for status in [429, 500, 501, 502, 503, 504] {
             let mut cache = Cache::default();
             cache.handle_fetch_error(0, &format!("腾讯分时 HTTP 错误; HTTP状态={status};"), now);
-            assert_eq!(cache.cooldown_until[0], Some(now + Duration::from_secs(60)));
-            assert_eq!(cache.request_interval_ms[0], 200);
+            assert_eq!(cache.cooldown_until[0], Some(now + Duration::from_secs(20)));
+            assert_eq!(cache.request_interval_ms[0], 120);
             assert_eq!(
                 cache.reserve_source(now, false, 0).unwrap(),
                 (1, Duration::ZERO)
             );
             cache.handle_fetch_error(0, "请求腾讯分时失败（连接失败）", now);
-            assert_eq!(cache.cooldown_until[0], Some(now + Duration::from_secs(60)));
+            assert_eq!(cache.cooldown_until[0], Some(now + Duration::from_secs(20)));
         }
         let mut cache = Cache::default();
         cache.handle_fetch_error(1, "请求东财分时失败（请求超时）", now);
@@ -872,7 +879,7 @@ mod tests {
         cache.reserve_source(now, false, 0).unwrap();
         assert_eq!(
             cache.reserve_source(now, false, 0).unwrap(),
-            (0, Duration::from_millis(100))
+            (0, Duration::from_millis(60))
         );
         assert_eq!(cache.next_request_at[2], None);
         assert_eq!(
@@ -881,14 +888,14 @@ mod tests {
         );
         assert_eq!(
             cache.next_request_at[2],
-            Some(now + Duration::from_millis(500))
+            Some(now + Duration::from_millis(40))
         );
         cache.handle_fetch_error(2, "MSN HTTP状态=429;", now);
-        assert_eq!(cache.request_interval_ms[2], 1000);
-        assert_eq!(cache.cooldown_until[2], Some(now + Duration::from_secs(60)));
+        assert_eq!(cache.request_interval_ms[2], 80);
+        assert_eq!(cache.cooldown_until[2], Some(now + Duration::from_secs(20)));
         assert_eq!(
             cache.reserve_source(now, true, 0).unwrap(),
-            (0, Duration::from_millis(100))
+            (0, Duration::from_millis(60))
         );
     }
 

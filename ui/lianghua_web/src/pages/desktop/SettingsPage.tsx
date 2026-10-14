@@ -678,7 +678,7 @@ export default function SettingsPage() {
       <section className="settings-card">
         <div className="settings-head">
           <div>
-            <h2 className="settings-title">设置</h2>
+            <h2 className="settings-title">配置项</h2>
             <p className="settings-section-note">每项设置单独编辑，点击条目打开对应设置弹窗。</p>
           </div>
           <div className="settings-actions">
@@ -701,16 +701,21 @@ export default function SettingsPage() {
 
         {isCloudSyncSettingsOpen && <CloudSyncSettingsModal onClose={() => setIsCloudSyncSettingsOpen(false)} />}
         <div className="settings-list">
-          <button className="settings-list-item" type="button" onClick={() => setIsCloudSyncSettingsOpen(true)}>
-            <div className="settings-list-item-main"><strong>WebDAV 云同步</strong><span>坚果云连接、账号及独立同步文件夹。</span></div>
-            <span className="settings-list-item-value">配置</span>
-          </button>
-          <button className="settings-list-item" type="button" onClick={openConceptEditor}>
+          <h3 className="settings-subtitle-head">行情与筛选</h3>
+          <button className="settings-list-item" type="button" onClick={openRealtimeProviderSetting}>
             <div className="settings-list-item-main">
-              <strong>概念排除</strong>
-              <span>已排除 {excludedConcepts.length} 项，影响选股页概念过滤。</span>
+              <strong>实时行情源</strong>
+              <span>控制实时监控及详情日 K 刷新使用的股票行情源；指数表现会自动使用另一个行情源。</span>
             </div>
-            <span className="settings-list-item-value">编辑</span>
+            <span className="settings-list-item-value">{getRealtimeQuoteProviderLabel(realtimeQuoteProvider)}</span>
+          </button>
+
+          <button className="settings-list-item" type="button" onClick={openDefaultBoardFilterSetting}>
+            <div className="settings-list-item-main">
+              <strong>默认板块筛选</strong>
+              <span>作为排名展示和选股页面没有当前会话筛选时的默认板块。</span>
+            </div>
+            <span className="settings-list-item-value">{defaultBoardFilter}</span>
           </button>
 
           <button className="settings-list-item" type="button" onClick={openStSetting}>
@@ -721,6 +726,14 @@ export default function SettingsPage() {
             <span className="settings-list-item-value">{excludeStBoard ? '已开启' : '未开启'}</span>
           </button>
 
+          <button className="settings-list-item" type="button" onClick={openConceptEditor}>
+            <div className="settings-list-item-main">
+              <strong>概念排除</strong>
+              <span>已排除 {excludedConcepts.length} 项，影响选股页概念过滤。</span>
+            </div>
+            <span className="settings-list-item-value">编辑</span>
+          </button>
+          <h3 className="settings-subtitle-head">详情与图表</h3>
           <button className="settings-list-item" type="button" onClick={openChartLayoutSetting}>
             <div className="settings-list-item-main">
               <strong>图表高度</strong>
@@ -742,14 +755,6 @@ export default function SettingsPage() {
             <span className="settings-list-item-value">{readStoredChartDefaultVisibleBars()} 根</span>
           </button>
 
-          <button className="settings-list-item" type="button" onClick={openDefaultBoardFilterSetting}>
-            <div className="settings-list-item-main">
-              <strong>默认板块筛选</strong>
-              <span>作为排名展示和选股页面没有当前会话筛选时的默认板块。</span>
-            </div>
-            <span className="settings-list-item-value">{defaultBoardFilter}</span>
-          </button>
-
           <button className="settings-list-item" type="button" onClick={openChartIndicatorSetting}>
             <div className="settings-list-item-main">
               <strong>自定义图表指标</strong>
@@ -768,14 +773,6 @@ export default function SettingsPage() {
             <span className="settings-list-item-value">{getDetailCyqModelLabel(detailCyqModel)}</span>
           </button>
 
-          <button className="settings-list-item" type="button" onClick={openRealtimeProviderSetting}>
-            <div className="settings-list-item-main">
-              <strong>实时行情源</strong>
-              <span>控制实时监控及详情日 K 刷新使用的股票行情源；指数表现会自动使用另一个行情源。</span>
-            </div>
-            <span className="settings-list-item-value">{getRealtimeQuoteProviderLabel(realtimeQuoteProvider)}</span>
-          </button>
-
           <button className="settings-list-item" type="button" onClick={openDetailsNavLongPressSetting}>
             <div className="settings-list-item-main">
               <strong>详情长按切换间隔</strong>
@@ -783,7 +780,7 @@ export default function SettingsPage() {
             </div>
             <span className="settings-list-item-value">{currentDetailsNavLongPressInterval} 秒</span>
           </button>
-
+          <h3 className="settings-subtitle-head">研究与回测</h3>
           <button className="settings-list-item" type="button" onClick={openBacktestHighlightSetting}>
             <div className="settings-list-item-main">
               <strong>回测指标高亮阈值</strong>
@@ -793,7 +790,11 @@ export default function SettingsPage() {
               残差 {currentBacktestHighlightSettings.residualThreshold} · IC {currentBacktestHighlightSettings.icThreshold} · IR {currentBacktestHighlightSettings.irThreshold} · t {currentBacktestHighlightSettings.tThreshold}
             </span>
           </button>
-
+          <h3 className="settings-subtitle-head">存储与云端</h3>
+          <button className="settings-list-item" type="button" onClick={() => setIsCloudSyncSettingsOpen(true)}>
+            <div className="settings-list-item-main"><strong>WebDAV 云同步</strong><span>坚果云连接、账号及独立同步文件夹。</span></div>
+            <span className="settings-list-item-value">配置</span>
+          </button>
           {isDirectoryImportSupported() || isAndroidClient() ? (
             <button className="settings-list-item" type="button" onClick={openWarehouseRootSetting}>
               <div className="settings-list-item-main">

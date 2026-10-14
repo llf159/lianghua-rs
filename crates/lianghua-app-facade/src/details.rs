@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::Path,
+    sync::atomic::{AtomicUsize, Ordering},
     time::Duration,
 };
 
@@ -11,7 +12,10 @@ use serde::Serialize;
 use crate::{
     crawler::{
         SinaQuote,
-        intraday::{TencentIntradayData, fetch_tencent_intraday_text, parse_tencent_intraday_text},
+        intraday::{
+            TencentIntradayData, fetch_tencent_intraday_text, normalize_eastmoney_intraday_text,
+            parse_tencent_intraday_text,
+        },
         volume_ratio::parse_tencent_volume_ratio,
     },
     data::{RowData, ScoreConfig},
@@ -2396,6 +2400,8 @@ pub fn get_stock_detail_realtime(
     )
 }
 
+static INTRADAY_SOURCE_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+
 pub fn get_stock_detail_intraday(
     source_path: String,
     ts_code: String,
@@ -2410,9 +2416,36 @@ pub fn get_stock_detail_intraday(
         .connect_timeout(Duration::from_secs(6))
         .timeout(Duration::from_secs(12))
         .build()
-        .map_err(|e| format!("创建腾讯分时行情客户端失败: {e}"))?;
-    let raw = fetch_tencent_intraday_text(&http, &normalized_ts_code)?;
-    let mut intraday = parse_tencent_intraday_text(&raw, &normalized_ts_code)?;
+        .map_err(|e| format!("创建分时行情客户端失败: {e}"))?;
+    let eastmoney_first = INTRADAY_SOURCE_SEQUENCE.fetch_add(1, Ordering::Relaxed) % 2 == 1;
+    let mut errors = Vec::new();
+    let mut selected = None;
+    for eastmoney in [eastmoney_first, !eastmoney_first] {
+        let fetched = if eastmoney {
+            lianghua_app_market::volume_ratio::fetch_eastmoney_intraday_text(
+                &http,
+                &normalized_ts_code,
+            )
+            .and_then(|raw| normalize_eastmoney_intraday_text(&raw, &normalized_ts_code))
+        } else {
+            fetch_tencent_intraday_text(&http, &normalized_ts_code)
+        };
+        match fetched.and_then(|raw| {
+            let mut intraday = parse_tencent_intraday_text(&raw, &normalized_ts_code)?;
+            intraday.source = if eastmoney { "eastmoney" } else { "tencent" };
+            if intraday.points.is_empty() {
+                return Err("分时响应为空".to_string());
+            }
+            Ok((raw, intraday))
+        }) {
+            Ok(data) => {
+                selected = Some(data);
+                break;
+            }
+            Err(error) => errors.push(error),
+        }
+    }
+    let (raw, mut intraday) = selected.ok_or_else(|| errors.join("；"))?;
     let volume_ratio = load_volume_ratio_averages(
         &source_path,
         &intraday.trade_date,
@@ -2442,7 +2475,7 @@ pub fn get_stock_detail_intraday_snapshot(
         let summary = intraday
             .summary
             .as_ref()
-            .ok_or_else(|| "腾讯分时响应缺少汇总行情，无法生成实时日K".to_string())?;
+            .ok_or_else(|| "分时响应缺少汇总行情，无法生成实时日K".to_string())?;
         let quote_time = summary
             .refreshed_at
             .as_deref()

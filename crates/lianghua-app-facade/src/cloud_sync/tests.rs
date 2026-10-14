@@ -325,6 +325,56 @@ fn two_devices_keep_conflicts_deduplicate_and_recover() {
     let before = *object_puts.lock().unwrap();
     sync(&app_a, &source_a, preferences, false, |_| {}).unwrap();
     assert_eq!(*object_puts.lock().unwrap() - before, 1);
+    // 管理同步不接收或上传自选；自选同步不会读取/改写策略与榜单。
+    let app_scoped = temp.path().join("app-scoped");
+    let source_scoped = temp.path().join("source-scoped");
+    save_config(&app_scoped, config.clone()).unwrap();
+    fs::create_dir_all(&source_scoped).unwrap();
+    fs::write(app_scoped.join("watch_observe.json"), "[]").unwrap();
+    sync_scoped(
+        &app_scoped,
+        &source_scoped,
+        BTreeMap::new(),
+        true,
+        SyncScope::Management,
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(app_scoped.join("watch_observe.json")).unwrap(),
+        "[]"
+    );
+    fs::write(source_scoped.join("score_rule.toml"), "local only").unwrap();
+    let before = *object_puts.lock().unwrap();
+    let received = sync_scoped(
+        &app_scoped,
+        &source_scoped,
+        BTreeMap::new(),
+        true,
+        SyncScope::Watchlists,
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(received.downloaded, 1);
+    assert_eq!(
+        fs::read(source_scoped.join("score_rule.toml")).unwrap(),
+        b"local only"
+    );
+    assert_eq!(*object_puts.lock().unwrap(), before);
+    let watch_before = fs::read(app_a.join("watch_observe.json")).unwrap();
+    fs::write(app_a.join("watch_observe.json"), "[]").unwrap();
+    let before = *object_puts.lock().unwrap();
+    sync_scoped(
+        &app_a,
+        &source_a,
+        BTreeMap::new(),
+        false,
+        SyncScope::Management,
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(*object_puts.lock().unwrap(), before);
+    fs::write(app_a.join("watch_observe.json"), watch_before).unwrap();
     stopped.store(true, Ordering::Relaxed);
     let _ = TcpStream::connect(address);
     worker.join().unwrap();

@@ -447,7 +447,8 @@ pub fn estimate_upload(
     source: &Path,
     settings: &BTreeMap<String, String>,
 ) -> Result<UploadEstimate, String> {
-    let snapshots = local_snapshots(app_data, source, settings)?;
+    let mut snapshots = local_snapshots(app_data, source, settings)?;
+    snapshots.retain(|path, _| SyncScope::Management.includes(path));
     let mut hashes = BTreeSet::new();
     let mut initial_upload_bytes = 0;
     let mut configuration_bytes = 0;
@@ -493,11 +494,50 @@ pub fn estimate_upload(
     })
 }
 
+#[derive(Clone, Copy, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SyncScope {
+    #[default]
+    All,
+    Management,
+    Watchlists,
+}
+
+impl SyncScope {
+    fn includes(self, path: &str) -> bool {
+        let watch = path == "bundles/watchlists.zip"
+            || bundles::for_path(path) == Some("bundles/watchlists.zip");
+        match self {
+            Self::All => true,
+            Self::Management => !watch,
+            Self::Watchlists => watch,
+        }
+    }
+}
+
 pub fn sync(
     app_data: &Path,
     source: &Path,
     settings: BTreeMap<String, String>,
     download_only: bool,
+    progress: impl Fn(&str),
+) -> Result<SyncResult, String> {
+    sync_scoped(
+        app_data,
+        source,
+        settings,
+        download_only,
+        SyncScope::All,
+        progress,
+    )
+}
+
+pub fn sync_scoped(
+    app_data: &Path,
+    source: &Path,
+    settings: BTreeMap<String, String>,
+    download_only: bool,
+    scope: SyncScope,
     progress: impl Fn(&str),
 ) -> Result<SyncResult, String> {
     let config = get_config(app_data)?;
@@ -508,8 +548,34 @@ pub fn sync(
     } else {
         SyncState::default()
     };
-    progress("正在读取本地策略、配置和按日榜单");
-    let snapshots = local_snapshots(app_data, source, &settings)?;
+    progress(if matches!(scope, SyncScope::Watchlists) {
+        "正在读取本地自选"
+    } else {
+        "正在读取本地策略、配置和按日榜单"
+    });
+    let mut snapshots = if matches!(scope, SyncScope::Watchlists) {
+        let _guard = SOURCE_ACCESS
+            .try_write()
+            .map_err(|_| "数据操作正在进行，请完成后再同步")?;
+        let mut files = BTreeMap::new();
+        let watch = app_data.join("watch_observe.json");
+        if watch.exists() {
+            files.insert(
+                "app/watch_observe.json".into(),
+                fs::read(watch).map_err(|e| e.to_string())?,
+            );
+        }
+        for (key, value) in &settings {
+            let path = format!("settings/{key}");
+            if scope.includes(&path) {
+                files.insert(path, value.as_bytes().to_vec());
+            }
+        }
+        bundles::snapshots(&files)?
+    } else {
+        local_snapshots(app_data, source, &settings)?
+    };
+    snapshots.retain(|path, _| scope.includes(path));
     progress(if download_only {
         "正在读取云端目录"
     } else {
@@ -598,7 +664,7 @@ pub fn sync(
         );
         result.uploaded += 1;
     }
-    if !download_only {
+    if !download_only && !matches!(scope, SyncScope::Watchlists) {
         dav.manifest.prune();
     }
     // 先提交云端，再应用本地。中断后基线可以重建，已上传版本仍可恢复。
@@ -606,7 +672,14 @@ pub fn sync(
         progress("正在提交云端目录");
         dav.persist()?;
     }
-    for path in dav.manifest.entries.keys().cloned().collect::<Vec<_>>() {
+    for path in dav
+        .manifest
+        .entries
+        .keys()
+        .filter(|path| scope.includes(path))
+        .cloned()
+        .collect::<Vec<_>>()
+    {
         if replacement_path(&path).is_some_and(|group| !dav.manifest.heads(group).is_empty()) {
             continue;
         }
@@ -663,12 +736,14 @@ pub fn sync(
         &serde_json::to_vec(&state).map_err(|e| e.to_string())?,
     )?;
     if !download_only {
-        progress("正在清理过期榜单");
-        dav.garbage_collect()?;
-        if !dav.manifest.garbage.is_empty() {
-            result
-                .warnings
-                .push("部分过期榜单清理失败，下次同步会重试".into());
+        if !matches!(scope, SyncScope::Watchlists) {
+            progress("正在清理过期榜单");
+            dav.garbage_collect()?;
+            if !dav.manifest.garbage.is_empty() {
+                result
+                    .warnings
+                    .push("部分过期榜单清理失败，下次同步会重试".into());
+            }
         }
         dav.release()?;
     }
@@ -953,6 +1028,12 @@ pub fn setting_keys() -> &'static [&'static str] {
         "lh_detail_cyq_model_v1",
         "lh_details_nav_long_press_interval_seconds_v1",
         "lh_details_similarity_nav_mode_v1",
+        "am_refresh_seconds",
+        "am_volume_body_min",
+        "am_volume_body_absolute",
+        "am_volume_above_average",
+        "am_volume_rank_max",
+        "am_volume_ratio_notifications",
         "am_speed_period",
         "am_speed_threshold",
         "am_speed_min_ticks",
