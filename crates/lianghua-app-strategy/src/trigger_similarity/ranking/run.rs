@@ -157,32 +157,6 @@ fn compute_strategy_trigger_similarity_ranking(
     }
     let conn = open_ranking_conn(&source_path)?;
     let resolved_trade_date = resolve_existing_trade_date(&conn, trade_date)?;
-    if sample_codes.is_none()
-        && crate::data::download_state::pending_rebuild_affects_saved_results_in_range(
-            &source_path,
-            "ranking",
-            "00000000",
-            &resolved_trade_date,
-        )?
-    {
-        let ranges = crate::data::download_state::load_pending_derived_rebuild_ranges(
-            &source_path,
-            "ranking",
-        )?;
-        return Err(format!(
-            "行情变更后仍有评分/排名待重算，不能使用旧评分计算相似度。剩余区间：{}。请在排名计算页覆盖这些区间重算；只重算最新一天不能清除历史欠账。",
-            ranges
-                .iter()
-                .filter(|item| item.start_date <= resolved_trade_date)
-                .map(|item| format!(
-                    "{} 至 {}",
-                    item.start_date,
-                    item.end_date.as_str().min(resolved_trade_date.as_str())
-                ))
-                .collect::<Vec<_>>()
-                .join("、")
-        ));
-    }
     let active_config = get_strategy_trigger_similarity_active_config(&conn)?;
     let window_trade_days = window_trade_days
         .map(|v| v as usize)
@@ -1570,7 +1544,7 @@ mod tests {
             )
             .expect("simulate recalculated historical qfq value");
         market.execute_batch("CREATE TABLE pending_derived_rebuild(component VARCHAR PRIMARY KEY, start_date VARCHAR, end_date VARCHAR);
-            INSERT INTO pending_derived_rebuild VALUES ('similarity','20240101','20240110')").unwrap();
+            INSERT INTO pending_derived_rebuild VALUES ('similarity','20240101','20240110'), ('ranking','20240101','20240109')").unwrap();
         drop(market);
         let result = Connection::open(source_dir.join("scoring_result.db"))
             .expect("reopen result db for daily scoring rebuild simulation");
@@ -1826,6 +1800,53 @@ mod tests {
         assert_eq!(config_count, 1);
         assert_eq!(active_pool, 3);
         drop(result);
+
+        let snapshot_source = run_strategy_trigger_similarity_ranking(
+            source_dir.to_string_lossy().to_string(),
+            Some("20240110".to_string()),
+            Some(3),
+            Some(3),
+            Some(2),
+            Some("000001.SH".to_string()),
+            Some(100),
+            None,
+            None,
+            None,
+            None,
+            Some(2),
+        )
+        .expect("compute snapshot before compacting local history");
+        let result = Connection::open(source_dir.join("scoring_result.db"))
+            .expect("reopen result db for compact snapshot simulation");
+        result
+            .execute(
+                "DELETE FROM score_summary WHERE trade_date < '20240110'",
+                [],
+            )
+            .expect("keep only the synced ranking day");
+        result
+            .execute("DELETE FROM rule_details WHERE trade_date < '20240110'", [])
+            .expect("keep only the synced rule day");
+        drop(result);
+        let synced_snapshot = get_strategy_trigger_similarity_ranking_page(
+            source_dir.to_string_lossy().to_string(),
+            Some("20240110".to_string()),
+            None,
+            None,
+            None,
+            None,
+            Some(100),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("read saved snapshot without full local history");
+        assert!(synced_snapshot.is_fresh);
+        assert!(!synced_snapshot.input_signature_verified);
+        assert_eq!(synced_snapshot.items.len(), snapshot_source.items.len());
 
         fs::remove_dir_all(&source_dir).expect("remove test source directory");
     }

@@ -71,7 +71,11 @@ pub async fn run_cloud_sync(
 pub async fn list_cloud_sync_data(app: tauri::AppHandle) -> Result<Vec<CloudItem>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = CLOUD_TASK.try_lock().map_err(|_| "云端操作正在进行")?;
-        cloud_sync::list_cloud(&app.path().app_data_dir().map_err(|e| e.to_string())?)
+        let source = crate::warehouse::warehouse_root(&app)?.join("source");
+        cloud_sync::list_cloud(
+            &app.path().app_data_dir().map_err(|e| e.to_string())?,
+            &source,
+        )
     })
     .await
     .map_err(|e| e.to_string())?

@@ -327,18 +327,17 @@ pub fn check_databases(source_path: &str) -> Result<DatabaseCheckReport, String>
                 component,
             )?;
             for item in ranges {
-                let affects_saved: bool = results
+                // 待重算区间可能早于已有结果；只按已有结果实际覆盖的日期提示需要重算的范围。
+                let affected: (Option<String>, Option<String>) = results
                     .query_row(
-                        &format!(
-                            "SELECT EXISTS(SELECT 1 FROM {table} WHERE trade_date BETWEEN ? AND ?)"
-                        ),
+                        &format!("SELECT MIN(trade_date), MAX(trade_date) FROM {table} WHERE trade_date BETWEEN ? AND ?"),
                         [&item.start_date, &item.end_date],
-                        |row| row.get(0),
+                        |row| Ok((row.get(0)?, row.get(1)?)),
                     )
                     .map_err(|e| e.to_string())?;
-                if !affects_saved {
+                let Some((affected_first, affected_last)) = affected.0.zip(affected.1) else {
                     continue;
-                }
+                };
                 check.summary = "已有结果受行情变更影响，待重算".to_string();
                 report.issues.push(DatabaseIssue {
                     id: format!("pending-derived:{component}:{}", item.start_date),
@@ -357,14 +356,14 @@ pub fn check_databases(source_path: &str) -> Result<DatabaseCheckReport, String>
                         }
                         .to_string(),
                         actual: format!(
-                            "{} 至 {} 尚未完成；只计算最新一天不会清除其他历史欠账",
-                            item.start_date, item.end_date
+                            "已有结果的 {} 至 {} 尚未按修订后行情重算；只计算最新一天不会清除其他历史欠账",
+                            affected_first, affected_last
                         ),
                     }],
                     ts_code: None,
                     stock_name: None,
-                    start_date: Some(item.start_date),
-                    end_date: Some(item.end_date),
+                    start_date: Some(affected_first),
+                    end_date: Some(affected_last),
                     repair_action: (component != "similarity").then(|| component.to_string()),
                     blocks_derived: false,
                 });

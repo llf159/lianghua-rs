@@ -22,16 +22,14 @@ use crate::{
         DataReader,
         concept_performance_data::rebuild_concept_performance_range,
         download_data::{
-            append_stage_pro_bar_rows, checkpoint_stock_data, delete_one_stock_all_rows,
-            delete_one_stock_range, delete_trade_date_rows, ensure_indicator_columns,
-            flush_stock_data_stage_table, init_stock_data_db, load_latest_close_map_before,
-            load_latest_trade_date, reset_stock_data_stage_table, write_stock_list_csv,
-            write_ths_concepts_csv,
+            append_stage_pro_bar_rows, checkpoint_stock_data, delete_one_stock_range,
+            delete_trade_date_rows, ensure_indicator_columns, flush_stock_data_stage_table,
+            init_stock_data_db, load_latest_close_map_before, load_latest_trade_date,
+            reset_stock_data_stage_table, write_stock_list_csv, write_ths_concepts_csv,
         },
         download_state::{
             ensure_stock_data_ready_for_derived, load_pending_stock_repairs,
             mark_chip_repairs_required, mark_derived_components_rebuild_required,
-            mark_derived_rebuild_required,
         },
         load_stock_list, load_ths_concepts_list, load_trade_date_list, source_db_path,
         stock_list_path, trade_calendar_path,
@@ -269,20 +267,6 @@ fn sync_gaini_bx_range(
     // duckdb-rs 的独立 open 不共享数据库实例；概念重建稍后会另开源库写清单。
     // 消费下载连接，保证旧实例关闭后才能开始重建，避免旧目录/块缓存覆盖新写入。
     drop(source_writer);
-    let pending =
-        crate::data::download_state::load_pending_derived_rebuild_ranges(source_dir, "concept")?;
-    let start_date = pending
-        .iter()
-        .map(|item| item.start_date.as_str())
-        .chain([start_date])
-        .min()
-        .unwrap_or(start_date);
-    let end_date = pending
-        .iter()
-        .map(|item| item.end_date.as_str())
-        .chain([end_date])
-        .max()
-        .unwrap_or(end_date);
     emit_progress(
         progress_cb,
         "rebuild_concept_performance",
@@ -292,7 +276,7 @@ fn sync_gaini_bx_range(
         format!("开始重建概念表现区间 {} ~ {}。", start_date, end_date),
     );
     let bx_row_count = rebuild_concept_performance_range(source_dir, start_date, end_date)
-        .map_err(|error| format!("行情已提交，但概念/行业表现 {start_date} 至 {end_date} 重建失败；待重算记录保留，下次更新会继续补算。{error}"))?;
+        .map_err(|error| format!("行情已提交，但概念/行业表现 {start_date} 至 {end_date} 重建失败；待重算记录已保留，请在检查页使用手动重算修复。{error}"))?;
     emit_progress(
         progress_cb,
         "rebuild_concept_performance",
@@ -1317,13 +1301,14 @@ where
     }
 }
 
+// 修复只登记计划，并在单只下载前登记筹码续算起点；行情行保留到写入事务里按真实输入差异替换。
 fn prepare_stock_repairs(
     conn: &Connection,
     ts_codes: &HashSet<String>,
     adj_type: AdjType,
     start_date: &str,
     end_date: &str,
-    delete_existing: bool,
+    mark_chip_repair: bool,
 ) -> Result<(), String> {
     if ts_codes.is_empty() {
         return Ok(());
@@ -1339,19 +1324,15 @@ fn prepare_stock_repairs(
                  ON CONFLICT (ts_code) DO UPDATE SET start_date = LEAST(pending_stock_repair.start_date, excluded.start_date), end_date = GREATEST(pending_stock_repair.end_date, excluded.end_date)",
                 duckdb::params![ts_code, start_date, start_date, end_date, end_date, ts_code],
             ).map_err(|e| format!("记录行情待补救股票失败: {e}"))?;
-            if delete_existing {
-                if adj_type == AdjType::Qfq {
-                    let (start, end): (String, String) = tx
-                        .query_row(
-                            "SELECT start_date, end_date FROM pending_stock_repair WHERE ts_code=?",
-                            [ts_code],
-                            |row| Ok((row.get(0)?, row.get(1)?)),
-                        )
-                        .map_err(|e| format!("读取已记录修复范围失败: {e}"))?;
-                    mark_derived_rebuild_required(tx, &start, &end)?;
-                    mark_chip_repairs_required(tx, &HashSet::from([ts_code.clone()]), &start)?;
-                }
-                delete_one_stock_all_rows(tx, ts_code, adj_type)?;
+            if mark_chip_repair && adj_type == AdjType::Qfq {
+                let start: String = tx
+                    .query_row(
+                        "SELECT start_date FROM pending_stock_repair WHERE ts_code=?",
+                        [ts_code],
+                        |row| row.get(0),
+                    )
+                    .map_err(|e| format!("读取已记录修复范围失败: {e}"))?;
+                mark_chip_repairs_required(tx, &HashSet::from([ts_code.clone()]), &start)?;
             }
         }
         Ok(())
@@ -1821,7 +1802,7 @@ fn download_selected_stocks_with_mode(
     let conn = Connection::open(db_path_str).map_err(|e| format!("数据库连接错误:{e}"))?;
 
     if repair_history {
-        // 先持久记录整个计划，但每次只删除即将修复的那一只。
+        // 先持久记录整个计划；旧行情保留到单只写入事务里按输入差异替换，未完成计划阻断派生计算。
         prepare_stock_repairs(
             &conn,
             &ts_codes.iter().cloned().collect(),
@@ -2241,20 +2222,7 @@ fn download_pending_all_market_after_basic_data(
     };
 
     if pending_trade_dates.is_empty() {
-        let mut summary = DownloadSummary::default();
-        let pending = crate::data::download_state::load_pending_derived_rebuild_ranges(
-            source_dir, "concept",
-        )?;
-        if let (Some(first), Some(last)) = (pending.first(), pending.last()) {
-            summary.concept_performance_rows = sync_gaini_bx_range(
-                crate::data::download_state::open_source_db_readonly(source_dir)?,
-                source_dir,
-                &first.start_date,
-                &last.end_date,
-                progress_cb,
-            )?;
-        }
-        return Ok(summary);
+        return Ok(DownloadSummary::default());
     }
     let total_trade_dates = pending_trade_dates.len();
     emit_progress(
@@ -3103,7 +3071,7 @@ mod tests {
             "20260106",
             false,
         )
-        .expect("persist repair plan before deleting any stock");
+        .expect("persist repair plan before any stock is replaced");
         assert_eq!(load_pending_stock_repairs(&conn).unwrap().len(), 1);
         let retained: i64 = conn
             .query_row(
@@ -3122,10 +3090,14 @@ mod tests {
             "20260106",
             true,
         )
-        .expect("delete broken stock history");
+        .expect("register chip repair for the stock being repaired");
+        assert_eq!(
+            crate::data::download_state::load_pending_chip_repairs_for_model(&conn, "chen")
+                .unwrap(),
+            vec!["000001.SZ"]
+        );
 
-        let pending =
-            load_pending_stock_repairs(&conn).expect("persist pending repair with deletion");
+        let pending = load_pending_stock_repairs(&conn).expect("persist pending repair plan");
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].start_date, "20260102");
         assert_eq!(pending[0].end_date, "20260106");
@@ -3165,7 +3137,8 @@ mod tests {
                 |row| row.get::<_, i64>(0),
             )
             .expect("count preserved hfq rows");
-        assert_eq!(broken_qfq_rows, 0);
+        // 旧行情保留到修复写入事务，失败时不丢数据；计划本身阻断派生计算。
+        assert_eq!(broken_qfq_rows, 2);
         assert_eq!(preserved_hfq_rows, 1);
 
         let daily_batch = PendingTradeDateBatch {
@@ -3253,7 +3226,7 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("check pending repair rollback");
-        // 删除历史时已记账；后续失败不能丢掉这条修复记录。
+        // 登记修复时已记账；后续写入失败不能丢掉这条修复记录。
         assert_eq!(pending_table_count, 1);
         assert_eq!(
             crate::data::download_state::load_pending_chip_repairs_for_model(&conn, "chen")
@@ -3276,7 +3249,7 @@ mod tests {
             )
             .expect("count failed repair rows");
         assert_eq!(committed_daily_rows, 1);
-        assert_eq!(broken_stock_rows, 0);
+        assert_eq!(broken_stock_rows, 2);
 
         assert!(ensure_stock_data_ready_for_derived(source_path).is_err());
         drop(conn);
@@ -3299,12 +3272,18 @@ mod tests {
         assert_eq!(pending_code, "000001.SZ");
         assert!(load_pending_stock_repairs(&conn).unwrap().is_empty());
         let dirty = crate::data::download_state::load_pending_derived_rebuilds(&conn).unwrap();
-        assert_eq!(dirty.len(), 3);
-        assert!(
-            dirty
-                .iter()
-                .all(|item| item.start_date == "20260102" && item.end_date == "20260106")
-        );
+        // 修复只记入真实行差异（20260105 旧行被替换），新增日期 20260106 仍按新增单独记账。
+        assert_eq!(dirty.len(), 6, "{dirty:?}");
+        for date in ["20260105", "20260106"] {
+            assert_eq!(
+                dirty
+                    .iter()
+                    .filter(|item| item.start_date == date && item.end_date == date)
+                    .count(),
+                3,
+                "{dirty:?}"
+            );
+        }
         checkpoint_stock_data(&conn).unwrap();
         ensure_stock_data_ready_for_derived(source_path).expect("full repair unblocks computation");
         fs::write(source_dir.join("stock_list.csv"), "ts_code,symbol,name,area,industry,list_date,trade_date,total_share,float_share,total_mv\n000001.SZ,1,A,,X,19900101,20260106,1,1,100\n000002.SZ,2,B,,X,19900101,20260106,1,1,100\n").unwrap();
@@ -3314,7 +3293,7 @@ mod tests {
         assert!(sync_gaini_bx_range(conn, source_path, "20260102", "20260106", None).unwrap() > 0);
         let conn = Connection::open(&db_path).unwrap();
         let dirty = crate::data::download_state::load_pending_derived_rebuilds(&conn).unwrap();
-        assert_eq!(dirty.len(), 2);
+        assert_eq!(dirty.len(), 4, "{dirty:?}");
         assert!(dirty.iter().all(|item| item.component != "concept"));
         assert_eq!(
             conn.query_row("SELECT COUNT(*) FROM stock_data", [], |row| row
@@ -3479,7 +3458,7 @@ mod tests {
     }
 
     #[test]
-    fn concept_maintenance_covers_history_and_retries_without_new_market_dates() {
+    fn concept_maintenance_stays_within_incremental_dates() {
         let directory = temp_source_dir("concept-maintenance-retry");
         fs::create_dir_all(&directory).unwrap();
         let source = directory.to_str().unwrap();
@@ -3493,17 +3472,25 @@ mod tests {
         let conn = Connection::open(source_db_path(source)).unwrap();
         conn.execute_batch("UPDATE stock_data SET pct_chg=7 WHERE trade_date='20260105'")
             .unwrap();
-        mark_derived_rebuild_required(&conn, "20260104", "20260107").unwrap();
-        // 本轮只新增/更新末日，仍需覆盖历史复权修复留下的概念欠账。
+        crate::data::download_state::mark_derived_rebuild_required(&conn, "20260104", "20260107")
+            .unwrap();
+        // 日常增量只维护本轮日期，历史欠账交给检查页和手动重算入口。
         sync_gaini_bx_range(conn, source, "20260106", "20260106", None).unwrap();
         let results = Connection::open(crate::data::concept_performance_db_path(source)).unwrap();
-        assert_eq!(results.query_row("SELECT performance_pct FROM concept_performance WHERE trade_date='20260105' AND performance_type='industry' AND concept='X'", [], |row| row.get::<_, f64>(0)).unwrap(), 7.0);
+        assert_eq!(results.query_row("SELECT performance_pct FROM concept_performance WHERE trade_date='20260105' AND performance_type='industry' AND concept='X'", [], |row| row.get::<_, f64>(0)).unwrap(), 1.0);
         drop(results);
+        let pending =
+            crate::data::download_state::load_pending_derived_rebuild_ranges(source, "concept")
+                .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].start_date, "20260105");
+        assert_eq!(pending[0].end_date, "20260105");
         let conn = Connection::open(source_db_path(source)).unwrap();
-        conn.execute_batch("UPDATE stock_data SET tor=NULL; UPDATE stock_data SET pct_chg=9 WHERE trade_date='20260105'").unwrap();
-        mark_derived_rebuild_required(&conn, "20260104", "20260107").unwrap();
-        let error = sync_gaini_bx_range(conn, source, "20260106", "20260106", None).unwrap_err();
-        assert!(error.contains("行情已提交"));
+        conn.execute_batch("UPDATE stock_data SET tor=NULL, pct_chg=9 WHERE trade_date='20260105'")
+            .unwrap();
+        crate::data::download_state::mark_derived_rebuild_required(&conn, "20260104", "20260107")
+            .unwrap();
+        sync_gaini_bx_range(conn, source, "20260106", "20260106", None).unwrap();
         assert!(
             !crate::data::download_state::load_pending_derived_rebuild_ranges(source, "concept")
                 .unwrap()
@@ -3526,14 +3513,14 @@ mod tests {
         };
         let summary =
             download_pending_all_market_after_basic_data(&config, "20260106", None).unwrap();
-        assert!(summary.concept_performance_rows > 0);
+        assert_eq!(summary.concept_performance_rows, 0);
         assert!(
-            crate::data::download_state::load_pending_derived_rebuild_ranges(source, "concept")
+            !crate::data::download_state::load_pending_derived_rebuild_ranges(source, "concept")
                 .unwrap()
                 .is_empty()
         );
         let results = Connection::open(crate::data::concept_performance_db_path(source)).unwrap();
-        assert_eq!(results.query_row("SELECT performance_pct FROM concept_performance WHERE trade_date='20260105' AND performance_type='industry' AND concept='X'", [], |row| row.get::<_, f64>(0)).unwrap(), 9.0);
+        assert_eq!(results.query_row("SELECT performance_pct FROM concept_performance WHERE trade_date='20260105' AND performance_type='industry' AND concept='X'", [], |row| row.get::<_, f64>(0)).unwrap(), 1.0);
         drop(results);
         fs::remove_dir_all(directory).unwrap();
     }

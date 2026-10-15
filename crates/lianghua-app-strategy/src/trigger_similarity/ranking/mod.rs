@@ -195,6 +195,7 @@ pub struct StrategyTriggerRankingPageData {
     pub data_signature: String,
     pub generated_at_epoch_seconds: Option<i64>,
     pub is_fresh: bool,
+    pub input_signature_verified: bool,
     pub stale_reason: Option<String>,
     pub universe_count: usize,
     pub ranked_count: usize,

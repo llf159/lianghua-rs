@@ -308,7 +308,7 @@ export default function WatchObservePage() {
   );
   const detailNavigationItems = displayRows.map((row) => ({
     tsCode: row.tsCode,
-    tradeDate: resolvedReferenceTradeDate ?? row.markedDate,
+    tradeDate: row.watchDate || undefined,
     sourcePath: sourcePathTrimmed || undefined,
     name: row.name || undefined,
   }));
@@ -1006,9 +1006,7 @@ export default function WatchObservePage() {
                             <DetailsLink
                               className="watch-observe-stock-link"
                               tsCode={splitTsCode(row.tsCode)}
-                              tradeDate={
-                                resolvedReferenceTradeDate ?? row.markedDate
-                              }
+                              tradeDate={row.watchDate || undefined}
                               sourcePath={sourcePathTrimmed}
                               title={`查看 ${row.name || row.tsCode} 详情`}
                               navigationItems={detailNavigationItems}

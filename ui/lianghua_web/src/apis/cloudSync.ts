@@ -24,6 +24,7 @@ export type CloudItem = {
   };
   isHead: boolean;
   conflict: boolean;
+  isLocalBase: boolean;
 };
 export type WatchlistTransferMode = "upload" | "download" | "merge";
 

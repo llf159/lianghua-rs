@@ -156,6 +156,7 @@ export type StrategyTriggerRankingPageData = {
   dataSignature: string
   generatedAtEpochSeconds?: number | null
   isFresh: boolean
+  inputSignatureVerified: boolean
   staleReason?: string | null
   universeCount: number
   rankedCount: number

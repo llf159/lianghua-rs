@@ -32,7 +32,6 @@ import {
   filterConceptItems,
   splitConceptText,
   useConceptExclusions,
-  isStBoard,
 } from "../../shared/conceptExclusions";
 import { readStoredRealtimeQuoteProvider } from "../../shared/realtimeSettings";
 import {
@@ -85,7 +84,7 @@ const INTRADAY_MONITOR_TEMPLATE_STORAGE_KEY =
 function readLocalStorageNumber<T extends number>(key: string, fallback: T): T {
   try {
     const raw = localStorage.getItem(key);
-    if (raw != null) {
+    if (raw != null && raw.trim() !== "") {
       const parsed = Number(raw);
       if (isFiniteNumber(parsed)) return parsed as T;
     }
@@ -532,7 +531,7 @@ function createEmptyHitRecordsByPeriod(): SpeedHitRecordsByPeriod {
 }
 
 export default function AllMarketMonitorPage() {
-  const { excludedConcepts, excludeStBoard } = useConceptExclusions();
+  const { excludedConcepts } = useConceptExclusions();
   const [sourcePath, setSourcePath] = useState("");
   const [enabled, setEnabled] = useState(false);
   const [templateDisplayMode, setTemplateDisplayMode] =
@@ -715,18 +714,32 @@ export default function AllMarketMonitorPage() {
   const [volumeRankMax, setVolumeRankMax] = useState(() =>
     Math.max(0, readLocalStorageNumber("am_volume_rank_max", 0)),
   );
+  const [refreshSecondsText, setRefreshSecondsText] = useState(() =>
+    String(refreshSeconds),
+  );
+  const [volumeBodyMinText, setVolumeBodyMinText] = useState(() =>
+    String(volumeBodyMin),
+  );
+  const [volumeRankMaxText, setVolumeRankMaxText] = useState(() =>
+    String(volumeRankMax),
+  );
+  const [volumeBoardFilter, setVolumeBoardFilter] = useState<BoardFilter>(() => {
+    const stored = readLocalStorageText("am_volume_board_filter");
+    return stored === "自选" ||
+      STOCK_PICK_BOARD_OPTIONS.includes(
+        stored as (typeof STOCK_PICK_BOARD_OPTIONS)[number],
+      )
+      ? (stored as BoardFilter)
+      : "全部";
+  });
   const volumeConditionsRef = useRef({
     volumeBodyMin,
     volumeBodyAbsolute,
     volumeAboveAverage,
     volumeRankMax,
+    volumeBoardFilter,
+    watchlistCodes: new Set<string>(),
   });
-  volumeConditionsRef.current = {
-    volumeBodyMin,
-    volumeBodyAbsolute,
-    volumeAboveAverage,
-    volumeRankMax,
-  };
   useEffect(() => {
     try {
       for (const [key, value] of Object.entries({
@@ -735,6 +748,7 @@ export default function AllMarketMonitorPage() {
         am_volume_body_absolute: volumeBodyAbsolute,
         am_volume_above_average: volumeAboveAverage,
         am_volume_rank_max: volumeRankMax,
+        am_volume_board_filter: volumeBoardFilter,
       }))
         localStorage.setItem(key, String(value));
     } catch {
@@ -746,6 +760,7 @@ export default function AllMarketMonitorPage() {
     volumeBodyAbsolute,
     volumeAboveAverage,
     volumeRankMax,
+    volumeBoardFilter,
   ]);
   const [eventsHeld, setEventsHeld] = useState(false);
   const [heldEvents, setHeldEvents] = useState<MonitorEvent[]>([]);
@@ -776,6 +791,14 @@ export default function AllMarketMonitorPage() {
     () => new Set(watchlistCodes),
     [watchlistCodes],
   );
+  volumeConditionsRef.current = {
+    volumeBodyMin,
+    volumeBodyAbsolute,
+    volumeAboveAverage,
+    volumeRankMax,
+    volumeBoardFilter,
+    watchlistCodes: watchlistCodeSet,
+  };
   const watchlistSelected = !searchStock && boardFilter === "自选";
   const [watchlistModalOpen, setWatchlistModalOpen] = useState(false);
   const templateEnabled = templateDisplayMode !== "off";
@@ -883,8 +906,11 @@ export default function AllMarketMonitorPage() {
 
   const closeParams = useCallback(() => {
     normalizeParamTexts();
+    setRefreshSecondsText(String(refreshSeconds));
+    setVolumeBodyMinText(String(volumeBodyMin));
+    setVolumeRankMaxText(String(volumeRankMax));
     setShowParams(false);
-  }, [normalizeParamTexts]);
+  }, [normalizeParamTexts, refreshSeconds, volumeBodyMin, volumeRankMax]);
 
   useEffect(() => {
     try {
@@ -1188,6 +1214,10 @@ export default function AllMarketMonitorPage() {
         const dayHigh = newDay ? high : Math.max(high, previous.high);
         // 首次补齐时仅当前正处于新高才提示，避免把中途启动前的历史突破补报。
         if (
+          (conditions.volumeBoardFilter === "自选"
+            ? conditions.watchlistCodes.has(row.ts_code)
+            : conditions.volumeBoardFilter === "全部" ||
+              row.board === conditions.volumeBoardFilter) &&
           (conditions.volumeBodyMin === 0 ||
             (isFiniteNumber(row.realtime_change_open_pct) &&
               (conditions.volumeBodyAbsolute
@@ -1528,11 +1558,7 @@ export default function AllMarketMonitorPage() {
         row.realtime_price != null &&
         row.realtime_price > 0 &&
         row.realtime_trade_date === latestDate &&
-        isFiniteNumber(row.realtime_change_pct) &&
-        (!excludeStBoard || !isStBoard(row.board)) &&
-        (boardFilter === "自选"
-          ? watchlistCodeSet.has(row.ts_code)
-          : boardFilter === "全部" || row.board === boardFilter),
+        isFiniteNumber(row.realtime_change_pct),
     );
     return {
       concept: summarizeGroups(validRows, "concept", (row) =>
@@ -1542,7 +1568,7 @@ export default function AllMarketMonitorPage() {
         row.industry?.trim() ?? "",
       ]),
     };
-  }, [rows, excludedConcepts, excludeStBoard, boardFilter, watchlistCodeSet]);
+  }, [rows, excludedConcepts]);
   const selectedGroup = groupSelection
     ? marketGroups[groupSelection.kind].find(
         (group) => group.name === groupSelection.name,
@@ -2183,8 +2209,8 @@ export default function AllMarketMonitorPage() {
                   {kind === "concept" ? "个组合" : "个行业"}
                 </span>
               </h3>
-              <p title="按当前行情池有效行情聚合 · 加权涨幅按总市值加权">
-                等权 / 总市值加权
+              <p title="固定按全市场有效行情聚合，不跟随个股表板块筛选 · 加权涨幅按总市值加权">
+                全市场 · 等权 / 总市值加权
               </p>
             </div>
             <IntradayMarketGroupTable
@@ -3169,40 +3195,23 @@ export default function AllMarketMonitorPage() {
               <section className="all-market-config-section" aria-label="刷新">
                 <h4 className="all-market-config-heading">刷新</h4>
                 <label className="settings-field">
-                  <span>板块范围</span>
-                  <select
-                    value={boardFilter}
-                    onChange={(event) => {
-                      setSearchStock(null);
-                      setBoardFilter(event.target.value as BoardFilter);
-                    }}
-                  >
-                    {([...STOCK_PICK_BOARD_OPTIONS, "自选"] as const).map(
-                      (board) => (
-                        <option key={board} value={board}>
-                          {board}
-                        </option>
-                      ),
-                    )}
-                  </select>
-                  <small>同时筛选监控表格和异动流水</small>
-                </label>
-                <label className="settings-field">
                   <span>刷新间隔（1–30 秒）</span>
                   <input
                     type="number"
                     min="1"
                     max="30"
                     step="1"
-                    value={refreshSeconds}
-                    onChange={(event) =>
-                      setRefreshSeconds(
-                        Math.min(
-                          30,
-                          Math.max(1, Number(event.target.value) || 1),
-                        ),
-                      )
-                    }
+                    value={refreshSecondsText}
+                    onChange={(event) => {
+                      const text = event.target.value;
+                      setRefreshSecondsText(text);
+                      if (text !== "" && Number.isFinite(Number(text))) {
+                        setRefreshSeconds(
+                          Math.min(30, Math.max(1, Math.trunc(Number(text)))),
+                        );
+                      }
+                    }}
+                    onBlur={() => setRefreshSecondsText(String(refreshSeconds))}
                   />
                 </label>
               </section>
@@ -3252,18 +3261,39 @@ export default function AllMarketMonitorPage() {
               <section className="all-market-config-section" aria-label="量比异动">
                 <h4 className="all-market-config-heading">量比异动</h4>
                 <label className="settings-field">
+                  <span>板块范围</span>
+                  <select
+                    value={volumeBoardFilter}
+                    onChange={(event) => {
+                      setVolumeBoardFilter(event.target.value as BoardFilter);
+                    }}
+                  >
+                    {([...STOCK_PICK_BOARD_OPTIONS, "自选"] as const).map(
+                      (board) => (
+                        <option key={board} value={board}>
+                          {board}
+                        </option>
+                      ),
+                    )}
+                  </select>
+                  <small>仅筛选量比异动；主行情仍全市场刷新</small>
+                </label>
+                <label className="settings-field">
                   <span>实体涨幅下限（%）</span>
                   <input
                     type="number"
                     min="0"
                     step="0.1"
                     title="最新价相对开盘价的涨幅；0 不限制"
-                    value={volumeBodyMin}
-                    onChange={(event) =>
-                      setVolumeBodyMin(
-                        Math.max(0, Number(event.target.value) || 0),
-                      )
-                    }
+                    value={volumeBodyMinText}
+                    onChange={(event) => {
+                      const text = event.target.value;
+                      setVolumeBodyMinText(text);
+                      if (text !== "" && Number.isFinite(Number(text))) {
+                        setVolumeBodyMin(Math.max(0, Number(text)));
+                      }
+                    }}
+                    onBlur={() => setVolumeBodyMinText(String(volumeBodyMin))}
                   />
                   <small>相对开盘价；0 不限</small>
                 </label>
@@ -3273,12 +3303,15 @@ export default function AllMarketMonitorPage() {
                     type="number"
                     min="0"
                     step="1"
-                    value={volumeRankMax}
-                    onChange={(event) =>
-                      setVolumeRankMax(
-                        Math.max(0, Math.floor(Number(event.target.value) || 0)),
-                      )
-                    }
+                    value={volumeRankMaxText}
+                    onChange={(event) => {
+                      const text = event.target.value;
+                      setVolumeRankMaxText(text);
+                      if (text !== "" && Number.isFinite(Number(text))) {
+                        setVolumeRankMax(Math.max(0, Math.floor(Number(text))));
+                      }
+                    }}
+                    onBlur={() => setVolumeRankMaxText(String(volumeRankMax))}
                   />
                   <small title="缺失排名不通过">3日优 / 相似榜任一满足；0 不限</small>
                 </label>

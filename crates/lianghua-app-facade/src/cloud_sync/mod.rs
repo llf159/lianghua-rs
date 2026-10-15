@@ -278,6 +278,7 @@ pub struct CloudItem {
     pub version: CloudVersion,
     pub is_head: bool,
     pub conflict: bool,
+    pub is_local_base: bool,
 }
 #[derive(Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -306,8 +307,15 @@ fn replacement_path(path: &str) -> Option<&'static str> {
     })
 }
 
-pub fn list_cloud(app_data: &Path) -> Result<Vec<CloudItem>, String> {
-    let mut dav = dav::Dav::new(&get_config(app_data)?)?;
+pub fn list_cloud(app_data: &Path, source: &Path) -> Result<Vec<CloudItem>, String> {
+    let config = get_config(app_data)?;
+    let state_path = local_root(app_data, source, &config)?.join("state.json");
+    let state: SyncState = if state_path.exists() {
+        read_json(&state_path)?
+    } else {
+        SyncState::default()
+    };
+    let mut dav = dav::Dav::new(&config)?;
     dav.read_manifest()?;
     let mut items = Vec::new();
     for (path, versions) in &dav.manifest.entries {
@@ -327,6 +335,10 @@ pub fn list_cloud(app_data: &Path) -> Result<Vec<CloudItem>, String> {
                 version: version.clone(),
                 is_head: heads.iter().any(|v| v.id == version.id),
                 conflict: heads.len() > 1,
+                is_local_base: state
+                    .base
+                    .get(path)
+                    .is_some_and(|base| base.id == version.id),
             });
         }
     }

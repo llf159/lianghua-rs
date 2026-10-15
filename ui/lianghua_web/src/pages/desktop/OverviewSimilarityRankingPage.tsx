@@ -419,7 +419,9 @@ export default function OverviewSimilarityRankingPage() {
               窗口 {data.windowTradeDays} · 池化 {data.poolSegments} · 后验 {data.outcomeTradeDays}
             </span>
             <span>基准 {data.benchmarkIndexCode}</span>
-            <span>实时水位核验通过</span>
+            <span>
+              {data.inputSignatureVerified ? '本地水位核验通过' : '已同步快照（本机历史不足，未复核水位）'}
+            </span>
           </div>
           <StickyHorizontalTable
             scrollClassName="trigger-sim-ranking-scroll"

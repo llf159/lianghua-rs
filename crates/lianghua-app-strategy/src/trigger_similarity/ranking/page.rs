@@ -120,15 +120,6 @@ pub fn get_strategy_trigger_similarity_ranking_page(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .map(|value| value.to_uppercase());
-    let all_trade_dates = load_all_trade_dates(&conn)?;
-    let target_index = all_trade_dates
-        .binary_search(&resolved_trade_date)
-        .map_err(|_| format!("参考日不在评分交易日中: {resolved_trade_date}"))?;
-    let candidate_gap_trade_days = outcome_trade_days.max(sample_gap_trade_days);
-    if target_index < candidate_gap_trade_days {
-        return Err("参考日前没有足够历史区间".to_string());
-    }
-    let historical_cutoff_date = all_trade_dates[target_index - candidate_gap_trade_days].clone();
     let key = config_key(
         window_trade_days,
         pool_segments,
@@ -136,7 +127,6 @@ pub fn get_strategy_trigger_similarity_ranking_page(
         sample_gap_trade_days,
         &benchmark_index_code,
     );
-    let current_signature = load_data_signature(&conn, &source_path, &resolved_trade_date)?;
     let meta = (|conn: &Connection,
                  trade_date: &str,
                  config_key: &str|
@@ -197,12 +187,31 @@ pub fn get_strategy_trigger_similarity_ranking_page(
             timings: serde_json::from_str(&timings_json).unwrap_or_default(),
         }))
     })(&conn, &resolved_trade_date, &key)?;
-    let is_fresh = meta
-        .as_ref()
-        .is_some_and(|value| value.data_signature == current_signature);
+    let candidate_gap_trade_days = outcome_trade_days.max(sample_gap_trade_days);
+    let all_trade_dates = load_all_trade_dates(&conn)?;
+    let local_historical_cutoff_date = match all_trade_dates.binary_search(&resolved_trade_date) {
+        Ok(target_index) if target_index >= candidate_gap_trade_days => {
+            Some(all_trade_dates[target_index - candidate_gap_trade_days].clone())
+        }
+        Ok(_) if meta.is_some() => None,
+        Ok(_) => return Err("参考日前没有足够历史区间".to_string()),
+        Err(_) if meta.is_some() => None,
+        Err(_) => return Err(format!("参考日不在评分交易日中: {resolved_trade_date}")),
+    };
+    let input_signature_verified = local_historical_cutoff_date.is_some();
+    let current_signature = if input_signature_verified {
+        load_data_signature(&conn, &source_path, &resolved_trade_date)?
+    } else {
+        meta.as_ref()
+            .map(|value| value.data_signature.clone())
+            .unwrap_or_default()
+    };
+    let is_fresh = meta.as_ref().is_some_and(|value| {
+        !input_signature_verified || value.data_signature == current_signature
+    });
     let stale_reason = match &meta {
         None => Some("尚未计算该日期的全市场排行榜".to_string()),
-        Some(value) if value.data_signature != current_signature => {
+        Some(value) if input_signature_verified && value.data_signature != current_signature => {
             Some("行情或策略触发数据已更新，已存排行榜自动失效".to_string())
         }
         Some(_) => None,
@@ -368,7 +377,8 @@ pub fn get_strategy_trigger_similarity_ranking_page(
         historical_cutoff_date: meta
             .as_ref()
             .map(|value| value.historical_cutoff_date.clone())
-            .unwrap_or(historical_cutoff_date),
+            .or(local_historical_cutoff_date)
+            .unwrap_or_default(),
         window_trade_days,
         pool_segments,
         outcome_trade_days,
@@ -377,6 +387,7 @@ pub fn get_strategy_trigger_similarity_ranking_page(
         data_signature: current_signature,
         generated_at_epoch_seconds: meta.as_ref().map(|value| value.generated_at_epoch_seconds),
         is_fresh,
+        input_signature_verified,
         stale_reason,
         universe_count: meta.as_ref().map_or(0, |value| value.universe_count),
         ranked_count: meta.as_ref().map_or(0, |value| value.ranked_count),

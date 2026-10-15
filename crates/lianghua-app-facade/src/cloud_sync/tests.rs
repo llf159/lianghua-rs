@@ -230,8 +230,15 @@ fn two_devices_keep_conflicts_deduplicate_and_recover() {
         fs::read_to_string(source_b.join("score_rule.toml")).unwrap(),
         "version = 3\n"
     );
-    let selected = list_cloud(&app_a)
-        .unwrap()
+    let conflict_items = list_cloud(&app_a, &source_a).unwrap();
+    assert_eq!(
+        conflict_items
+            .iter()
+            .filter(|item| item.path == "bundles/strategies.zip" && item.is_local_base)
+            .count(),
+        1
+    );
+    let selected = conflict_items
         .into_iter()
         .find(|v| v.version.hash == digest(&local_snapshots(&app_a, &source_a, &BTreeMap::new()).unwrap()["bundles/strategies.zip"]))
         .unwrap();
@@ -259,7 +266,7 @@ fn two_devices_keep_conflicts_deduplicate_and_recover() {
         "version = 3\n"
     );
     assert_eq!(
-        list_cloud(&app_b)
+        list_cloud(&app_b, &source_b)
             .unwrap()
             .iter()
             .filter(|v| v.path == selected.path && v.is_head)
@@ -277,7 +284,7 @@ fn two_devices_keep_conflicts_deduplicate_and_recover() {
     lock.release().unwrap();
     assert!(stale.persist().is_err());
     // 删除云端当前版本不会清理本地，也不会重新上传同一基线。
-    let head = list_cloud(&app_b)
+    let head = list_cloud(&app_b, &source_b)
         .unwrap()
         .into_iter()
         .find(|v| v.path == selected.path && v.is_head)
@@ -285,7 +292,7 @@ fn two_devices_keep_conflicts_deduplicate_and_recover() {
     delete_cloud(&app_b, &head.path, &head.version.id).unwrap();
     sync(&app_b, &source_b, BTreeMap::new(), false, |_| {}).unwrap();
     assert!(
-        list_cloud(&app_b)
+        list_cloud(&app_b, &source_b)
             .unwrap()
             .iter()
             .all(|v| v.path != selected.path || !v.is_head)
@@ -305,7 +312,7 @@ fn two_devices_keep_conflicts_deduplicate_and_recover() {
     let before = *object_puts.lock().unwrap();
     sync(&app_a, &source_a, preferences.clone(), false, |_| {}).unwrap();
     assert_eq!(*object_puts.lock().unwrap() - before, 3);
-    let heads = list_cloud(&app_a).unwrap();
+    let heads = list_cloud(&app_a, &source_a).unwrap();
     for path in [
         "bundles/indicator_config.zip",
         "bundles/watchlists.zip",
@@ -497,7 +504,7 @@ fn two_devices_keep_conflicts_deduplicate_and_recover() {
         read_json(&transfer_b.join("watch_observe.json")).unwrap();
     assert_eq!(merged_rows.len(), 3);
     assert_eq!(
-        list_cloud(&transfer_a)
+        list_cloud(&transfer_a, &source_a)
             .unwrap()
             .iter()
             .filter(|item| item.path == "bundles/watchlists.zip" && item.is_head)

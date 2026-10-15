@@ -37,7 +37,9 @@ export default function CloudSyncPanel({
   const [filter, setFilter] = useState("");
   const [showHistory, setShowHistory] = useState(false);
   const [selected, setSelected] = useState<CloudItem | null>(null);
-  const [action, setAction] = useState<"restore" | "delete" | null>(null);
+  const [action, setAction] = useState<"restore" | "resolve" | "delete" | null>(
+    null,
+  );
   useEffect(() => {
     let cancelled = false;
     const subscription = listen<string>("cloud-sync-progress", (event) => {
@@ -49,7 +51,14 @@ export default function CloudSyncPanel({
     };
   }, []);
   async function operate(
-    kind: "sync" | "download" | "list" | "restore" | "delete" | "estimate",
+    kind:
+      | "sync"
+      | "download"
+      | "list"
+      | "restore"
+      | "resolve"
+      | "delete"
+      | "estimate",
     item?: CloudItem,
   ) {
     if (busy || disabled) return;
@@ -70,15 +79,15 @@ export default function CloudSyncPanel({
         setItems(await listCloudData());
       } else {
         const result = await syncCloud(
-          kind === "restore" ? item : undefined,
+          kind === "restore" || kind === "resolve" ? item : undefined,
           kind === "download",
         );
         setConflicts(result.conflicts);
         setNotice(
-          `${kind === "download" ? "下载完成" : "同步完成"} · 上传 ${result.uploaded} 项 · 接收 ${result.downloaded} 项${result.skipped ? ` · 跳过 ${result.skipped} 项` : ""} · 上传 ${bytes(result.uploadedBytes)} / 下载 ${bytes(result.downloadedBytes)}${result.warnings.length ? `；${result.warnings.join("；")}` : ""}`,
+          `${kind === "download" ? "下载完成" : kind === "resolve" ? "冲突已解决" : kind === "restore" ? "版本已恢复" : "同步完成"} · 上传 ${result.uploaded} 项 · 接收 ${result.downloaded} 项${result.skipped ? ` · 跳过 ${result.skipped} 项` : ""} · 上传 ${bytes(result.uploadedBytes)} / 下载 ${bytes(result.downloadedBytes)}${result.warnings.length ? `；${result.warnings.join("；")}` : ""}`,
         );
         onSynced();
-        if (manager) setItems(await listCloudData());
+        if (manager || kind === "resolve") setItems(await listCloudData());
       }
       setSelected(null);
       setAction(null);
@@ -90,12 +99,37 @@ export default function CloudSyncPanel({
       setProgress("");
     }
   }
+  const normalizedFilter = filter.trim().toLowerCase();
+  const matchingPaths = new Set(
+    items
+      .filter((item) =>
+        `${item.path} ${cloudPathLabel(item.path)}`
+          .toLowerCase()
+          .includes(normalizedFilter),
+      )
+      .map((item) => item.path),
+  );
+  const conflictPaths = new Set(
+    items
+      .filter((item) => item.isHead && item.conflict)
+      .map((item) => item.path),
+  );
+  const conflictGroups = [...conflictPaths]
+    .filter((path) => matchingPaths.has(path))
+    .map((path) => ({
+      path,
+      versions: items.filter(
+        (item) => item.path === path && item.isHead && item.conflict,
+      ),
+    }));
   const visible = items.filter(
     (item) =>
       (showHistory || item.isHead) &&
-      `${item.path} ${cloudPathLabel(item.path)}`
-        .toLowerCase()
-        .includes(filter.toLowerCase()),
+      !(item.isHead && item.conflict) &&
+      matchingPaths.has(item.path),
+  );
+  const currentPaths = new Set(
+    items.filter((item) => item.isHead).map((item) => item.path),
   );
   return (
     <section
@@ -239,7 +273,15 @@ export default function CloudSyncPanel({
               <li key={path}>{cloudPathLabel(path)}</li>
             ))}
           </ul>
-          <p>在云端数据管理中恢复所需版本。</p>
+          <p>请选择要继续使用的版本，未选中的分支仍会保留在历史中。</p>
+          <button
+            className="settings-secondary-btn"
+            type="button"
+            disabled={busy || disabled}
+            onClick={() => void operate("list")}
+          >
+            立即处理冲突
+          </button>
         </div>
       )}
       {manager && (
@@ -261,13 +303,19 @@ export default function CloudSyncPanel({
           <div className="cloud-manager-summary">
             <div>
               <span>当前数据</span>
-              <strong>{items.filter((item) => item.isHead).length}</strong>
+              <strong>{currentPaths.size}</strong>
               <small>个云端项目</small>
             </div>
             <div>
-              <span>本次显示</span>
-              <strong>{visible.length}</strong>
-              <small>{showHistory ? "包含历史版本" : "仅当前版本"}</small>
+              <span>待处理冲突</span>
+              <strong
+                className={conflictPaths.size > 0 ? "is-warning" : "is-ready"}
+              >
+                {conflictPaths.size}
+              </strong>
+              <small>
+                {conflictPaths.size > 0 ? "需选择保留版本" : "所有数据已收敛"}
+              </small>
             </div>
             <div>
               <span>相似榜快照</span>
@@ -322,12 +370,80 @@ export default function CloudSyncPanel({
             <span aria-hidden="true">✓</span>
             恢复前会备份本地文件，冲突不会自动覆盖；删除只影响选中的云端版本。
           </div>
-          {visible.length === 0 ? (
+          {conflictGroups.length > 0 && (
+            <section
+              className="cloud-conflict-resolver"
+              aria-label="待处理冲突"
+            >
+              <div className="cloud-conflict-resolver-head">
+                <div>
+                  <h5>选择双端冲突的保留版本</h5>
+                  <p>
+                    每一行都是仍有效的设备分支。选择后，该版本会成为两端共同的当前版本。
+                  </p>
+                </div>
+                <strong>{conflictGroups.length} 项待处理</strong>
+              </div>
+              {conflictGroups.map((group) => (
+                <div className="cloud-conflict-group" key={group.path}>
+                  <div className="cloud-conflict-group-title">
+                    <div>
+                      <strong>{cloudPathLabel(group.path)}</strong>
+                      <code>{group.path}</code>
+                    </div>
+                    <span>{group.versions.length} 个分支</span>
+                  </div>
+                  <div className="cloud-conflict-branches">
+                    {group.versions.map((item, index) => (
+                      <article
+                        className="cloud-conflict-branch"
+                        key={item.version.id}
+                      >
+                        <div className="cloud-conflict-branch-head">
+                          <strong>
+                            分支 {index + 1}
+                            {item.isLocalBase && <em>本机上次同步</em>}
+                          </strong>
+                          <span>
+                            {new Date(item.version.createdAt).toLocaleString(
+                              "zh-CN",
+                            )}
+                          </span>
+                        </div>
+                        <dl>
+                          <div>
+                            <dt>版本标识</dt>
+                            <dd>{item.version.hash.slice(0, 12)}</dd>
+                          </div>
+                          <div>
+                            <dt>压缩大小</dt>
+                            <dd>{bytes(item.version.compressedSize)}</dd>
+                          </div>
+                        </dl>
+                        <button
+                          className="settings-primary-btn"
+                          type="button"
+                          disabled={busy || disabled}
+                          onClick={() => {
+                            setSelected(item);
+                            setAction("resolve");
+                          }}
+                        >
+                          选择此版本
+                        </button>
+                      </article>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </section>
+          )}
+          {visible.length === 0 && conflictGroups.length === 0 ? (
             <div className="cloud-empty">
               <span aria-hidden="true">☁</span>
               <strong>{filter ? "没有匹配的数据" : "云端还没有数据"}</strong>
             </div>
-          ) : (
+          ) : visible.length > 0 ? (
             <div
               className={`cloud-item-list${showHistory ? " cloud-item-list-history" : ""}`}
             >
@@ -406,7 +522,7 @@ export default function CloudSyncPanel({
                 </article>
               ))}
             </div>
-          )}
+          ) : null}
         </div>
       )}
       {selected && action && (
@@ -415,10 +531,20 @@ export default function CloudSyncPanel({
             className="settings-modal settings-modal-narrow cloud-version-dialog"
             role="dialog"
             aria-modal="true"
-            aria-label={action === "restore" ? "恢复云端版本" : "删除云端版本"}
+            aria-label={
+              action === "resolve"
+                ? "解决同步冲突"
+                : action === "restore"
+                  ? "恢复云端版本"
+                  : "删除云端版本"
+            }
           >
             <h3>
-              {action === "restore" ? "恢复并启用这个版本" : "删除这个云端版本"}
+              {action === "resolve"
+                ? "选择这个版本解决冲突"
+                : action === "restore"
+                  ? "恢复并启用这个版本"
+                  : "删除这个云端版本"}
             </h3>
             <div className="cloud-dialog-file">
               <strong>{cloudPathLabel(selected.path)}</strong>
@@ -437,9 +563,11 @@ export default function CloudSyncPanel({
               </span>
             </div>
             <p className="cloud-dialog-copy">
-              {action === "restore"
-                ? "会先保留当前本地内容，再启用选定版本；该文件的冲突分支将合并，历史版本仍可恢复。"
-                : "仅删除这个云端版本，本地数据保留。删除后相同的已同步本地内容不会自动上传；删除的版本将无法再从云端恢复。"}
+              {action === "resolve"
+                ? "选定版本会成为两端共同的当前版本。本机现有内容会先备份并保留到云端，其他冲突分支转入历史，之后仍可恢复。"
+                : action === "restore"
+                  ? "会先保留当前本地内容，再启用选定版本；该文件的冲突分支将合并，历史版本仍可恢复。"
+                  : "仅删除这个云端版本，本地数据保留。删除后相同的已同步本地内容不会自动上传；删除的版本将无法再从云端恢复。"}
             </p>
             <div className="settings-actions cloud-dialog-actions">
               <button
@@ -467,7 +595,9 @@ export default function CloudSyncPanel({
                   ? "处理中…"
                   : action === "delete"
                     ? "确认删除"
-                    : "确认恢复"}
+                    : action === "resolve"
+                      ? "确认选择并解决"
+                      : "确认恢复"}
               </button>
             </div>
           </section>

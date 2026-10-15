@@ -554,7 +554,9 @@ export default function StrategyTriggerSimilarityPage() {
               </span>
               <span>历史截止 {rankingData.historicalCutoffDate}</span>
               <span>耗时 {formatElapsed(rankingData.elapsedMs)}</span>
-              <span>实时水位核验</span>
+              <span>
+                {rankingData.inputSignatureVerified ? '本地水位核验通过' : '已同步快照（本机历史不足，未复核水位）'}
+              </span>
             </div>
             <p className="trigger-sim-direction-note">
               历史质量由未来超额分位45%、MFE分位25%、MAE分位20%和上涨持续性分位10%组成；
