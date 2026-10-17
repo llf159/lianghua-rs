@@ -1,5 +1,7 @@
 use crate::expr::parser::{BinaryOp, Expr, Stmt, Stmts, UnaryOp};
+use std::borrow::Cow;
 use std::collections::HashMap;
+use std::ops::Range;
 use std::sync::Arc;
 
 const EPS: f64 = 1e-12;
@@ -14,32 +16,116 @@ pub struct Runtime {
     pub vars: HashMap<String, Value>,
 }
 
-fn to_bool(v: f64) -> bool {
-    v != 0.0
+/// Boolean results retain missing evidence until the final match boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Truth {
+    False,
+    True,
+    Unknown,
 }
 
-fn to_num(b: bool) -> f64 {
-    if b { 1.0 } else { 0.0 }
-}
-
-#[derive(Clone, Copy)]
-enum DayValue {
-    Num(Option<f64>),
-    Bool(bool),
-}
-
-fn day_value_as_num(value: DayValue) -> Option<f64> {
-    match value {
-        DayValue::Num(value) => value,
-        DayValue::Bool(value) => Some(to_num(value)),
+impl From<bool> for Truth {
+    fn from(value: bool) -> Self {
+        if value { Self::True } else { Self::False }
     }
 }
 
-fn day_value_as_bool(value: DayValue) -> bool {
+impl Truth {
+    pub fn from_num(value: Option<f64>) -> Self {
+        match value.filter(|value| value.is_finite()) {
+            Some(value) => (value != 0.0).into(),
+            None => Self::Unknown,
+        }
+    }
+
+    pub fn as_num(self) -> Option<f64> {
+        match self {
+            Self::True => Some(1.0),
+            Self::False => Some(0.0),
+            Self::Unknown => None,
+        }
+    }
+
+    pub fn is_true(self) -> bool {
+        self == Self::True
+    }
+    pub fn is_known(self) -> bool {
+        self != Self::Unknown
+    }
+
+    fn and(self, rhs: Self) -> Self {
+        match (self, rhs) {
+            (Self::False, _) | (_, Self::False) => Self::False,
+            (Self::True, Self::True) => Self::True,
+            _ => Self::Unknown,
+        }
+    }
+
+    fn or(self, rhs: Self) -> Self {
+        match (self, rhs) {
+            (Self::True, _) | (_, Self::True) => Self::True,
+            (Self::False, Self::False) => Self::False,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+impl std::ops::Not for Truth {
+    type Output = Self;
+    fn not(self) -> Self {
+        match self {
+            Self::True => Self::False,
+            Self::False => Self::True,
+            Self::Unknown => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum DayValue {
+    Unset,
+    Num(Option<f64>),
+    Bool(Truth),
+}
+
+pub(crate) fn day_value_as_num(value: DayValue) -> Option<f64> {
     match value {
-        DayValue::Num(Some(value)) => to_bool(value),
-        DayValue::Num(None) => false,
-        DayValue::Bool(value) => value,
+        DayValue::Unset => None,
+        DayValue::Num(value) => value.filter(|value| value.is_finite()),
+        DayValue::Bool(value) => value.as_num(),
+    }
+}
+
+fn day_value_as_truth(value: DayValue) -> Truth {
+    Truth::from_num(day_value_as_num(value))
+}
+
+fn eval_day_binary(op: &BinaryOp, lhs: DayValue, rhs: DayValue) -> DayValue {
+    if matches!(op, BinaryOp::And) {
+        return DayValue::Bool(day_value_as_truth(lhs).and(day_value_as_truth(rhs)));
+    }
+    if matches!(op, BinaryOp::Or) {
+        return DayValue::Bool(day_value_as_truth(lhs).or(day_value_as_truth(rhs)));
+    }
+    let pair = day_value_as_num(lhs).zip(day_value_as_num(rhs));
+    match op {
+        BinaryOp::Add => DayValue::Num(pair.map(|(a, b)| a + b)),
+        BinaryOp::Sub => DayValue::Num(pair.map(|(a, b)| a - b)),
+        BinaryOp::Mul => DayValue::Num(pair.map(|(a, b)| a * b)),
+        BinaryOp::Div => DayValue::Num(pair.map(|(a, b)| if b.abs() < EPS { 0.0 } else { a / b })),
+        _ => DayValue::Bool(
+            pair.map(|(a, b)| match op {
+                BinaryOp::Ge => a > b + EPS || (a - b).abs() <= EPS,
+                BinaryOp::Gt => a > b + EPS,
+                BinaryOp::Le => a < b - EPS || (a - b).abs() <= EPS,
+                BinaryOp::Lt => a < b - EPS,
+                BinaryOp::Eq => (a - b).abs() <= EPS,
+                BinaryOp::Ne => (a - b).abs() > EPS,
+                _ => unreachable!(),
+            })
+            .map(Truth::from)
+            .unwrap_or(Truth::Unknown),
+        ),
     }
 }
 
@@ -63,7 +149,8 @@ impl Runtime {
     ) -> Result<Vec<Option<usize>>, EvalErr> {
         let period_series = Value::as_num_series(&period, len)?;
         Ok(period_series
-            .into_iter()
+            .iter()
+            .copied()
             .map(|value| {
                 let value = value?;
                 if !value.is_finite() {
@@ -88,7 +175,7 @@ impl Runtime {
         &mut self,
         args: &[Expr],
         fn_name: &str,
-    ) -> Result<(Vec<Option<f64>>, Vec<Option<usize>>, usize), EvalErr> {
+    ) -> Result<(Value, Vec<Option<usize>>, usize), EvalErr> {
         if args.len() != 3 {
             return Err(EvalErr {
                 msg: format!("{fn_name}需要三个参数"),
@@ -98,11 +185,10 @@ impl Runtime {
         let value = self.eval_expr(&args[0])?;
         let period = self.eval_expr(&args[1])?;
         let len = Value::len_of(&value).max(Value::len_of(&period));
-        let value_series = Value::as_num_series(&value, len)?;
         let max_period = self.dynamic_limit(&args[2], fn_name)?;
         let period_series = self.dynamic_period_series(period, len, max_period, 1)?;
 
-        Ok((value_series, period_series, len))
+        Ok((value, period_series, len))
     }
 
     fn impl_extremed(
@@ -111,7 +197,8 @@ impl Runtime {
         fn_name: &str,
         greater: bool,
     ) -> Result<Value, EvalErr> {
-        let (num_series, period_series, len) = self.dynamic_num_window_args(args, fn_name)?;
+        let (value, period_series, len) = self.dynamic_num_window_args(args, fn_name)?;
+        let num_series = Value::as_num_series(&value, len)?;
         let mut out = Vec::with_capacity(len);
 
         for i in 0..len {
@@ -133,22 +220,26 @@ impl Runtime {
                 }
             };
 
+            let mut complete = true;
             for value in num_series.iter().take(i + 1).skip(start) {
-                if let Some(value) = value {
-                    if (greater && *value > best) || (!greater && *value < best) {
-                        best = *value;
-                    }
+                let Some(value) = value else {
+                    complete = false;
+                    break;
+                };
+                if (greater && *value > best) || (!greater && *value < best) {
+                    best = *value;
                 }
             }
-            out.push(Some(best));
+            out.push(complete.then_some(best));
         }
 
         Ok(Value::NumSeries(out))
     }
 
     fn impl_window_sumd(&mut self, args: &[Expr], average: bool) -> Result<Value, EvalErr> {
-        let (num_series, period_series, len) =
+        let (value, period_series, len) =
             self.dynamic_num_window_args(args, if average { "MAD" } else { "SUMD" })?;
+        let num_series = Value::as_num_series(&value, len)?;
         let mut out = Vec::with_capacity(len);
 
         for i in 0..len {
@@ -187,7 +278,8 @@ impl Runtime {
     }
 
     fn impl_stdd(&mut self, args: &[Expr]) -> Result<Value, EvalErr> {
-        let (num_series, period_series, len) = self.dynamic_num_window_args(args, "STDD")?;
+        let (value, period_series, len) = self.dynamic_num_window_args(args, "STDD")?;
+        let num_series = Value::as_num_series(&value, len)?;
         let mut out = Vec::with_capacity(len);
 
         for i in 0..len {
@@ -236,7 +328,8 @@ impl Runtime {
         fn_name: &str,
         greater_first: bool,
     ) -> Result<Value, EvalErr> {
-        let (num_series, period_series, len) = self.dynamic_num_window_args(args, fn_name)?;
+        let (value, period_series, len) = self.dynamic_num_window_args(args, fn_name)?;
+        let num_series = Value::as_num_series(&value, len)?;
         let mut out = Vec::with_capacity(len);
 
         for i in 0..len {
@@ -298,72 +391,92 @@ impl Runtime {
         Ok(Value::NumSeries(out))
     }
 
-    fn impl_countd(&mut self, args: &[Expr]) -> Result<Value, EvalErr> {
-        if args.len() != 3 {
+    fn impl_condition_window(
+        &mut self,
+        args: &[Expr],
+        dynamic: bool,
+        exists: bool,
+    ) -> Result<Value, EvalErr> {
+        let name = match (dynamic, exists) {
+            (true, true) => "EXISTD",
+            (true, false) => "COUNTD",
+            (false, true) => "EXIST",
+            (false, false) => "COUNT",
+        };
+        if args.len() != if dynamic { 3 } else { 2 } {
             return Err(EvalErr {
-                msg: "COUNTD需要三个参数".to_string(),
+                msg: format!("{name}参数数量错误"),
             });
         }
-
-        let cond = self.eval_expr(&args[0])?;
+        let condition = self.eval_expr(&args[0])?;
         let period = self.eval_expr(&args[1])?;
-        let len = Value::len_of(&cond).max(Value::len_of(&period));
-        let cond_series = Value::as_bool_series(&cond, len)?;
-        let max_period = self.dynamic_limit(&args[2], "COUNTD")?;
-        let period_series = self.dynamic_period_series(period, len, max_period, 1)?;
-
+        let len = if dynamic {
+            Value::len_of(&condition).max(Value::len_of(&period))
+        } else {
+            Value::len_of(&condition)
+        };
+        let conditions = Value::as_truth_series(&condition, len)?;
+        let periods = if dynamic {
+            let limit = self.dynamic_limit(&args[2], name)?;
+            self.dynamic_period_series(period, len, limit, 1)?
+        } else {
+            let period = Value::as_num(&period)?;
+            vec![
+                Some(if period as i64 <= 0 {
+                    1
+                } else {
+                    period as usize
+                });
+                len
+            ]
+        };
         let mut prefix = Vec::with_capacity(len + 1);
-        prefix.push(0usize);
-        for hit in &cond_series {
-            let next = prefix.last().copied().unwrap_or(0) + usize::from(*hit);
-            prefix.push(next);
+        prefix.push((0usize, 0usize));
+        for truth in conditions.iter() {
+            let (hits, missing) = *prefix.last().unwrap();
+            prefix.push((
+                hits + usize::from(truth.is_true()),
+                missing + usize::from(!truth.is_known()),
+            ));
         }
-
-        let mut out = Vec::with_capacity(len);
-        for i in 0..len {
-            let Some(period) = period_series[i] else {
-                out.push(None);
+        let mut counts = Vec::with_capacity(if exists { 0 } else { len });
+        let mut truths = Vec::with_capacity(if exists { len } else { 0 });
+        for (day, period) in periods.into_iter().enumerate() {
+            let Some(period) = period else {
+                if exists {
+                    truths.push(Truth::Unknown);
+                } else {
+                    counts.push(None);
+                }
                 continue;
             };
-            let start = (i + 1).saturating_sub(period);
-            out.push(Some((prefix[i + 1] - prefix[start]) as f64));
+            let start = (day + 1).saturating_sub(period);
+            let hits = prefix[day + 1].0 - prefix[start].0;
+            let missing = day + 1 < period || prefix[day + 1].1 != prefix[start].1;
+            if exists {
+                truths.push(if hits > 0 {
+                    Truth::True
+                } else if missing {
+                    Truth::Unknown
+                } else {
+                    Truth::False
+                });
+            } else {
+                counts.push((!missing).then_some(hits as f64));
+            }
         }
-
-        Ok(Value::NumSeries(out))
+        Ok(if exists {
+            Value::BoolSeries(truths)
+        } else {
+            Value::NumSeries(counts)
+        })
     }
 
+    fn impl_countd(&mut self, args: &[Expr]) -> Result<Value, EvalErr> {
+        self.impl_condition_window(args, true, false)
+    }
     fn impl_existd(&mut self, args: &[Expr]) -> Result<Value, EvalErr> {
-        if args.len() != 3 {
-            return Err(EvalErr {
-                msg: "EXISTD需要三个参数".to_string(),
-            });
-        }
-
-        let cond = self.eval_expr(&args[0])?;
-        let period = self.eval_expr(&args[1])?;
-        let len = Value::len_of(&cond).max(Value::len_of(&period));
-        let cond_series = Value::as_bool_series(&cond, len)?;
-        let max_period = self.dynamic_limit(&args[2], "EXISTD")?;
-        let period_series = self.dynamic_period_series(period, len, max_period, 1)?;
-
-        let mut prefix = Vec::with_capacity(len + 1);
-        prefix.push(0usize);
-        for hit in &cond_series {
-            let next = prefix.last().copied().unwrap_or(0) + usize::from(*hit);
-            prefix.push(next);
-        }
-
-        let mut out = Vec::with_capacity(len);
-        for i in 0..len {
-            let Some(period) = period_series[i] else {
-                out.push(false);
-                continue;
-            };
-            let start = (i + 1).saturating_sub(period);
-            out.push(prefix[i + 1] > prefix[start]);
-        }
-
-        Ok(Value::BoolSeries(out))
+        self.impl_condition_window(args, true, true)
     }
 
     fn impl_max(&mut self, args: &[Expr]) -> Result<Value, EvalErr> {
@@ -492,65 +605,10 @@ impl Runtime {
     }
 
     fn impl_count(&mut self, args: &[Expr]) -> Result<Value, EvalErr> {
-        if args.len() != 2 {
-            return Err(EvalErr {
-                msg: "COUNT需要两个参数".to_string(),
-            });
-        }
-
-        let cond = self.eval_expr(&args[0])?;
-        let len = Value::len_of(&cond);
-        let ori_n = Value::as_num(&self.eval_expr(&args[1])?)?;
-        let std_n = { if ori_n as i64 <= 0 { 1 } else { ori_n as usize } };
-        let cond_series = Value::as_bool_series(&cond, len)?;
-        let mut out = Vec::with_capacity(len);
-        let mut cnt: usize = 0;
-
-        for i in 0..len {
-            if cond_series[i] {
-                cnt += 1;
-            }
-            if i + 1 > std_n {
-                let left = i + 1 - std_n;
-                if cond_series[left - 1] {
-                    cnt -= 1;
-                }
-            }
-
-            out.push(Some(cnt as f64));
-        }
-        Ok(Value::NumSeries(out))
+        self.impl_condition_window(args, false, false)
     }
-
     fn impl_exist(&mut self, args: &[Expr]) -> Result<Value, EvalErr> {
-        if args.len() != 2 {
-            return Err(EvalErr {
-                msg: "EXIST需要两个参数".to_string(),
-            });
-        }
-
-        let cond = self.eval_expr(&args[0])?;
-        let len = Value::len_of(&cond);
-        let ori_n = Value::as_num(&self.eval_expr(&args[1])?)?;
-        let std_n = { if ori_n as i64 <= 0 { 1 } else { ori_n as usize } };
-        let cond_series = Value::as_bool_series(&cond, len)?;
-        let mut out = Vec::with_capacity(len);
-        let mut cnt: usize = 0;
-
-        for i in 0..len {
-            if cond_series[i] {
-                cnt += 1;
-            }
-            if i + 1 > std_n {
-                let left = i + 1 - std_n;
-                if cond_series[left - 1] {
-                    cnt -= 1;
-                }
-            }
-
-            out.push(cnt > 0);
-        }
-        Ok(Value::BoolSeries(out))
+        self.impl_condition_window(args, false, true)
     }
 
     fn impl_ma(&mut self, args: &[Expr]) -> Result<Value, EvalErr> {
@@ -645,15 +703,15 @@ impl Runtime {
             Value::Bool(b) => Ok(Value::Bool(b)),
             Value::NumSeries(ns) => match ns[idx] {
                 Some(n) => Ok(Value::Num(n)),
-                None => Err(EvalErr {
-                    msg: "LAST命中的值为空".to_string(),
-                }),
+                None => Ok(Value::Bool(Truth::Unknown)),
+            },
+            Value::NumWindow { values, range } => match values[range.start + idx] {
+                Some(n) => Ok(Value::Num(n)),
+                None => Ok(Value::Bool(Truth::Unknown)),
             },
             Value::SharedNumSeries(ns) => match ns[idx] {
                 Some(n) => Ok(Value::Num(n)),
-                None => Err(EvalErr {
-                    msg: "LAST命中的值为空".to_string(),
-                }),
+                None => Ok(Value::Bool(Truth::Unknown)),
             },
             Value::BoolSeries(bs) => Ok(Value::Bool(bs[idx])),
         }
@@ -688,17 +746,17 @@ impl Runtime {
                 }
             };
 
-            for j in start..=i {
-                match num_series[j] {
-                    Some(a) => {
-                        if a > max {
-                            max = a
-                        }
-                    }
-                    None => {}
+            let mut complete = true;
+            for value in &num_series[start..=i] {
+                let Some(value) = value else {
+                    complete = false;
+                    break;
+                };
+                if *value > max {
+                    max = *value;
                 }
             }
-            out.push(Some(max));
+            out.push(complete.then_some(max));
         }
         Ok(Value::NumSeries(out))
     }
@@ -732,17 +790,17 @@ impl Runtime {
                 }
             };
 
-            for j in start..=i {
-                match num_series[j] {
-                    Some(a) => {
-                        if a < min {
-                            min = a
-                        }
-                    }
-                    None => {}
+            let mut complete = true;
+            for value in &num_series[start..=i] {
+                let Some(value) = value else {
+                    complete = false;
+                    break;
+                };
+                if *value < min {
+                    min = *value;
                 }
             }
-            out.push(Some(min));
+            out.push(complete.then_some(min));
         }
         Ok(Value::NumSeries(out))
     }
@@ -853,17 +911,17 @@ impl Runtime {
         let len_r = Value::len_of(&r);
         let len = len_cond.max(len_l).max(len_r);
 
-        let b_series = Value::as_bool_series(&cond, len)?;
+        let b_series = Value::as_truth_series(&cond, len)?;
         let l_series = Value::as_num_series(&l, len)?;
         let r_series = Value::as_num_series(&r, len)?;
         let mut out = Vec::with_capacity(len);
 
         for i in 0..len {
-            if b_series[i] {
-                out.push(l_series[i]);
-            } else {
-                out.push(r_series[i]);
-            }
+            out.push(match b_series[i] {
+                Truth::True => l_series[i],
+                Truth::False => r_series[i],
+                Truth::Unknown => None,
+            });
         }
         Ok(Value::NumSeries(out))
     }
@@ -884,11 +942,17 @@ impl Runtime {
         let r_series = Value::as_num_series(&r, len)?;
         let mut out = Vec::with_capacity(len);
 
-        out.push(false);
+        if len > 0 {
+            out.push(Truth::Unknown);
+        }
         for i in 1..len {
             let hit = match (l_series[i], r_series[i], l_series[i - 1], r_series[i - 1]) {
-                (Some(a), Some(b), Some(pa), Some(pb)) => a > b && pa <= pb,
-                _ => false,
+                (Some(a), Some(b), Some(pa), Some(pb))
+                    if [a, b, pa, pb].iter().all(|n| n.is_finite()) =>
+                {
+                    (a > b && pa <= pb).into()
+                }
+                _ => Truth::Unknown,
             };
             out.push(hit);
         }
@@ -976,36 +1040,17 @@ impl Runtime {
 
         let v = self.eval_expr(&args[0])?;
         let len = Value::len_of(&v);
-        let b_series = Value::as_bool_series(&v, len)?;
+        let b_series = Value::as_truth_series(&v, len)?;
         let mut out = Vec::with_capacity(len);
-        let mut count = 0;
-        let mut has_true = false;
-        let mut start = len;
-
-        for i in 0..len {
-            if b_series[i] {
-                has_true = true;
-                start = i + 1;
-                out.push(Some(0.0));
-                break;
-            } else {
-                out.push(Some(f64::NAN));
-            }
+        let mut age: Option<usize> = None;
+        for truth in b_series.iter() {
+            age = match truth {
+                Truth::True => Some(0),
+                Truth::False => age.map(|age| age + 1),
+                Truth::Unknown => None,
+            };
+            out.push(age.map(|age| age as f64));
         }
-        if has_true {
-            for j in start..len {
-                match b_series[j] {
-                    true => {
-                        count = 0;
-                    }
-                    false => {
-                        count += 1;
-                    }
-                }
-                out.push(Some(count as f64));
-            }
-        }
-
         Ok(Value::NumSeries(out))
     }
 
@@ -1222,7 +1267,7 @@ impl Runtime {
         let cond = self.eval_expr(&args[1])?;
         let len = Value::len_of(&value).max(Value::len_of(&cond));
         let value_series = Value::as_num_series(&value, len)?;
-        let cond_series = Value::as_bool_series(&cond, len)?;
+        let cond_series = Value::as_truth_series(&cond, len)?;
         let ori_win = Value::as_num(&self.eval_expr(&args[2])?)?;
         let ori_topn = Value::as_num(&self.eval_expr(&args[3])?)?;
         let std_win = if ori_win as i64 <= 0 {
@@ -1244,7 +1289,7 @@ impl Runtime {
             }
 
             let start = i + 1 - std_win;
-            let mut rows: Vec<(usize, f64, bool)> = Vec::with_capacity(std_win);
+            let mut rows: Vec<(usize, f64, Truth)> = Vec::with_capacity(std_win);
             let mut has_none = false;
             for j in start..=i {
                 match value_series[j] {
@@ -1274,8 +1319,18 @@ impl Runtime {
             });
 
             let keep_n = rows.len().min(std_topn);
-            let hit_count = rows.iter().take(keep_n).filter(|(_, _, ok)| *ok).count();
-            out.push(Some(hit_count as f64));
+            let selected = &rows[..keep_n];
+            out.push(
+                selected
+                    .iter()
+                    .all(|(_, _, truth)| truth.is_known())
+                    .then(|| {
+                        selected
+                            .iter()
+                            .filter(|(_, _, truth)| truth.is_true())
+                            .count() as f64
+                    }),
+            );
         }
 
         Ok(Value::NumSeries(out))
@@ -1300,7 +1355,7 @@ impl Runtime {
             .max(Value::len_of(&cond))
             .max(Value::len_of(&period));
         let value_series = Value::as_num_series(&value, len)?;
-        let cond_series = Value::as_bool_series(&cond, len)?;
+        let cond_series = Value::as_truth_series(&cond, len)?;
         let max_period = self.dynamic_limit(&args[4], fn_name)?;
         let period_series = self.dynamic_period_series(period, len, max_period, 1)?;
         let ori_topn = Value::as_num(&self.eval_expr(&args[3])?)?;
@@ -1322,7 +1377,7 @@ impl Runtime {
             }
 
             let start = i + 1 - period;
-            let mut rows: Vec<(usize, f64, bool)> = Vec::with_capacity(period);
+            let mut rows: Vec<(usize, f64, Truth)> = Vec::with_capacity(period);
             let mut has_none = false;
             for j in start..=i {
                 match value_series[j] {
@@ -1351,8 +1406,18 @@ impl Runtime {
             });
 
             let keep_n = rows.len().min(std_topn);
-            let hit_count = rows.iter().take(keep_n).filter(|(_, _, ok)| *ok).count();
-            out.push(Some(hit_count as f64));
+            let selected = &rows[..keep_n];
+            out.push(
+                selected
+                    .iter()
+                    .all(|(_, _, truth)| truth.is_known())
+                    .then(|| {
+                        selected
+                            .iter()
+                            .filter(|(_, _, truth)| truth.is_true())
+                            .count() as f64
+                    }),
+            );
         }
 
         Ok(Value::NumSeries(out))
@@ -1434,7 +1499,7 @@ impl Runtime {
         let cond = self.eval_expr(&args[0])?;
         let v = self.eval_expr(&args[1])?;
         let len = Value::len_of(&cond).max(Value::len_of(&v));
-        let cond_series = Value::as_bool_series(&cond, len)?;
+        let cond_series = Value::as_truth_series(&cond, len)?;
         let v_series = Value::as_num_series(&v, len)?;
         let ori_n = Value::as_num(&self.eval_expr(&args[2])?)?;
         let std_n = { if ori_n as i64 <= 0 { 1 } else { ori_n as usize } };
@@ -1444,8 +1509,10 @@ impl Runtime {
             let start = i.saturating_sub(std_n);
             let mut last = None;
             for j in start..i {
-                if cond_series[j] {
-                    last = v_series[j];
+                match cond_series[j] {
+                    Truth::True => last = v_series[j],
+                    Truth::Unknown => last = None,
+                    Truth::False => {}
                 }
             }
             out.push(last);
@@ -1467,7 +1534,7 @@ impl Runtime {
         let len = Value::len_of(&cond)
             .max(Value::len_of(&v))
             .max(Value::len_of(&period));
-        let cond_series = Value::as_bool_series(&cond, len)?;
+        let cond_series = Value::as_truth_series(&cond, len)?;
         let v_series = Value::as_num_series(&v, len)?;
         let max_period = self.dynamic_limit(&args[3], "GETD")?;
         let period_series = self.dynamic_period_series(period, len, max_period, 1)?;
@@ -1481,8 +1548,10 @@ impl Runtime {
             let start = i.saturating_sub(period);
             let mut last = None;
             for j in start..i {
-                if cond_series[j] {
-                    last = v_series[j];
+                match cond_series[j] {
+                    Truth::True => last = v_series[j],
+                    Truth::Unknown => last = None,
+                    Truth::False => {}
                 }
             }
             out.push(last);
@@ -1584,8 +1653,15 @@ impl Runtime {
     }
 
     fn eval_assign(&mut self, name: &str, value: &Expr) -> Result<Value, EvalErr> {
-        let v = self.eval_expr(value)?;
-        self.vars.insert(name.to_string(), v.clone());
+        let v = match self.eval_expr(value)? {
+            Value::NumSeries(series) => Value::SharedNumSeries(Arc::new(series)),
+            value => value,
+        };
+        if let Some(slot) = self.vars.get_mut(name) {
+            *slot = v.clone();
+        } else {
+            self.vars.insert(name.to_string(), v.clone());
+        }
         Ok(v)
     }
 
@@ -1639,223 +1715,102 @@ impl Runtime {
     }
 
     fn eval_unary(&mut self, op: &UnaryOp, rhs: &Expr) -> Result<Value, EvalErr> {
-        let v = self.eval_expr(rhs)?;
-        match (op, v) {
-            (UnaryOp::Neg, Value::Num(n)) => Ok(Value::Num(-n)),
-            (UnaryOp::Neg, Value::Bool(b)) => Ok(Value::Num(-to_num(b))),
-            (UnaryOp::Neg, Value::NumSeries(ns)) => Ok(Value::NumSeries(
-                ns.into_iter().map(|x| x.map(|n| -n)).collect(),
-            )),
-            (UnaryOp::Neg, Value::SharedNumSeries(ns)) => {
-                Ok(Value::NumSeries(ns.iter().map(|x| x.map(|n| -n)).collect()))
-            }
-            (UnaryOp::Neg, Value::BoolSeries(bs)) => Ok(Value::NumSeries(
-                bs.into_iter().map(|b| Some(-to_num(b))).collect(),
-            )),
-            (UnaryOp::Not, Value::Num(n)) => Ok(Value::Bool(!to_bool(n))),
-            (UnaryOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
-            (UnaryOp::Not, Value::NumSeries(ns)) => Ok(Value::BoolSeries(
-                ns.into_iter().map(|x| !to_bool(x.unwrap_or(0.0))).collect(),
-            )),
-            (UnaryOp::Not, Value::SharedNumSeries(ns)) => Ok(Value::BoolSeries(
-                ns.iter().map(|x| !to_bool(x.unwrap_or(0.0))).collect(),
-            )),
-            (UnaryOp::Not, Value::BoolSeries(bs)) => {
-                Ok(Value::BoolSeries(bs.into_iter().map(|b| !b).collect()))
-            }
+        let value = self.eval_expr(rhs)?;
+        if let Value::Num(number) = value {
+            return Ok(match op {
+                UnaryOp::Neg => Value::Num(-number),
+                UnaryOp::Not => Value::Bool(!Truth::from_num(Some(number))),
+            });
         }
+        if let Value::Bool(truth) = value {
+            return Ok(match op {
+                UnaryOp::Neg => truth
+                    .as_num()
+                    .map(|n| Value::Num(-n))
+                    .unwrap_or(Value::Bool(Truth::Unknown)),
+                UnaryOp::Not => Value::Bool(!truth),
+            });
+        }
+        if let Value::BoolSeries(series) = value {
+            return Ok(match op {
+                UnaryOp::Neg => Value::NumSeries(
+                    series
+                        .into_iter()
+                        .map(|truth| truth.as_num().map(|n| -n))
+                        .collect(),
+                ),
+                UnaryOp::Not => Value::BoolSeries(series.into_iter().map(|truth| !truth).collect()),
+            });
+        }
+        let series = Value::as_num_series(&value, Value::len_of(&value))?;
+        Ok(match op {
+            UnaryOp::Neg => {
+                Value::NumSeries(series.iter().map(|value| value.map(|n| -n)).collect())
+            }
+            UnaryOp::Not => Value::BoolSeries(
+                series
+                    .iter()
+                    .map(|value| !Truth::from_num(*value))
+                    .collect(),
+            ),
+        })
     }
 
     fn eval_binary(&mut self, op: &BinaryOp, lhs: &Expr, rhs: &Expr) -> Result<Value, EvalErr> {
-        let lv = self.eval_expr(lhs)?;
-        let rv = self.eval_expr(rhs)?;
-
-        if matches!(lv, Value::Num(_) | Value::Bool(_))
-            && matches!(rv, Value::Num(_) | Value::Bool(_))
+        let lhs = self.eval_expr(lhs)?;
+        let rhs = self.eval_expr(rhs)?;
+        if matches!(lhs, Value::Num(_) | Value::Bool(_))
+            && matches!(rhs, Value::Num(_) | Value::Bool(_))
         {
-            let l = Value::as_num(&lv)?;
-            let r = Value::as_num(&rv)?;
-
-            return match op {
-                BinaryOp::Add => Ok(Value::Num(l + r)),
-                BinaryOp::Sub => Ok(Value::Num(l - r)),
-                BinaryOp::Mul => Ok(Value::Num(l * r)),
-                BinaryOp::Div => {
-                    if r.abs() < EPS {
-                        Ok(Value::Num(0.0))
-                    } else {
-                        Ok(Value::Num(l / r))
-                    }
-                }
-                BinaryOp::Ge => Ok(Value::Bool(l > r + EPS || (l - r).abs() <= EPS)),
-                BinaryOp::Gt => Ok(Value::Bool(l > r + EPS)),
-                BinaryOp::Le => Ok(Value::Bool(l < r - EPS || (l - r).abs() <= EPS)),
-                BinaryOp::Lt => Ok(Value::Bool(l < r - EPS)),
-                BinaryOp::Eq => Ok(Value::Bool((l - r).abs() <= EPS)),
-                BinaryOp::Ne => Ok(Value::Bool((l - r).abs() > EPS)),
-                BinaryOp::And => Ok(Value::Bool(to_bool(l) && to_bool(r))),
-                BinaryOp::Or => Ok(Value::Bool(to_bool(l) || to_bool(r))),
+            let left = match lhs {
+                Value::Num(n) => DayValue::Num(Some(n)),
+                Value::Bool(b) => DayValue::Bool(b),
+                _ => unreachable!(),
             };
+            let right = match rhs {
+                Value::Num(n) => DayValue::Num(Some(n)),
+                Value::Bool(b) => DayValue::Bool(b),
+                _ => unreachable!(),
+            };
+            return Ok(match eval_day_binary(op, left, right) {
+                DayValue::Num(Some(n)) => Value::Num(n),
+                DayValue::Bool(b) => Value::Bool(b),
+                _ => Value::Bool(Truth::Unknown),
+            });
         }
-
-        let len = usize::max(Value::len_of(&lv), Value::len_of(&rv));
-        let ls = Value::as_num_series(&lv, len)?;
-        let rs = Value::as_num_series(&rv, len)?;
-
-        match op {
-            BinaryOp::Add => {
-                let mut out: Vec<Option<f64>> = Vec::with_capacity(len);
-                for i in 0..len {
-                    match (ls[i], rs[i]) {
-                        (Some(a), Some(b)) => out.push(Some(a + b)),
-                        _ => {
-                            out.push(None);
+        let len = Value::len_of(&lhs).max(Value::len_of(&rhs));
+        if matches!(op, BinaryOp::And | BinaryOp::Or) {
+            let left = Value::as_truth_series(&lhs, len)?;
+            let right = Value::as_truth_series(&rhs, len)?;
+            return Ok(Value::BoolSeries(
+                left.iter()
+                    .zip(right.iter())
+                    .map(|(lhs, rhs)| {
+                        if matches!(op, BinaryOp::And) {
+                            lhs.and(*rhs)
+                        } else {
+                            lhs.or(*rhs)
                         }
-                    }
-                }
-                Ok(Value::NumSeries(out))
-            }
-            BinaryOp::Sub => {
-                let mut out: Vec<Option<f64>> = Vec::with_capacity(len);
-                for i in 0..len {
-                    match (ls[i], rs[i]) {
-                        (Some(a), Some(b)) => out.push(Some(a - b)),
-                        _ => {
-                            out.push(None);
-                        }
-                    }
-                }
-                Ok(Value::NumSeries(out))
-            }
-            BinaryOp::Mul => {
-                let mut out: Vec<Option<f64>> = Vec::with_capacity(len);
-                for i in 0..len {
-                    match (ls[i], rs[i]) {
-                        (Some(a), Some(b)) => out.push(Some(a * b)),
-                        _ => {
-                            out.push(None);
-                        }
-                    }
-                }
-                Ok(Value::NumSeries(out))
-            }
-            BinaryOp::Div => {
-                let mut out: Vec<Option<f64>> = Vec::with_capacity(len);
-                for i in 0..len {
-                    match (ls[i], rs[i]) {
-                        (Some(a), Some(b)) => {
-                            if b.abs() < EPS {
-                                out.push(Some(0.0));
-                            } else {
-                                out.push(Some(a / b))
-                            }
-                        }
-                        _ => {
-                            out.push(None);
-                        }
-                    }
-                }
-                Ok(Value::NumSeries(out))
-            }
-
-            BinaryOp::Ge => {
-                let mut out = Vec::with_capacity(len);
-                for i in 0..len {
-                    match (ls[i], rs[i]) {
-                        (Some(a), Some(b)) => out.push(a > b + EPS || (a - b).abs() <= EPS),
-                        _ => {
-                            out.push(false);
-                        }
-                    }
-                }
-                Ok(Value::BoolSeries(out))
-            }
-            BinaryOp::Gt => {
-                let mut out = Vec::with_capacity(len);
-                for i in 0..len {
-                    match (ls[i], rs[i]) {
-                        (Some(a), Some(b)) => out.push(a > b + EPS),
-                        _ => {
-                            out.push(false);
-                        }
-                    }
-                }
-                Ok(Value::BoolSeries(out))
-            }
-            BinaryOp::Le => {
-                let mut out = Vec::with_capacity(len);
-                for i in 0..len {
-                    match (ls[i], rs[i]) {
-                        (Some(a), Some(b)) => out.push(a < b - EPS || (a - b).abs() <= EPS),
-                        _ => {
-                            out.push(false);
-                        }
-                    }
-                }
-                Ok(Value::BoolSeries(out))
-            }
-            BinaryOp::Lt => {
-                let mut out = Vec::with_capacity(len);
-                for i in 0..len {
-                    match (ls[i], rs[i]) {
-                        (Some(a), Some(b)) => out.push(a < b - EPS),
-                        _ => {
-                            out.push(false);
-                        }
-                    }
-                }
-                Ok(Value::BoolSeries(out))
-            }
-            BinaryOp::Eq => {
-                let mut out = Vec::with_capacity(len);
-                for i in 0..len {
-                    match (ls[i], rs[i]) {
-                        (Some(a), Some(b)) => out.push((a - b).abs() <= EPS),
-                        _ => {
-                            out.push(false);
-                        }
-                    }
-                }
-                Ok(Value::BoolSeries(out))
-            }
-            BinaryOp::Ne => {
-                let mut out = Vec::with_capacity(len);
-                for i in 0..len {
-                    match (ls[i], rs[i]) {
-                        (Some(a), Some(b)) => out.push(!((a - b).abs() <= EPS)),
-                        _ => {
-                            out.push(false);
-                        }
-                    }
-                }
-                Ok(Value::BoolSeries(out))
-            }
-
-            BinaryOp::And => {
-                let mut out = Vec::with_capacity(len);
-                for i in 0..len {
-                    match (ls[i], rs[i]) {
-                        (Some(a), Some(b)) => out.push(to_bool(a) && to_bool(b)),
-                        _ => {
-                            out.push(false);
-                        }
-                    }
-                }
-                Ok(Value::BoolSeries(out))
-            }
-            BinaryOp::Or => {
-                let mut out = Vec::with_capacity(len);
-                for i in 0..len {
-                    match (ls[i], rs[i]) {
-                        (Some(a), Some(b)) => out.push(to_bool(a) || to_bool(b)),
-                        _ => {
-                            out.push(false);
-                        }
-                    }
-                }
-                Ok(Value::BoolSeries(out))
-            }
+                    })
+                    .collect(),
+            ));
         }
+        let left = Value::as_num_series(&lhs, len)?;
+        let right = Value::as_num_series(&rhs, len)?;
+        let evaluated = left
+            .iter()
+            .zip(right.iter())
+            .map(|(lhs, rhs)| eval_day_binary(op, DayValue::Num(*lhs), DayValue::Num(*rhs)));
+        Ok(
+            if matches!(
+                op,
+                BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div
+            ) {
+                Value::NumSeries(evaluated.map(day_value_as_num).collect())
+            } else {
+                Value::BoolSeries(evaluated.map(day_value_as_truth).collect())
+            },
+        )
     }
 
     fn eval_stmt(&mut self, stmt: &Stmt) -> Result<Value, EvalErr> {
@@ -1873,11 +1828,14 @@ impl Runtime {
             Value::Num(value) => Ok(DayValue::Num(Some(*value))),
             Value::Bool(value) => Ok(DayValue::Bool(*value)),
             Value::NumSeries(series) => Ok(DayValue::Num(series.get(day_index).copied().flatten())),
+            Value::NumWindow { values, range } => Ok(DayValue::Num(
+                values[range.clone()].get(day_index).copied().flatten(),
+            )),
             Value::SharedNumSeries(series) => {
                 Ok(DayValue::Num(series.get(day_index).copied().flatten()))
             }
             Value::BoolSeries(series) => Ok(DayValue::Bool(
-                series.get(day_index).copied().unwrap_or(false),
+                series.get(day_index).copied().unwrap_or(Truth::Unknown),
             )),
         }
     }
@@ -1891,7 +1849,11 @@ impl Runtime {
         match expr {
             Expr::Number(value) => Ok(Some(DayValue::Num(Some(*value)))),
             Expr::Ident(name) => {
-                if let Some(value) = locals.get(name).copied() {
+                if let Some(value) = locals
+                    .get(name)
+                    .copied()
+                    .filter(|value| !matches!(value, DayValue::Unset))
+                {
                     Ok(Some(value))
                 } else {
                     self.day_value(name, day_index).map(Some)
@@ -1904,7 +1866,7 @@ impl Runtime {
                 };
                 Ok(Some(match op {
                     UnaryOp::Neg => DayValue::Num(day_value_as_num(rhs).map(|value| -value)),
-                    UnaryOp::Not => DayValue::Bool(!day_value_as_bool(rhs)),
+                    UnaryOp::Not => DayValue::Bool(!day_value_as_truth(rhs)),
                 }))
             }
             Expr::Binary { op, lhs, rhs } => {
@@ -1914,71 +1876,37 @@ impl Runtime {
                 let Some(rhs) = self.eval_expr_bool_at(rhs, locals, day_index)? else {
                     return Ok(None);
                 };
-                let lhs_num = day_value_as_num(lhs);
-                let rhs_num = day_value_as_num(rhs);
-                let value = match op {
-                    BinaryOp::Add => {
-                        DayValue::Num(lhs_num.zip(rhs_num).map(|(lhs, rhs)| lhs + rhs))
-                    }
-                    BinaryOp::Sub => {
-                        DayValue::Num(lhs_num.zip(rhs_num).map(|(lhs, rhs)| lhs - rhs))
-                    }
-                    BinaryOp::Mul => {
-                        DayValue::Num(lhs_num.zip(rhs_num).map(|(lhs, rhs)| lhs * rhs))
-                    }
-                    BinaryOp::Div => DayValue::Num(
-                        lhs_num.zip(rhs_num).map(
-                            |(lhs, rhs)| {
-                                if rhs.abs() < EPS { 0.0 } else { lhs / rhs }
-                            },
-                        ),
-                    ),
-                    BinaryOp::Ge => DayValue::Bool(
-                        lhs_num
-                            .zip(rhs_num)
-                            .map(|(lhs, rhs)| lhs > rhs + EPS || (lhs - rhs).abs() <= EPS)
-                            .unwrap_or(false),
-                    ),
-                    BinaryOp::Gt => DayValue::Bool(
-                        lhs_num
-                            .zip(rhs_num)
-                            .map(|(lhs, rhs)| lhs > rhs + EPS)
-                            .unwrap_or(false),
-                    ),
-                    BinaryOp::Le => DayValue::Bool(
-                        lhs_num
-                            .zip(rhs_num)
-                            .map(|(lhs, rhs)| lhs < rhs - EPS || (lhs - rhs).abs() <= EPS)
-                            .unwrap_or(false),
-                    ),
-                    BinaryOp::Lt => DayValue::Bool(
-                        lhs_num
-                            .zip(rhs_num)
-                            .map(|(lhs, rhs)| lhs < rhs - EPS)
-                            .unwrap_or(false),
-                    ),
-                    BinaryOp::Eq => DayValue::Bool(
-                        lhs_num
-                            .zip(rhs_num)
-                            .map(|(lhs, rhs)| (lhs - rhs).abs() <= EPS)
-                            .unwrap_or(false),
-                    ),
-                    BinaryOp::Ne => DayValue::Bool(
-                        lhs_num
-                            .zip(rhs_num)
-                            .map(|(lhs, rhs)| (lhs - rhs).abs() > EPS)
-                            .unwrap_or(false),
-                    ),
-                    BinaryOp::And => {
-                        DayValue::Bool(day_value_as_bool(lhs) && day_value_as_bool(rhs))
-                    }
-                    BinaryOp::Or => {
-                        DayValue::Bool(day_value_as_bool(lhs) || day_value_as_bool(rhs))
-                    }
-                };
+                let value = eval_day_binary(op, lhs, rhs);
                 Ok(Some(value))
             }
         }
+    }
+
+    pub(crate) fn eval_program_scalar_at(
+        &self,
+        stmts: &Stmts,
+        day_index: usize,
+        locals: &mut HashMap<String, DayValue>,
+    ) -> Result<Option<DayValue>, EvalErr> {
+        let mut last = DayValue::Num(Some(0.0));
+        for stmt in &stmts.item {
+            let (name, expr) = match stmt {
+                Stmt::Assign { name, value } => (Some(name), value),
+                Stmt::Expr(expr) => (None, expr),
+            };
+            let Some(value) = self.eval_expr_bool_at(expr, locals, day_index)? else {
+                return Ok(None);
+            };
+            if let Some(name) = name {
+                if let Some(slot) = locals.get_mut(name) {
+                    *slot = value;
+                } else {
+                    locals.insert(name.clone(), value);
+                }
+            }
+            last = value;
+        }
+        Ok(Some(last))
     }
 
     pub fn eval_program_bool_at(
@@ -1986,28 +1914,8 @@ impl Runtime {
         stmts: &Stmts,
         day_index: usize,
     ) -> Result<Option<bool>, EvalErr> {
-        let mut locals = HashMap::new();
-        let mut last = DayValue::Num(Some(0.0));
-
-        for stmt in &stmts.item {
-            match stmt {
-                Stmt::Assign { name, value } => {
-                    let Some(value) = self.eval_expr_bool_at(value, &locals, day_index)? else {
-                        return Ok(None);
-                    };
-                    locals.insert(name.clone(), value);
-                    last = value;
-                }
-                Stmt::Expr(expr) => {
-                    let Some(value) = self.eval_expr_bool_at(expr, &locals, day_index)? else {
-                        return Ok(None);
-                    };
-                    last = value;
-                }
-            }
-        }
-
-        Ok(Some(day_value_as_bool(last)))
+        self.eval_program_scalar_at(stmts, day_index, &mut HashMap::new())
+            .map(|value| value.map(|value| day_value_as_truth(value).is_true()))
     }
 
     pub fn eval_program(&mut self, stmts: &Stmts) -> Result<Value, EvalErr> {
@@ -2024,17 +1932,33 @@ pub enum Value {
     Num(f64),
     NumSeries(Vec<Option<f64>>),
     SharedNumSeries(Arc<Vec<Option<f64>>>),
-    Bool(bool),
-    BoolSeries(Vec<bool>),
+    NumWindow {
+        values: Arc<Vec<Option<f64>>>,
+        range: Range<usize>,
+    },
+    Bool(Truth),
+    BoolSeries(Vec<Truth>),
 }
 
 impl Value {
+    /// Share immutable expression inputs and assignment results without copying on reads.
+    pub fn into_shared(self) -> Self {
+        match self {
+            Self::NumSeries(series) => Self::SharedNumSeries(Arc::new(series)),
+            Self::BoolSeries(series) => {
+                Self::SharedNumSeries(Arc::new(series.into_iter().map(Truth::as_num).collect()))
+            }
+            other => other,
+        }
+    }
+
     pub fn len_of(v: &Value) -> usize {
         match v {
             Value::Num(_) => 1,
             Value::Bool(_) => 1,
             Value::NumSeries(n) => n.len(),
             Value::SharedNumSeries(n) => n.len(),
+            Value::NumWindow { range, .. } => range.len(),
             Value::BoolSeries(b) => b.len(),
         }
     }
@@ -2042,10 +1966,14 @@ impl Value {
     pub fn as_num(v: &Value) -> Result<f64, EvalErr> {
         match v {
             Value::Num(n) => Ok(*n),
-            Value::Bool(b) => Ok(if *b { 1.0 } else { 0.0 }),
-            Value::NumSeries(_) | Value::SharedNumSeries(_) => Err(EvalErr {
-                msg: "需要标量数字，但拿到数值序列，可用LAST函数转换".to_string(),
+            Value::Bool(b) => b.as_num().ok_or_else(|| EvalErr {
+                msg: "布尔值未知".into(),
             }),
+            Value::NumSeries(_) | Value::SharedNumSeries(_) | Value::NumWindow { .. } => {
+                Err(EvalErr {
+                    msg: "需要标量数字，但拿到数值序列，可用LAST函数转换".to_string(),
+                })
+            }
             Value::BoolSeries(_) => Err(EvalErr {
                 msg: "需要标量数字，但拿到布尔序列".to_string(),
             }),
@@ -2054,58 +1982,47 @@ impl Value {
 
     pub fn as_bool(v: &Value) -> Result<bool, EvalErr> {
         match v {
-            Value::Num(n) => Ok(*n != 0.0),
-            Value::Bool(b) => Ok(*b),
-            Value::NumSeries(_) | Value::SharedNumSeries(_) => Err(EvalErr {
-                msg: "需要布尔，但拿到数值序列".to_string(),
-            }),
+            Value::Num(n) => Ok(Truth::from_num(Some(*n)).is_true()),
+            Value::Bool(b) => Ok(b.is_true()),
+            Value::NumSeries(_) | Value::SharedNumSeries(_) | Value::NumWindow { .. } => {
+                Err(EvalErr {
+                    msg: "需要布尔，但拿到数值序列".to_string(),
+                })
+            }
             Value::BoolSeries(_) => Err(EvalErr {
                 msg: "需要布尔，但拿到布尔序列，可用LAST函数转换".to_string(),
             }),
         }
     }
 
-    pub fn as_num_series(v: &Value, len: usize) -> Result<Vec<Option<f64>>, EvalErr> {
-        match v {
-            Value::Num(n) => Ok(vec![Some(*n); len]),
-            Value::Bool(b) => Ok(vec![Some(if *b { 1.0 } else { 0.0 }); len]),
-            Value::NumSeries(ns) => {
-                if ns.len() == len {
-                    Ok(ns.clone())
-                } else {
-                    Err(EvalErr {
-                        msg: "数值序列长度不对".to_string(),
-                    })
-                }
-            }
-            Value::SharedNumSeries(ns) => {
-                if ns.len() == len {
-                    Ok(ns.as_ref().clone())
-                } else {
-                    Err(EvalErr {
-                        msg: "数值序列长度不对".to_string(),
-                    })
-                }
-            }
+    pub fn as_num_series(v: &Value, len: usize) -> Result<Cow<'_, [Option<f64>]>, EvalErr> {
+        let series = match v {
+            Value::Num(n) => return Ok(Cow::Owned(vec![Some(*n); len])),
+            Value::Bool(b) => return Ok(Cow::Owned(vec![b.as_num(); len])),
+            Value::NumSeries(ns) => ns.as_slice(),
+            Value::SharedNumSeries(ns) => ns.as_slice(),
+            Value::NumWindow { values, range } => &values[range.clone()],
             Value::BoolSeries(bs) => {
-                if bs.len() == len {
-                    Ok(bs
-                        .iter()
-                        .map(|b| Some(if *b { 1.0 } else { 0.0 }))
-                        .collect())
-                } else {
-                    Err(EvalErr {
+                if bs.len() != len {
+                    return Err(EvalErr {
                         msg: "布尔序列长度不对".to_string(),
-                    })
+                    });
                 }
+                return Ok(Cow::Owned(bs.iter().copied().map(Truth::as_num).collect()));
             }
+        };
+        if series.len() != len {
+            return Err(EvalErr {
+                msg: "数值序列长度不对".to_string(),
+            });
         }
+        Ok(Cow::Borrowed(series))
     }
 
     pub fn into_num_series(self, len: usize) -> Result<Vec<Option<f64>>, EvalErr> {
         match self {
             Value::Num(n) => Ok(vec![Some(n); len]),
-            Value::Bool(b) => Ok(vec![Some(if b { 1.0 } else { 0.0 }); len]),
+            Value::Bool(b) => Ok(vec![b.as_num(); len]),
             Value::NumSeries(ns) => {
                 if ns.len() == len {
                     Ok(ns)
@@ -2124,12 +2041,18 @@ impl Value {
                     })
                 }
             }
+            Value::NumWindow { values, range } => {
+                if range.len() == len {
+                    Ok(values[range].to_vec())
+                } else {
+                    Err(EvalErr {
+                        msg: "数值序列长度不对".to_string(),
+                    })
+                }
+            }
             Value::BoolSeries(bs) => {
                 if bs.len() == len {
-                    Ok(bs
-                        .into_iter()
-                        .map(|b| Some(if b { 1.0 } else { 0.0 }))
-                        .collect())
+                    Ok(bs.into_iter().map(Truth::as_num).collect())
                 } else {
                     Err(EvalErr {
                         msg: "布尔序列长度不对".to_string(),
@@ -2139,49 +2062,53 @@ impl Value {
         }
     }
 
-    pub fn as_bool_series(v: &Value, len: usize) -> Result<Vec<bool>, EvalErr> {
+    pub fn into_truth_series(self, len: usize) -> Result<Vec<Truth>, EvalErr> {
+        if let Self::BoolSeries(series) = self {
+            if series.len() != len {
+                return Err(EvalErr {
+                    msg: "布尔序列长度不对".into(),
+                });
+            }
+            Ok(series)
+        } else {
+            Self::as_truth_series(&self, len).map(Cow::into_owned)
+        }
+    }
+
+    pub fn into_bool_series(self, len: usize) -> Result<Vec<bool>, EvalErr> {
+        Self::as_truth_series(&self, len)
+            .map(|series| series.iter().map(|truth| truth.is_true()).collect())
+    }
+
+    /// Only final matching boundaries may collapse Unknown to false.
+    pub fn as_bool_series(v: &Value, len: usize) -> Result<Cow<'_, [bool]>, EvalErr> {
+        Ok(Cow::Owned(
+            Self::as_truth_series(v, len)?
+                .iter()
+                .map(|truth| truth.is_true())
+                .collect(),
+        ))
+    }
+
+    pub fn as_truth_series(v: &Value, len: usize) -> Result<Cow<'_, [Truth]>, EvalErr> {
         match v {
-            Value::Num(n) => Ok(vec![*n != 0.0; len]),
-            Value::Bool(b) => Ok(vec![*b; len]),
-            Value::NumSeries(ns) => {
-                if ns.len() == len {
-                    Ok(ns
-                        .iter()
-                        .map(|n| match n {
-                            Some(n) => *n != 0.0,
-                            None => false,
-                        })
-                        .collect())
-                } else {
-                    Err(EvalErr {
-                        msg: "数值序列长度不对".to_string(),
-                    })
+            Value::Num(n) => Ok(Cow::Owned(vec![Truth::from_num(Some(*n)); len])),
+            Value::Bool(b) => Ok(Cow::Owned(vec![*b; len])),
+            Value::BoolSeries(series) => {
+                if series.len() != len {
+                    return Err(EvalErr {
+                        msg: "布尔序列长度不对".into(),
+                    });
                 }
+                Ok(Cow::Borrowed(series))
             }
-            Value::SharedNumSeries(ns) => {
-                if ns.len() == len {
-                    Ok(ns
-                        .iter()
-                        .map(|n| match n {
-                            Some(n) => *n != 0.0,
-                            None => false,
-                        })
-                        .collect())
-                } else {
-                    Err(EvalErr {
-                        msg: "数值序列长度不对".to_string(),
-                    })
-                }
-            }
-            Value::BoolSeries(bs) => {
-                if bs.len() == len {
-                    Ok(bs.clone())
-                } else {
-                    Err(EvalErr {
-                        msg: "布尔序列长度不对".to_string(),
-                    })
-                }
-            }
+            _ => Ok(Cow::Owned(
+                Self::as_num_series(v, len)?
+                    .iter()
+                    .copied()
+                    .map(Truth::from_num)
+                    .collect(),
+            )),
         }
     }
 }
@@ -2390,8 +2317,8 @@ fn repeated_ref_comparisons_keep_the_same_reference_low_per_bar() {
     match out {
         Value::BoolSeries(bs) => {
             assert_eq!(bs.len(), 7);
-            assert!(!bs[5]);
-            assert!(bs[6]);
+            assert!(!bs[5].is_true());
+            assert!(bs[6].is_true());
         }
         other => panic!("unexpected result: {other:?}"),
     }
@@ -2432,7 +2359,7 @@ fn last_supports_bool_series() {
     );
 
     let out = rt.eval_program(&stmts).expect("eval failed");
-    assert_eq!(out, Value::Bool(true));
+    assert_eq!(out, Value::Bool(Truth::True));
 }
 
 #[test]
@@ -2453,7 +2380,13 @@ fn in_range_supports_inclusive_and_exclusive_bounds() {
     let out = rt.eval_program(&stmts).expect("eval failed");
     assert_eq!(
         out,
-        Value::BoolSeries(vec![false, true, false, true, false])
+        Value::BoolSeries(vec![
+            Truth::False,
+            Truth::True,
+            Truth::False,
+            Truth::True,
+            Truth::False
+        ])
     );
 }
 
@@ -2475,7 +2408,13 @@ fn in_range_accepts_expression_bounds() {
     let out = rt.eval_program(&stmts).expect("eval failed");
     assert_eq!(
         out,
-        Value::BoolSeries(vec![false, false, true, false, true])
+        Value::BoolSeries(vec![
+            Truth::Unknown,
+            Truth::Unknown,
+            Truth::True,
+            Truth::False,
+            Truth::True
+        ])
     );
 }
 
@@ -2504,7 +2443,14 @@ fn exist_returns_true_when_condition_hit_within_window() {
     let out = rt.eval_program(&stmts).expect("eval failed");
     assert_eq!(
         out,
-        Value::BoolSeries(vec![false, true, true, true, true, true])
+        Value::BoolSeries(vec![
+            Truth::Unknown,
+            Truth::True,
+            Truth::True,
+            Truth::True,
+            Truth::True,
+            Truth::True
+        ])
     );
 }
 
@@ -2573,7 +2519,7 @@ fn countd_returns_none_when_dynamic_window_exceeds_runtime_cap() {
 }
 
 #[test]
-fn existd_uses_dynamic_window_and_false_when_window_is_invalid() {
+fn existd_preserves_unknown_when_window_is_invalid() {
     use crate::expr::parser::{Parser, lex_all};
 
     let expr = "EXISTD(C > 2, N, 3);";
@@ -2608,7 +2554,14 @@ fn existd_uses_dynamic_window_and_false_when_window_is_invalid() {
     let out = rt.eval_program(&stmts).expect("eval failed");
     assert_eq!(
         out,
-        Value::BoolSeries(vec![false, true, true, true, false, false])
+        Value::BoolSeries(vec![
+            Truth::False,
+            Truth::True,
+            Truth::True,
+            Truth::True,
+            Truth::Unknown,
+            Truth::Unknown
+        ])
     );
 }
 
@@ -2658,7 +2611,16 @@ fn dynamic_window_exceeding_cap_does_not_match_comparisons() {
     );
 
     let out = rt.eval_program(&stmts).expect("eval failed");
-    assert_eq!(out, Value::BoolSeries(vec![true, true, true, true, false]));
+    assert_eq!(
+        out,
+        Value::BoolSeries(vec![
+            Truth::True,
+            Truth::True,
+            Truth::True,
+            Truth::True,
+            Truth::Unknown
+        ])
+    );
 }
 
 #[test]
@@ -2684,4 +2646,55 @@ fn dynamic_limit_rejects_fractional_upper_bound() {
         .eval_program(&stmts)
         .expect_err("fractional cap should fail");
     assert_eq!(err.msg, "HHVD动态周期上限必须是正整数");
+}
+
+#[test]
+fn unknown_survives_negation_functions_and_scalar_evaluation() {
+    use crate::expr::validation::parse_expression_program;
+    use Truth::{False as F, True as T, Unknown as U};
+    let base = Runtime {
+        vars: HashMap::from([(
+            "C".into(),
+            Value::NumSeries(vec![None, Some(9.0), Some(12.0)]),
+        )]),
+    };
+    for (text, expected, scalar) in [
+        ("!(C > 10)", [U, T, F], true),
+        ("X := C > 10; !X", [U, T, F], true),
+        ("(C > 10) OR 1", [T, T, T], true),
+        ("(C > 10) AND 0", [F, F, F], true),
+        ("!(C > 10 OR 0)", [U, T, F], true),
+        ("IF(C > 10,1,2) > 0", [U, T, T], false),
+        ("IF(0,C,1) > 0", [T, T, T], false),
+        ("!(COUNT(C > 10,2) > 0)", [U, U, F], false),
+        ("!EXIST(C > 10,2)", [U, U, F], false),
+        ("!CROSS(C,10)", [U, U, F], false),
+        ("!(BARSLAST(C > 10) > 0)", [U, U, T], false),
+        ("!(GET(C > 10,C,2) > 0)", [U, U, U], false),
+        ("!(HHV(C,2) > 10)", [U, U, F], false),
+        ("!(MAX(C,10) > 0)", [U, F, F], false),
+    ] {
+        let program = parse_expression_program(text).unwrap();
+        let value = base.clone().eval_program(&program).unwrap();
+        assert_eq!(
+            Value::as_truth_series(&value, 3).unwrap().as_ref(),
+            expected,
+            "{text}"
+        );
+        let matches = Value::as_bool_series(&value, 3).unwrap();
+        for day in 0..3 {
+            assert_eq!(matches[day], expected[day].is_true(), "{text} day {day}");
+            if scalar {
+                let actual = base
+                    .eval_program_scalar_at(&program, day, &mut HashMap::new())
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    day_value_as_truth(actual),
+                    expected[day],
+                    "{text} scalar day {day}"
+                );
+            }
+        }
+    }
 }

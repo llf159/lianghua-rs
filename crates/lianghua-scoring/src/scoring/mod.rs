@@ -5,7 +5,7 @@ use lianghua_model::scoring::SceneResolvedStage;
 use crate::{
     data::{DistPoint, RuleStage, RuleTag, SceneDirection, ScopeWay, ScoreScene},
     expr::{
-        eval::{Runtime, Value},
+        eval::{Runtime, Truth, Value},
         parser::Stmts,
     },
     scoring::tools::rt_max_len,
@@ -128,13 +128,13 @@ fn restore_runtime_values(rt: &mut Runtime, snapshots: &[RuntimeSnapshotEntry]) 
     }
 }
 
-fn hit_scopeway(scopeway: ScopeWay, windows: usize, bs: &[bool], i: usize) -> ScopeHit {
+fn hit_scopeway(scopeway: ScopeWay, windows: usize, bs: &[Truth], i: usize) -> ScopeHit {
     match scopeway {
-        ScopeWay::Last => ScopeHit::Bool(bs[i]),
+        ScopeWay::Last => ScopeHit::Bool(bs[i].is_true()),
         ScopeWay::Any => {
             let start = (i + 1).saturating_sub(windows);
             for j in start..=i {
-                if bs[j] {
+                if bs[j].is_true() {
                     return ScopeHit::Bool(true);
                 }
             }
@@ -145,7 +145,7 @@ fn hit_scopeway(scopeway: ScopeWay, windows: usize, bs: &[bool], i: usize) -> Sc
             let mut cur = 0;
             let mut best = 0;
             for j in start..=i {
-                if bs[j] {
+                if bs[j].is_true() {
                     cur += 1;
                 } else {
                     cur = 0;
@@ -160,7 +160,7 @@ fn hit_scopeway(scopeway: ScopeWay, windows: usize, bs: &[bool], i: usize) -> Sc
             let start = (i + 1).saturating_sub(windows);
             let mut offsets = Vec::new();
             for j in start..=i {
-                if bs[j] {
+                if bs[j].is_true() {
                     offsets.push(i - j);
                 }
             }
@@ -169,7 +169,7 @@ fn hit_scopeway(scopeway: ScopeWay, windows: usize, bs: &[bool], i: usize) -> Sc
         ScopeWay::Recent => {
             let start = (i + 1).saturating_sub(windows);
             for j in (start..=i).rev() {
-                if bs[j] {
+                if bs[j].is_true() {
                     return ScopeHit::Recent(Some(i - j));
                 }
             }
@@ -238,7 +238,7 @@ fn scoring_rule_cache(
                 .map(|condition| {
                     (|expression: &CachedRuleExpression,
                       rt: &mut Runtime|
-                     -> Result<Vec<bool>, String> {
+                     -> Result<Vec<Truth>, String> {
                         let snapshots = snapshot_runtime_values(rt, &expression.assigned_names);
                         let result = rt
                             .eval_program(&expression.when_ast)
@@ -247,7 +247,7 @@ fn scoring_rule_cache(
                             })
                             .and_then(|value| {
                                 let len = rt_max_len(rt);
-                                Value::as_bool_series(&value, len).map_err(|error| {
+                                value.into_truth_series(len).map_err(|error| {
                                     format!("表达式({})返回值非布尔:{}", expression.name, error.msg)
                                 })
                             });
@@ -257,26 +257,46 @@ fn scoring_rule_cache(
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let len = rt_max_len(rt);
+            let mut missing_prefix = Vec::with_capacity(len + 1);
+            missing_prefix.push(0usize);
+            for day in 0..len {
+                missing_prefix.push(
+                    missing_prefix[day]
+                        + usize::from(condition_hits.iter().any(|hits| !hits[day].is_known())),
+                );
+            }
             let mut scores = Vec::with_capacity(len);
             let mut triggered = Vec::with_capacity(len);
 
             for index in 0..len {
-                let start = (index + 1).saturating_sub(rule.scope_windows);
+                let start = if matches!(rule.scope_way, ScopeWay::Last) {
+                    index
+                } else {
+                    (index + 1).saturating_sub(rule.scope_windows)
+                };
+                if missing_prefix[index + 1] != missing_prefix[start] {
+                    scores.push(0.0);
+                    triggered.push(false);
+                    continue;
+                }
                 let (base_score, bonus_score, is_triggered) = match rule.scope_way {
                     ScopeWay::Last => combination_score_parts(combination, |condition| {
-                        condition_hits[condition][index]
+                        condition_hits[condition][index].is_true()
                     }),
                     ScopeWay::Any => {
                         let best_day = (start..=index)
                             .max_by_key(|day| {
                                 (
-                                    condition_hits.iter().filter(|hits| hits[*day]).count(),
+                                    condition_hits
+                                        .iter()
+                                        .filter(|hits| hits[*day].is_true())
+                                        .count(),
                                     *day,
                                 )
                             })
                             .unwrap_or(index);
                         combination_score_parts(combination, |condition| {
-                            condition_hits[condition][best_day]
+                            condition_hits[condition][best_day].is_true()
                         })
                     }
                     ScopeWay::Each => {
@@ -286,7 +306,7 @@ fn scoring_rule_cache(
                         for day in start..=index {
                             let (day_base, day_bonus, day_triggered) =
                                 combination_score_parts(combination, |condition| {
-                                    condition_hits[condition][day]
+                                    condition_hits[condition][day].is_true()
                                 });
                             if day_triggered {
                                 base_total += day_base;
@@ -328,20 +348,38 @@ fn scoring_rule_cache(
     }
 
     let snapshots = snapshot_runtime_values(rt, &rule.assigned_names);
-    let bs_result = (|rule: &CachedRule, rt: &mut Runtime| -> Result<Vec<bool>, String> {
+    let bs_result = (|rule: &CachedRule, rt: &mut Runtime| -> Result<Vec<Truth>, String> {
         let value = rt
             .eval_program(&rule.when_ast)
             .map_err(|e| format!("表达式计算错误:{}", e.msg))?;
         let len = rt_max_len(rt);
 
-        Value::as_bool_series(&value, len).map_err(|e| format!("表达式返回值非布尔:{}", e.msg))
+        value
+            .into_truth_series(len)
+            .map_err(|e| format!("表达式返回值非布尔:{}", e.msg))
     })(rule, rt);
     restore_runtime_values(rt, &snapshots);
-    let bs = bs_result?;
+    let truths = bs_result?;
+    let mut missing_prefix = Vec::with_capacity(truths.len() + 1);
+    missing_prefix.push(0usize);
+    for truth in &truths {
+        missing_prefix.push(missing_prefix.last().unwrap() + usize::from(!truth.is_known()));
+    }
+    let bs = truths;
     let mut out = Vec::with_capacity(bs.len());
     let mut triggered = Vec::with_capacity(bs.len());
 
     for i in 0..bs.len() {
+        let start = if matches!(rule.scope_way, ScopeWay::Last) {
+            i
+        } else {
+            (i + 1).saturating_sub(rule.scope_windows)
+        };
+        if missing_prefix[i + 1] != missing_prefix[start] {
+            out.push(0.0);
+            triggered.push(false);
+            continue;
+        }
         let hit = hit_scopeway(rule.scope_way, rule.scope_windows, &bs, i);
         triggered.push(scope_hit_triggered(&hit));
         let s = (|scopeway: ScopeHit, dps: Option<&[DistPoint]>, points: f64| -> f64 {
@@ -883,5 +921,41 @@ mod tests {
 
         assert_eq!(scores, vec![5.5]);
         assert_eq!(triggered, vec![true]);
+    }
+    #[test]
+    fn unknown_conditions_never_create_scores_or_invent_combination_hit_counts() {
+        let mut runtime = Runtime {
+            vars: std::collections::HashMap::from([(
+                "C".into(),
+                Value::NumSeries(vec![None, Some(9.0), Some(12.0)]),
+            )]),
+        };
+        for (rule, expected) in [
+            (cached_rule("!(C > 10)"), vec![0.0, 1.0, 0.0]),
+            (cached_rule("IF(0,C,1) > 0"), vec![1.0, 1.0, 1.0]),
+            (
+                combination_rule(&["1", "!(C > 10)"], vec![0.0, 7.0, 2.0], &[], None, None),
+                vec![0.0, 2.0, 7.0],
+            ),
+        ] {
+            let (scores, triggered) = evaluate_cached_rule_scores(&rule, &mut runtime).unwrap();
+            assert_eq!(scores, expected);
+            assert_eq!(
+                triggered,
+                expected
+                    .iter()
+                    .map(|score| *score != 0.0)
+                    .collect::<Vec<_>>()
+            );
+        }
+        let mut windowed = cached_rule("!(C > 10)");
+        windowed.scope_way = ScopeWay::Each;
+        windowed.scope_windows = 2;
+        assert_eq!(
+            evaluate_cached_rule_scores(&windowed, &mut runtime)
+                .unwrap()
+                .0,
+            vec![0.0, 0.0, 1.0]
+        );
     }
 }

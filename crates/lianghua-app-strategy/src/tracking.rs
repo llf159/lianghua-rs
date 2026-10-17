@@ -18,11 +18,11 @@ use crate::{
     scoring,
 };
 
-use scoring::tracking::{TrackingSourceProgram, input_stamp};
+use scoring::tracking::input_stamp;
 
 static TRACKING_RUN: Mutex<()> = Mutex::new(());
 // Bump when expression or event semantics change; cached states must then be replayed.
-const TRACKING_VERSION: u32 = 3;
+const TRACKING_VERSION: u32 = 4;
 
 #[derive(Serialize)]
 pub struct TrackingSource {
@@ -411,15 +411,6 @@ pub fn run_strategy_tracking(
         .collect();
     let mut rules = scoring::rule_cache::cache_rule_build(source, None)?;
     rules.retain(|rule| source_names.contains_key(rule.name.as_str()));
-    let source_programs = rules
-        .iter()
-        .map(|rule| {
-            Ok((
-                source_names[rule.name.as_str()],
-                TrackingSourceProgram::compile(rule)?,
-            ))
-        })
-        .collect::<Result<BTreeMap<_, _>, String>>()?;
     let expressions: Vec<_> = programs
         .iter()
         .flat_map(TrackProgram::expressions)
@@ -489,10 +480,6 @@ pub fn run_strategy_tracking(
             let (values, _) = scoring::evaluate_cached_rule_scores(rule, &mut rt)?;
             scores.insert(source_names[rule.name.as_str()].to_string(), values);
         }
-        let source_evidence = source_programs
-            .iter()
-            .map(|(id, program)| Ok((*id, program.prepare(&rt)?)))
-            .collect::<Result<BTreeMap<_, _>, String>>()?;
         let signature = |limit: &str, sessions: &[String]| {
             let mut hash = DefaultHasher::new();
             sessions.hash(&mut hash);
@@ -542,9 +529,7 @@ pub fn run_strategy_tracking(
                     .is_none_or(|event| definition.expired(event, session))
                 {
                     match (definition.source.as_deref(), quoted_index) {
-                        (Some(id), Some(index)) => {
-                            source_evidence[id].score_at(index, scores[id][index])?
-                        }
+                        (Some(id), Some(index)) => Some(scores[id][index]),
                         _ => None,
                     }
                 } else {

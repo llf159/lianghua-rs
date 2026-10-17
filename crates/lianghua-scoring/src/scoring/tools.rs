@@ -265,12 +265,7 @@ pub fn calc_query_need_rows(
 pub fn rt_max_len(rt: &Runtime) -> usize {
     let mut max_len = 1;
     for v in rt.vars.values() {
-        let len = match v {
-            Value::Num(_) | Value::Bool(_) => 1,
-            Value::NumSeries(ns) => ns.len(),
-            Value::SharedNumSeries(ns) => ns.len(),
-            Value::BoolSeries(bs) => bs.len(),
-        };
+        let len = Value::len_of(v);
         if len > max_len {
             max_len = len;
         }

@@ -77,7 +77,10 @@ fn main() -> Result<(), String> {
                             }
                         })
                         .collect();
-                    runtime.vars.insert(key, Value::BoolSeries(hits));
+                    runtime.vars.insert(
+                        key,
+                        Value::BoolSeries(hits.into_iter().map(Into::into).collect()),
+                    );
                 }
             } else {
                 rule.when_ast = Parser::new(lex_all("F"))
@@ -86,7 +89,7 @@ fn main() -> Result<(), String> {
                 rule.assigned_names.clear();
                 runtime.vars.insert(
                     "F".into(),
-                    Value::BoolSeries((0..len).map(|i| i % 7 < 2).collect()),
+                    Value::BoolSeries((0..len).map(|i| (i % 7 < 2).into()).collect()),
                 );
             }
         }

@@ -889,8 +889,8 @@ fn eval_other_sort_value(
     (|value: &Value, len: usize| -> Result<Option<f64>, String> {
         match value {
             Value::Num(value) => Ok(value.is_finite().then_some(*value)),
-            Value::Bool(value) => Ok(Some(if *value { 1.0 } else { 0.0 })),
-            Value::NumSeries(_) | Value::SharedNumSeries(_) => {
+            Value::Bool(value) => Ok(value.as_num()),
+            Value::NumSeries(_) | Value::SharedNumSeries(_) | Value::NumWindow { .. } => {
                 let series = Value::as_num_series(value, len)
                     .map_err(|error| format!("表达式返回值非数值:{}", error.msg))?;
                 Ok(series
@@ -900,9 +900,9 @@ fn eval_other_sort_value(
                     .filter(|value| value.is_finite()))
             }
             Value::BoolSeries(_) => {
-                let series = Value::as_bool_series(value, len)
+                let series = Value::as_truth_series(value, len)
                     .map_err(|error| format!("表达式返回值非布尔:{}", error.msg))?;
-                Ok(series.last().map(|value| if *value { 1.0 } else { 0.0 }))
+                Ok(series.last().and_then(|value| value.as_num()))
             }
         }
     })(&value, len)

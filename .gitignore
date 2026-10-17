@@ -19,3 +19,7 @@ market*
 /src/bin
 research
 scripts
+
+# 本地研究记录
+/RESEARCH_SUMMARY.md
+/STRATEGY_CONFIRMATION_HANDOFF.md

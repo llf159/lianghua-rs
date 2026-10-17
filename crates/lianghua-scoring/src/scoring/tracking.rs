@@ -8,85 +8,18 @@ use std::{
 
 use lianghua_core::{
     expr::eval::Runtime,
-    tracking::{
-        PreparedTrackExpression, TrackDefinition, TrackExpression, TrackProgram, TrackState,
-        value_at,
-    },
+    tracking::{TrackDefinition, TrackExpression, TrackProgram, TrackState, value_at},
 };
 use lianghua_model::scoring::TrackingScoreState;
 use serde::{Deserialize, Serialize};
 
 use super::{CachedRule, RuleScoreSeries, tools::cyq_chen_runtime_key_names};
-use crate::data::{self, RuntimeKeyCollectOptions, ScopeWay, ScoreConfig};
-
-pub struct TrackingSourceProgram {
-    expressions: Vec<TrackExpression>,
-    window: usize,
-}
-
-impl TrackingSourceProgram {
-    pub fn compile(rule: &CachedRule) -> Result<Self, String> {
-        let expressions = if let Some(combination) = &rule.combination {
-            combination
-                .conditions
-                .iter()
-                .map(|condition| condition.expression.when_src.as_str())
-                .collect::<Vec<_>>()
-        } else {
-            vec![rule.when_src.as_str()]
-        };
-        Ok(Self {
-            expressions: expressions
-                .into_iter()
-                .map(|expression| TrackExpression::compile(expression, &HashSet::new()))
-                .collect::<Result<_, _>>()?,
-            window: if matches!(rule.scope_way, ScopeWay::Last) {
-                1
-            } else {
-                rule.scope_windows
-            },
-        })
-    }
-
-    pub fn prepare(&self, rt: &Runtime) -> Result<PreparedTrackingSource, String> {
-        Ok(PreparedTrackingSource {
-            expressions: self
-                .expressions
-                .iter()
-                .map(|expression| expression.prepare(rt, &HashSet::new()))
-                .collect::<Result<_, _>>()?,
-            window: self.window,
-        })
-    }
-}
-
-pub struct PreparedTrackingSource {
-    expressions: Vec<PreparedTrackExpression>,
-    window: usize,
-}
-
-impl PreparedTrackingSource {
-    pub fn score_at(&self, index: usize, score: f64) -> Result<Option<f64>, String> {
-        if !score.is_finite() || score <= 0.0 {
-            return Ok(None);
-        }
-        // Legacy rule booleans erase NULL. Require complete evidence for the original
-        // scope before using its positive contribution as a persistent event anchor.
-        for day in (index + 1).saturating_sub(self.window)..=index {
-            for expression in &self.expressions {
-                if expression.evaluate(day, &BTreeMap::new())?.is_none() {
-                    return Ok(None);
-                }
-            }
-        }
-        Ok(Some(score))
-    }
-}
+use crate::data::{self, RuntimeKeyCollectOptions, ScoreConfig};
 
 pub fn config_hash(config: &str) -> String {
     let mut hash = DefaultHasher::new();
     // Invalidate checkpoints when scoring/event semantics change.
-    3u32.hash(&mut hash);
+    4u32.hash(&mut hash);
     config.hash(&mut hash);
     hash.finish().to_string()
 }
@@ -131,7 +64,7 @@ pub struct RankingTrackCheckpoint {
 
 pub struct ScoringTrackingPlan {
     tracks: Vec<(TrackDefinition, TrackProgram, Option<usize>)>,
-    sources: HashMap<usize, TrackingSourceProgram>,
+    sources: HashSet<usize>,
     pub(crate) calendar: Vec<String>,
     config_hash: String,
     stamp: String,
@@ -151,7 +84,7 @@ impl ScoringTrackingPlan {
         let config = fs::read_to_string(data::resolve_strategy_path(source, strategy_path))
             .map_err(|e| e.to_string())?;
         let mut tracks = Vec::new();
-        let mut sources = HashMap::new();
+        let mut sources = HashSet::new();
         for definition in cfg.track.into_iter().filter(|track| track.enabled) {
             let source_index = if let Some(id) = &definition.source {
                 let rule = cfg
@@ -162,9 +95,7 @@ impl ScoringTrackingPlan {
                 let Some(index) = rules.iter().position(|cached| cached.name == rule.name) else {
                     continue;
                 };
-                if let std::collections::hash_map::Entry::Vacant(entry) = sources.entry(index) {
-                    entry.insert(TrackingSourceProgram::compile(&rules[index])?);
-                }
+                sources.insert(index);
                 Some(index)
             } else {
                 if definition.points != 0.0
@@ -304,10 +235,8 @@ impl ScoringTrackingPlan {
         let sources = self
             .sources
             .iter()
-            .map(|(&index, program)| {
-                Ok((index, (details[index].series.clone(), program.prepare(rt)?)))
-            })
-            .collect::<Result<HashMap<_, _>, String>>()?;
+            .map(|&index| (index, details[index].series.clone()))
+            .collect::<HashMap<_, _>>();
         let signature = |limit: &str, sessions: usize| {
             let mut hash = DefaultHasher::new();
             self.calendar[..sessions].hash(&mut hash);
@@ -327,7 +256,7 @@ impl ScoringTrackingPlan {
             source_indices.sort();
             for index in source_indices {
                 index.hash(&mut hash);
-                for value in sources[index].0.iter().take(count) {
+                for value in sources[index].iter().take(count) {
                     value.to_bits().hash(&mut hash);
                 }
             }
@@ -358,9 +287,7 @@ impl ScoringTrackingPlan {
                     .is_none_or(|event| definition.expired(event, session))
                 {
                     match (source, quoted_index) {
-                        (Some(source), Some(index)) => sources[source]
-                            .1
-                            .score_at(index, sources[source].0[index])?,
+                        (Some(source), Some(index)) => Some(sources[source][index]),
                         _ => None,
                     }
                 } else {

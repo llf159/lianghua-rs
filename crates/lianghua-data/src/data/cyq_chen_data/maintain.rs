@@ -145,18 +145,29 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
     if latest_metadata.is_some() {
         let conn = crate::data::open_db_readonly(&cyq_chen_db).map_err(|e| e.to_string())?;
         let mut statement = conn.prepare(
-            "SELECT history.ts_code FROM
+            "SELECT history.ts_code, checkpoint.bins,
+             checkpoint.feature_state IS NULL OR checkpoint.trade_date != history.latest AS needs_repair FROM
              (SELECT ts_code, MAX(trade_date) AS latest FROM cyq_chen_snapshot WHERE adj_type = ? GROUP BY ts_code) history
-             LEFT JOIN cyq_chen_checkpoint checkpoint ON checkpoint.ts_code = history.ts_code AND checkpoint.adj_type = ?
-             WHERE checkpoint.feature_state IS NULL OR checkpoint.trade_date != history.latest",
-        ).map_err(|e| format!("检查筹码特征缺失状态失败: {e}"))?;
-        let repairs = statement
-            .query_map(params![DEFAULT_ADJ_TYPE, DEFAULT_ADJ_TYPE], |row| {
-                row.get::<_, String>(0)
-            })
-            .map_err(|e| e.to_string())?
-            .collect::<Result<Vec<_>, _>>()
+             LEFT JOIN cyq_chen_checkpoint checkpoint ON checkpoint.ts_code = history.ts_code AND checkpoint.adj_type = ?",
+        ).map_err(|e| format!("检查新筹码续算状态失败: {e}"))?;
+        let mut rows = statement
+            .query(params![DEFAULT_ADJ_TYPE, DEFAULT_ADJ_TYPE])
             .map_err(|e| e.to_string())?;
+        let mut repairs = Vec::new();
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            let ts_code: String = row.get(0).map_err(|e| e.to_string())?;
+            let checkpoint: Option<String> = row.get(1).map_err(|e| e.to_string())?;
+            let needs_repair: bool = row.get(2).map_err(|e| e.to_string())?;
+            // 使用与续算相同的类型检查必填字段，不能为损坏的价格或后验库存补默认值。
+            let bins_valid = checkpoint.as_deref().is_some_and(|json| {
+                serde_json::from_str::<Vec<crate::data::cyq_chen::ChenChipBin>>(json)
+                    .is_ok_and(|bins| !bins.is_empty())
+            });
+            if needs_repair || !bins_valid {
+                repairs.push(ts_code);
+            }
+        }
+        drop(rows);
         drop(statement);
         drop(conn);
         if !repairs.is_empty() {
@@ -1164,6 +1175,63 @@ mod tests {
         assert_eq!(features(incremental), repaired);
         fs::remove_dir_all(incremental_dir).unwrap();
         fs::remove_dir_all(full_dir).unwrap();
+    }
+
+    #[test]
+    fn incremental_repairs_checkpoint_missing_price_before_resuming() {
+        let source_dir = unique_temp_source_dir();
+        prepare_source_db(&source_dir);
+        let source = source_dir.to_str().unwrap();
+        let config = ChenChipConfig {
+            warmup_days: 1,
+            bucket_pct: 5.0,
+        };
+        rebuild_cyq_chen_all(source, config, None, None).unwrap();
+        let expected_snapshots = snapshot_rows_for_compare(source);
+        let expected_bins = bin_rows_for_compare(source);
+        rebuild_cyq_chen_all(source, config, None, Some("20260403")).unwrap();
+        let conn = Connection::open(cyq_chen_db_path(source)).unwrap();
+        let json: String = conn
+            .query_row(
+                "SELECT bins FROM cyq_chen_checkpoint WHERE ts_code = '000001.SZ'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut bins: serde_json::Value = serde_json::from_str(&json).unwrap();
+        bins[0].as_object_mut().unwrap().remove("price").unwrap();
+        let damaged = serde_json::to_string(&bins).unwrap();
+        assert!(
+            serde_json::from_str::<Vec<crate::data::cyq_chen::ChenChipBin>>(&damaged)
+                .unwrap_err()
+                .to_string()
+                .contains("missing field `price`")
+        );
+        conn.execute(
+            "UPDATE cyq_chen_checkpoint SET bins = ? WHERE ts_code = '000001.SZ'",
+            [damaged],
+        )
+        .unwrap();
+        drop(conn);
+
+        maintain_cyq_chen_incremental_if_db_exists(source, false, None).unwrap();
+        assert_eq!(snapshot_rows_for_compare(source), expected_snapshots);
+        assert_eq!(bin_rows_for_compare(source), expected_bins);
+        let conn = Connection::open(cyq_chen_db_path(source)).unwrap();
+        let json: String = conn
+            .query_row(
+                "SELECT bins FROM cyq_chen_checkpoint WHERE ts_code = '000001.SZ'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            !serde_json::from_str::<Vec<crate::data::cyq_chen::ChenChipBin>>(&json)
+                .unwrap()
+                .is_empty()
+        );
+        drop(conn);
+        fs::remove_dir_all(source_dir).unwrap();
     }
 
     #[test]

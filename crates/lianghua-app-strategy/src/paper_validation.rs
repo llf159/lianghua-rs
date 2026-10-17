@@ -1531,7 +1531,9 @@ fn evaluate_program_as_bool_series(
         .eval_program(program)
         .map_err(|error| format!("表达式计算错误: {}", error.msg))?;
     let len = rt_max_len(&runtime);
-    Value::as_bool_series(&value, len).map_err(|error| format!("表达式返回值非布尔: {}", error.msg))
+    value
+        .into_bool_series(len)
+        .map_err(|error| format!("表达式返回值非布尔: {}", error.msg))
 }
 
 fn collect_paper_validation_runtime_keys(

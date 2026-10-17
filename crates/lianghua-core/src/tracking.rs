@@ -1,11 +1,12 @@
+use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
 use crate::expr::{
-    eval::{Runtime, Value},
-    parser::{BinaryOp, Expr, Stmt, Stmts, UnaryOp},
+    eval::{DayValue, Runtime, Value, day_value_as_num},
+    parser::{Expr, Stmt, Stmts},
     validation::{
         estimate_expression_warmup, expression_input_identifiers, parse_expression_program,
         validate_expression_functions,
@@ -110,49 +111,25 @@ impl TrackExpression {
     ) -> Result<PreparedTrackExpression, String> {
         let mut values = HashMap::new();
         // 不依赖当日跟踪上下文的语句在整段历史上先算一次，后面的语句就能复用它。
-        let mut full = rt.clone();
+        let mut full = Runtime::default();
+        for name in self.inputs.iter().filter(|name| !context.contains(*name)) {
+            let value = rt
+                .vars
+                .get(name)
+                .ok_or_else(|| format!("跟踪引用未知字段：{name}"))?;
+            full.vars.insert(name.clone(), value.clone().into_shared());
+        }
+        let required = full
+            .vars
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect::<Vec<_>>();
         let mut statements = Vec::with_capacity(self.program.item.len());
         for (index, stmt) in self.program.item.iter().enumerate() {
             let (name, expr) = statement_parts(stmt);
             let derived = &self.derived_locals[index];
             let contextual = depends_on_track_context(expr, context, derived);
-            let mut pending = vec![expr];
-            let mut checks = Vec::new();
-            while let Some(node) = pending.pop() {
-                match node {
-                    Expr::Call { args, .. } => pending.extend(args),
-                    Expr::Unary { rhs, .. } => pending.push(rhs),
-                    Expr::Binary { lhs, rhs, .. } => {
-                        pending.push(lhs);
-                        pending.push(rhs);
-                    }
-                    _ => {}
-                }
-                // Preserve unavailable numeric intermediates before legacy boolean conversion can erase NULL.
-                if matches!(
-                    node,
-                    Expr::Call { .. }
-                        | Expr::Unary {
-                            op: UnaryOp::Neg,
-                            ..
-                        }
-                        | Expr::Binary {
-                            op: BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div,
-                            ..
-                        }
-                ) {
-                    checks.push(Stmts {
-                        item: vec![Stmt::Expr(prepare_expression(
-                            node.clone(),
-                            &full,
-                            context,
-                            derived,
-                            &mut values,
-                        )?)],
-                    });
-                }
-            }
-            let expr = prepare_expression(expr.clone(), &full, context, derived, &mut values)?;
+            let expr = prepare_expression(expr.clone(), &mut full, context, derived, &mut values)?;
             let program = Stmts {
                 item: vec![match name {
                     Some(name) => Stmt::Assign {
@@ -169,41 +146,45 @@ impl TrackExpression {
                     full.vars.insert(key.clone(), value.clone());
                 }
                 full.eval_program(&program).map_err(|e| e.msg)?;
-                if let Some(value) = full.vars.get_mut(name)
-                    && let Value::NumSeries(series) = value
-                {
-                    *value = Value::SharedNumSeries(Arc::new(std::mem::take(series)));
+                if let Some(value) = full.vars.get_mut(name) {
+                    *value = std::mem::replace(value, Value::Num(0.0)).into_shared();
                 }
             }
-            statements.push(PreparedTrackStatement { program, checks });
+            statements.push(program);
         }
-        for input in self.inputs.iter().cloned() {
-            if !context.contains(&input) && !values.contains_key(&input) {
-                values.insert(
-                    input.clone(),
-                    rt.vars
-                        .get(&input)
-                        .cloned()
-                        .ok_or_else(|| format!("跟踪引用未知字段：{input}"))?,
-                );
+        for (name, value) in &required {
+            values.entry(name.clone()).or_insert_with(|| value.clone());
+        }
+        // Remaining calls depend on event context and still need historical windows.
+        let scalar = statements.iter().all(|program| {
+            let mut pending = program
+                .item
+                .iter()
+                .map(|stmt| statement_parts(stmt).1)
+                .collect::<Vec<_>>();
+            while let Some(expr) = pending.pop() {
+                match expr {
+                    Expr::Call { .. } => return false,
+                    Expr::Unary { rhs, .. } => pending.push(rhs),
+                    Expr::Binary { lhs, rhs, .. } => {
+                        pending.push(lhs);
+                        pending.push(rhs);
+                    }
+                    _ => {}
+                }
             }
-        }
-        let required = self
-            .inputs
-            .iter()
-            .filter(|name| !context.contains(*name))
-            .map(|name| {
-                rt.vars
-                    .get(name)
-                    .cloned()
-                    .map(|value| (name.clone(), value))
-                    .ok_or_else(|| format!("跟踪引用未知字段：{name}"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+            true
+        });
         Ok(PreparedTrackExpression {
             statements,
+            scalar,
+            locals: RefCell::new(HashMap::with_capacity(
+                context.len() + self.program.item.len(),
+            )),
+            runtime: RefCell::new(Runtime {
+                vars: values.clone(),
+            }),
             values,
-            required,
             warmup: self.warmup,
         })
     }
@@ -305,7 +286,7 @@ fn validate_track_calls(
 
 fn prepare_expression(
     expr: Expr,
-    rt: &Runtime,
+    rt: &mut Runtime,
     context: &HashSet<String>,
     derived_locals: &HashSet<String>,
     values: &mut HashMap<String, Value>,
@@ -313,17 +294,13 @@ fn prepare_expression(
     if matches!(&expr, Expr::Call { .. })
         && !depends_on_track_context(&expr, context, derived_locals)
     {
-        let mut runtime = rt.clone();
-        let value = runtime
+        let value = rt
             .eval_program(&Stmts {
                 item: vec![Stmt::Expr(expr)],
             })
             .map_err(|e| e.msg)?;
         let key = format!("__TRACK_{}", values.len());
-        let value = match value {
-            Value::NumSeries(series) => Value::SharedNumSeries(Arc::new(series)),
-            other => other,
-        };
+        let value = value.into_shared();
         values.insert(key.clone(), value);
         return Ok(Expr::Ident(key));
     }
@@ -366,29 +343,23 @@ fn prepare_expression(
     })
 }
 
-struct PreparedTrackStatement {
-    /// 恰好一条语句，逐日按声明顺序执行。
-    program: Stmts,
-    /// 这条语句里必须在当日可用的数值中间量。
-    checks: Vec<Stmts>,
-}
-
 pub struct PreparedTrackExpression {
-    statements: Vec<PreparedTrackStatement>,
+    statements: Vec<Stmts>,
     values: HashMap<String, Value>,
-    required: Vec<(String, Value)>,
+    runtime: RefCell<Runtime>,
+    scalar: bool,
+    locals: RefCell<HashMap<String, DayValue>>,
     warmup: usize,
 }
 
 pub fn value_at(value: &Value, index: usize) -> Option<f64> {
     match value {
         Value::Num(value) => Some(*value),
-        Value::Bool(value) => Some(if *value { 1.0 } else { 0.0 }),
+        Value::Bool(value) => value.as_num(),
         Value::NumSeries(values) => values.get(index).copied().flatten(),
         Value::SharedNumSeries(values) => values.get(index).copied().flatten(),
-        Value::BoolSeries(values) => values
-            .get(index)
-            .map(|value| if *value { 1.0 } else { 0.0 }),
+        Value::NumWindow { values, range } => values[range.clone()].get(index).copied().flatten(),
+        Value::BoolSeries(values) => values.get(index).and_then(|value| value.as_num()),
     }
     .filter(|value| value.is_finite())
 }
@@ -399,55 +370,69 @@ impl PreparedTrackExpression {
         index: usize,
         context: &BTreeMap<String, f64>,
     ) -> Result<Option<f64>, String> {
-        if index < self.warmup {
-            return Ok(None);
+        let start = index.saturating_sub(self.warmup);
+        if self.scalar {
+            let rt = self.runtime.borrow();
+            let mut locals = self.locals.borrow_mut();
+            // Retain allocated names while preventing prior-day assignments from shadowing inputs.
+            locals
+                .values_mut()
+                .for_each(|value| *value = DayValue::Unset);
+            for (name, value) in context {
+                if let Some(slot) = locals.get_mut(name) {
+                    *slot = DayValue::Num(Some(*value));
+                } else {
+                    locals.insert(name.clone(), DayValue::Num(Some(*value)));
+                }
+            }
+            let mut result = None;
+            for statement in &self.statements {
+                result = rt
+                    .eval_program_scalar_at(statement, index, &mut locals)
+                    .map_err(|e| e.msg)?
+                    .and_then(day_value_as_num);
+            }
+            return Ok(result.filter(|value| value.is_finite()));
         }
-        let start = index - self.warmup;
-        // Missing evidence must not turn into a successful NOT/! comparison.
-        if self
-            .required
-            .iter()
-            .any(|(_, value)| (start..=index).any(|day| value_at(value, day).is_none()))
-        {
-            return Ok(None);
-        }
-        let mut rt = Runtime::default();
+        let mut rt = self.runtime.borrow_mut();
         for (name, value) in &self.values {
             let value = match value {
-                Value::NumSeries(series) => {
-                    let Some(slice) = series.get(start..=index) else {
-                        return Ok(None);
-                    };
-                    Value::NumSeries(slice.to_vec())
-                }
                 Value::SharedNumSeries(series) => {
-                    let Some(slice) = series.get(start..=index) else {
+                    if index >= series.len() {
                         return Ok(None);
-                    };
-                    Value::NumSeries(slice.to_vec())
+                    }
+                    Value::NumWindow {
+                        values: Arc::clone(series),
+                        range: start..index + 1,
+                    }
                 }
-                Value::BoolSeries(series) => {
-                    let Some(slice) = series.get(start..=index) else {
+                Value::NumWindow { values, range } => {
+                    if index >= range.len() {
                         return Ok(None);
-                    };
-                    Value::BoolSeries(slice.to_vec())
+                    }
+                    Value::NumWindow {
+                        values: Arc::clone(values),
+                        range: range.start + start..range.start + index + 1,
+                    }
                 }
                 other => other.clone(),
             };
-            rt.vars.insert(name.clone(), value);
+            if let Some(slot) = rt.vars.get_mut(name) {
+                *slot = value;
+            } else {
+                rt.vars.insert(name.clone(), value);
+            }
         }
         for (name, value) in context {
-            rt.vars.insert(name.clone(), Value::Num(*value));
+            if let Some(slot) = rt.vars.get_mut(name) {
+                *slot = Value::Num(*value);
+            } else {
+                rt.vars.insert(name.clone(), Value::Num(*value));
+            }
         }
         let mut result = None;
         for statement in &self.statements {
-            let value = rt.eval_program(&statement.program).map_err(|e| e.msg)?;
-            for check in &statement.checks {
-                let value = rt.eval_program(check).map_err(|e| e.msg)?;
-                if value_at(&value, Value::len_of(&value).saturating_sub(1)).is_none() {
-                    return Ok(None);
-                }
-            }
+            let value = rt.eval_program(statement).map_err(|e| e.msg)?;
             result = value_at(&value, Value::len_of(&value).saturating_sub(1));
         }
         Ok(result)
@@ -595,9 +580,12 @@ impl TrackDefinition {
     }
 }
 
-pub struct PreparedTrackProgram {
+pub struct PreparedTrackProgram<'a> {
     start: Option<PreparedTrackExpression>,
-    capture: BTreeMap<String, PreparedTrackExpression>,
+    capture: &'a BTreeMap<String, TrackExpression>,
+    context: &'a HashSet<String>,
+    prepared_capture: OnceCell<BTreeMap<String, PreparedTrackExpression>>,
+    event_context: RefCell<BTreeMap<String, f64>>,
     invalidate: PreparedTrackExpression,
     eligible: PreparedTrackExpression,
     steps: Vec<PreparedTrackExpression>,
@@ -606,18 +594,17 @@ pub struct PreparedTrackProgram {
 }
 
 impl TrackProgram {
-    pub fn prepare(&self, rt: &Runtime) -> Result<PreparedTrackProgram, String> {
+    pub fn prepare(&self, rt: &Runtime) -> Result<PreparedTrackProgram<'_>, String> {
         Ok(PreparedTrackProgram {
             start: self
                 .start
                 .as_ref()
                 .map(|expr| expr.prepare(rt, &self.context))
                 .transpose()?,
-            capture: self
-                .capture
-                .iter()
-                .map(|(name, expr)| Ok((name.clone(), expr.prepare(rt, &self.context)?)))
-                .collect::<Result<_, String>>()?,
+            capture: &self.capture,
+            context: &self.context,
+            prepared_capture: OnceCell::new(),
+            event_context: RefCell::new(BTreeMap::new()),
             invalidate: self.invalidate.prepare(rt, &self.context)?,
             eligible: self.eligible.prepare(rt, &self.context)?,
             steps: self
@@ -635,7 +622,7 @@ impl TrackProgram {
     }
 }
 
-impl PreparedTrackProgram {
+impl PreparedTrackProgram<'_> {
     pub fn advance(
         &self,
         state: &mut TrackState,
@@ -656,22 +643,37 @@ impl PreparedTrackProgram {
         if let Some(index) = index.filter(|_| evidence.quoted) {
             if let Some(event) = existing {
                 if event.stopped.is_none() {
-                    let mut context = event.captured.clone();
-                    context.insert("AGE".into(), (session - event.started) as f64);
-                    context.insert("TRIGGER_SCORE".into(), event.source_score.unwrap_or(0.0));
-                    context.insert(
-                        "SCORE_AGE".into(),
-                        event
-                            .score_started
-                            .map_or(-1.0, |started| (session - started) as f64),
-                    );
-                    context.insert(
-                        "SIGNAL_AGE".into(),
-                        event
-                            .first_signal
-                            .map_or(-1.0, |started| (session - started) as f64),
-                    );
-                    context.insert("COMPLETED_STEPS".into(), event.completed.len() as f64);
+                    let mut context = self.event_context.borrow_mut();
+                    for (name, value) in &event.captured {
+                        if let Some(slot) = context.get_mut(name) {
+                            *slot = *value;
+                        } else {
+                            context.insert(name.clone(), *value);
+                        }
+                    }
+                    for (name, value) in [
+                        ("AGE", (session - event.started) as f64),
+                        ("TRIGGER_SCORE", event.source_score.unwrap_or(0.0)),
+                        (
+                            "SCORE_AGE",
+                            event
+                                .score_started
+                                .map_or(-1.0, |started| (session - started) as f64),
+                        ),
+                        (
+                            "SIGNAL_AGE",
+                            event
+                                .first_signal
+                                .map_or(-1.0, |started| (session - started) as f64),
+                        ),
+                        ("COMPLETED_STEPS", event.completed.len() as f64),
+                    ] {
+                        if let Some(slot) = context.get_mut(name) {
+                            *slot = value;
+                        } else {
+                            context.insert(name.into(), value);
+                        }
+                    }
                     evidence.invalidate =
                         self.invalidate.evaluate(index, &context)?.map(|v| v != 0.0);
                     if evidence.invalidate == Some(false) {
@@ -707,8 +709,18 @@ impl PreparedTrackProgram {
                     evidence.source_score.is_some_and(|v| v > 0.0)
                 };
                 if evidence.start {
+                    if self.prepared_capture.get().is_none() {
+                        let prepared = self
+                            .capture
+                            .iter()
+                            .map(|(name, expr)| Ok((name.clone(), expr.prepare(rt, self.context)?)))
+                            .collect::<Result<_, String>>()?;
+                        let _ = self.prepared_capture.set(prepared);
+                    }
                     evidence.captured = self
-                        .capture
+                        .prepared_capture
+                        .get()
+                        .unwrap()
                         .iter()
                         .map(|(name, expr)| {
                             expr.evaluate(index, &BTreeMap::new())
@@ -973,10 +985,8 @@ mod tests {
                 ]),
             )]),
         };
-        let program = TrackProgram::compile(&definition)
-            .unwrap()
-            .prepare(&rt)
-            .unwrap();
+        let compiled = TrackProgram::compile(&definition).unwrap();
+        let program = compiled.prepare(&rt).unwrap();
         let mut state = TrackState::default();
         let scores = (0..6)
             .map(|day| {
@@ -1074,5 +1084,94 @@ mod tests {
                 .unwrap(),
             prepared.evaluate(2, &values).unwrap()
         );
+    }
+    #[test]
+    fn reused_expression_state_matches_fresh_evaluation() {
+        let series = Arc::new((1..=8).map(|day| Some(day as f64)).collect::<Vec<_>>());
+        let rt = Runtime {
+            vars: HashMap::from([("X".into(), Value::SharedNumSeries(Arc::clone(&series)))]),
+        };
+        let context = HashSet::from(["AGE".into(), "A_LOW".into()]);
+        for (text, scalar) in [
+            ("X := X + AGE; X > A_LOW", true),
+            ("X := X + AGE; COUNTD(X > A_LOW, AGE, 3)", false),
+        ] {
+            let compiled = TrackExpression::compile(text, &context).unwrap();
+            let prepared = compiled.prepare(&rt, &context).unwrap();
+            assert_eq!(prepared.scalar, scalar);
+            for day in [3, 5, 4, 7] {
+                for age in [1.0, 2.0] {
+                    let values = BTreeMap::from([("AGE".into(), age), ("A_LOW".into(), 5.0)]);
+                    assert_eq!(
+                        prepared.evaluate(day, &values).unwrap(),
+                        compiled
+                            .prepare(&rt, &context)
+                            .unwrap()
+                            .evaluate(day, &values)
+                            .unwrap()
+                    );
+                }
+            }
+        }
+        let window = Value::NumWindow {
+            values: Arc::clone(&series),
+            range: 2..5,
+        };
+        let borrowed = Value::as_num_series(&window, 3).unwrap();
+        assert!(matches!(borrowed, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(borrowed.as_ptr(), series[2..5].as_ptr());
+    }
+
+    #[test]
+    fn captures_prepare_only_on_new_anchor_and_are_reused() {
+        let definition = TrackDefinition {
+            id: "lazy".into(),
+            name: "lazy".into(),
+            enabled: true,
+            source: Some("rule".into()),
+            start: None,
+            ttl: 2,
+            capture: BTreeMap::from([("A_MEAN".into(), "MA(C,2)".into())]),
+            invalidate: None,
+            eligible: None,
+            steps: Vec::new(),
+            signal: None,
+            points: 0.0,
+            score_until: None,
+        };
+        let rt = Runtime {
+            vars: HashMap::from([(
+                "C".into(),
+                Value::NumSeries(vec![
+                    Some(10.0),
+                    Some(20.0),
+                    Some(30.0),
+                    Some(40.0),
+                    Some(50.0),
+                ]),
+            )]),
+        };
+        let compiled = TrackProgram::compile(&definition).unwrap();
+        let program = compiled.prepare(&rt).unwrap();
+        let mut state = TrackState::default();
+        program
+            .advance(&mut state, &definition, 0, Some(0), &rt, None)
+            .unwrap();
+        assert!(program.prepared_capture.get().is_none());
+        program
+            .advance(&mut state, &definition, 1, Some(1), &rt, Some(2.0))
+            .unwrap();
+        assert!(program.prepared_capture.get().is_some());
+        assert_eq!(state.event.as_ref().unwrap().captured["A_MEAN"], 15.0);
+        let resumed = compiled.prepare(&rt).unwrap();
+        resumed
+            .advance(&mut state, &definition, 2, Some(2), &rt, Some(2.0))
+            .unwrap();
+        assert!(resumed.prepared_capture.get().is_none());
+        assert_eq!(state.event.as_ref().unwrap().captured["A_MEAN"], 15.0);
+        program
+            .advance(&mut state, &definition, 4, Some(4), &rt, Some(2.0))
+            .unwrap();
+        assert_eq!(state.event.as_ref().unwrap().captured["A_MEAN"], 45.0);
     }
 }

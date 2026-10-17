@@ -1,10 +1,7 @@
 use std::{env, fs, path::Path};
 
 use lianghua_data::data::{DataReader, runtime::row_into_rt};
-use lianghua_scoring::expr::{
-    eval::{Runtime, Value},
-    validation::parse_expression_program,
-};
+use lianghua_scoring::expr::{eval::Runtime, validation::parse_expression_program};
 use lianghua_scoring::scoring::{
     rule_cache::cache_rule_build,
     runner::{ScoringMemoryMode, scoring_all_to_memory_with_mode},
@@ -42,7 +39,9 @@ fn eval_bool_series(rt: &mut Runtime, expr: &str) -> Result<Vec<bool>, String> {
         .eval_program(&stmts)
         .map_err(|e| format!("锁存表达式计算错误:{}", e.msg))?;
     let len = rt_max_len(rt);
-    Value::as_bool_series(&value, len).map_err(|e| format!("锁存表达式返回非布尔:{}", e.msg))
+    value
+        .into_bool_series(len)
+        .map_err(|e| format!("锁存表达式返回非布尔:{}", e.msg))
 }
 
 fn replay_to_csv(

@@ -470,10 +470,7 @@ pub(super) fn inject_strategy_expression_caches(
                     match value {
                         Value::NumSeries(series) => Value::SharedNumSeries(Arc::new(series)),
                         Value::BoolSeries(series) => Value::SharedNumSeries(Arc::new(
-                            series
-                                .into_iter()
-                                .map(|value| Some(if value { 1.0 } else { 0.0 }))
-                                .collect(),
+                            series.into_iter().map(|value| value.as_num()).collect(),
                         )),
                         other => other,
                     }
