@@ -25,6 +25,43 @@ struct FeatureBucket {
 
 impl ChenChipFeatureState {
     pub fn validate(&self, trade_date: &str, bins: &[super::ChenChipBin]) -> Result<(), String> {
+        let total_chip = bins.iter().map(|bin| bin.total_chip).sum::<f64>();
+        if bins.is_empty() || !total_chip.is_finite() || (total_chip - 100.0).abs() > 1e-8 {
+            return Err("筹码检查点总库存不守恒，请重建该股票筹码".into());
+        }
+        for (index, bin) in bins.iter().enumerate() {
+            if bin.index != index
+                || !bin.price_low.is_finite()
+                || !bin.price_high.is_finite()
+                || !bin.price.is_finite()
+                || bin.price_low <= 0.0
+                || bin.price_high <= bin.price_low + EPS
+                || bin.price < bin.price_low
+                || bin.price > bin.price_high
+                || !bin.main_chip.is_finite()
+                || !bin.retail_chip.is_finite()
+                || bin.main_chip < 0.0
+                || bin.retail_chip < 0.0
+                || !bin.total_chip.is_finite()
+                || (bin.total_chip - bin.main_chip - bin.retail_chip).abs() > 1e-8
+                || (index > 0 && bins[index - 1].price_high > bin.price_low + EPS)
+                || bin.pending.iter().any(|lot| {
+                    !lot.main_chip.is_finite()
+                        || !lot.retail_chip.is_finite()
+                        || lot.main_chip < 0.0
+                        || lot.retail_chip < 0.0
+                        || lot.trade_date.is_empty()
+                        || lot.trade_date.as_str() > trade_date
+                })
+                || bin.pending.iter().map(|lot| lot.main_chip).sum::<f64>() > bin.main_chip + EPS
+                || bin.pending.iter().map(|lot| lot.retail_chip).sum::<f64>()
+                    > bin.retail_chip + EPS
+            {
+                return Err(format!(
+                    "筹码检查点分桶或后验库存非法，bin={index}，请重建该股票筹码"
+                ));
+            }
+        }
         if self.version != CYQ_CHEN_FEATURE_VERSION
             || self.trade_date.as_deref() != Some(trade_date)
             || self.observed_days == 0
@@ -37,7 +74,7 @@ impl ChenChipFeatureState {
         {
             return Err("筹码特征检查点版本、日期或窗口不兼容，请重建该股票筹码".into());
         }
-        for (state, bin) in self.buckets.iter().zip(bins) {
+        for (index, (state, bin)) in self.buckets.iter().zip(bins).enumerate() {
             let total = state.ages.iter().sum::<f64>() + state.initial;
             if state.low.to_bits() != bin.price_low.to_bits()
                 || state.high.to_bits() != bin.price_high.to_bits()
@@ -45,10 +82,18 @@ impl ChenChipFeatureState {
                 || !state.initial.is_finite()
                 || state.initial < 0.0
                 || state.ages.iter().any(|q| !q.is_finite() || *q < 0.0)
+                || !total.is_finite()
                 || (total - bin.main_chip - bin.retail_chip).abs() > 1e-8
                 || state.loss_run > 120
             {
-                return Err("筹码特征检查点库存不守恒，请重建该股票筹码".into());
+                return Err(format!(
+                    "筹码特征检查点库存或边界不一致，bin={index}, feature_total={total}, bin_total={}, feature_range=[{}, {}], bin_range=[{}, {}]，请重建该股票筹码",
+                    bin.main_chip + bin.retail_chip,
+                    state.low,
+                    state.high,
+                    bin.price_low,
+                    bin.price_high
+                ));
             }
         }
         Ok(())

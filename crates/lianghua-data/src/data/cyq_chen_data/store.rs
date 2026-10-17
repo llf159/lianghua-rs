@@ -254,25 +254,6 @@ pub(super) fn replace_cyq_chen_db(temp_path: &Path, db_path: &Path) -> Result<()
     }
 }
 
-pub(super) fn clear_cyq_chen_tables(db_path: &Path) -> Result<(), String> {
-    init_cyq_chen_db(db_path)?;
-
-    let mut conn = Connection::open(db_path).map_err(|e| format!("打开筹码库失败:{e}"))?;
-    let tx = conn
-        .transaction()
-        .map_err(|e| format!("创建筹码库事务失败:{e}"))?;
-    tx.execute("DELETE FROM cyq_chen_checkpoint", [])
-        .map_err(|e| e.to_string())?;
-    tx.execute("DELETE FROM cyq_chen_bin", [])
-        .map_err(|e| format!("清空cyq_chen_bin失败:{e}"))?;
-    tx.execute("DELETE FROM cyq_chen_snapshot", [])
-        .map_err(|e| format!("清空cyq_chen_snapshot失败:{e}"))?;
-    tx.execute("DELETE FROM cyq_chen_meta", [])
-        .map_err(|e| format!("清空cyq_chen_meta失败:{e}"))?;
-    tx.commit().map_err(|e| format!("提交筹码库事务失败:{e}"))?;
-    Ok(())
-}
-
 pub(super) fn current_chip_change_strategy_hash(source_dir: &str) -> Result<String, String> {
     let path = chip_change_rule_path(source_dir);
     let text = read_to_string(&path).map_err(|e| {

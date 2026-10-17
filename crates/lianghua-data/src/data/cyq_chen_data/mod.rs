@@ -47,6 +47,7 @@ pub struct CyqChenStrategyMaintenanceStatus {
 pub struct ComputedCyqChenStock {
     pub ts_code: String,
     pub snapshots: Vec<ChenChipSnapshot>,
+    replace_history: bool,
     feature_state: Option<crate::data::cyq_chen::ChenChipFeatureState>,
 }
 
@@ -57,6 +58,32 @@ pub struct CyqChenInitialState {
     main_ratio_history: Vec<Arc<Vec<Option<f64>>>>,
 }
 
+pub struct CyqChenCheckpointRecovery<'a> {
+    source_dir: &'a str,
+    first_date: &'a std::sync::OnceLock<Result<String, String>>,
+    report: &'a dyn Fn(&str, &str),
+}
+
+pub(super) fn decode_cyq_chen_checkpoint(
+    trade_date: &str,
+    bins_json: &str,
+    feature_json: Option<&str>,
+) -> Result<
+    (
+        Vec<ChenChipBin>,
+        crate::data::cyq_chen::ChenChipFeatureState,
+    ),
+    String,
+> {
+    let bins: Vec<ChenChipBin> =
+        serde_json::from_str(bins_json).map_err(|e| format!("新筹码分桶检查点损坏: {e}"))?;
+    let state: crate::data::cyq_chen::ChenChipFeatureState =
+        serde_json::from_str(feature_json.ok_or_else(|| "缺少筹码特征检查点".to_string())?)
+            .map_err(|e| format!("筹码特征检查点损坏: {e}"))?;
+    state.validate(trade_date, &bins)?;
+    Ok((bins, state))
+}
+
 #[derive(Debug, Default)]
 pub struct CyqChenWriteBatch {
     pub stocks: Vec<ComputedCyqChenStock>,
@@ -65,6 +92,7 @@ pub struct CyqChenWriteBatch {
 #[derive(Debug)]
 pub(super) struct PreparedCyqChenWriteBatch {
     stock_count: usize,
+    replace_ts_codes: Vec<String>,
     snapshot_rows: usize,
     bin_rows: usize,
     checkpoints: Vec<(String, String, String, Option<String>)>,
@@ -77,4 +105,5 @@ pub(super) enum CyqChenWriteMessage {
     Batch(CyqChenWriteBatch),
     PreparedBatch(PreparedCyqChenWriteBatch),
     Abort(String),
+    Finish,
 }

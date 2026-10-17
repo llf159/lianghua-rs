@@ -3,13 +3,12 @@ use crate::data::cyq_chen_data::store::{
 };
 use crate::data::cyq_chen_data::{
     CYQ_CHEN_BIN_TABLE, CYQ_CHEN_FLUSH_BATCH_SIZE, CYQ_CHEN_SNAPSHOT_TABLE, ComputedCyqChenStock,
-    CyqChenInitialState, CyqChenWriteBatch, CyqChenWriteMessage, DEFAULT_ADJ_TYPE,
-    PreparedCyqChenWriteBatch,
+    CyqChenCheckpointRecovery, CyqChenInitialState, CyqChenWriteBatch, CyqChenWriteMessage,
+    DEFAULT_ADJ_TYPE, PreparedCyqChenWriteBatch, decode_cyq_chen_checkpoint,
 };
 
 use crate::data::DataReader;
 use crate::data::RowData;
-use crate::data::cyq_chen::ChenChipBin;
 use crate::data::cyq_chen::ChenChipConfig;
 use crate::data::cyq_chen::ChenChipFeatureState;
 use crate::data::cyq_chen::ChipDirection;
@@ -181,10 +180,12 @@ pub fn compute_cyq_chen_stock_group_batch(
     total_share_map: &HashMap<String, f64>,
     ts_group: &[String],
     on_stock_done: Option<&dyn Fn(&str)>,
+    checkpoint_recovery: Option<&CyqChenCheckpointRecovery<'_>>,
 ) -> Result<CyqChenWriteBatch, String> {
     let lookback = config
         .warmup_days
-        .max(estimate_chen_chip_expression_warmup(chip_config)?);
+        .max(estimate_chen_chip_expression_warmup(chip_config)?)
+        .max(usize::from(state_conn.is_some()));
     let needs_main_ratio_history = chip_config.strategies.iter().any(|strategy| {
         strategy.direction == ChipDirection::Sell
             && expr_program_uses_runtime_key(&strategy.when_ast, "MAIN_CHIP_RATIO")
@@ -272,6 +273,7 @@ pub fn compute_cyq_chen_stock_group_batch(
                 return Ok(ComputedCyqChenStock {
                     ts_code: ts_code.to_string(),
                     snapshots: Vec::new(),
+                    replace_history: false,
                     feature_state: None,
                 });
             }
@@ -289,6 +291,7 @@ pub fn compute_cyq_chen_stock_group_batch(
                 return Ok(ComputedCyqChenStock {
                     ts_code: ts_code.to_string(),
                     snapshots: Vec::new(),
+                    replace_history: false,
                     feature_state: None,
                 });
             };
@@ -338,91 +341,15 @@ pub fn compute_cyq_chen_stock_group_batch(
                         return Ok(None);
                     };
 
-                    let checkpoint = conn.query_row(
-                        "SELECT bins FROM cyq_chen_checkpoint WHERE ts_code = ? AND adj_type = ? AND trade_date = ?",
+                    let (bins_json, feature_json): (String, Option<String>) = conn.query_row(
+                        "SELECT bins, feature_state FROM cyq_chen_checkpoint WHERE ts_code = ? AND adj_type = ? AND trade_date = ?",
                         params![ts_code, DEFAULT_ADJ_TYPE, state_trade_date.as_str()],
-                        |row| row.get::<_, String>(0),
-                    ).map(Some).or_else(|e| match e { duckdb::Error::QueryReturnedNoRows => Ok(None), other => Err(other) })
-                        .map_err(|e| format!("读取新筹码续算检查点失败: {e}"))?;
-                    let bins = if let Some(checkpoint) = checkpoint {
-                        serde_json::from_str(&checkpoint)
-                            .map_err(|e| format!("新筹码检查点损坏: {e}"))?
-                    } else {
-                        if chip_config
-                            .strategies
-                            .iter()
-                            .any(|rule| rule.confirm_after > 0)
-                        {
-                            return Err(format!("{ts_code} 缺少后验续算检查点，请重建该股票筹码"));
-                        }
-                        let mut stmt = conn
-                            .prepare(
-                                r#"
-            SELECT bin_index, price, price_low, price_high, main_chip, retail_chip, total_chip
-            FROM cyq_chen_bin
-            WHERE ts_code = ? AND adj_type = ? AND trade_date = ?
-            ORDER BY bin_index ASC
-            "#,
-                            )
-                            .map_err(|e| {
-                                format!("预编译新筹码状态分桶查询失败, ts_code={ts_code}: {e}")
-                            })?;
-                        let mut rows = stmt
-                            .query(params![
-                                ts_code,
-                                DEFAULT_ADJ_TYPE,
-                                state_trade_date.as_str()
-                            ])
-                            .map_err(|e| {
-                                format!("查询新筹码状态分桶失败, ts_code={ts_code}: {e}")
-                            })?;
-                        let mut bins = Vec::new();
-                        while let Some(row) = rows.next().map_err(|e| {
-                            format!("读取新筹码状态分桶失败, ts_code={ts_code}: {e}")
-                        })? {
-                            let index_i64: i64 = row.get(0).map_err(|e| {
-                                format!("读取新筹码分桶序号失败, ts_code={ts_code}: {e}")
-                            })?;
-                            bins.push(ChenChipBin {
-                                pending: Vec::new(),
-                                index: index_i64.max(0) as usize,
-                                price: row.get(1).map_err(|e| {
-                                    format!("读取新筹码分桶价格失败, ts_code={ts_code}: {e}")
-                                })?,
-                                price_low: row.get(2).map_err(|e| {
-                                    format!("读取新筹码分桶下沿失败, ts_code={ts_code}: {e}")
-                                })?,
-                                price_high: row.get(3).map_err(|e| {
-                                    format!("读取新筹码分桶上沿失败, ts_code={ts_code}: {e}")
-                                })?,
-                                main_chip: row.get(4).map_err(|e| {
-                                    format!("读取新筹码主力筹码失败, ts_code={ts_code}: {e}")
-                                })?,
-                                retail_chip: row.get(5).map_err(|e| {
-                                    format!("读取新筹码散户筹码失败, ts_code={ts_code}: {e}")
-                                })?,
-                                total_chip: row.get(6).map_err(|e| {
-                                    format!("读取新筹码总筹码失败, ts_code={ts_code}: {e}")
-                                })?,
-                            });
-                        }
-                        bins
-                    };
-                    if bins.is_empty() {
-                        return Ok(None);
-                    }
-
-                    let feature_json: Option<String> = conn.query_row(
-                        "SELECT feature_state FROM cyq_chen_checkpoint WHERE ts_code = ? AND adj_type = ? AND trade_date = ?",
-                        params![ts_code, DEFAULT_ADJ_TYPE, state_trade_date],
-                        |row| row.get(0),
-                    ).map_err(|e| format!("读取筹码特征检查点失败: {e}"))?;
-                    let feature_state: ChenChipFeatureState =
-                        serde_json::from_str(feature_json.as_deref().ok_or_else(|| {
-                            format!("{ts_code} 缺少筹码特征检查点，请重建该股票筹码")
-                        })?)
-                        .map_err(|e| format!("筹码特征检查点损坏，请重建该股票筹码: {e}"))?;
-                    feature_state.validate(&state_trade_date, &bins)?;
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    ).map_err(|e| format!("读取新筹码续算检查点失败，请重建该股票筹码: {e}"))?;
+                    // 不能用展示表的舍入分桶回退续算：它缺少后验库存和特征状态。
+                    let (bins, feature_state) = decode_cyq_chen_checkpoint(
+                        &state_trade_date, &bins_json, feature_json.as_deref(),
+                    )?;
                     if output_start_index == 0
                         || row_trade_dates[output_start_index - 1] != state_trade_date
                     {
@@ -528,8 +455,35 @@ pub fn compute_cyq_chen_stock_group_batch(
                     &output_start_date,
                     &row_data.trade_dates,
                     output_start_index,
-                )?,
-                None => None,
+                ),
+                None => Ok(None),
+            };
+            let initial_state = match initial_state {
+                Ok(state) => state,
+                Err(error) => {
+                    let Some(recovery) = checkpoint_recovery else {
+                        return Err(error);
+                    };
+                    (recovery.report)(ts_code, &error);
+                    let conn = state_conn.ok_or_else(|| error.clone())?;
+                    let first_date = recovery.first_date.get_or_init(|| conn.query_row(
+                        "SELECT MIN(trade_date) FROM cyq_chen_snapshot WHERE adj_type = ?",
+                        [DEFAULT_ADJ_TYPE], |row| row.get(0),
+                    ).map_err(|e| format!("读取筹码重放起点失败: {e}"))).clone()?;
+                    let replay_load_start = resolve_cyq_chen_load_start_date(
+                        recovery.source_dir, &first_date, end_date, lookback,
+                    )?.ok_or_else(|| format!("缺少筹码重放交易日历，保留旧结果: {error}"))?;
+                    let codes = [ts_code.to_string()];
+                    let mut replay = compute_cyq_chen_stock_group_batch(
+                        worker_reader, None, &replay_load_start, &first_date, end_date,
+                        chip_config, config, st_list, total_share_map, &codes, None, None,
+                    )?;
+                    let mut stock = replay.stocks.pop().ok_or_else(|| format!(
+                        "{ts_code} 重放未生成快照，保留旧结果；原续算错误: {error}"
+                    ))?;
+                    stock.replace_history = true;
+                    return Ok(stock);
+                }
             };
 
             let mut feature_state = ChenChipFeatureState::default();
@@ -546,6 +500,7 @@ pub fn compute_cyq_chen_stock_group_batch(
                     return Ok(ComputedCyqChenStock {
                         ts_code: ts_code.to_string(),
                         snapshots: Vec::new(),
+                        replace_history: false,
                         feature_state: None,
                     });
                 };
@@ -580,6 +535,7 @@ pub fn compute_cyq_chen_stock_group_batch(
                     return Ok(ComputedCyqChenStock {
                         ts_code: ts_code.to_string(),
                         snapshots: Vec::new(),
+                        replace_history: false,
                         feature_state: None,
                     });
                 };
@@ -603,6 +559,7 @@ pub fn compute_cyq_chen_stock_group_batch(
             Ok(ComputedCyqChenStock {
                 ts_code: ts_code.to_string(),
                 snapshots,
+                replace_history: false,
                 feature_state: Some(feature_state),
             })
         })(
@@ -632,6 +589,12 @@ pub(super) fn prepare_cyq_chen_batch_rows(
     config: ChenChipConfig,
 ) -> Result<PreparedCyqChenWriteBatch, String> {
     let stock_count = batch.stocks.len();
+    let replace_ts_codes = batch
+        .stocks
+        .iter()
+        .filter(|stock| stock.replace_history)
+        .map(|stock| stock.ts_code.clone())
+        .collect();
     let snapshot_rows = batch
         .stocks
         .iter()
@@ -695,6 +658,17 @@ pub(super) fn prepare_cyq_chen_batch_rows(
     for stock in batch.stocks {
         let ts_code = stock.ts_code;
         if let Some(last) = stock.snapshots.last() {
+            let date = last
+                .trade_date
+                .as_deref()
+                .ok_or_else(|| format!("{ts_code} 的新筹码快照缺少交易日期"))?;
+            let state = stock
+                .feature_state
+                .as_ref()
+                .ok_or_else(|| format!("{ts_code} 的新筹码计算缺少特征续算状态"))?;
+            state
+                .validate(date, &last.bins)
+                .map_err(|e| format!("拒绝写入无效新筹码检查点, ts_code={ts_code}: {e}"))?;
             checkpoints.push((
                 ts_code.clone(),
                 last.trade_date
@@ -945,6 +919,7 @@ pub(super) fn prepare_cyq_chen_batch_rows(
 
     Ok(PreparedCyqChenWriteBatch {
         stock_count,
+        replace_ts_codes,
         snapshot_rows,
         bin_rows,
         checkpoints,
@@ -959,6 +934,20 @@ pub(super) fn append_prepared_cyq_chen_batch_rows(
     bin_app: &mut Appender<'_>,
     batch: PreparedCyqChenWriteBatch,
 ) -> Result<(usize, usize), String> {
+    for ts_code in &batch.replace_ts_codes {
+        // 与本轮增量共用事务：先删该股旧历史，再追加重放结果，失败一起回滚。
+        for table in [
+            "cyq_chen_checkpoint",
+            CYQ_CHEN_BIN_TABLE,
+            CYQ_CHEN_SNAPSHOT_TABLE,
+        ] {
+            conn.execute(
+                &format!("DELETE FROM {table} WHERE ts_code = ? AND adj_type = ?"),
+                params![ts_code, DEFAULT_ADJ_TYPE],
+            )
+            .map_err(|e| format!("替换重放股票筹码失败, ts_code={ts_code}: {e}"))?;
+        }
+    }
     if !batch.checkpoints.is_empty() {
         // 大字符串列的逐股 MERGE 更新成本高，删除和追加仍由调用方的事务一起提交。
         conn.execute(
@@ -1154,6 +1143,9 @@ fn write_cyq_chen_batch_groups(
                     CyqChenWriteMessage::Abort(reason) => {
                         return Err(format!("筹码计算中断，临时库不发布:{reason}"));
                     }
+                    CyqChenWriteMessage::Finish => {
+                        return Err("临时库写入不接受增量提交标记".into());
+                    }
                 };
                 group_stocks += batch.stock_count;
                 let (snapshots, bins) = append_prepared_cyq_chen_batch_rows(
@@ -1181,33 +1173,52 @@ fn write_cyq_chen_batch_groups(
     Ok((snapshot_rows, bin_rows))
 }
 
-pub(super) fn write_cyq_chen_incremental_batches_from_channel(
+pub(super) fn write_cyq_chen_maintenance_batches_from_channel(
     mut conn: Connection,
     rx: Receiver<CyqChenWriteMessage>,
     config: ChenChipConfig,
     start_date: &str,
     end_date: &str,
     strategy_hash: String,
+    repair_ts_codes: Option<&[String]>,
 ) -> Result<(usize, usize), String> {
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("创建新筹码维护事务失败:{e}"))?;
     let write_result = (|| -> Result<(usize, usize), String> {
-        let tx = conn
-            .transaction()
-            .map_err(|e| format!("创建新筹码增量事务失败:{e}"))?;
-        tx.execute(
+        if let Some(ts_codes) = repair_ts_codes {
+            for ts_code in ts_codes {
+                // 局部修复是整股重放，连同源行情已删掉的旧日期一起替换。
+                for table in [
+                    "cyq_chen_checkpoint",
+                    CYQ_CHEN_BIN_TABLE,
+                    CYQ_CHEN_SNAPSHOT_TABLE,
+                ] {
+                    tx.execute(
+                        &format!("DELETE FROM {table} WHERE ts_code = ? AND adj_type = ?"),
+                        params![ts_code, DEFAULT_ADJ_TYPE],
+                    )
+                    .map_err(|e| format!("清理股票新筹码失败, ts_code={ts_code}: {e}"))?;
+                }
+            }
+        } else {
+            tx.execute(
             "DELETE FROM cyq_chen_bin WHERE adj_type = ? AND trade_date >= ? AND trade_date <= ?",
             params![DEFAULT_ADJ_TYPE, start_date, end_date],
         )
         .map_err(|e| format!("清理增量区间cyq_chen_bin失败:{e}"))?;
-        tx.execute(
+            tx.execute(
             "DELETE FROM cyq_chen_snapshot WHERE adj_type = ? AND trade_date >= ? AND trade_date <= ?",
             params![DEFAULT_ADJ_TYPE, start_date, end_date],
         )
         .map_err(|e| format!("清理增量区间cyq_chen_snapshot失败:{e}"))?;
+        }
 
         let mut snapshot_rows = 0usize;
         let mut bin_rows = 0usize;
         let mut batch_count = 0usize;
         let mut abort_reason = None;
+        let mut finished = false;
         {
             let mut snapshot_app = tx
                 .appender(CYQ_CHEN_SNAPSHOT_TABLE)
@@ -1220,10 +1231,14 @@ pub(super) fn write_cyq_chen_incremental_batches_from_channel(
                 let batch = match message {
                     CyqChenWriteMessage::Batch(batch) => batch,
                     CyqChenWriteMessage::PreparedBatch(_) => {
-                        return Err("新筹码增量写入不接受预构造批次".to_string());
+                        return Err("新筹码维护写入不接受预构造批次".to_string());
                     }
                     CyqChenWriteMessage::Abort(reason) => {
                         abort_reason = Some(reason);
+                        break;
+                    }
+                    CyqChenWriteMessage::Finish => {
+                        finished = true;
                         break;
                     }
                 };
@@ -1249,7 +1264,7 @@ pub(super) fn write_cyq_chen_incremental_batches_from_channel(
                 }
             }
 
-            if abort_reason.is_none() {
+            if finished && abort_reason.is_none() {
                 snapshot_app
                     .flush()
                     .map_err(|e| format!("刷新cyq_chen_snapshot写入器失败:{e}"))?;
@@ -1259,19 +1274,28 @@ pub(super) fn write_cyq_chen_incremental_batches_from_channel(
             }
         }
 
-        if let Some(reason) = abort_reason {
-            tx.rollback()
-                .map_err(|e| format!("新筹码增量计算中断且结果库回滚失败:{reason}; {e}"))?;
-            return Err(format!("新筹码增量计算中断，结果库已回滚:{reason}"));
+        if !finished {
+            let reason =
+                abort_reason.unwrap_or_else(|| "计算通道提前关闭，未收到全部成功标记".into());
+            return Err(format!("新筹码维护计算中断:{reason}"));
         }
 
         write_cyq_chen_meta(&tx, config, &strategy_hash)?;
-        tx.commit()
-            .map_err(|e| format!("提交新筹码增量事务失败:{e}"))?;
         Ok((snapshot_rows, bin_rows))
     })();
 
-    write_result
+    match write_result {
+        Ok(rows) => {
+            tx.commit()
+                .map_err(|e| format!("提交新筹码维护事务失败:{e}"))?;
+            Ok(rows)
+        }
+        Err(error) => {
+            tx.rollback()
+                .map_err(|e| format!("新筹码维护失败且结果库回滚失败:{error}; {e}"))?;
+            Err(format!("新筹码维护失败，结果库已回滚:{error}"))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1298,17 +1322,23 @@ mod tests {
             warmup_days: 2,
             bucket_pct: 5.0,
         };
-        let snapshot = crate::data::cyq_chen::compute_chen_chip_snapshots_from_row_data(
-            &row,
-            "20260403",
-            &crate::data::cyq_chen::ChipChangeConfig {
-                version: 1,
-                strategy: Vec::new(),
-            },
-            config,
-        )
-        .unwrap()
-        .remove(0);
+        let mut state = crate::data::cyq_chen::ChenChipFeatureState::default();
+        let snapshot =
+            crate::data::cyq_chen::compute_chen_chip_snapshots_with_compiled_config_with_features(
+                &row,
+                "20260403",
+                &crate::data::cyq_chen::ChipChangeConfig {
+                    version: 1,
+                    strategy: Vec::new(),
+                }
+                .compile()
+                .unwrap(),
+                config,
+                &mut state,
+            )
+            .unwrap()
+            .pop()
+            .unwrap();
         let stage = source_dir.join("parallel-stage.db");
         init_cyq_chen_db(&stage).unwrap();
         let (tx, rx) = sync_channel(64);
@@ -1317,7 +1347,8 @@ mod tests {
                 stocks: vec![ComputedCyqChenStock {
                     ts_code: format!("{index:06}.SZ"),
                     snapshots: vec![snapshot.clone()],
-                    feature_state: None,
+                    replace_history: false,
+                    feature_state: Some(state.clone()),
                 }],
             }))
             .unwrap();

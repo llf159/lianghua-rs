@@ -1,18 +1,17 @@
 use crate::data::cyq_chen_data::compute::{
-    append_cyq_chen_batch_rows, compute_cyq_chen_stock_group_batch, finish_cyq_chen_write,
-    prepare_cyq_chen_batch_rows, query_source_trade_date_range, resolve_cyq_chen_load_start_date,
+    compute_cyq_chen_stock_group_batch, finish_cyq_chen_write, prepare_cyq_chen_batch_rows,
+    query_source_trade_date_range, resolve_cyq_chen_load_start_date,
     resolve_cyq_chen_rebuild_trade_date_range, source_stock_data_exists,
-    write_cyq_chen_batches_from_channel, write_cyq_chen_incremental_batches_from_channel,
+    write_cyq_chen_batches_from_channel, write_cyq_chen_maintenance_batches_from_channel,
 };
 use crate::data::cyq_chen_data::store::replace_cyq_chen_db;
 use crate::data::cyq_chen_data::store::{
-    clear_cyq_chen_tables, current_chip_change_strategy_hash, init_cyq_chen_db,
-    query_cyq_chen_meta_value, query_latest_cyq_chen_metadata, remove_cyq_chen_db_artifacts,
-    write_cyq_chen_meta,
+    current_chip_change_strategy_hash, init_cyq_chen_db, query_cyq_chen_meta_value,
+    query_latest_cyq_chen_metadata, remove_cyq_chen_db_artifacts,
 };
 use crate::data::cyq_chen_data::{
-    CYQ_CHEN_BIN_TABLE, CYQ_CHEN_FLUSH_BATCH_SIZE, CYQ_CHEN_GROUP_SIZE, CYQ_CHEN_QUEUE_BOUND,
-    CYQ_CHEN_SNAPSHOT_TABLE, CyqChenRebuildSummary, CyqChenWriteMessage, DEFAULT_ADJ_TYPE,
+    CYQ_CHEN_GROUP_SIZE, CYQ_CHEN_QUEUE_BOUND, CYQ_CHEN_SNAPSHOT_TABLE, CyqChenCheckpointRecovery,
+    CyqChenRebuildSummary, CyqChenWriteMessage, DEFAULT_ADJ_TYPE,
 };
 
 use crate::data::DataReader;
@@ -33,7 +32,6 @@ use rayon::prelude::*;
 use std::collections::HashSet;
 use std::fs::create_dir_all;
 use std::path::Path;
-use std::sync::mpsc::Receiver;
 use std::sync::mpsc::sync_channel;
 use std::thread;
 use std::time::SystemTime;
@@ -142,43 +140,6 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
         )
         .map(Some);
     }
-    if latest_metadata.is_some() {
-        let conn = crate::data::open_db_readonly(&cyq_chen_db).map_err(|e| e.to_string())?;
-        let mut statement = conn.prepare(
-            "SELECT history.ts_code, checkpoint.bins,
-             checkpoint.feature_state IS NULL OR checkpoint.trade_date != history.latest AS needs_repair FROM
-             (SELECT ts_code, MAX(trade_date) AS latest FROM cyq_chen_snapshot WHERE adj_type = ? GROUP BY ts_code) history
-             LEFT JOIN cyq_chen_checkpoint checkpoint ON checkpoint.ts_code = history.ts_code AND checkpoint.adj_type = ?",
-        ).map_err(|e| format!("检查新筹码续算状态失败: {e}"))?;
-        let mut rows = statement
-            .query(params![DEFAULT_ADJ_TYPE, DEFAULT_ADJ_TYPE])
-            .map_err(|e| e.to_string())?;
-        let mut repairs = Vec::new();
-        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-            let ts_code: String = row.get(0).map_err(|e| e.to_string())?;
-            let checkpoint: Option<String> = row.get(1).map_err(|e| e.to_string())?;
-            let needs_repair: bool = row.get(2).map_err(|e| e.to_string())?;
-            // 使用与续算相同的类型检查必填字段，不能为损坏的价格或后验库存补默认值。
-            let bins_valid = checkpoint.as_deref().is_some_and(|json| {
-                serde_json::from_str::<Vec<crate::data::cyq_chen::ChenChipBin>>(json)
-                    .is_ok_and(|bins| !bins.is_empty())
-            });
-            if needs_repair || !bins_valid {
-                repairs.push(ts_code);
-            }
-        }
-        drop(rows);
-        drop(statement);
-        drop(conn);
-        if !repairs.is_empty() {
-            repair_cyq_chen_stocks_if_db_exists(
-                source_dir,
-                &repairs,
-                allow_strategy_rebuild,
-                progress_cb,
-            )?;
-        }
-    }
     let start_date = match latest_metadata.as_ref() {
         Some((latest_trade_date, _)) if latest_trade_date >= &source_max_trade_date => {
             return Ok(Some(CyqChenRebuildSummary {
@@ -211,7 +172,8 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
     let end_date = source_max_trade_date;
 
     let expression_warmup_need = estimate_chen_chip_expression_warmup(&chip_config)?;
-    let load_warmup_need = config.warmup_days.max(expression_warmup_need);
+    // 即使模型无需预热，续算也需要该股上一根行情来校验检查点衔接。
+    let load_warmup_need = config.warmup_days.max(expression_warmup_need).max(1);
     let Some(load_start_date) =
         resolve_cyq_chen_load_start_date(source_dir, &start_date, &end_date, load_warmup_need)?
     else {
@@ -254,6 +216,7 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
 
     // 独立只读实例也不参与写实例的块管理；续算状态必须与写线程共享实例。
     // scope 保证异常退出也先结束写线程，再释放 try_clone 借用的主数据库句柄。
+    let replay_first_date = std::sync::OnceLock::new();
     let (compute_result, writer_result) = thread::scope(|scope| {
         let (tx, rx) = sync_channel(CYQ_CHEN_QUEUE_BOUND);
         let abort_tx = tx.clone();
@@ -261,13 +224,14 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
         let write_end_date = end_date.clone();
         let writer_strategy_hash = strategy_hash.clone();
         let writer_handle = scope.spawn(move || {
-            write_cyq_chen_incremental_batches_from_channel(
+            write_cyq_chen_maintenance_batches_from_channel(
                 writer_conn,
                 rx,
                 config,
                 &write_start_date,
                 &write_end_date,
                 writer_strategy_hash,
+                None,
             )
         });
 
@@ -302,6 +266,17 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
                         });
                     }
                 };
+                let checkpoint_recovery = |ts_code: &str, reason: &str| {
+                    if let Some(progress_cb) = progress_cb {
+                        progress_cb(DownloadProgress {
+                            phase: "compute_cyq_chen".into(),
+                            finished: finished_stock_count.load(std::sync::atomic::Ordering::Relaxed),
+                            total: ts_codes.len(),
+                            current_label: Some(ts_code.to_string()),
+                            message: format!("{ts_code} 续算状态不可用，正在从行情重放该股；完成后与本轮增量一起提交。原因: {reason}"),
+                        });
+                    }
+                };
                 let batch = compute_cyq_chen_stock_group_batch(
                     worker_reader,
                     Some(state_conn),
@@ -314,6 +289,11 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
                     &total_share_map,
                     ts_group,
                     Some(&progress_stock_done),
+                    Some(&CyqChenCheckpointRecovery {
+                        source_dir,
+                        first_date: &replay_first_date,
+                        report: &checkpoint_recovery,
+                    }),
                 )?;
                 tx.send(CyqChenWriteMessage::Batch(batch))
                     .map_err(|e| format!("发送新筹码增量批次失败:{e}"))?;
@@ -321,8 +301,13 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
             },
         );
 
-        if let Err(err) = &compute_result {
-            let _ = abort_tx.send(CyqChenWriteMessage::Abort(err.clone()));
+        match &compute_result {
+            Ok(()) => {
+                let _ = abort_tx.send(CyqChenWriteMessage::Finish);
+            }
+            Err(err) => {
+                let _ = abort_tx.send(CyqChenWriteMessage::Abort(err.clone()));
+            }
         }
         drop(abort_tx);
         drop(tx);
@@ -587,114 +572,16 @@ pub fn repair_cyq_chen_stocks_if_db_exists(
     let write_end_date = end_date.clone();
     let writer_strategy_hash = strategy_hash.clone();
     let writer_handle = thread::spawn(move || {
-        (|db_path: &str,
-          rx: Receiver<CyqChenWriteMessage>,
-          config: ChenChipConfig,
-          ts_codes: &[String],
-          start_date: &str,
-          end_date: &str,
-          strategy_hash: String|
-         -> Result<(usize, usize), String> {
-            let mut conn = Connection::open(db_path).map_err(|e| format!("打开筹码库失败:{e}"))?;
-
-            let write_result = (|| -> Result<(usize, usize), String> {
-                let tx = conn
-                    .transaction()
-                    .map_err(|e| format!("创建筹码库事务失败:{e}"))?;
-
-                for ts_code in ts_codes {
-                    tx.execute(
-                        "DELETE FROM cyq_chen_checkpoint WHERE ts_code = ? AND adj_type = ?",
-                        params![ts_code, DEFAULT_ADJ_TYPE],
-                    )
-                    .map_err(|e| format!("清理股票新筹码检查点失败: {e}"))?;
-                    tx.execute(
-                "DELETE FROM cyq_chen_bin WHERE ts_code = ? AND adj_type = ? AND trade_date >= ? AND trade_date <= ?",
-                params![ts_code, DEFAULT_ADJ_TYPE, start_date, end_date],
-            )
-            .map_err(|e| format!("清理股票新筹码分桶失败, ts_code={ts_code}: {e}"))?;
-                    tx.execute(
-                "DELETE FROM cyq_chen_snapshot WHERE ts_code = ? AND adj_type = ? AND trade_date >= ? AND trade_date <= ?",
-                params![ts_code, DEFAULT_ADJ_TYPE, start_date, end_date],
-            )
-            .map_err(|e| format!("清理股票新筹码摘要失败, ts_code={ts_code}: {e}"))?;
-                }
-
-                let mut snapshot_rows = 0usize;
-                let mut bin_rows = 0usize;
-                let mut batch_count = 0usize;
-                let mut abort_reason = None;
-                {
-                    let mut snapshot_app = tx
-                        .appender(CYQ_CHEN_SNAPSHOT_TABLE)
-                        .map_err(|e| format!("创建cyq_chen_snapshot写入器失败:{e}"))?;
-                    let mut bin_app = tx
-                        .appender(CYQ_CHEN_BIN_TABLE)
-                        .map_err(|e| format!("创建cyq_chen_bin写入器失败:{e}"))?;
-
-                    for message in rx {
-                        let batch = match message {
-                            CyqChenWriteMessage::Batch(batch) => batch,
-                            CyqChenWriteMessage::PreparedBatch(_) => {
-                                return Err("新筹码单股修复不接受预构造批次".to_string());
-                            }
-                            CyqChenWriteMessage::Abort(reason) => {
-                                abort_reason = Some(reason);
-                                break;
-                            }
-                        };
-
-                        let (added_snapshot_rows, added_bin_rows) = append_cyq_chen_batch_rows(
-                            &tx,
-                            &mut snapshot_app,
-                            &mut bin_app,
-                            batch,
-                            config,
-                        )?;
-                        snapshot_rows += added_snapshot_rows;
-                        bin_rows += added_bin_rows;
-                        batch_count += 1;
-
-                        if batch_count % CYQ_CHEN_FLUSH_BATCH_SIZE == 0 {
-                            snapshot_app
-                                .flush()
-                                .map_err(|e| format!("刷新cyq_chen_snapshot写入器失败:{e}"))?;
-                            bin_app
-                                .flush()
-                                .map_err(|e| format!("刷新cyq_chen_bin写入器失败:{e}"))?;
-                        }
-                    }
-
-                    if abort_reason.is_none() {
-                        snapshot_app
-                            .flush()
-                            .map_err(|e| format!("刷新cyq_chen_snapshot写入器失败:{e}"))?;
-                        bin_app
-                            .flush()
-                            .map_err(|e| format!("刷新cyq_chen_bin写入器失败:{e}"))?;
-                    }
-                }
-
-                if let Some(reason) = abort_reason {
-                    tx.rollback()
-                        .map_err(|e| format!("新筹码局部修复中断且结果库回滚失败:{reason}; {e}"))?;
-                    return Err(format!("新筹码局部修复中断，结果库已回滚:{reason}"));
-                }
-
-                write_cyq_chen_meta(&tx, config, &strategy_hash)?;
-                tx.commit().map_err(|e| format!("提交筹码库事务失败:{e}"))?;
-                Ok((snapshot_rows, bin_rows))
-            })();
-
-            write_result
-        })(
-            &cyq_chen_db_str,
+        let conn =
+            Connection::open(&cyq_chen_db_str).map_err(|e| format!("打开新筹码库失败:{e}"))?;
+        write_cyq_chen_maintenance_batches_from_channel(
+            conn,
             rx,
             config,
-            &writer_ts_codes,
             &write_start_date,
             &write_end_date,
             writer_strategy_hash,
+            Some(&writer_ts_codes),
         )
     });
 
@@ -731,6 +618,7 @@ pub fn repair_cyq_chen_stocks_if_db_exists(
                 &total_share_map,
                 ts_group,
                 Some(&progress_stock_done),
+                None,
             )?;
             tx.send(CyqChenWriteMessage::Batch(batch))
                 .map_err(|e| format!("发送新筹码局部修复批次失败:{e}"))?;
@@ -738,8 +626,13 @@ pub fn repair_cyq_chen_stocks_if_db_exists(
         },
     );
 
-    if let Err(err) = &compute_result {
-        let _ = abort_tx.send(CyqChenWriteMessage::Abort(err.clone()));
+    match &compute_result {
+        Ok(()) => {
+            let _ = abort_tx.send(CyqChenWriteMessage::Finish);
+        }
+        Err(err) => {
+            let _ = abort_tx.send(CyqChenWriteMessage::Abort(err.clone()));
+        }
     }
     drop(abort_tx);
     drop(tx);
@@ -810,15 +703,7 @@ pub fn rebuild_cyq_chen_all_with_progress(
 
     let source_db = source_db_path(source_dir);
     if !source_db.exists() {
-        clear_cyq_chen_tables(&cyq_chen_db)?;
-        return Ok(CyqChenRebuildSummary {
-            snapshot_rows: 0,
-            bin_rows: 0,
-            warmup_days: config.warmup_days,
-            bucket_pct: config.bucket_pct,
-            start_date: None,
-            end_date: None,
-        });
+        return Err("缺少可重建的行情或交易日历，新筹码旧结果保持不变".into());
     }
 
     let source_db_str = source_db
@@ -827,29 +712,13 @@ pub fn rebuild_cyq_chen_all_with_progress(
     let source_conn =
         crate::data::open_db_readonly(source_db_str).map_err(|e| format!("打开原始库失败:{e}"))?;
     if !source_stock_data_exists(&source_conn)? {
-        clear_cyq_chen_tables(&cyq_chen_db)?;
-        return Ok(CyqChenRebuildSummary {
-            snapshot_rows: 0,
-            bin_rows: 0,
-            warmup_days: config.warmup_days,
-            bucket_pct: config.bucket_pct,
-            start_date: None,
-            end_date: None,
-        });
+        return Err("缺少可重建的行情或交易日历，新筹码旧结果保持不变".into());
     }
 
     let Some((start_date, end_date)) =
         resolve_cyq_chen_rebuild_trade_date_range(&source_conn, start_date, end_date)?
     else {
-        clear_cyq_chen_tables(&cyq_chen_db)?;
-        return Ok(CyqChenRebuildSummary {
-            snapshot_rows: 0,
-            bin_rows: 0,
-            warmup_days: config.warmup_days,
-            bucket_pct: config.bucket_pct,
-            start_date: None,
-            end_date: None,
-        });
+        return Err("缺少可重建的行情或交易日历，新筹码旧结果保持不变".into());
     };
     let chip_config = load_compiled_chip_change_config(source_dir)?;
     let strategy_hash = current_chip_change_strategy_hash(source_dir)?;
@@ -858,15 +727,7 @@ pub fn rebuild_cyq_chen_all_with_progress(
     let Some(load_start_date) =
         resolve_cyq_chen_load_start_date(source_dir, &start_date, &end_date, load_warmup_need)?
     else {
-        clear_cyq_chen_tables(&cyq_chen_db)?;
-        return Ok(CyqChenRebuildSummary {
-            snapshot_rows: 0,
-            bin_rows: 0,
-            warmup_days: config.warmup_days,
-            bucket_pct: config.bucket_pct,
-            start_date: Some(start_date),
-            end_date: Some(end_date),
-        });
+        return Err("缺少可重建的行情或交易日历，新筹码旧结果保持不变".into());
     };
 
     let required_runtime_keys = collect_chen_chip_runtime_keys(&chip_config);
@@ -969,6 +830,7 @@ pub fn rebuild_cyq_chen_all_with_progress(
                     &total_share_map,
                     ts_group,
                     Some(&progress_stock_done),
+                    None,
                 )?;
                 tx.send(CyqChenWriteMessage::PreparedBatch(
                     prepare_cyq_chen_batch_rows(batch, config)?,
@@ -1010,6 +872,10 @@ pub fn rebuild_cyq_chen_all_with_progress(
             return Err(error);
         }
     };
+    if snapshot_rows == 0 {
+        remove_cyq_chen_db_artifacts(&rebuild_db);
+        return Err("新筹码重建未生成任何快照，旧结果保持不变，请检查行情和预热区间".into());
+    }
     if let Err(error) = replace_cyq_chen_db(&rebuild_db, &cyq_chen_db) {
         remove_cyq_chen_db_artifacts(&rebuild_db);
         return Err(error);
@@ -1046,7 +912,7 @@ mod tests {
     use crate::data::cyq_chen_data::CYQ_CHEN_SNAPSHOT_TABLE;
     use crate::data::cyq_chen_data::CyqChenWriteMessage;
     use crate::data::cyq_chen_data::compute::write_cyq_chen_batches_from_channel;
-    use crate::data::cyq_chen_data::compute::write_cyq_chen_incremental_batches_from_channel;
+    use crate::data::cyq_chen_data::compute::write_cyq_chen_maintenance_batches_from_channel;
     use crate::data::cyq_chen_data::maintain::maintain_cyq_chen_incremental_if_db_exists;
     use crate::data::cyq_chen_data::maintain::rebuild_cyq_chen_all;
     use crate::data::cyq_chen_data::maintain::repair_cyq_chen_stocks_if_db_exists;
@@ -1178,9 +1044,10 @@ mod tests {
     }
 
     #[test]
-    fn incremental_repairs_checkpoint_missing_price_before_resuming() {
+    fn incremental_repairs_mixed_checkpoint_corruption_before_resuming() {
         let source_dir = unique_temp_source_dir();
         prepare_source_db(&source_dir);
+        insert_paused_stock_resume_row(&source_dir);
         let source = source_dir.to_str().unwrap();
         let config = ChenChipConfig {
             warmup_days: 1,
@@ -1212,6 +1079,20 @@ mod tests {
             [damaged],
         )
         .unwrap();
+        let feature_json: String = conn
+            .query_row(
+                "SELECT feature_state FROM cyq_chen_checkpoint WHERE ts_code = '000002.SZ'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut state: serde_json::Value = serde_json::from_str(&feature_json).unwrap();
+        state["buckets"][0]["initial"] = serde_json::json!(999.0);
+        conn.execute(
+            "UPDATE cyq_chen_checkpoint SET feature_state = ? WHERE ts_code = '000002.SZ'",
+            [serde_json::to_string(&state).unwrap()],
+        )
+        .unwrap();
         drop(conn);
 
         maintain_cyq_chen_incremental_if_db_exists(source, false, None).unwrap();
@@ -1231,6 +1112,42 @@ mod tests {
                 .is_empty()
         );
         drop(conn);
+        // 没有新行情不读取长 JSON；坏状态等下次实际使用时再重放。
+        let conn = Connection::open(cyq_chen_db_path(source)).unwrap();
+        conn.execute(
+            "UPDATE cyq_chen_checkpoint SET feature_state = '{' WHERE ts_code = '000001.SZ'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        maintain_cyq_chen_incremental_if_db_exists(source, false, None).unwrap();
+        assert_eq!(snapshot_rows_for_compare(source), expected_snapshots);
+        assert_eq!(bin_rows_for_compare(source), expected_bins);
+        let conn = Connection::open(cyq_chen_db_path(source)).unwrap();
+        let stored: String = conn
+            .query_row(
+                "SELECT feature_state FROM cyq_chen_checkpoint WHERE ts_code = '000001.SZ'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, "{");
+        drop(conn);
+        let conn = Connection::open(crate::data::source_db_path(source)).unwrap();
+        insert_stock_row(&conn, "000001.SZ", "20260409", 11.6, 12.0, 11.5, 11.8, 4.0);
+        drop(conn);
+        let calendar = crate::data::trade_calendar_path(source);
+        fs::write(
+            &calendar,
+            format!("{}20260409\n", fs::read_to_string(&calendar).unwrap()),
+        )
+        .unwrap();
+        maintain_cyq_chen_incremental_if_db_exists(source, false, None).unwrap();
+        let resumed = snapshot_rows_for_compare(source);
+        let resumed_bins = bin_rows_for_compare(source);
+        rebuild_cyq_chen_all(source, config, None, None).unwrap();
+        assert_eq!(snapshot_rows_for_compare(source), resumed);
+        assert_eq!(bin_rows_for_compare(source), resumed_bins);
         fs::remove_dir_all(source_dir).unwrap();
     }
 
@@ -1593,7 +1510,56 @@ bias = 0.5
             vec!["idx_cyq_chen_snapshot_stock_date".to_string()]
         );
 
+        // 已知行情修订由下载修复清单触发整股重放，不靠日常增量扫描全库。
+        insert_paused_stock_resume_row(&source_dir);
+        repair_cyq_chen_stocks_if_db_exists(source_path, &["000002.SZ".into()], false, None)
+            .unwrap();
+        maintain_cyq_chen_incremental_if_db_exists(source_path, false, None).unwrap();
+        let resumed = snapshot_rows_for_compare(source_path);
+        let resumed_bins = bin_rows_for_compare(source_path);
+        rebuild_cyq_chen_all(source_path, config, None, None).unwrap();
+        assert_eq!(snapshot_rows_for_compare(source_path), resumed);
+        assert_eq!(bin_rows_for_compare(source_path), resumed_bins);
+
         fs::remove_dir_all(source_dir).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn rebuild_without_trade_calendar_preserves_existing_results() {
+        let source_dir = unique_temp_source_dir();
+        prepare_source_db(&source_dir);
+        let source = source_dir.to_str().unwrap();
+        let config = ChenChipConfig {
+            warmup_days: 1,
+            bucket_pct: 5.0,
+        };
+        rebuild_cyq_chen_all(source, config, None, None).unwrap();
+        let before = snapshot_rows_for_compare(source);
+        let bins_before = bin_rows_for_compare(source);
+        let meta_before = meta_rows_for_compare(source);
+        assert!(
+            rebuild_cyq_chen_all(
+                source,
+                ChenChipConfig {
+                    warmup_days: 100,
+                    ..config
+                },
+                None,
+                None,
+            )
+            .unwrap_err()
+            .contains("旧结果保持不变")
+        );
+        fs::write(crate::data::trade_calendar_path(source), "cal_date\n").unwrap();
+        assert!(
+            rebuild_cyq_chen_all(source, config, None, None)
+                .unwrap_err()
+                .contains("旧结果保持不变")
+        );
+        assert_eq!(snapshot_rows_for_compare(source), before);
+        assert_eq!(bin_rows_for_compare(source), bins_before);
+        assert_eq!(meta_rows_for_compare(source), meta_before);
+        fs::remove_dir_all(source_dir).unwrap();
     }
 
     #[test]
@@ -1639,7 +1605,7 @@ bias = 0.5
         }
         .compile()
         .unwrap();
-        let snapshots =
+        let snapshots: Vec<_> =
             crate::data::cyq_chen::compute_chen_chip_snapshots_with_compiled_config_with_features(
                 &row, "20260402", &chip, config, &mut state,
             )
@@ -1647,37 +1613,72 @@ bias = 0.5
             .into_iter()
             .filter(|snapshot| snapshot.trade_date.as_deref().unwrap() >= "20260407")
             .collect();
-        let (tx, rx) = sync_channel(2);
-        tx.send(CyqChenWriteMessage::Batch(
-            crate::data::cyq_chen_data::CyqChenWriteBatch {
-                stocks: vec![crate::data::cyq_chen_data::ComputedCyqChenStock {
-                    ts_code: "000001.SZ".into(),
-                    snapshots,
-                    feature_state: Some(state),
-                }],
-            },
-        ))
-        .unwrap();
-        tx.send(CyqChenWriteMessage::Abort("test interrupt".to_string()))
-            .expect("send abort");
-        drop(tx);
-
-        let error = write_cyq_chen_incremental_batches_from_channel(
-            Connection::open(&cyq_chen_db).unwrap(),
-            rx,
-            config,
-            "20260407",
-            "20260408",
-            "changed-strategy-hash".to_string(),
-        )
-        .expect_err("incremental write should abort");
-
-        assert!(error.contains("结果库已回滚"));
-        assert_eq!(snapshot_rows_for_compare(source_path), snapshots_before);
-        assert_eq!(bin_rows_for_compare(source_path), bins_before);
-        assert_eq!(meta_rows_for_compare(source_path), meta_before);
-
-        assert_eq!(checkpoint_rows(source_path), checkpoint_before);
+        let codes = vec!["000001.SZ".to_string()];
+        for repair in [None, Some(codes.as_slice())] {
+            for failure in ["abort", "disconnect", "invalid_state"] {
+                let (tx, rx) = sync_channel(3);
+                tx.send(CyqChenWriteMessage::Batch(
+                    crate::data::cyq_chen_data::CyqChenWriteBatch {
+                        stocks: vec![crate::data::cyq_chen_data::ComputedCyqChenStock {
+                            ts_code: "000001.SZ".into(),
+                            snapshots: snapshots.clone(),
+                            replace_history: true,
+                            feature_state: Some(state.clone()),
+                        }],
+                    },
+                ))
+                .unwrap();
+                match failure {
+                    "abort" => tx
+                        .send(CyqChenWriteMessage::Abort("test interrupt".into()))
+                        .unwrap(),
+                    "invalid_state" => {
+                        let mut damaged = snapshots.clone();
+                        damaged.last_mut().unwrap().bins[0].main_chip += 1.0;
+                        tx.send(CyqChenWriteMessage::Batch(
+                            crate::data::cyq_chen_data::CyqChenWriteBatch {
+                                stocks: vec![crate::data::cyq_chen_data::ComputedCyqChenStock {
+                                    ts_code: "000001.SZ".into(),
+                                    snapshots: damaged,
+                                    replace_history: false,
+                                    feature_state: Some(state.clone()),
+                                }],
+                            },
+                        ))
+                        .unwrap();
+                        tx.send(CyqChenWriteMessage::Finish).unwrap();
+                    }
+                    _ => {}
+                }
+                drop(tx);
+                let error = write_cyq_chen_maintenance_batches_from_channel(
+                    Connection::open(&cyq_chen_db).unwrap(),
+                    rx,
+                    config,
+                    "20260407",
+                    "20260408",
+                    "changed-strategy-hash".into(),
+                    repair,
+                )
+                .expect_err("incomplete or invalid write must roll back");
+                if failure == "invalid_state" {
+                    assert!(error.contains("拒绝写入无效新筹码检查点"), "{error}");
+                } else {
+                    assert!(error.contains("结果库已回滚"), "{error}");
+                }
+                assert_eq!(snapshot_rows_for_compare(source_path), snapshots_before);
+                assert_eq!(bin_rows_for_compare(source_path), bins_before);
+                assert_eq!(meta_rows_for_compare(source_path), meta_before);
+                assert_eq!(checkpoint_rows(source_path), checkpoint_before);
+            }
+        }
+        // 回滚之后重新执行正常维护，结果仍须与完整重放一致。
+        maintain_cyq_chen_incremental_if_db_exists(source_path, false, None).unwrap();
+        let resumed_snapshots = snapshot_rows_for_compare(source_path);
+        let resumed_bins = bin_rows_for_compare(source_path);
+        rebuild_cyq_chen_all(source_path, config, None, None).unwrap();
+        assert_eq!(snapshot_rows_for_compare(source_path), resumed_snapshots);
+        assert_eq!(bin_rows_for_compare(source_path), resumed_bins);
         drop(reader);
         fs::remove_dir_all(source_dir).expect("cleanup temp dir");
     }
@@ -1697,28 +1698,34 @@ bias = 0.5
         let row = reader
             .load_one("000001.SZ", "qfq", "20260401", "20260408")
             .unwrap();
-        let snapshots = crate::data::cyq_chen::compute_chen_chip_snapshots_from_row_data(
-            &row,
-            "20260403",
-            &crate::data::cyq_chen::ChipChangeConfig {
-                version: 1,
-                strategy: Vec::new(),
-            },
-            config,
-        )
-        .unwrap();
-        assert!(snapshots.len() > 1);
+        let mut state = crate::data::cyq_chen::ChenChipFeatureState::default();
+        let snapshots =
+            crate::data::cyq_chen::compute_chen_chip_snapshots_with_compiled_config_with_features(
+                &row,
+                "20260403",
+                &crate::data::cyq_chen::ChipChangeConfig {
+                    version: 1,
+                    strategy: Vec::new(),
+                }
+                .compile()
+                .unwrap(),
+                config,
+                &mut state,
+            )
+            .unwrap();
+        let snapshot = snapshots.last().unwrap();
         let count = 33;
         let stage = source_dir.join("stage.db");
         super::init_cyq_chen_db(&stage).unwrap();
         let (tx, rx) = sync_channel(count + 1);
-        for (index, snapshot) in snapshots.iter().cycle().take(count).cloned().enumerate() {
+        for index in 0..count {
             tx.send(CyqChenWriteMessage::Batch(
                 crate::data::cyq_chen_data::CyqChenWriteBatch {
                     stocks: vec![crate::data::cyq_chen_data::ComputedCyqChenStock {
                         ts_code: format!("{index:06}.SZ"),
-                        snapshots: vec![snapshot],
-                        feature_state: None,
+                        snapshots: vec![snapshot.clone()],
+                        replace_history: false,
+                        feature_state: Some(state.clone()),
                     }],
                 },
             ))
