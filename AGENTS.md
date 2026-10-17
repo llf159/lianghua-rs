@@ -20,6 +20,10 @@
 
 当在一个新项目的时候把这段话加到项目agents.md
 
+## 文档维护
+
+根目录仅保留 README.md 与 AGENTS.md；公开使用说明集中到 docs/，由 README.md 链接。研究报告、实验结果、候选参数和研究交接统一放在本地 research/，不得加入 Git 或写入公开文档；组件 AGENTS.md 继续只记录必要的工程取舍。新增公开文档时按文件更新 .gitignore 白名单。
+
 ## 工程取舍
 
 - 问题：手动测试与编辑器全工作区检查叠加时，多路 Rust 编译会造成内存峰值，重复关联 workspace 根和已在成员列表中的 Tauri crate 还会启动两组检查；解决方案选择：Cargo 默认 `build.jobs = 1`，rust-analyzer 只关联根 `Cargo.toml`；解释：以编译吞吐换取桌面可用性，根工作区已包含 Tauri，无需重复关联；确有内存余量时可单次执行 `cargo check -j 2` 覆盖默认值，避免另启并行 Cargo 任务。

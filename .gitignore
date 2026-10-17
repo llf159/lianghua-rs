@@ -11,7 +11,9 @@ __pycache__
 /.cargo
 /.vscode
 .sisyphus
-/docs/
+/docs/*
+!/docs/tracking-strategies.md
+!/docs/cloud-sync.md
 /strategies
 market*
 !crates/lianghua-app-strategy/src/statistics/market_activity.rs
@@ -20,6 +22,7 @@ market*
 research
 scripts
 
-# 本地研究记录
+# 本地研究记录（兼容旧根目录位置）
 /RESEARCH_SUMMARY.md
 /STRATEGY_CONFIRMATION_HANDOFF.md
+/STRATEGY_SYSTEM_DESIGN.md
