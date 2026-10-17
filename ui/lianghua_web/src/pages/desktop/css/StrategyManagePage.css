@@ -1462,3 +1462,201 @@
     max-height: calc(100vh - 20px);
   }
 }
+
+/* Keep the rule form scrollable while its title, feedback and actions stay visible. */
+.strategy-manage-modal.strategy-rule-editor-modal {
+  width: min(1120px, 100%);
+  height: min(980px, calc(100dvh - 32px));
+  max-height: calc(100dvh - 32px);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  overflow: hidden;
+}
+
+.strategy-rule-editor-header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 22px;
+  border-bottom: 1px solid #e1e7ef;
+  background: #fff;
+}
+
+.strategy-rule-editor-header > div {
+  min-width: 0;
+}
+
+.strategy-rule-editor-header h3 {
+  font-size: 19px;
+  color: #1f2a37;
+}
+
+.strategy-rule-editor-header p {
+  margin-top: 5px;
+  color: #607286;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.strategy-rule-editor-scene {
+  flex: 0 1 auto;
+  max-width: 40%;
+  padding: 6px 10px;
+  border: 1px solid var(--theme-orange-200);
+  border-radius: 7px;
+  color: var(--theme-orange-800);
+  background: var(--theme-orange-50);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.strategy-rule-editor-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 18px 22px;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  scroll-padding-block: 18px;
+  background: #f7f9fc;
+}
+
+.strategy-rule-editor-fields {
+  min-width: 0;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  display: grid;
+  gap: 16px;
+}
+
+.strategy-rule-editor-section {
+  min-width: 0;
+  padding: 18px;
+  border: 1px solid #dfe5ed;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.strategy-rule-editor-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin-bottom: 16px;
+}
+
+.strategy-rule-editor-section-head h4 {
+  margin: 0;
+  color: #243247;
+  font-size: 16px;
+}
+
+.strategy-rule-editor-section-head > span {
+  color: #607286;
+  font-size: 12px;
+}
+
+.strategy-rule-editor-help {
+  min-width: 0;
+  color: #607286;
+  font-size: 13px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+
+.strategy-rule-editor-help > summary {
+  width: fit-content;
+  padding-block: 8px;
+  cursor: pointer;
+}
+
+.strategy-rule-editor-help > ul {
+  margin: 6px 0 0;
+  padding-left: 20px;
+}
+
+.strategy-rule-editor-section .strategy-manage-editor-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.strategy-rule-editor-modal .strategy-manage-field > span {
+  font-size: 13px;
+  color: #425164;
+}
+
+.strategy-rule-editor-modal .strategy-manage-field input,
+.strategy-rule-editor-modal .strategy-manage-field select,
+.strategy-rule-editor-modal .strategy-manage-field textarea {
+  min-height: 44px;
+  font-size: 15px;
+}
+
+.strategy-rule-editor-modal textarea {
+  line-height: 1.6;
+  tab-size: 2;
+}
+
+.strategy-rule-editor-modal input:disabled,
+.strategy-rule-editor-modal select:disabled {
+  color: #758295;
+  background: #f1f4f8;
+}
+
+.strategy-rule-editor-footer {
+  flex: 0 0 auto;
+  padding: 12px 22px;
+  padding-bottom: max(12px, env(safe-area-inset-bottom));
+  border-top: 1px solid #dfe5ed;
+  background: #fff;
+}
+
+.strategy-rule-editor-footer .strategy-manage-message {
+  margin: 0 0 10px;
+  max-height: 20dvh;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
+
+.strategy-rule-editor-footer .strategy-manage-editor-actions {
+  display: grid;
+  grid-template-columns: repeat(3, max-content);
+  justify-content: end;
+  gap: 10px;
+}
+
+.strategy-rule-editor-footer button {
+  min-height: 44px;
+  padding-inline: 20px;
+}
+
+@media (max-width: 600px) {
+  .strategy-rule-editor-header,
+  .strategy-rule-editor-body,
+  .strategy-rule-editor-footer {
+    padding-inline: 14px;
+  }
+
+  .strategy-rule-editor-section {
+    padding: 14px;
+  }
+
+  .strategy-rule-editor-section .strategy-manage-editor-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .strategy-rule-editor-footer .strategy-manage-editor-actions {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .strategy-rule-editor-footer button {
+    padding-inline: 6px;
+  }
+}

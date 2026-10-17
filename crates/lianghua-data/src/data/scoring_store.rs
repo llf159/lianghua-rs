@@ -929,6 +929,7 @@ mod tests {
                 },
             ],
             scene_backtest_rows: Vec::new(),
+            tracking_states: Vec::new(),
         }))
         .expect("send batch");
         drop(tx);
@@ -1016,6 +1017,8 @@ fn drop_result_staging_tables(conn: &Connection) -> Result<(), String> {
         DROP TABLE IF EXISTS {RULE_DETAILS_SHADOW_TABLE};
         DROP TABLE IF EXISTS {SCENE_DETAILS_STAGE_TABLE};
         DROP TABLE IF EXISTS {SCENE_DETAILS_SHADOW_TABLE};
+        DROP TABLE IF EXISTS strategy_tracking_state_stage;
+        DROP TABLE IF EXISTS strategy_tracking_meta_stage;
         "#
     ))
     .map_err(|e| format!("清理结果库暂存表失败:{e}"))
@@ -1073,6 +1076,11 @@ pub fn write_score_batches_from_channel(
         drop_result_staging_tables(&conn)?;
         conn.execute_batch(&format!(
             r#"
+        CREATE TABLE strategy_tracking_meta_stage (calendar_json VARCHAR);
+        CREATE TABLE strategy_tracking_state_stage (
+            ts_code VARCHAR, trade_date VARCHAR, config_hash VARCHAR,
+            input_stamp VARCHAR, state_json VARCHAR
+        );
         CREATE TABLE {SCORE_SUMMARY_STAGE_TABLE} (
             ts_code VARCHAR,
             trade_date VARCHAR,
@@ -1134,6 +1142,9 @@ pub fn write_score_batches_from_channel(
                     .appender(SCENE_DETAILS_STAGE_TABLE)
                     .map_err(|e| format!("场景暂存表appender创建失败:{e}"))?;
 
+                let mut tracking_app = tx
+                    .appender("strategy_tracking_state_stage")
+                    .map_err(|e| format!("跟踪状态appender创建失败:{e}"))?;
                 let mut group_batches = 0usize;
                 while group_batches < 32 {
                     let Ok(message) = rx.recv() else {
@@ -1141,6 +1152,14 @@ pub fn write_score_batches_from_channel(
                         break;
                     };
                     let batch = match message {
+                        ScoreWriteMessage::TrackingCalendar(calendar) => {
+                            tx.execute(
+                                "INSERT INTO strategy_tracking_meta_stage VALUES (?)",
+                                [calendar],
+                            )
+                            .map_err(|e| format!("写入跟踪日历失败:{e}"))?;
+                            continue;
+                        }
                         ScoreWriteMessage::Batch(batch) => batch,
                         ScoreWriteMessage::Abort(reason) => {
                             return Err(format!("评分计算中断，结果库回滚:{reason}"));
@@ -1148,6 +1167,17 @@ pub fn write_score_batches_from_channel(
                     };
                     group_batches += 1;
                     profile.batch_count += 1;
+                    for row in &batch.tracking_states {
+                        tracking_app
+                            .append_row(params![
+                                row.ts_code,
+                                row.trade_date,
+                                row.config_hash,
+                                row.input_stamp,
+                                row.state_json
+                            ])
+                            .map_err(|e| format!("追加跟踪状态失败:{e}"))?;
+                    }
 
                     (|app: &mut Appender<'_>, rows: &[ScoreSummary]| -> Result<(), String> {
                         if rows.is_empty() {
@@ -1286,6 +1316,9 @@ pub fn write_score_batches_from_channel(
                     })(&mut scene_app, &batch.scene_rows)?;
                 }
 
+                tracking_app
+                    .flush()
+                    .map_err(|e| format!("刷新跟踪状态失败:{e}"))?;
                 summary_app
                     .flush()
                     .map_err(|e| format!("刷新score_summary暂存表失败:{e}"))?;
@@ -1493,6 +1526,14 @@ pub fn write_score_batches_from_channel(
             profile.receive_and_append_batches_ms += merge_started_at.elapsed().as_millis() as u64;
         }
 
+        // Publish the final event states in the same transaction as scores and ranks.
+        tx.execute_batch(
+            "DROP TABLE IF EXISTS strategy_tracking_state;
+            DROP TABLE IF EXISTS strategy_tracking_meta;
+            ALTER TABLE strategy_tracking_state_stage RENAME TO strategy_tracking_state;
+            ALTER TABLE strategy_tracking_meta_stage RENAME TO strategy_tracking_meta;",
+        )
+        .map_err(|e| format!("提交跟踪状态失败:{e}"))?;
         let commit_started_at = time::Instant::now();
         tx.commit().map_err(|e| format!("事务提交错误:{e}"))?;
         profile.commit_ms = commit_started_at.elapsed().as_millis() as u64;

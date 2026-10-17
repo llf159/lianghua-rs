@@ -2,6 +2,7 @@ mod cloud_sync_bridge;
 mod data_download_bridge;
 mod eastmoney_session;
 mod managed_source_bridge;
+mod strategy_tracking_bridge;
 mod warehouse;
 
 use std::{
@@ -3228,6 +3229,10 @@ pub fn run() {
             activate_cyq_chen_strategy_backup,
             run_ranking_tiebreak_fill,
             get_strategy_manage_page,
+            strategy_tracking_bridge::get_strategy_tracking_page,
+            strategy_tracking_bridge::save_strategy_track,
+            strategy_tracking_bridge::remove_strategy_track,
+            strategy_tracking_bridge::run_strategy_tracking,
             set_strategy_manage_scene_enabled,
             set_strategy_manage_rule_enabled,
             check_strategy_manage_scene_draft,

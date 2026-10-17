@@ -2633,6 +2633,9 @@ dependencies = [
 [[package]]
 name = "lianghua-core"
 version = "0.1.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "lianghua-data"
@@ -2709,6 +2712,8 @@ dependencies = [
  "lianghua-data",
  "lianghua-model",
  "rayon",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

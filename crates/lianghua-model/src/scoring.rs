@@ -71,6 +71,15 @@ pub struct SceneBacktestRow {
     pub stage: Option<SceneResolvedStage>,
 }
 
+#[derive(Debug, Clone)]
+pub struct TrackingScoreState {
+    pub ts_code: String,
+    pub trade_date: String,
+    pub config_hash: String,
+    pub input_stamp: String,
+    pub state_json: String,
+}
+
 #[derive(Debug, Default)]
 pub struct ScoreBatch {
     pub summary_rows: Vec<ScoreSummary>,
@@ -78,6 +87,7 @@ pub struct ScoreBatch {
     pub compact_rule_rows: Vec<CompactRuleScore>,
     pub scene_rows: Vec<SceneDetails>,
     pub scene_backtest_rows: Vec<SceneBacktestRow>,
+    pub tracking_states: Vec<TrackingScoreState>,
 }
 
 impl ScoreBatch {
@@ -92,11 +102,13 @@ impl ScoreBatch {
             }));
         self.scene_rows.extend(other.scene_rows);
         self.scene_backtest_rows.extend(other.scene_backtest_rows);
+        self.tracking_states.extend(other.tracking_states);
     }
 }
 
 #[derive(Debug)]
 pub enum ScoreWriteMessage {
+    TrackingCalendar(String),
     Batch(ScoreBatch),
     Abort(String),
 }

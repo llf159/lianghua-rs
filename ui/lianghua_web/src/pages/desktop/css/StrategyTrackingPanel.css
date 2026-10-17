@@ -1,0 +1,310 @@
+.strategy-tracking > summary {
+  cursor: pointer;
+  font-size: 1.1rem;
+  font-weight: 650;
+}
+.strategy-tracking summary span {
+  font-size: 0.85rem;
+  font-weight: 400;
+  color: #566272;
+  margin-left: 0.75rem;
+}
+.strategy-tracking-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 0.65rem;
+  margin: 0.9rem 0;
+}
+.strategy-tracking label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  min-width: 0;
+}
+.strategy-tracking button,
+.strategy-tracking input,
+.strategy-tracking select,
+.strategy-tracking textarea {
+  font: inherit;
+  color: inherit;
+  background: #f8fafc;
+  border: 1px solid #d8dee6;
+  border-radius: 7px;
+  padding: 0.65rem 0.8rem;
+  min-height: 44px;
+  box-sizing: border-box;
+}
+.strategy-tracking button {
+  cursor: pointer;
+}
+.strategy-tracking button:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+.strategy-tracking textarea {
+  width: 100%;
+  min-height: 76px;
+  font-family: monospace;
+  resize: vertical;
+}
+.strategy-tracking input,
+.strategy-tracking select {
+  max-width: 100%;
+}
+.strategy-tracking-step {
+  padding: 0.8rem;
+  margin: 0.8rem 0;
+  display: grid;
+  gap: 0.7rem;
+  border: 1px solid #d8dee6;
+  border-radius: 8px;
+}
+.strategy-tracking-error {
+  color: #b42318;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.strategy-tracking-results {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr));
+  gap: 0.75rem;
+}
+.strategy-tracking-results article {
+  border: 1px solid #d8dee6;
+  border-radius: 9px;
+  padding: 0.85rem;
+  min-width: 0;
+}
+.strategy-tracking-results article > div {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.strategy-tracking-results p {
+  margin: 0.55rem 0 0;
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+.strategy-tracking-captures {
+  opacity: 0.8;
+  font-family: monospace;
+}
+.strategy-tracking-search {
+  flex: 1 1 160px;
+  max-width: 280px;
+}
+.strategy-tracking-status {
+  align-self: flex-start;
+  padding: 4px 8px;
+  border-radius: 6px;
+  color: #334b65;
+  background: #edf2f7;
+  font-size: 0.8rem;
+}
+.strategy-tracking-status.is-signal {
+  color: #9a3412;
+  background: #fff0df;
+}
+.strategy-tracking-status.is-stopped {
+  color: #657184;
+  background: #f0f1f3;
+}
+.strategy-tracking-capture-details {
+  margin-top: 0.6rem;
+}
+.strategy-tracking-capture-details > summary {
+  min-height: 44px;
+  align-content: center;
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: #566272;
+}
+@media (max-width: 600px) {
+  .strategy-tracking summary span {
+    display: block;
+    margin: 0.4rem 0 0;
+  }
+}
+
+/* Follow-up settings live inside the ordinary rule editor. */
+.strategy-rule-tracking .strategy-rule-editor-section-head {
+  align-items: flex-start;
+}
+.strategy-rule-tracking .strategy-rule-editor-section-head > div {
+  flex: 1;
+  min-width: 180px;
+}
+.strategy-rule-tracking-toggle {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  color: #526173;
+  font-size: 13px;
+  cursor: pointer;
+}
+.strategy-rule-tracking-toggle > input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+.strategy-rule-tracking-switch {
+  position: relative;
+  width: 40px;
+  height: 24px;
+  border-radius: 20px;
+  background: #bec9d6;
+  transition: background 150ms;
+}
+.strategy-rule-tracking-switch::after {
+  content: '';
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  top: 3px;
+  left: 3px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px #0002;
+  transition: transform 150ms;
+}
+.strategy-rule-tracking-toggle > input:checked + span {
+  background: var(--theme-orange-600);
+}
+.strategy-rule-tracking-toggle > input:checked + span::after {
+  transform: translateX(16px);
+}
+.strategy-rule-tracking-toggle > input:focus-visible + span {
+  outline: 2px solid var(--theme-orange-600);
+  outline-offset: 3px;
+}
+.strategy-rule-tracking-toggle > input:disabled + span {
+  opacity: 0.55;
+}
+.strategy-rule-tracking .strategy-tracking-check {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.6rem;
+  min-height: 44px;
+}
+.strategy-rule-tracking .strategy-tracking-check input {
+  width: 20px;
+  height: 20px;
+  min-height: 20px;
+  flex: 0 0 auto;
+}
+.strategy-rule-tracking-settings {
+  display: grid;
+  gap: 10px;
+}
+.strategy-rule-tracking-settings + .strategy-rule-tracking-settings {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid #e1e7ef;
+}
+.strategy-rule-tracking-duration {
+  margin-bottom: 6px;
+}
+.strategy-rule-tracking-duration > .strategy-manage-field {
+  max-width: 220px;
+}
+.strategy-rule-tracking-duration .strategy-manage-field > div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.strategy-rule-tracking-duration input {
+  max-width: 88px;
+}
+.strategy-rule-tracking-duration .strategy-manage-field > div > span {
+  white-space: nowrap;
+}
+.strategy-rule-tracking-detail {
+  min-width: 0;
+  border: 1px solid #e1e7ef;
+  border-radius: 9px;
+}
+.strategy-rule-tracking-detail > summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px;
+  min-height: 48px;
+  box-sizing: border-box;
+  cursor: pointer;
+  list-style: none;
+}
+.strategy-rule-tracking-detail > summary::-webkit-details-marker {
+  display: none;
+}
+.strategy-rule-tracking-detail > summary::before {
+  content: '›';
+  font-size: 22px;
+  color: #758295;
+  line-height: 1;
+  transition: transform 150ms;
+}
+.strategy-rule-tracking-detail[open] > summary::before {
+  transform: rotate(90deg);
+}
+.strategy-rule-tracking-detail summary strong {
+  font-size: 14px;
+  color: #425164;
+}
+.strategy-rule-tracking-detail summary > span {
+  margin-left: auto;
+  color: #607286;
+  font-size: 12px;
+  text-align: right;
+}
+.strategy-rule-tracking-detail[open] > summary {
+  border-bottom: 1px solid #e1e7ef;
+  background: #f8fafc;
+  border-radius: 9px 9px 0 0;
+}
+.strategy-rule-tracking-detail-body {
+  padding: 14px;
+  display: grid;
+  gap: 12px;
+}
+.strategy-rule-tracking-condition-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.strategy-rule-tracking-step-head,
+.strategy-rule-tracking-step-head > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.strategy-rule-tracking-step-head strong {
+  color: #425164;
+  font-size: 14px;
+}
+.strategy-rule-tracking .strategy-tracking-step {
+  margin: 0;
+  background: #f8fafc;
+}
+.strategy-rule-tracking button {
+  min-height: 44px;
+}
+.strategy-rule-tracking-add {
+  justify-self: start;
+}
+@media (max-width: 900px) {
+  .strategy-rule-tracking-condition-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 600px) {
+  .strategy-rule-tracking-detail > summary {
+    flex-wrap: wrap;
+  }
+}

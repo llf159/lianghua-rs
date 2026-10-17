@@ -4,6 +4,7 @@ use std::{
     path::PathBuf,
 };
 
+use lianghua_core::tracking::{TrackDefinition, TrackProgram};
 use serde::{Deserialize, Serialize};
 
 use crate::expr::eval::Value;
@@ -92,6 +93,7 @@ pub struct StrategyManageRuleItem {
     pub points_by_hits: Option<Vec<f64>>,
     pub max_points: Option<f64>,
     pub max_bonus_points: Option<f64>,
+    pub tracking: Vec<TrackDefinition>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -116,6 +118,8 @@ pub struct StrategyManageRuleDraft {
     pub max_points: Option<f64>,
     pub max_bonus_points: Option<f64>,
     pub explain: String,
+    #[serde(default)]
+    pub tracking: Option<Vec<TrackDefinition>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -131,10 +135,12 @@ pub struct StrategyManageRefactorDraft {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-struct StrategyRuleFile {
+pub(super) struct StrategyRuleFile {
     version: u32,
     scene: Vec<StrategyRuleFileScene>,
-    rule: Vec<StrategyRuleFileRule>,
+    pub(super) rule: Vec<StrategyRuleFileRule>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) track: Vec<lianghua_core::tracking::TrackDefinition>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -158,8 +164,10 @@ struct StrategyRuleFileCondition {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-struct StrategyRuleFileRule {
-    name: String,
+pub(super) struct StrategyRuleFileRule {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) id: Option<String>,
+    pub(super) name: String,
     #[serde(default = "default_enabled", skip_serializing_if = "is_enabled")]
     enabled: bool,
     #[serde(rename = "scene")]
@@ -205,7 +213,7 @@ fn is_enabled(enabled: &bool) -> bool {
     *enabled
 }
 
-fn load_rule_file(source_path: &str) -> Result<StrategyRuleFile, String> {
+pub(super) fn load_rule_file(source_path: &str) -> Result<StrategyRuleFile, String> {
     let path = score_rule_path(source_path);
     let text = fs::read_to_string(&path)
         .map_err(|e| format!("读取策略规则文件失败: path={}, err={e}", path.display()))?;
@@ -227,9 +235,11 @@ fn parse_rule_file_text(text: &str) -> Result<StrategyRuleFile, toml::de::Error>
     toml::from_str(text)
 }
 
-fn save_rule_file(source_path: &str, file: &StrategyRuleFile) -> Result<(), String> {
+pub(super) fn save_rule_file(source_path: &str, file: &StrategyRuleFile) -> Result<(), String> {
     let path = score_rule_path(source_path);
     let text = toml::to_string_pretty(file).map_err(|e| format!("序列化策略规则文件失败: {e}"))?;
+    let parsed: ScoreConfig = toml::from_str(&text).map_err(|e| format!("策略配置错误：{e}"))?;
+    ScoreConfig::validate(&parsed)?;
     let temp_path = path.with_extension("toml.tmp");
     fs::write(&temp_path, text).map_err(|e| {
         format!(
@@ -639,6 +649,7 @@ fn load_validation_context(
 
 fn draft_to_rule(draft: StrategyManageRuleDraft) -> Result<StrategyRuleFileRule, String> {
     Ok(StrategyRuleFileRule {
+        id: None,
         name: draft.name.trim().to_string(),
         enabled: draft.enabled,
         scene_name: draft.scene_name.trim().to_string(),
@@ -684,6 +695,56 @@ fn draft_to_rule(draft: StrategyManageRuleDraft) -> Result<StrategyRuleFileRule,
         max_bonus_points: draft.max_bonus_points,
         explain: draft.explain.trim().to_string(),
     })
+}
+
+fn apply_rule_tracking(
+    config: &mut StrategyRuleFile,
+    rule_name: &str,
+    tracking: Option<Vec<TrackDefinition>>,
+) -> Result<(), String> {
+    let Some(mut tracking) = tracking else {
+        return Ok(());
+    };
+    let index = config
+        .rule
+        .iter()
+        .position(|rule| rule.name == rule_name)
+        .ok_or_else(|| format!("规则不存在: {rule_name}"))?;
+    if config.rule[index].id.is_none() && tracking.is_empty() {
+        return Ok(());
+    }
+    if config.rule[index].id.is_none() {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_nanos();
+        let mut id = format!("rule_{seed:x}_{index}");
+        while config.rule.iter().any(|rule| rule.id.as_ref() == Some(&id)) {
+            id.push('_');
+        }
+        config.rule[index].id = Some(id);
+    }
+    let source = config.rule[index].id.as_ref().unwrap();
+    let mut ids: HashSet<_> = config
+        .track
+        .iter()
+        .filter(|track| track.source.as_ref() != Some(source))
+        .map(|track| track.id.clone())
+        .collect();
+    for track in &mut tracking {
+        if !ids.insert(track.id.clone()) {
+            return Err(format!("跟踪ID重复：{}", track.id));
+        }
+        track.source = Some(source.clone());
+        track.start = None;
+        TrackProgram::compile(track)
+            .map_err(|error| format!("后续跟踪 {}：{error}", track.name))?;
+    }
+    config
+        .track
+        .retain(|track| track.source.as_ref() != Some(source));
+    config.track.extend(tracking);
+    Ok(())
 }
 
 fn scene_draft_to_file(draft: StrategyManageSceneDraft) -> Result<StrategyRuleFileScene, String> {
@@ -761,6 +822,12 @@ pub fn get_strategy_manage_page(source_path: &str) -> Result<StrategyManagePageD
                 points_by_hits: rule.points_by_hits.clone(),
                 max_points: rule.max_points,
                 max_bonus_points: rule.max_bonus_points,
+                tracking: config
+                    .track
+                    .iter()
+                    .filter(|track| rule.id.is_some() && track.source == rule.id)
+                    .cloned()
+                    .collect(),
             })
             .collect();
 
@@ -888,7 +955,8 @@ pub fn check_strategy_manage_rule_draft(
     original_name: Option<&str>,
     draft: StrategyManageRuleDraft,
 ) -> Result<String, String> {
-    let config = load_rule_file(source_path)?;
+    let mut config = load_rule_file(source_path)?;
+    let tracking = draft.tracking.clone();
     let rule = draft_to_rule(draft)?;
     if config.rule.iter().any(|item| {
         item.name.trim() == rule.name.trim()
@@ -908,6 +976,22 @@ pub fn check_strategy_manage_rule_draft(
         &rule,
         &config.scene,
     )?;
+    let name = rule.name.clone();
+    if let Some(old) = config
+        .rule
+        .iter_mut()
+        .find(|item| original_name.is_some_and(|name| item.name.trim() == name.trim()))
+    {
+        let id = old.id.clone();
+        *old = rule;
+        old.id = id;
+    } else {
+        config.rule.push(rule);
+    }
+    apply_rule_tracking(&mut config, &name, tracking)?;
+    let parsed: ScoreConfig = toml::from_str(&toml::to_string(&config).map_err(|e| e.to_string())?)
+        .map_err(|e| format!("策略配置错误：{e}"))?;
+    ScoreConfig::validate(&parsed)?;
     Ok("rule 草稿检查通过".to_string())
 }
 
@@ -917,7 +1001,10 @@ pub fn create_strategy_manage_rule(
 ) -> Result<StrategyManagePageData, String> {
     check_strategy_manage_rule_draft(source_path, None, draft.clone())?;
     let mut config = load_rule_file(source_path)?;
+    let tracking = draft.tracking.clone();
+    let name = draft.name.trim().to_string();
     config.rule.push(draft_to_rule(draft)?);
+    apply_rule_tracking(&mut config, &name, tracking)?;
     save_rule_file(source_path, &config)?;
     get_strategy_manage_page(source_path)
 }
@@ -932,6 +1019,18 @@ pub fn remove_strategy_manage_rules(
         .filter(|item| !item.is_empty())
         .collect();
     let mut config = load_rule_file(source_path)?;
+    let removed_ids: HashSet<_> = config
+        .rule
+        .iter()
+        .filter(|rule| name_set.contains(rule.name.trim()))
+        .filter_map(|rule| rule.id.clone())
+        .collect();
+    config.track.retain(|track| {
+        track
+            .source
+            .as_ref()
+            .is_none_or(|id| !removed_ids.contains(id))
+    });
     config
         .rule
         .retain(|item| !name_set.contains(item.name.trim()));
@@ -953,7 +1052,12 @@ pub fn update_strategy_manage_rule(
     else {
         return Err(format!("规则不存在: {}", original_name.trim()));
     };
+    let id = rule.id.clone();
+    let tracking = draft.tracking.clone();
+    let name = draft.name.trim().to_string();
     *rule = draft_to_rule(draft)?;
+    rule.id = id;
+    apply_rule_tracking(&mut config, &name, tracking)?;
     save_rule_file(source_path, &config)?;
     get_strategy_manage_page(source_path)
 }
@@ -1025,10 +1129,30 @@ pub fn save_strategy_manage_refactor_file(
         rule_items.push(rule);
     }
 
+    let current = load_rule_file(source_path)?;
+    for rule in &mut rule_items {
+        rule.id = current
+            .rule
+            .iter()
+            .find(|old| old.name == rule.name)
+            .and_then(|old| old.id.clone());
+    }
+    if current.track.iter().any(|track| {
+        track.source.as_ref().is_some_and(|source| {
+            !rule_items
+                .iter()
+                .any(|rule| rule.id.as_ref() == Some(source))
+        })
+    }) {
+        return Err(
+            "整体编辑不能移除或重命名被跟踪引用的规则，请先单条改名或调整跟踪起点".to_string(),
+        );
+    }
     let file = StrategyRuleFile {
         version: 1,
         scene: scene_items,
         rule: rule_items,
+        track: current.track,
     };
 
     let text = toml::to_string_pretty(&file).map_err(|e| format!("序列化策略规则文件失败: {e}"))?;
@@ -1351,6 +1475,7 @@ AND C >= H * 0.98
                 max_points: None,
                 max_bonus_points: None,
                 explain: "大量解放套牢盘".to_string(),
+                tracking: None,
             },
         );
 

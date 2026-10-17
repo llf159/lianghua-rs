@@ -1,13 +1,13 @@
 use lianghua_model::scoring::{
     CompactRuleScore, SceneBacktestRow, SceneDetails, ScoreBatch, ScoreDetails, ScoreSummary,
-    ScoreWriteMessage, ScoreWriteProfile, TieBreakWay,
+    ScoreWriteMessage, ScoreWriteProfile, TieBreakWay, TrackingScoreState,
 };
 use lianghua_model::{DownloadProgress, DownloadProgressCallback};
 use rayon::prelude::*;
 use std::{
     collections::{HashMap, HashSet},
-    sync::Mutex,
     sync::mpsc::sync_channel,
+    sync::{Arc, Mutex},
     thread, time,
 };
 
@@ -36,6 +36,9 @@ use crate::scoring::{
         load_total_share_map, preview_optional_cyq_chen_injection_warnings, warmup_rows_estimate,
     },
 };
+
+use super::tracking::ScoringTrackingPlan;
+use lianghua_core::expr::eval::Value;
 
 const SCORING_MEMORY_GROUP_SIZE: usize = 32;
 
@@ -125,6 +128,7 @@ fn scoring_single_core(
     rule_scene_meta: &[RuleSceneMeta],
     scenes: &[ScoreScene],
     memory_mode: ScoringMemoryMode,
+    tracking: &ScoringTrackingPlan,
 ) -> Result<
     (
         Vec<ScoreSummary>,
@@ -132,31 +136,61 @@ fn scoring_single_core(
         Vec<CompactRuleScore>,
         Vec<SceneDetails>,
         Vec<SceneBacktestRow>,
+        Vec<TrackingScoreState>,
     ),
     String,
 > {
     let trade_dates = row_data.trade_dates.clone();
     let mut rt = row_into_rt(row_data)?;
+    if !tracking.is_empty() {
+        for value in rt.vars.values_mut() {
+            if let Value::NumSeries(series) = value {
+                *value = Value::SharedNumSeries(Arc::new(std::mem::take(series)));
+            }
+        }
+    }
 
     let keep_from = trade_dates
         .binary_search_by(|d| d.as_str().cmp(score_start_date))
         .unwrap_or_else(|i| i);
 
-    if keep_from >= trade_dates.len() {
-        return Ok((Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()));
+    if keep_from >= trade_dates.len() && tracking.is_empty() {
+        return Ok((
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ));
     }
 
     let kept_trade_dates = &trade_dates[keep_from..];
 
-    if matches!(memory_mode, ScoringMemoryMode::SummaryOnly) {
+    if matches!(memory_mode, ScoringMemoryMode::SummaryOnly) && tracking.is_empty() {
         let total_scores = scoring_rules_total_cache(&mut rt, rules_cache)?;
         let kept_scores = &total_scores[keep_from..];
         let summary = build_score_summaries(ts_code, kept_trade_dates, kept_scores);
-        return Ok((summary, Vec::new(), Vec::new(), Vec::new(), Vec::new()));
+        return Ok((
+            summary,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ));
     }
 
     let result = scoring_rules_details_cache(&mut rt, rules_cache)?;
-    let (total_scores, mut details_series) = (result.0, result.1);
+    let (mut total_scores, mut details_series) = (result.0, result.1);
+    let tracking_states = tracking.apply(
+        &rt,
+        &trade_dates,
+        score_start_date,
+        ts_code,
+        &mut total_scores,
+        &mut details_series,
+    )?;
     let kept_scores = &total_scores[keep_from..];
 
     for rule in &mut details_series {
@@ -167,6 +201,7 @@ fn scoring_single_core(
     let summary = if matches!(
         memory_mode,
         ScoringMemoryMode::All
+            | ScoringMemoryMode::SummaryOnly
             | ScoringMemoryMode::SummaryAndDetails
             | ScoringMemoryMode::RuleBacktest
     ) {
@@ -213,6 +248,7 @@ fn scoring_single_core(
         compact_rule_rows,
         scene_details,
         scene_backtest_rows,
+        tracking_states,
     ))
 }
 
@@ -253,6 +289,7 @@ fn collect_scoring_used_cyq_chen_runtime_keys(rules_cache: &[CachedRule]) -> Has
     collect_used_cyq_chen_runtime_keys(&programs)
 }
 
+#[cfg(test)]
 fn ensure_scoring_dependencies_ready(
     source_dir: &str,
     rules: &[CachedRule],
@@ -263,10 +300,38 @@ fn ensure_scoring_dependencies_ready(
     ts_code: Option<&str>,
     adj_type: &str,
 ) -> Result<(), String> {
+    let programs = rules
+        .iter()
+        .flat_map(CachedRule::expression_programs)
+        .collect::<Vec<_>>();
+    ensure_expression_dependencies_ready(
+        source_dir,
+        &programs,
+        used_chip_keys,
+        start_date,
+        end_date,
+        warmup_need,
+        ts_code,
+        adj_type,
+    )
+}
+
+pub fn ensure_expression_dependencies_ready(
+    source_dir: &str,
+    programs: &[&crate::expr::parser::Stmts],
+    used_chip_keys: &HashSet<String>,
+    start_date: &str,
+    end_date: &str,
+    warmup_need: usize,
+    ts_code: Option<&str>,
+    adj_type: &str,
+) -> Result<(), String> {
     if adj_type != "qfq" {
         return Ok(());
     }
-    let uses_similarity = scoring_uses_similarity_rank(rules);
+    let uses_similarity = programs
+        .iter()
+        .any(|program| expr_program_uses_runtime_key(program, "S_RANK"));
     if used_chip_keys.is_empty() && !uses_similarity {
         return Ok(());
     }
@@ -371,14 +436,29 @@ pub fn preview_scoring_runtime_warnings(
     start_date: &str,
     end_date: &str,
 ) -> Result<Vec<String>, String> {
-    let warmup_need = warmup_rows_estimate(source_dir, strategy_path)?;
     let rules_cache = cache_rule_build(source_dir, strategy_path)?;
-    let used_cyq_chen_keys = collect_scoring_used_cyq_chen_runtime_keys(&rules_cache);
-    ensure_scoring_dependencies_ready(
+    let tracking = ScoringTrackingPlan::load(source_dir, strategy_path, &rules_cache, end_date)?;
+    let warmup_need = if tracking.is_empty() {
+        warmup_rows_estimate(source_dir, strategy_path)?
+    } else {
+        crate::data::load_trade_date_list(source_dir)?.len()
+    };
+    let mut used_cyq_chen_keys = collect_scoring_used_cyq_chen_runtime_keys(&rules_cache);
+    let programs = rules_cache
+        .iter()
+        .flat_map(CachedRule::expression_programs)
+        .chain(tracking.expressions())
+        .collect::<Vec<_>>();
+    used_cyq_chen_keys.extend(collect_used_cyq_chen_runtime_keys(&programs));
+    ensure_expression_dependencies_ready(
         source_dir,
-        &rules_cache,
+        &programs,
         &used_cyq_chen_keys,
-        start_date,
+        if tracking.is_empty() {
+            start_date
+        } else {
+            "00000000"
+        },
         end_date,
         warmup_need,
         None,
@@ -410,6 +490,7 @@ fn scoring_stock_group_batch(
     uses_similarity_rank: bool,
     ts_group: &[String],
     memory_mode: ScoringMemoryMode,
+    tracking: &ScoringTrackingPlan,
 ) -> Result<ScoreBatch, String> {
     let mut rows_map = worker_reader.load_batch(ts_group, adj_type, query_start_date, end_date)?;
     let mut group_batch = ScoreBatch::default();
@@ -465,16 +546,23 @@ fn scoring_stock_group_batch(
                 st_list.contains(ts_code),
                 total_share_map.get(ts_code).copied(),
             )?;
-            let (summary_rows, detail_rows, compact_rule_rows, scene_rows, scene_backtest_rows) =
-                scoring_single_core(
-                    row,
-                    ts_code,
-                    score_start_date,
-                    rules_cache,
-                    rule_scene_meta,
-                    scenes,
-                    memory_mode,
-                )?;
+            let (
+                summary_rows,
+                detail_rows,
+                compact_rule_rows,
+                scene_rows,
+                scene_backtest_rows,
+                tracking_states,
+            ) = scoring_single_core(
+                row,
+                ts_code,
+                score_start_date,
+                rules_cache,
+                rule_scene_meta,
+                scenes,
+                memory_mode,
+                tracking,
+            )?;
 
             Ok(ScoreBatch {
                 summary_rows,
@@ -482,6 +570,7 @@ fn scoring_stock_group_batch(
                 compact_rule_rows,
                 scene_rows,
                 scene_backtest_rows,
+                tracking_states,
             })
         })(
             row,
@@ -524,22 +613,50 @@ pub fn scoring_all_to_db(
     let prepare_started_at = time::Instant::now();
     let st_list = load_st_list(source_dir)?;
     let total_share_map = load_total_share_map(source_dir).unwrap_or_default();
-    let warmup_need = warmup_rows_estimate(source_dir, strategy_path)?;
-    let query_start_date = calc_query_start_date(source_dir, warmup_need, start_date)?;
-    let need_rows = calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?;
     let rules_cache = cache_rule_build(source_dir, strategy_path)?;
-    let used_cyq_chen_keys = collect_scoring_used_cyq_chen_runtime_keys(&rules_cache);
-    ensure_scoring_dependencies_ready(
+    let tracking = ScoringTrackingPlan::load(source_dir, strategy_path, &rules_cache, end_date)?;
+    let warmup_need = if tracking.is_empty() {
+        warmup_rows_estimate(source_dir, strategy_path)?
+    } else {
+        crate::data::load_trade_date_list(source_dir)?.len()
+    };
+    let query_start_date = if tracking.is_empty() {
+        calc_query_start_date(source_dir, warmup_need, start_date)?
+    } else {
+        "00000000".into()
+    };
+    // Tracking already loads full history, so a tail query would read it a second time.
+    let need_rows = if tracking.is_empty() {
+        calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?
+    } else {
+        0
+    };
+    let mut used_cyq_chen_keys = collect_scoring_used_cyq_chen_runtime_keys(&rules_cache);
+    let programs = rules_cache
+        .iter()
+        .flat_map(CachedRule::expression_programs)
+        .chain(tracking.expressions())
+        .collect::<Vec<_>>();
+    used_cyq_chen_keys.extend(collect_used_cyq_chen_runtime_keys(&programs));
+    ensure_expression_dependencies_ready(
         source_dir,
-        &rules_cache,
+        &programs,
         &used_cyq_chen_keys,
-        start_date,
+        if tracking.is_empty() {
+            start_date
+        } else {
+            "00000000"
+        },
         end_date,
         warmup_need,
         None,
         adj_type,
     )?;
-    let uses_similarity_rank = scoring_uses_similarity_rank(&rules_cache);
+    let uses_similarity_rank = scoring_uses_similarity_rank(&rules_cache)
+        || tracking
+            .expressions()
+            .iter()
+            .any(|program| expr_program_uses_runtime_key(program, "S_RANK"));
     let warnings = preview_optional_cyq_chen_injection_warnings(
         source_dir,
         start_date,
@@ -547,9 +664,19 @@ pub fn scoring_all_to_db(
         warmup_need,
         &used_cyq_chen_keys,
     );
-    let required_runtime_keys = collect_scoring_runtime_keys(&rules_cache);
+    let mut required_runtime_keys = collect_scoring_runtime_keys(&rules_cache);
+    required_runtime_keys.extend(tracking.runtime_keys());
     let dr = DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
-    let tc_list = DataReader::list_ts_code(&dr, adj_type, start_date, end_date)?;
+    let tc_list = DataReader::list_ts_code(
+        &dr,
+        adj_type,
+        if tracking.is_empty() {
+            start_date
+        } else {
+            "00000000"
+        },
+        end_date,
+    )?;
     let rule_scene_meta: Vec<RuleSceneMeta> =
         ScoreRule::load_rules_with_strategy_path(source_dir, strategy_path)?
             .into_iter()
@@ -569,6 +696,7 @@ pub fn scoring_all_to_db(
         .to_str()
         .ok_or_else(|| "原始数据库路径不是有效UTF-8".to_string())?;
 
+    let tracking_calendar = serde_json::to_string(&tracking.calendar).map_err(|e| e.to_string())?;
     let (tx, rx) = sync_channel(2);
     let abort_tx = tx.clone();
     let db_path = out_db_path.to_string();
@@ -588,6 +716,8 @@ pub fn scoring_all_to_db(
         )
     });
 
+    tx.send(ScoreWriteMessage::TrackingCalendar(tracking_calendar))
+        .map_err(|e| format!("发送跟踪日历失败:{e}"))?;
     let compute_started_at = time::Instant::now();
     let progress_counter = Mutex::new(0_usize);
     let total_stock_count = tc_list.len();
@@ -633,6 +763,7 @@ pub fn scoring_all_to_db(
                     uses_similarity_rank,
                     ts_group,
                     ScoringMemoryMode::All,
+                    &tracking,
                 )?;
                 sender
                     .send(ScoreWriteMessage::Batch(batch))
@@ -650,6 +781,7 @@ pub fn scoring_all_to_db(
                 Ok(())
             },
         );
+    let compute_result = compute_result.and_then(|()| tracking.ensure_unchanged(source_dir));
     let compute_and_send_batches_ms = compute_started_at.elapsed().as_millis() as u64;
     emit_scoring_progress(
         progress_cb,
@@ -715,9 +847,13 @@ pub fn scoring_all_to_db(
     })(&profile);
     drop(dr);
     if adj_type == "qfq" {
+        let tracking_inputs_unchanged = tracking.ensure_unchanged(source_dir).is_ok();
         crate::data::download_state::clear_pending_derived_rebuild(
             source_dir, "ranking", start_date, end_date,
         )?;
+        if tracking_inputs_unchanged {
+            tracking.refresh_stamp_after_maintenance(source_dir)?;
+        }
     }
     Ok(profile)
 }
@@ -752,22 +888,50 @@ pub fn scoring_all_to_memory_with_mode(
     let prepare_started_at = time::Instant::now();
     let st_list = load_st_list(source_dir)?;
     let total_share_map = load_total_share_map(source_dir).unwrap_or_default();
-    let warmup_need = warmup_rows_estimate(source_dir, strategy_path)?;
-    let query_start_date = calc_query_start_date(source_dir, warmup_need, start_date)?;
-    let need_rows = calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?;
     let rules_cache = cache_rule_build(source_dir, strategy_path)?;
-    let used_cyq_chen_keys = collect_scoring_used_cyq_chen_runtime_keys(&rules_cache);
-    ensure_scoring_dependencies_ready(
+    let tracking = ScoringTrackingPlan::load(source_dir, strategy_path, &rules_cache, end_date)?;
+    let warmup_need = if tracking.is_empty() {
+        warmup_rows_estimate(source_dir, strategy_path)?
+    } else {
+        crate::data::load_trade_date_list(source_dir)?.len()
+    };
+    let query_start_date = if tracking.is_empty() {
+        calc_query_start_date(source_dir, warmup_need, start_date)?
+    } else {
+        "00000000".into()
+    };
+    // Tracking already loads full history, so a tail query would read it a second time.
+    let need_rows = if tracking.is_empty() {
+        calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?
+    } else {
+        0
+    };
+    let mut used_cyq_chen_keys = collect_scoring_used_cyq_chen_runtime_keys(&rules_cache);
+    let programs = rules_cache
+        .iter()
+        .flat_map(CachedRule::expression_programs)
+        .chain(tracking.expressions())
+        .collect::<Vec<_>>();
+    used_cyq_chen_keys.extend(collect_used_cyq_chen_runtime_keys(&programs));
+    ensure_expression_dependencies_ready(
         source_dir,
-        &rules_cache,
+        &programs,
         &used_cyq_chen_keys,
-        start_date,
+        if tracking.is_empty() {
+            start_date
+        } else {
+            "00000000"
+        },
         end_date,
         warmup_need,
         None,
         adj_type,
     )?;
-    let uses_similarity_rank = scoring_uses_similarity_rank(&rules_cache);
+    let uses_similarity_rank = scoring_uses_similarity_rank(&rules_cache)
+        || tracking
+            .expressions()
+            .iter()
+            .any(|program| expr_program_uses_runtime_key(program, "S_RANK"));
     let warnings = preview_optional_cyq_chen_injection_warnings(
         source_dir,
         start_date,
@@ -775,9 +939,19 @@ pub fn scoring_all_to_memory_with_mode(
         warmup_need,
         &used_cyq_chen_keys,
     );
-    let required_runtime_keys = collect_scoring_runtime_keys(&rules_cache);
+    let mut required_runtime_keys = collect_scoring_runtime_keys(&rules_cache);
+    required_runtime_keys.extend(tracking.runtime_keys());
     let dr = DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
-    let tc_list = DataReader::list_ts_code(&dr, adj_type, start_date, end_date)?;
+    let tc_list = DataReader::list_ts_code(
+        &dr,
+        adj_type,
+        if tracking.is_empty() {
+            start_date
+        } else {
+            "00000000"
+        },
+        end_date,
+    )?;
     let rule_scene_meta: Vec<RuleSceneMeta> =
         ScoreRule::load_rules_with_strategy_path(source_dir, strategy_path)?
             .into_iter()
@@ -824,6 +998,7 @@ pub fn scoring_all_to_memory_with_mode(
                     uses_similarity_rank,
                     ts_group,
                     memory_mode,
+                    &tracking,
                 )
             },
         )
@@ -847,6 +1022,7 @@ pub fn scoring_all_to_memory_with_mode(
         rank_scene_rows(&mut batch.scene_rows);
     }
 
+    tracking.ensure_unchanged(source_dir)?;
     let profile = ScoringRunProfile {
         total_ms: total_started_at.elapsed().as_millis() as u64,
         init_result_db_ms: 0,
@@ -873,23 +1049,52 @@ pub fn scoring_single_period(
 ) -> Result<(Vec<ScoreSummary>, Vec<ScoreDetails>, Vec<SceneDetails>), String> {
     let st_list = load_st_list(source_dir)?;
     let total_share_map = load_total_share_map(source_dir).unwrap_or_default();
-    let warmup_need = warmup_rows_estimate(source_dir, strategy_path)?;
-    let query_start_date = calc_query_start_date(source_dir, warmup_need, start_date)?;
-    let need_rows = calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?;
     let rules_cache = cache_rule_build(source_dir, strategy_path)?;
-    let used_cyq_chen_keys = collect_scoring_used_cyq_chen_runtime_keys(&rules_cache);
-    ensure_scoring_dependencies_ready(
+    let tracking = ScoringTrackingPlan::load(source_dir, strategy_path, &rules_cache, end_date)?;
+    let warmup_need = if tracking.is_empty() {
+        warmup_rows_estimate(source_dir, strategy_path)?
+    } else {
+        crate::data::load_trade_date_list(source_dir)?.len()
+    };
+    let query_start_date = if tracking.is_empty() {
+        calc_query_start_date(source_dir, warmup_need, start_date)?
+    } else {
+        "00000000".into()
+    };
+    // Tracking already loads full history, so a tail query would read it a second time.
+    let need_rows = if tracking.is_empty() {
+        calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?
+    } else {
+        0
+    };
+    let mut used_cyq_chen_keys = collect_scoring_used_cyq_chen_runtime_keys(&rules_cache);
+    let programs = rules_cache
+        .iter()
+        .flat_map(CachedRule::expression_programs)
+        .chain(tracking.expressions())
+        .collect::<Vec<_>>();
+    used_cyq_chen_keys.extend(collect_used_cyq_chen_runtime_keys(&programs));
+    ensure_expression_dependencies_ready(
         source_dir,
-        &rules_cache,
+        &programs,
         &used_cyq_chen_keys,
-        start_date,
+        if tracking.is_empty() {
+            start_date
+        } else {
+            "00000000"
+        },
         end_date,
         warmup_need,
         Some(ts_code),
         adj_type,
     )?;
-    let uses_similarity_rank = scoring_uses_similarity_rank(&rules_cache);
-    let required_runtime_keys = collect_scoring_runtime_keys(&rules_cache);
+    let uses_similarity_rank = scoring_uses_similarity_rank(&rules_cache)
+        || tracking
+            .expressions()
+            .iter()
+            .any(|program| expr_program_uses_runtime_key(program, "S_RANK"));
+    let mut required_runtime_keys = collect_scoring_runtime_keys(&rules_cache);
+    required_runtime_keys.extend(tracking.runtime_keys());
     let dr = DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
 
     let mut row_data = DataReader::load_one(&dr, ts_code, adj_type, &query_start_date, end_date)?;
@@ -919,7 +1124,7 @@ pub fn scoring_single_period(
             })
             .collect();
     let scenes = ScoreScene::load_scenes_with_strategy_path(source_dir, strategy_path)?;
-    let (summary, details, _, scenes, _) = scoring_single_core(
+    let (summary, details, _, scenes, _, _) = scoring_single_core(
         row_data,
         ts_code,
         start_date,
@@ -927,7 +1132,9 @@ pub fn scoring_single_period(
         &rule_scene_meta,
         &scenes,
         ScoringMemoryMode::All,
+        &tracking,
     )?;
+    tracking.ensure_unchanged(source_dir)?;
     Ok((summary, details, scenes))
 }
 

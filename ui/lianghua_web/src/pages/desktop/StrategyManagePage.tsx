@@ -30,10 +30,13 @@ import {
 } from '../../apis/strategyManage'
 import { autoBackupManagedActiveStrategyOnEntry } from '../../apis/strategyAssets'
 import StrategyAssetModal from './StrategyAssetModal'
+import StrategyDistPointsEditor from './StrategyDistPointsEditor'
+import { validateDistPointRows, type DistPointRow } from '../../shared/strategyDistPoints'
+import StrategyTrackingPanel from './StrategyTrackingPanel'
+import StrategyRuleTrackingEditor from './StrategyRuleTrackingEditor'
 import './css/StrategyManagePage.css'
 
-const SCOPE_OPTIONS = ['LAST', 'ANY', 'EACH', 'RECENT', 'CONSEC>=2'] as const
-const COMBINATION_SCOPE_OPTIONS = ['LAST', 'ANY', 'EACH', 'CONSEC>=2'] as const
+const SCOPE_OPTIONS = ['LAST', 'ANY', 'EACH', 'RECENT', 'CONSEC'] as const
 const STAGE_OPTIONS = ['base', 'trigger', 'confirm', 'risk', 'fail'] as const
 const RULE_KIND_OPTIONS = [
   { value: 'single', label: '单语句策略' },
@@ -59,7 +62,7 @@ const BULK_STACK_SINGLE_SCENE_BREAKPOINT = BULK_SCENE_DOUBLE_MIN_WIDTH
 const BULK_SCENE_BOX_MIN_HEIGHT = 180
 const BULK_SCENE_GAP = 10
 
-type BusyAction = 'idle' | 'loading' | 'saving' | 'deleting'
+type BusyAction = 'idle' | 'loading' | 'checking' | 'saving' | 'deleting'
 type EditorMode = 'create' | 'edit'
 type SceneEditorMode = 'create' | 'edit'
 type DeleteSceneTarget = Pick<StrategyManageSceneItem, 'name' | 'rule_count'>
@@ -144,6 +147,7 @@ function buildEmptyDraft(sceneName = ''): StrategyManageRuleDraft {
     max_points: null,
     max_bonus_points: null,
     explain: '',
+    tracking: [],
   }
 }
 
@@ -188,6 +192,7 @@ function buildDraftFromRule(rule: StrategyManageRuleItem): StrategyManageRuleDra
     max_points: rule.max_points ?? null,
     max_bonus_points: rule.max_bonus_points ?? null,
     explain: rule.explain,
+    tracking: structuredClone(rule.tracking ?? []),
   }
 }
 
@@ -264,66 +269,23 @@ function parseOptionalPositiveNumber(value: string, label: string) {
   return parsed
 }
 
-function distPointsToText(items?: StrategyManageDistPoint[] | null) {
-  if (!items || items.length === 0) {
-    return ''
-  }
-  return items.map((item) => `${item.min},${item.max},${item.points}`).join('\n')
-}
-
-function parseDistPointsText(raw: string) {
-  const trimmed = raw.trim()
-  if (!trimmed) {
-    return null
-  }
-
-  const items = trimmed.split('\n').map((line, index) => {
-    const parts = line
-      .split(',')
-      .map((item) => item.trim())
-      .filter(Boolean)
-    if (parts.length !== 3) {
-      throw new Error(`字典得分第 ${index + 1} 行格式错误，应为 min,max,points`)
-    }
-
-    const min = Number(parts[0])
-    const max = Number(parts[1])
-    const points = Number(parts[2])
-    if (!Number.isInteger(min) || !Number.isInteger(max) || !Number.isFinite(points)) {
-      throw new Error(`字典得分第 ${index + 1} 行存在非法数值`)
-    }
-    if (min > max) {
-      throw new Error(`字典得分第 ${index + 1} 行 min 不能大于 max`)
-    }
-    return { min, max, points }
-  })
-  const sorted = [...items].sort((left, right) => left.min - right.min)
-  for (let index = 1; index < sorted.length; index += 1) {
-    const prev = sorted[index - 1]!
-    const current = sorted[index]!
-    if (prev.max >= current.min) {
-      throw new Error(`字典得分区间重叠: ${prev.min}-${prev.max} 与 ${current.min}-${current.max}`)
-    }
-  }
-  return items
-}
-
 function buildPreparedDraft(
   draft: StrategyManageRuleDraft,
   scoreMode: 'fixed' | 'dist',
   fixedPointsText: string,
-  distPointsText: string,
+  distPointRows: DistPointRow[],
   maxPointsText: string,
   maxBonusPointsText: string,
   combinationBonusPointTexts: string[],
   combinationHitPointTexts: string[],
+  trackingCaptureTexts: Record<string, string>,
 ) {
   const nextDraft: StrategyManageRuleDraft = {
     ...draft,
     name: draft.name.trim(),
     scene_name: draft.scene_name.trim(),
     stage: draft.stage.trim(),
-    scope_way: draft.scope_way.trim(),
+    scope_way: draft.scope_way.trim().toUpperCase(),
     when: draft.when.trim(),
     explain: draft.explain.trim(),
     conditions: draft.conditions.map((condition) => ({
@@ -332,6 +294,38 @@ function buildPreparedDraft(
       bonus_points: condition.bonus_points,
     })),
   }
+
+  if (nextDraft.scope_way.startsWith('CONSEC>=')) {
+    nextDraft.scope_way = `CONSEC>=${parseRequiredInteger(nextDraft.scope_way.slice(8), '连续命中日数', 1)}`
+  }
+
+  nextDraft.tracking = nextDraft.tracking?.map((track) => {
+    if (!Number.isSafeInteger(track.ttl) || track.ttl <= 0) {
+      throw new Error('跟踪观察期限必须为大于 0 的整数')
+    }
+    if (!Number.isFinite(track.points ?? 0) || track.steps?.some((step) => !Number.isFinite(step.points ?? 0))) {
+      throw new Error('请填写完整、有效的跟踪分值；只观察时填 0')
+    }
+    let capture = { ...track.capture }
+    if (Object.hasOwn(trackingCaptureTexts, track.id)) {
+      capture = {}
+      for (const line of trackingCaptureTexts[track.id].split('\n').filter((value) => value.trim())) {
+        const match = line.match(/^\s*(A_[A-Z0-9_]+)\s*=\s*(.+)$/)
+        if (!match || Object.hasOwn(capture, match[1])) {
+          throw new Error('冻结值每行填写一个不重复的 A_变量 = 表达式')
+        }
+        capture[match[1]] = match[2]
+      }
+    }
+    return {
+      ...track,
+      capture,
+      invalidate: track.invalidate?.trim() || undefined,
+      eligible: track.eligible?.trim() || undefined,
+      signal: track.signal?.trim() || undefined,
+      score_until: track.score_until?.trim() || undefined,
+    }
+  })
 
   if (nextDraft.kind === 'combination') {
     if (nextDraft.conditions.length === 0) {
@@ -390,11 +384,11 @@ function buildPreparedDraft(
       if (!scopeWaySupportsDistPoints(nextDraft.scope_way)) {
         throw new Error('当前 scope_way 不支持区间字典，仅 EACH/RECENT 支持')
       }
-      const parsedDistPoints = parseDistPointsText(distPointsText)
-      if (!parsedDistPoints || parsedDistPoints.length === 0) {
-        throw new Error('区间字典不能为空')
+      const { points, errors } = validateDistPointRows(distPointRows)
+      if (Object.keys(errors).length > 0) {
+        throw new Error(Object.values(errors).join('；'))
       }
-      nextDraft.dist_points = parsedDistPoints
+      nextDraft.dist_points = points
     } else {
       const parsed = Number(fixedPointsText.trim())
       if (!Number.isFinite(parsed)) {
@@ -498,6 +492,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
   const [editingOriginalName, setEditingOriginalName] = useState('')
   const [editingSceneOriginalName, setEditingSceneOriginalName] = useState('')
   const [draft, setDraft] = useState<StrategyManageRuleDraft | null>(null)
+  const [trackingCaptureTexts, setTrackingCaptureTexts] = useState<Record<string, string>>({})
   const [sceneDraft, setSceneDraft] = useState<StrategyManageSceneDraft | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<StrategyManageRuleItem | null>(null)
   const [deleteSceneTarget, setDeleteSceneTarget] = useState<DeleteSceneTarget | null>(null)
@@ -515,7 +510,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
   const [scoreMode, setScoreMode] = useState<'fixed' | 'dist'>('fixed')
   const [scopeWindowsText, setScopeWindowsText] = useState('1')
   const [fixedPointsText, setFixedPointsText] = useState('0')
-  const [distPointsText, setDistPointsText] = useState('')
+  const [distPointRows, setDistPointRows] = useState<DistPointRow[]>([])
   const [maxPointsText, setMaxPointsText] = useState('')
   const [maxBonusPointsText, setMaxBonusPointsText] = useState('')
   const [combinationBonusPointTexts, setCombinationBonusPointTexts] = useState<string[]>([])
@@ -741,7 +736,10 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
   const draftScopeSupportsDistPoints = draft
     ? scopeWaySupportsDistPoints(draft.scope_way)
     : false
-  const draftScopeOptions = draft?.kind === 'combination' ? COMBINATION_SCOPE_OPTIONS : SCOPE_OPTIONS
+  const draftScopeOptions = draft?.kind === 'combination'
+    ? SCOPE_OPTIONS.filter((item) => item !== 'RECENT')
+    : SCOPE_OPTIONS
+  const draftUsesConsec = draft?.scope_way.trim().toUpperCase().startsWith('CONSEC>=') ?? false
 
   function applyChipStrategyPage(page: CyqChenStrategyPageData) {
     setChipStrategies(page.strategies ?? [])
@@ -847,10 +845,11 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
     setEditorMode('create')
     setEditingOriginalName('')
     setDraft(nextDraft)
+    setTrackingCaptureTexts({})
     setScoreMode('fixed')
     setScopeWindowsText(String(nextDraft.scope_windows))
     setFixedPointsText('0')
-    setDistPointsText('')
+    setDistPointRows([])
     setMaxPointsText('')
     setMaxBonusPointsText('')
     setCombinationBonusPointTexts([])
@@ -1104,15 +1103,22 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
     setEditorMode('edit')
     setEditingOriginalName(rule.name)
     setDraft(nextDraft)
+    setTrackingCaptureTexts({})
     setScopeWindowsText(String(nextDraft.scope_windows))
     if (hasDistPoints(rule.dist_points)) {
       setScoreMode('dist')
-      setDistPointsText(distPointsToText(rule.dist_points))
+      setDistPointRows(
+        (rule.dist_points ?? []).map((point) => ({
+          min: String(point.min),
+          max: String(point.max),
+          points: String(point.points),
+        })),
+      )
       setFixedPointsText(String(rule.points))
     } else {
       setScoreMode('fixed')
       setFixedPointsText(String(rule.points))
-      setDistPointsText('')
+      setDistPointRows([])
     }
     setMaxPointsText(rule.max_points == null ? '' : String(rule.max_points))
     setMaxBonusPointsText(
@@ -1243,7 +1249,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
   }
 
   async function onSaveDraft() {
-    if (!draft) {
+    if (!draft || isBusy) {
       return
     }
     if (!sourcePath.trim()) {
@@ -1251,37 +1257,24 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
       return
     }
 
-    let preparedDraft: StrategyManageRuleDraft
+    setBusyAction('saving')
+    setEditorError('')
+    setCheckNotice('')
     try {
-      preparedDraft = buildPreparedDraft(
+      const preparedDraft = buildPreparedDraft(
         {
           ...draft,
-          scope_windows: parseRequiredInteger(scopeWindowsText, '窗口', 1),
+          scope_windows: draft.scope_way.toUpperCase() === 'LAST' ? 1 : parseRequiredInteger(scopeWindowsText, '窗口', 1),
         },
         scoreMode,
         fixedPointsText,
-        distPointsText,
+        distPointRows,
         maxPointsText,
         maxBonusPointsText,
         combinationBonusPointTexts,
         combinationHitPointTexts,
+        trackingCaptureTexts,
       )
-      const message = await checkStrategyManageRuleDraft(
-        sourcePath,
-        preparedDraft,
-        editorMode === 'edit' ? editingOriginalName : undefined,
-      )
-      setNotice(message)
-      setEditorError('')
-      setCheckNotice(message)
-    } catch (checkError) {
-      setEditorError(`策略校验失败: ${String(checkError)}`)
-      return
-    }
-
-    setBusyAction('saving')
-    setEditorError('')
-    try {
       const data =
         editorMode === 'create'
           ? await createStrategyManageRule(sourcePath, preparedDraft)
@@ -1299,26 +1292,30 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
   }
 
   async function onCheckDraft() {
-    if (!draft) {
+    if (!draft || isBusy) {
       return
     }
     if (!sourcePath.trim()) {
       setEditorError('当前数据目录为空，无法检查草稿。')
       return
     }
+    setBusyAction('checking')
+    setEditorError('')
+    setCheckNotice('')
     try {
       const preparedDraft = buildPreparedDraft(
         {
           ...draft,
-          scope_windows: parseRequiredInteger(scopeWindowsText, '窗口', 1),
+          scope_windows: draft.scope_way.toUpperCase() === 'LAST' ? 1 : parseRequiredInteger(scopeWindowsText, '窗口', 1),
         },
         scoreMode,
         fixedPointsText,
-        distPointsText,
+        distPointRows,
         maxPointsText,
         maxBonusPointsText,
         combinationBonusPointTexts,
         combinationHitPointTexts,
+        trackingCaptureTexts,
       )
       const message = await checkStrategyManageRuleDraft(
         sourcePath,
@@ -1330,6 +1327,8 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
     } catch (checkError) {
       setEditorError(`检查策略失败: ${String(checkError)}`)
       setCheckNotice('')
+    } finally {
+      setBusyAction('idle')
     }
   }
 
@@ -1598,6 +1597,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
 
   return (
     <div className="strategy-manage-page">
+      {!isChipView && sourcePath && <StrategyTrackingPanel key={sourcePath} sourcePath={sourcePath} rules={rules} />}
       <section className="strategy-manage-card">
         <div className="strategy-manage-section-head">
           <div>
@@ -1832,7 +1832,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
                     <div>
                       <div className="strategy-manage-rule-card-name">{rule.name}</div>
                       <div className="strategy-manage-rule-card-source">
-                        {rule.scene_name} · #{rule.index + 1} · {isCombination ? '组合策略' : '单语句'}
+                        {rule.scene_name} · #{rule.index + 1} · {isCombination ? '组合策略' : '单语句'}{rule.tracking?.some((item) => item.enabled) ? ' · 后续跟踪' : ''}
                       </div>
                     </div>
                     <div className="strategy-manage-rule-card-actions">
@@ -2130,7 +2130,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
           <div className="strategy-manage-modal" role="dialog" aria-modal="true">
             <h3>删除 Rule</h3>
             <p>
-              即将删除规则：<strong>{deleteTarget.name}</strong>
+              即将删除规则：<strong>{deleteTarget.name}</strong>。该策略的后续跟踪配置也会一并删除。
             </p>
             <div className="strategy-manage-modal-actions">
               <button
@@ -2240,7 +2240,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
                             <div className="strategy-manage-rule-card-name">
                               {rule.name}
                               <span className="strategy-manage-rule-kind-badge">
-                                {isCombination ? '组合' : '单语句'}
+                                {isCombination ? '组合' : '单语句'}{rule.tracking?.some((item) => item.enabled) ? ' · 后续跟踪' : ''}
                               </span>
                             </div>
                           </div>
@@ -2306,289 +2306,436 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
       ) : null}
 
       {draft ? (
-        <div className="strategy-manage-modal-backdrop strategy-manage-modal-backdrop-top" role="presentation">
-          <div className="strategy-manage-modal strategy-manage-editor-modal" role="dialog" aria-modal="true">
-            <div className="strategy-manage-list-head">
-              <strong>{editorMode === 'create' ? '新建 Rule' : `编辑 Rule · ${editingOriginalName}`}</strong>
-              <span>{draft.scene_name || '未选择 scene'}</span>
-            </div>
-            {editorError ? <div className="strategy-manage-message strategy-manage-message-error">{editorError}</div> : null}
-            {checkNotice ? <div className="strategy-manage-message strategy-manage-message-notice">{checkNotice}</div> : null}
-            <div className="strategy-manage-editor-grid">
-              <label className="strategy-manage-field">
-                <span>名称</span>
-                <input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} />
-              </label>
-              <label className="strategy-manage-field">
-                <span>策略类型</span>
-                <select
-                  value={draft.kind}
-                  onChange={(event) =>
-                    updateDraftKind(event.target.value as StrategyManageRuleDraft['kind'])
-                  }
-                >
-                  {RULE_KIND_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="strategy-manage-field">
-                <span>Scene</span>
-                <select value={draft.scene_name} onChange={(event) => setDraft({ ...draft, scene_name: event.target.value })}>
-                  {scenes.map((scene) => (
-                    <option key={scene.name} value={scene.name}>
-                      {scene.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="strategy-manage-field">
-                <span>Stage</span>
-                <select value={draft.stage} onChange={(event) => setDraft({ ...draft, stage: event.target.value })}>
-                  {STAGE_OPTIONS.map((item) => (
-                    <option key={item} value={item}>
-                      {item}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="strategy-manage-field">
-                <span>Scope</span>
-                <select value={draft.scope_way} onChange={(event) => updateDraftScopeWay(event.target.value)}>
-                  {draftScopeOptions.map((item) => (
-                    <option key={item} value={item}>
-                      {item}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="strategy-manage-field">
-                <span>窗口</span>
-                <input
-                  type="number"
-                  min={1}
-                  step={1}
-                  value={scopeWindowsText}
-                  onChange={(event) => setScopeWindowsText(event.target.value)}
-                />
-              </label>
-              <label className="strategy-manage-field strategy-manage-field-span-full">
-                <span>说明</span>
-                <input value={draft.explain} onChange={(event) => setDraft({ ...draft, explain: event.target.value })} />
-              </label>
-              {draft.kind === 'single' ? (
-                <>
-                  <label className="strategy-manage-field strategy-manage-field-span-full">
-                    <span>表达式</span>
-                    <textarea rows={8} value={draft.when} onChange={(event) => setDraft({ ...draft, when: event.target.value })} />
-                  </label>
-                  <div className="strategy-manage-field strategy-manage-field-span-full">
-                    <span>得分方式</span>
-                    <div className="strategy-manage-score-mode">
-                      <button
-                        type="button"
-                        className={scoreMode === 'fixed' ? 'strategy-manage-score-mode-btn is-active' : 'strategy-manage-score-mode-btn'}
-                        onClick={() => setScoreMode('fixed')}
-                      >
-                        固定分
-                      </button>
-                      <button
-                        type="button"
-                        className={scoreMode === 'dist' ? 'strategy-manage-score-mode-btn is-active' : 'strategy-manage-score-mode-btn'}
-                        onClick={() => setScoreMode('dist')}
-                        disabled={!draftScopeSupportsDistPoints}
-                      >
-                        区间字典
-                      </button>
-                    </div>
+        <div
+          className="strategy-manage-modal-backdrop strategy-manage-modal-backdrop-top"
+          role="presentation"
+        >
+          <div
+            className="strategy-manage-modal strategy-manage-editor-modal strategy-rule-editor-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="strategy-rule-editor-title"
+          >
+            <header className="strategy-rule-editor-header">
+              <div>
+                <h3 id="strategy-rule-editor-title">
+                  {editorMode === 'create' ? '新建策略' : '编辑策略'}
+                </h3>
+                {draft.name.trim() && <p>{draft.name}</p>}
+              </div>
+              <span className="strategy-rule-editor-scene">{draft.scene_name || '未选择场景'}</span>
+            </header>
+            <div className="strategy-rule-editor-body">
+              <fieldset disabled={isBusy} className="strategy-rule-editor-fields">
+                <section className="strategy-rule-editor-section">
+                  <div className="strategy-rule-editor-section-head">
+                    <h4>基本信息</h4>
                   </div>
-                  {scoreMode === 'fixed' ? (
-                    <label className="strategy-manage-field strategy-manage-field-span-full">
-                      <span>固定分值</span>
-                      <input value={fixedPointsText} onChange={(event) => setFixedPointsText(event.target.value)} />
-                    </label>
-                  ) : (
-                    <label className="strategy-manage-field strategy-manage-field-span-full">
-                      <span>区间字典，每行 `min,max,points`</span>
-                      <textarea rows={6} value={distPointsText} onChange={(event) => setDistPointsText(event.target.value)} />
-                    </label>
-                  )}
-                  {draft.scope_way.toUpperCase() === 'EACH' ? (
-                    <label className="strategy-manage-field strategy-manage-field-span-full">
-                      <span>窗口累计得分的正负限制值</span>
+                  <div className="strategy-manage-editor-grid strategy-rule-editor-basic">
+                    <label className="strategy-manage-field">
+                      <span>策略名称</span>
                       <input
-                        type="number"
-                        min="0"
-                        step="any"
-                        value={maxPointsText}
-                        onChange={(event) => setMaxPointsText(event.target.value)}
-                        placeholder="例如 5：得分限制在 -5～5"
+                        value={draft.name}
+                        onChange={(event) => setDraft({ ...draft, name: event.target.value })}
                       />
                     </label>
-                  ) : null}
-                </>
-              ) : (
-                <div className="strategy-manage-combination-editor strategy-manage-field-span-full">
-                  <div className="strategy-manage-combination-intro">
-                    <div>
-                      <strong>组合计分</strong>
-                      <p>先按命中条件数量得到基础分；基础分不为 0 时，直接累加所有命中条件的额外分。</p>
-                    </div>
-                    <span>{draft.conditions.length} 条条件</span>
+                    <label className="strategy-manage-field">
+                      <span>策略类型</span>
+                      <select
+                        value={draft.kind}
+                        onChange={(event) =>
+                          updateDraftKind(event.target.value as StrategyManageRuleDraft['kind'])
+                        }
+                      >
+                        {RULE_KIND_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="strategy-manage-field">
+                      <span>所属场景</span>
+                      <select
+                        value={draft.scene_name}
+                        onChange={(event) => setDraft({ ...draft, scene_name: event.target.value })}
+                      >
+                        {scenes.map((scene) => (
+                          <option key={scene.name} value={scene.name}>
+                            {scene.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="strategy-manage-field">
+                      <span>计分阶段</span>
+                      <select
+                        value={draft.stage}
+                        onChange={(event) => setDraft({ ...draft, stage: event.target.value })}
+                      >
+                        {STAGE_OPTIONS.map((item) => (
+                          <option key={item} value={item}>
+                            {
+                              {
+                                base: '基础',
+                                trigger: '触发',
+                                confirm: '确认',
+                                risk: '风险',
+                                fail: '失效',
+                              }[item]
+                            }{' '}
+                            · {item}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <details className="strategy-rule-editor-help strategy-manage-field-span-full">
+                      <summary>策略说明（可选）{draft.explain.trim() ? ' · 已填写' : ''}</summary>
+                      <label className="strategy-manage-field">
+                        <input
+                          aria-label="策略说明"
+                          value={draft.explain}
+                          onChange={(event) => setDraft({ ...draft, explain: event.target.value })}
+                        />
+                      </label>
+                    </details>
                   </div>
-
-                  <section className="strategy-manage-combination-section">
-                    <div className="strategy-manage-combination-section-head">
-                      <div>
-                        <strong>基础条件</strong>
-                        <span>每条条件最多计一次命中</span>
-                      </div>
-                      <button className="strategy-manage-inline-btn" type="button" onClick={addCombinationCondition}>
-                        添加条件
-                      </button>
-                    </div>
-                    <div className="strategy-manage-combination-list">
-                      {draft.conditions.map((condition, index) => (
-                        <article className="strategy-manage-combination-row" key={`condition-${index}`}>
-                          <div className="strategy-manage-combination-row-head">
-                            <strong>条件 {index + 1}</strong>
+                </section>
+                <section className="strategy-rule-editor-section">
+                  <div className="strategy-rule-editor-section-head">
+                    <h4>触发与计分</h4>
+                  </div>
+                  <div className="strategy-manage-editor-grid strategy-rule-editor-scoring">
+                    <label className="strategy-manage-field">
+                      <span>命中方式</span>
+                      <select
+                        value={draftUsesConsec ? 'CONSEC' : draft.scope_way.trim().toUpperCase()}
+                        onChange={(event) => updateDraftScopeWay(
+                          event.target.value === 'CONSEC' ? 'CONSEC>=2' : event.target.value,
+                        )}
+                      >
+                        {draftScopeOptions.map((item) => (
+                          <option key={item} value={item}>
+                            {
+                              {
+                                LAST: '当天满足',
+                                ANY: '窗口内曾满足',
+                                EACH: '逐次累计',
+                                RECENT: '最近一次',
+                                CONSEC: '连续命中',
+                              }[item]
+                            }{' '}
+                            · {item}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="strategy-manage-field">
+                      <span>回看窗口（个股报价日）</span>
+                      <input
+                        type="number"
+                        min={1}
+                        step={1}
+                        disabled={draft.scope_way.toUpperCase() === 'LAST'}
+                        value={draft.scope_way.toUpperCase() === 'LAST' ? '1' : scopeWindowsText}
+                        onChange={(event) => setScopeWindowsText(event.target.value)}
+                      />
+                    </label>
+                    {draftUsesConsec && (
+                      <label className="strategy-manage-field">
+                        <span>连续命中日数（个股报价日）</span>
+                        <input
+                          type="number"
+                          min={1}
+                          step={1}
+                          value={draft.scope_way.trim().slice(8)}
+                          onChange={(event) => setDraft({ ...draft, scope_way: `CONSEC>=${event.target.value}` })}
+                        />
+                      </label>
+                    )}
+                    {draft.kind === 'single' ? (
+                      <>
+                        <label className="strategy-manage-field strategy-manage-field-span-full">
+                          <span>表达式</span>
+                          <textarea
+                            rows={7}
+                            spellCheck={false}
+                            autoCapitalize="off"
+                            autoCorrect="off"
+                            placeholder="例如 C > MA(C,20) AND V > REF(V,1)"
+                            value={draft.when}
+                            onChange={(event) => setDraft({ ...draft, when: event.target.value })}
+                          />
+                        </label>
+                        <div className="strategy-manage-field strategy-manage-field-span-full">
+                          <span>得分方式</span>
+                          <div className="strategy-manage-score-mode">
                             <button
-                              className="strategy-manage-inline-btn is-danger"
                               type="button"
-                              onClick={() => removeCombinationCondition(index)}
-                              disabled={draft.conditions.length <= 1}
+                              className={
+                                scoreMode === 'fixed'
+                                  ? 'strategy-manage-score-mode-btn is-active'
+                                  : 'strategy-manage-score-mode-btn'
+                              }
+                              onClick={() => setScoreMode('fixed')}
                             >
-                              删除
+                              固定分
+                            </button>
+                            <button
+                              type="button"
+                              className={
+                                scoreMode === 'dist'
+                                  ? 'strategy-manage-score-mode-btn is-active'
+                                  : 'strategy-manage-score-mode-btn'
+                              }
+                              onClick={() => {
+                                setScoreMode('dist')
+                                if (distPointRows.length === 0) {
+                                  setDistPointRows([{ min: '0', max: '0', points: fixedPointsText }])
+                                }
+                              }}
+                              disabled={!draftScopeSupportsDistPoints}
+                            >
+                              区间字典
                             </button>
                           </div>
+                        </div>
+                        {scoreMode === 'fixed' ? (
                           <label className="strategy-manage-field">
-                            <span>条件名称</span>
-                            <input
-                              value={condition.name}
-                              onChange={(event) =>
-                                updateCombinationCondition(index, 'name', event.target.value)
-                              }
-                              placeholder="例如：价格突破"
-                            />
-                          </label>
-                          <label className="strategy-manage-field">
-                            <span>触发表达式</span>
-                            <textarea
-                              rows={4}
-                              value={condition.when}
-                              onChange={(event) =>
-                                updateCombinationCondition(index, 'when', event.target.value)
-                              }
-                              placeholder="例如：C > HHV(REF(H, 1), 20)"
-                            />
-                          </label>
-                          <label className="strategy-manage-field">
-                            <span>满足此条件额外加分</span>
+                            <span>固定分值</span>
                             <input
                               type="number"
                               step="any"
-                              value={combinationBonusPointTexts[index] ?? ''}
-                              onChange={(event) =>
-                                updateCombinationCondition(
-                                  index,
-                                  'bonus_points',
-                                  event.target.value,
-                                )
-                              }
+                              value={fixedPointsText}
+                              onChange={(event) => setFixedPointsText(event.target.value)}
                             />
                           </label>
-                        </article>
-                      ))}
-                    </div>
-                  </section>
-
-                  <section className="strategy-manage-combination-section">
-                    <div className="strategy-manage-combination-section-head">
-                      <div>
-                        <strong>命中数得分</strong>
-                        <span>配置命中 1 条及以上的得分档位</span>
-                      </div>
-                    </div>
-                    <div className="strategy-manage-hit-score-grid">
-                      {combinationHitPointTexts.map((points, index) => {
-                        const hitCount = index + 1
-                        return (
-                          <label className="strategy-manage-hit-score-item" key={`hit-score-${hitCount}`}>
-                            <span>命中 {hitCount} 条</span>
+                        ) : (
+                          <StrategyDistPointsEditor
+                            rows={distPointRows}
+                            onChange={setDistPointRows}
+                            scopeWay={draft.scope_way}
+                            windowText={scopeWindowsText}
+                          />
+                        )}
+                        {draft.scope_way.toUpperCase() === 'EACH' ? (
+                          <label className="strategy-manage-field strategy-manage-field-span-full">
+                            <span>窗口累计得分的正负限制值</span>
                             <input
                               type="number"
+                              min="0"
                               step="any"
-                              value={points}
-                              onChange={(event) => updateCombinationHitPoints(hitCount, event.target.value)}
+                              value={maxPointsText}
+                              onChange={(event) => setMaxPointsText(event.target.value)}
+                              placeholder="例如 5：得分限制在 -5～5"
                             />
                           </label>
-                        )
-                      })}
-                    </div>
-                  </section>
+                        ) : null}
+                      </>
+                    ) : (
+                      <div className="strategy-manage-combination-editor strategy-manage-field-span-full">
+                        <div className="strategy-manage-combination-intro">
+                          <strong>组合计分</strong>
+                          <span>{draft.conditions.length} 条条件</span>
+                        </div>
 
-                  <section className="strategy-manage-combination-section">
-                    <div className="strategy-manage-combination-section-head">
-                      <div>
-                        <strong>分数范围限制</strong>
-                        <span>填写 5 表示分数最高为 5、最低为 -5；留空表示不限制</span>
+                        <section className="strategy-manage-combination-section">
+                          <div className="strategy-manage-combination-section-head">
+                            <div>
+                              <strong>基础条件</strong>
+                            </div>
+                            <button
+                              className="strategy-manage-inline-btn"
+                              type="button"
+                              onClick={addCombinationCondition}
+                            >
+                              添加条件
+                            </button>
+                          </div>
+                          <div className="strategy-manage-combination-list">
+                            {draft.conditions.map((condition, index) => (
+                              <article
+                                className="strategy-manage-combination-row"
+                                key={`condition-${index}`}
+                              >
+                                <div className="strategy-manage-combination-row-head">
+                                  <strong>条件 {index + 1}</strong>
+                                  <button
+                                    className="strategy-manage-inline-btn is-danger"
+                                    type="button"
+                                    onClick={() => removeCombinationCondition(index)}
+                                    disabled={draft.conditions.length <= 1}
+                                  >
+                                    删除
+                                  </button>
+                                </div>
+                                <label className="strategy-manage-field">
+                                  <span>条件名称</span>
+                                  <input
+                                    value={condition.name}
+                                    onChange={(event) =>
+                                      updateCombinationCondition(index, 'name', event.target.value)
+                                    }
+                                    placeholder="例如：价格突破"
+                                  />
+                                </label>
+                                <label className="strategy-manage-field">
+                                  <span>触发表达式</span>
+                                  <textarea
+                                    rows={4}
+                                    value={condition.when}
+                                    onChange={(event) =>
+                                      updateCombinationCondition(index, 'when', event.target.value)
+                                    }
+                                    placeholder="例如：C > HHV(REF(H, 1), 20)"
+                                  />
+                                </label>
+                                <label className="strategy-manage-field">
+                                  <span>满足此条件额外加分</span>
+                                  <input
+                                    type="number"
+                                    step="any"
+                                    value={combinationBonusPointTexts[index] ?? ''}
+                                    onChange={(event) =>
+                                      updateCombinationCondition(
+                                        index,
+                                        'bonus_points',
+                                        event.target.value,
+                                      )
+                                    }
+                                  />
+                                </label>
+                              </article>
+                            ))}
+                          </div>
+                        </section>
+
+                        <section className="strategy-manage-combination-section">
+                          <div className="strategy-manage-combination-section-head">
+                            <div>
+                              <strong>命中数得分</strong>
+                            </div>
+                          </div>
+                          <div className="strategy-manage-hit-score-grid">
+                            {combinationHitPointTexts.map((points, index) => {
+                              const hitCount = index + 1
+                              return (
+                                <label
+                                  className="strategy-manage-hit-score-item"
+                                  key={`hit-score-${hitCount}`}
+                                >
+                                  <span>命中 {hitCount} 条</span>
+                                  <input
+                                    type="number"
+                                    step="any"
+                                    value={points}
+                                    onChange={(event) =>
+                                      updateCombinationHitPoints(hitCount, event.target.value)
+                                    }
+                                  />
+                                </label>
+                              )
+                            })}
+                          </div>
+                        </section>
+
+                        <section className="strategy-manage-combination-section">
+                          <div className="strategy-manage-combination-section-head">
+                            <div>
+                              <strong>分数范围限制</strong>
+                            </div>
+                          </div>
+                          <div className="strategy-manage-combination-cap-grid">
+                            <label className="strategy-manage-field">
+                              <span>额外分的正负限制值</span>
+                              <input
+                                type="number"
+                                min="0"
+                                step="any"
+                                value={maxBonusPointsText}
+                                onChange={(event) => setMaxBonusPointsText(event.target.value)}
+                                placeholder="例如 5：限制在 -5～5"
+                              />
+                            </label>
+                            <label className="strategy-manage-field">
+                              <span>最终总分的正负限制值</span>
+                              <input
+                                type="number"
+                                min="0"
+                                step="any"
+                                value={maxPointsText}
+                                onChange={(event) => setMaxPointsText(event.target.value)}
+                                placeholder="例如 5：限制在 -5～5"
+                              />
+                            </label>
+                          </div>
+                        </section>
                       </div>
-                    </div>
-                    <div className="strategy-manage-combination-cap-grid">
-                      <label className="strategy-manage-field">
-                        <span>额外分的正负限制值</span>
-                        <input
-                          type="number"
-                          min="0"
-                          step="any"
-                          value={maxBonusPointsText}
-                          onChange={(event) => setMaxBonusPointsText(event.target.value)}
-                          placeholder="例如 5：限制在 -5～5"
-                        />
-                      </label>
-                      <label className="strategy-manage-field">
-                        <span>最终总分的正负限制值</span>
-                        <input
-                          type="number"
-                          min="0"
-                          step="any"
-                          value={maxPointsText}
-                          onChange={(event) => setMaxPointsText(event.target.value)}
-                          placeholder="例如 5：限制在 -5～5"
-                        />
-                      </label>
-                    </div>
-                  </section>
+                    )}
+                    <details className="strategy-rule-editor-help strategy-manage-field-span-full">
+                      <summary>配置说明</summary>
+                      <ul>
+                        <li>回看窗口和连续日数均按个股报价日计算；LAST 只判断当天。</li>
+                        <li>CONSEC：窗口内有连续 N 个报价日满足即可命中，不要求连续段截止当天。</li>
+                        {draft.kind === 'combination' && (
+                          <li>每个条件最多计一次命中；基础分不为 0 时，再累加命中条件的额外分。</li>
+                        )}
+                        <li>正负限制值填 5 表示限制在 -5～5，留空不限。</li>
+                      </ul>
+                    </details>
+                  </div>
+                </section>
+                <StrategyRuleTrackingEditor
+                  ruleName={draft.name}
+                  tracking={draft.tracking ?? []}
+                  onChange={(tracking) => setDraft({ ...draft, tracking })}
+                  captureTexts={trackingCaptureTexts}
+                  onCaptureTextsChange={setTrackingCaptureTexts}
+                />
+              </fieldset>
+            </div>
+            <footer className="strategy-rule-editor-footer">
+              {editorError ? (
+                <div className="strategy-manage-message strategy-manage-message-error" role="alert">
+                  {editorError}
                 </div>
-              )}
-            </div>
-            <div className="strategy-manage-editor-actions">
-              <button
-                className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-secondary"
-                type="button"
-                onClick={() => void onCheckDraft()}
-                disabled={isBusy}
-              >
-                检查草稿
-              </button>
-              <button className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-primary" type="button" onClick={() => void onSaveDraft()} disabled={isBusy}>
-                {busyAction === 'saving' ? '保存中...' : '保存'}
-              </button>
-              <button
-                className="strategy-manage-toolbar-btn"
-                type="button"
-                onClick={() => {
-                  setDraft(null)
-                  setEditingOriginalName('')
-                  setEditorError('')
-                }}
-                disabled={isBusy}
-              >
-                取消
-              </button>
-            </div>
+              ) : null}
+              {!editorError && checkNotice ? (
+                <div className="strategy-manage-message strategy-manage-message-notice" role="status">
+                  上次检查：{checkNotice}。保存时会重新校验。
+                </div>
+              ) : null}
+              <div className="strategy-manage-editor-actions">
+                <button
+                  className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-secondary"
+                  type="button"
+                  onClick={() => void onCheckDraft()}
+                  disabled={isBusy}
+                >
+                  {busyAction === 'checking' ? '检查中…' : '检查草稿'}
+                </button>
+                <button
+                  className="strategy-manage-toolbar-btn"
+                  type="button"
+                  onClick={() => {
+                    setDraft(null)
+                    setEditingOriginalName('')
+                    setEditorError('')
+                  }}
+                  disabled={isBusy}
+                >
+                  取消
+                </button>
+                <button
+                  className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-primary"
+                  type="button"
+                  onClick={() => void onSaveDraft()}
+                  disabled={isBusy}
+                >
+                  {busyAction === 'saving' ? '校验并保存中…' : '保存策略'}
+                </button>
+              </div>
+            </footer>
           </div>
         </div>
       ) : null}

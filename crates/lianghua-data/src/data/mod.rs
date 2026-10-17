@@ -963,6 +963,8 @@ pub struct ScoreConfig {
     pub version: u32,
     pub scene: Vec<ScoreScene>,
     pub rule: Vec<ScoreRule>,
+    #[serde(default)]
+    pub track: Vec<lianghua_core::tracking::TrackDefinition>,
 }
 
 fn default_enabled() -> bool {
@@ -1065,6 +1067,8 @@ pub struct ScoreRuleBonus {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ScoreRule {
+    #[serde(default)]
+    pub id: Option<String>,
     pub name: String,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
@@ -1114,7 +1118,59 @@ impl ScoreConfig {
         Ok(cfg)
     }
 
-    fn validate(cfg: &ScoreConfig) -> Result<(), String> {
+    pub fn validate(cfg: &ScoreConfig) -> Result<(), String> {
+        let mut rule_ids = HashSet::new();
+        for rule in &cfg.rule {
+            if let Some(id) = &rule.id
+                && (id.trim().is_empty() || !rule_ids.insert(id.as_str()))
+            {
+                return Err("规则ID不能为空或重复".to_string());
+            }
+        }
+        let mut track_ids = HashSet::new();
+        for track in &cfg.track {
+            lianghua_core::tracking::TrackProgram::compile(track)
+                .map_err(|error| format!("跟踪 {}：{error}", track.name))?;
+            if track.source.is_none()
+                && (track.points != 0.0 || track.steps.iter().any(|step| step.points != 0.0))
+            {
+                return Err(format!(
+                    "跟踪 {} 计分需要关联原规则，以确定场景与评分阶段",
+                    track.name
+                ));
+            }
+            if !track_ids.insert(&track.id) {
+                return Err(format!("跟踪ID重复：{}", track.id));
+            }
+            if let Some(source) = &track.source
+                && !rule_ids.contains(source.as_str())
+            {
+                return Err(format!(
+                    "跟踪 {} 引用的原规则ID不存在：{source}",
+                    track.name
+                ));
+            }
+            if let Some(rule) = cfg.rule.iter().find(|rule| {
+                track
+                    .source
+                    .as_ref()
+                    .is_some_and(|source| rule.id.as_ref() == Some(source))
+            }) {
+                for expression in std::iter::once(rule.when.as_str())
+                    .filter(|_| rule.kind == RuleKind::Single)
+                    .chain(
+                        rule.conditions
+                            .iter()
+                            .map(|condition| condition.when.as_str()),
+                    )
+                {
+                    lianghua_core::tracking::TrackExpression::compile(expression, &HashSet::new())
+                        .map_err(|error| {
+                            format!("跟踪 {} 的来源规则 {}：{error}", track.name, rule.name)
+                        })?;
+                }
+            }
+        }
         let mut scene_name_set = HashSet::new();
         for (i, scene) in cfg.scene.iter().enumerate() {
             let n = i + 1;

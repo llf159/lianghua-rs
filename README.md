@@ -5,6 +5,8 @@
 工程代码位于 `crates/`，前端及 Tauri 应用位于 `ui/lianghua_web/`。
 
 - [项目工程约束](AGENTS.md)
+- [研究工作与结论汇总](RESEARCH_SUMMARY.md)
+- [跟踪策略：配置、观察与续算](TRACKING_STRATEGIES.md)
 - [组件取舍目录](crates/README.md)
 - [前端工程取舍](ui/lianghua_web/AGENTS.md)
 - [Tauri 工程取舍](ui/lianghua_web/src-tauri/AGENTS.md)

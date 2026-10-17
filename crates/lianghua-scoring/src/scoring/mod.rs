@@ -15,6 +15,7 @@ pub mod result_build;
 pub mod rule_cache;
 pub mod runner;
 pub mod tools;
+pub mod tracking;
 
 enum ScopeHit {
     Bool(bool),

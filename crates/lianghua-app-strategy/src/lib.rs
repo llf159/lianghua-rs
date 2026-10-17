@@ -15,4 +15,5 @@ pub mod ranking_compute;
 pub mod statistics;
 pub mod stock_pick;
 pub mod stock_similarity;
+pub mod tracking;
 pub mod trigger_similarity;

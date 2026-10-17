@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
+import type { TrackDefinition } from './strategyTracking'
 
 export type StrategyManageDistPoint = {
   min: number
@@ -53,6 +54,7 @@ export type StrategyManageRuleItem = {
   points_by_hits?: number[] | null
   max_points?: number | null
   max_bonus_points?: number | null
+  tracking: TrackDefinition[]
 }
 
 export type StrategyManageRuleDraft = {
@@ -71,6 +73,7 @@ export type StrategyManageRuleDraft = {
   max_points?: number | null
   max_bonus_points?: number | null
   explain: string
+  tracking?: TrackDefinition[]
 }
 
 export type StrategyManagePageData = {
