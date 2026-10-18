@@ -32,7 +32,6 @@ import { autoBackupManagedActiveStrategyOnEntry } from '../../apis/strategyAsset
 import StrategyAssetModal from './StrategyAssetModal'
 import StrategyDistPointsEditor from './StrategyDistPointsEditor'
 import { validateDistPointRows, type DistPointRow } from '../../shared/strategyDistPoints'
-import StrategyTrackingPanel from './StrategyTrackingPanel'
 import StrategyRuleTrackingEditor from './StrategyRuleTrackingEditor'
 import './css/StrategyManagePage.css'
 
@@ -1599,7 +1598,6 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
 
   return (
     <div className="strategy-manage-page">
-      {!isChipView && sourcePath && <StrategyTrackingPanel key={sourcePath} sourcePath={sourcePath} rules={rules} />}
       <section className="strategy-manage-card">
         <div className="strategy-manage-section-head">
           <div>

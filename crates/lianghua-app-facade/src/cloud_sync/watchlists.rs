@@ -131,6 +131,26 @@ pub fn transfer(
     mode: TransferMode,
     progress: impl Fn(&str),
 ) -> Result<TransferResult, String> {
+    transfer_bundle(
+        app_data, source, settings, watch_rows, mode, false, progress,
+    )
+}
+
+pub(super) fn transfer_bundle(
+    app_data: &Path,
+    source: &Path,
+    settings: BTreeMap<String, String>,
+    watch_rows: Option<Vec<WatchObserveStoredRow>>,
+    mode: TransferMode,
+    strategies: bool,
+    progress: impl Fn(&str),
+) -> Result<TransferResult, String> {
+    let bundle = if strategies {
+        "bundles/strategies.zip"
+    } else {
+        "bundles/watchlists.zip"
+    };
+    let label = if strategies { "策略资产" } else { "自选" };
     // 明确替换或合并沿用手动恢复的门禁，避免网络等待期间编辑被覆盖。
     let _guard = SOURCE_ACCESS
         .try_write()
@@ -143,7 +163,13 @@ pub fn transfer(
     } else {
         SyncState::default()
     };
-    let mut local_files = local_files(app_data, source, &settings)?;
+    let mut local_files = if strategies {
+        let mut files = super::local_files(app_data, source, &BTreeMap::new())?;
+        files.retain(|path, _| bundles::for_path(path) == Some(bundle));
+        files
+    } else {
+        local_files(app_data, source, &settings)?
+    };
     if let Some(rows) = watch_rows {
         local_files.insert(
             "app/watch_observe.json".into(),
@@ -151,41 +177,54 @@ pub fn transfer(
         );
     }
     let local_backup = if mode != TransferMode::Upload {
-        bundles::snapshots(&local_files)?.remove("bundles/watchlists.zip")
+        bundles::snapshots(&local_files)?.remove(bundle)
     } else {
         None
     };
     let mut dav = dav::Dav::new(&config)?;
-    progress("正在读取云端自选…");
+    progress(&format!("正在读取云端{label}…"));
     if mode == TransferMode::Download {
         dav.read_manifest()?;
     } else {
         dav.acquire()?;
     }
-    let bundle_heads = dav.manifest.heads("bundles/watchlists.zip");
+    let bundle_heads = dav.manifest.heads(bundle);
     let mut versions = Vec::new();
     if bundle_heads.is_empty() {
-        for path in [
-            "app/watch_observe.json",
-            "settings/lh_intraday_monitor_watchlist_v1",
-            "settings/am_board_filter",
-            "settings/lh_intraday_monitor_watchlist_enabled_v1",
-        ] {
-            let heads = dav.manifest.heads(path);
+        let legacy_paths = if strategies {
+            dav.manifest
+                .entries
+                .keys()
+                .filter(|path| bundles::for_path(path) == Some(bundle))
+                .cloned()
+                .collect::<Vec<_>>()
+        } else {
+            [
+                "app/watch_observe.json",
+                "settings/lh_intraday_monitor_watchlist_v1",
+                "settings/am_board_filter",
+                "settings/lh_intraday_monitor_watchlist_enabled_v1",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect()
+        };
+        for path in legacy_paths {
+            let heads = dav.manifest.heads(&path);
             if mode == TransferMode::Download && heads.len() > 1 {
-                return Err("云端自选存在多个版本，请选择合并".into());
+                return Err(format!("云端{label}存在多个版本，请选择合并"));
             }
-            versions.extend(heads.into_iter().map(|version| (path, version)));
+            versions.extend(heads.into_iter().map(|version| (path.clone(), version)));
         }
     } else {
         if mode == TransferMode::Download && bundle_heads.len() > 1 {
-            return Err("云端自选存在多个版本，请选择合并".into());
+            return Err(format!("云端{label}存在多个版本，请选择合并"));
         }
         versions.extend(
             bundle_heads
                 .iter()
                 .cloned()
-                .map(|version| ("bundles/watchlists.zip", version)),
+                .map(|version| (bundle.to_string(), version)),
         );
     }
     versions.sort_by(|a, b| {
@@ -200,12 +239,12 @@ pub fn transfer(
     let mut downloaded_bundle = None;
     if mode != TransferMode::Upload {
         if mode == TransferMode::Download && versions.is_empty() {
-            return Err("云端暂无自选数据".into());
+            return Err(format!("云端暂无{label}数据"));
         }
         for (path, version) in &versions {
-            progress("正在下载云端自选…");
+            progress(&format!("正在下载云端{label}…"));
             let bytes = dav.download(&version.hash, &local.join("objects"))?;
-            sources.push(if *path == "bundles/watchlists.zip" {
+            sources.push(if path == bundle {
                 let files = bundles::unpack(path, &bytes)?;
                 if mode == TransferMode::Download {
                     downloaded_bundle = Some(bytes);
@@ -219,22 +258,25 @@ pub fn transfer(
     if mode != TransferMode::Download {
         sources.push(local_files);
     }
-    let files = merge_files(&sources)?;
+    let files = if strategies {
+        super::strategies::merge_files(&sources)?
+    } else {
+        merge_files(&sources)?
+    };
     let bytes = if let Some(bytes) = downloaded_bundle {
         bytes
     } else {
         bundles::snapshots(&files)?
-            .remove("bundles/watchlists.zip")
-            .ok_or("未生成自选同步数据")?
+            .remove(bundle)
+            .ok_or_else(|| format!("本地暂无{label}数据"))?
     };
+    if strategies {
+        bundles::unpack(bundle, &bytes)?;
+    }
     let hash = digest(&bytes);
     let mut result = SyncResult::default();
     if mode != TransferMode::Download {
-        progress(if mode == TransferMode::Merge {
-            "正在合并并上传自选…"
-        } else {
-            "正在上传本地自选…"
-        });
+        progress(&format!("正在上传{label}…"));
         let version = if bundle_heads.len() == 1 && bundle_heads[0].hash == hash {
             result.skipped = 1;
             bundle_heads[0].clone()
@@ -249,7 +291,7 @@ pub fn transfer(
             )?;
             dav.manifest.format = 3;
             let version = dav.manifest.add(
-                "bundles/watchlists.zip",
+                bundle,
                 &hash,
                 bundle_heads.into_iter().map(|v| v.id).collect(),
                 bytes.len() as u64,
@@ -261,7 +303,7 @@ pub fn transfer(
         };
         last_modified = Some(version.created_at.clone());
         state.base.insert(
-            "bundles/watchlists.zip".into(),
+            bundle.into(),
             Base {
                 id: version.id,
                 hash,
@@ -269,7 +311,7 @@ pub fn transfer(
         );
     } else if let Some(version) = bundle_heads.first() {
         state.base.insert(
-            "bundles/watchlists.zip".into(),
+            bundle.into(),
             Base {
                 id: version.id.clone(),
                 hash: version.hash.clone(),
@@ -277,27 +319,30 @@ pub fn transfer(
         );
     }
     if mode != TransferMode::Upload {
-        // 本地 JSON 可能滞后，备份传入的真实自选及监控设置后再替换。
+        // 替换前保存完整本地包；自选使用页面传入的实际条目。
         if let Some(backup) = local_backup {
             atomic_write(
                 &source
                     .join("cloud_sync_backups")
                     .join(format!(
-                        "watchlists-{}",
+                        "{}-{}",
+                        if strategies {
+                            "strategies"
+                        } else {
+                            "watchlists"
+                        },
                         chrono::Utc::now().format("%Y%m%d%H%M%S%f")
                     ))
-                    .join("watchlists.zip"),
+                    .join(if strategies {
+                        "strategies.zip"
+                    } else {
+                        "watchlists.zip"
+                    }),
                 &backup,
             )?;
         }
-        progress("正在更新本地自选…");
-        super::apply(
-            app_data,
-            source,
-            "bundles/watchlists.zip",
-            &bytes,
-            &mut result,
-        )?;
+        progress(&format!("正在更新本地{label}…"));
+        super::apply(app_data, source, bundle, &bytes, &mut result)?;
         result.downloaded = 1;
     }
     atomic_write(
@@ -310,7 +355,7 @@ pub fn transfer(
     result.uploaded_bytes = dav.uploaded_bytes;
     result.downloaded_bytes = dav.downloaded_bytes;
     result.transferred_bytes = result.uploaded_bytes + result.downloaded_bytes;
-    let watch_rows = if mode != TransferMode::Upload {
+    let watch_rows = if !strategies && mode != TransferMode::Upload {
         Some(serde_json::from_slice(&files["app/watch_observe.json"]).map_err(|e| e.to_string())?)
     } else {
         None

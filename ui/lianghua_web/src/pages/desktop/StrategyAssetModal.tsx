@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { listen } from '@tauri-apps/api/event'
+import { listCloudData, transferStrategyCloud, type WatchlistTransferMode } from '../../apis/cloudSync'
 import {
   activateCyqChenStrategyBackup,
   backupCyqChenStrategyFile,
@@ -32,10 +33,12 @@ import {
   type ManagedStrategyBackupItem,
 } from '../../apis/strategyAssets'
 import ConfirmDialog from '../../shared/ConfirmDialog'
+import './css/CloudSync.css'
 import './css/StrategyAssetModal.css'
 
 type BusyAction =
   | 'idle'
+  | 'cloud'
   | 'loading'
   | 'importing'
   | 'creating-empty'
@@ -137,7 +140,6 @@ function backupSourceTagLabel(sourceKind?: string) {
 
 export default function StrategyAssetModal(props: StrategyAssetModalProps) {
   const { open, sourcePath = '', initialAssetKind = 'rank', onClose, onActivated } = props
-  const navigate = useNavigate()
   const [status, setStatus] = useState<ManagedStrategyAssetsStatus | null>(null)
   const [chipStatus, setChipStatus] = useState<CyqChenStrategyPageData | null>(null)
   const [busyAction, setBusyAction] = useState<BusyAction>('idle')
@@ -151,7 +153,55 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
   const [activeAssetKind, setActiveAssetKind] = useState<AssetKind>('rank')
   const [diffData, setDiffData] = useState<StrategyBackupDiffData | null>(null)
 
-  const isBusy = busyAction !== 'idle'
+  const [cloudOpen, setCloudOpen] = useState(false)
+  const [cloudMode, setCloudMode] = useState<WatchlistTransferMode | null>(null)
+  const [cloudModified, setCloudModified] = useState<string | null>(null)
+  const [cloudLoading, setCloudLoading] = useState(false)
+  const [cloudProgress, setCloudProgress] = useState('')
+  const [cloudFeedback, setCloudFeedback] = useState('')
+  const isBusy = busyAction !== 'idle' || cloudMode !== null
+
+  useEffect(() => {
+    if (!open || !cloudOpen) return
+    let cancelled = false
+    setCloudLoading(true)
+    setCloudFeedback('')
+    void listCloudData().then((items) => {
+      if (cancelled) return
+      const dates = items.filter((item) => item.isHead && (item.path === 'bundles/strategies.zip' || item.path.startsWith('source/') && !item.path.endsWith('/ind.toml') && !item.path.endsWith('/chart_indicators.toml'))).map((item) => item.version.createdAt).sort()
+      setCloudModified(dates.at(-1) ?? null)
+    }).catch((loadError) => {
+      if (!cancelled) setCloudFeedback(`读取云端失败：${String(loadError)}`)
+    }).finally(() => {
+      if (!cancelled) setCloudLoading(false)
+    })
+    const unlisten = listen<string>('cloud-sync-progress', (event) => {
+      if (!cancelled) setCloudProgress(event.payload)
+    })
+    return () => { cancelled = true; void unlisten.then((stop) => stop()) }
+  }, [open, cloudOpen])
+
+  async function onCloudTransfer(mode: WatchlistTransferMode, label: string) {
+    setBusyAction('cloud')
+    setCloudMode(mode)
+    setCloudFeedback('')
+    setCloudProgress('准备中…')
+    try {
+      const result = await transferStrategyCloud(mode)
+      setCloudModified(result.lastModified ?? null)
+      setCloudFeedback(`${label}完成${result.warnings.length ? `；${result.warnings.join('；')}` : ''}`)
+      if (mode !== 'upload') {
+        await loadStatus()
+        onActivated?.()
+      }
+    } catch (syncError) {
+      setCloudFeedback(`${label}失败：${String(syncError)}`)
+    } finally {
+      setBusyAction('idle')
+      setCloudMode(null)
+      setCloudProgress('')
+    }
+  }
   const autoBackups = useMemo(
     () => status?.backups.filter((item) => item.sourceKind === 'auto_entry') ?? [],
     [status?.backups],
@@ -217,6 +267,7 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
 
   useEffect(() => {
     if (!open) {
+      setCloudOpen(false)
       setPendingDeleteBackup(null)
       setPendingDeleteChipBackup(null)
       setBackupViewMode('managed')
@@ -235,13 +286,14 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
       return
     }
     function onKeyDown(event: KeyboardEvent) {
-      if (event.key === 'Escape') {
+      if (event.key === 'Escape' && !isBusy) {
+        if (cloudOpen) { setCloudOpen(false); return }
         onClose()
       }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [open, onClose])
+  }, [open, onClose, isBusy, cloudOpen])
 
   async function onImport() {
     setBusyAction('importing')
@@ -537,11 +589,6 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
     }
   }
 
-  function navigateToStrategyPage(kind: AssetKind) {
-    onClose()
-    navigate(kind === 'chip' ? '/strategy/chip-change' : '/strategy/rules')
-  }
-
   async function onActivateChipBackup(item: CyqChenStrategyBackupItem) {
     const nextSourcePath = sourcePath.trim() || status?.sourcePath.trim() || ''
     if (!nextSourcePath) {
@@ -684,7 +731,7 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
       className="strategy-asset-modal-backdrop"
       role="presentation"
       onClick={(event) => {
-        if (event.target === event.currentTarget) {
+        if (event.target === event.currentTarget && !isBusy && !cloudOpen) {
           onClose()
         }
       }}
@@ -695,6 +742,9 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
             <h3>策略资产中心</h3>
           </div>
           <div className="strategy-asset-actions">
+            <button className="strategy-asset-btn" type="button" onClick={() => { setCloudModified(null); setCloudOpen(true) }} disabled={isBusy}>
+              同步云端
+            </button>
             <button className="strategy-asset-btn" type="button" onClick={() => void loadStatus()} disabled={isBusy}>
               {busyAction === 'loading' ? '刷新中...' : '刷新'}
             </button>
@@ -703,6 +753,28 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
             </button>
           </div>
         </div>
+
+        {cloudOpen ? (
+          <div className="strategy-asset-cloud-overlay" onClick={(event) => { if (event.target === event.currentTarget && !isBusy) setCloudOpen(false) }}>
+            <section className="settings-modal cloud-watch-modal" role="dialog" aria-modal="true" aria-label="策略资产同步">
+              <div className="cloud-config-head">
+                <div><h3>策略资产同步</h3><p>排名策略、筹码策略与历史备份</p></div>
+                <button className="cloud-config-close" type="button" aria-label="关闭策略同步" disabled={isBusy} onClick={() => setCloudOpen(false)}>×</button>
+              </div>
+              <div className="cloud-watch-modified"><span>云端最后修改</span><time dateTime={cloudModified ?? undefined}>{cloudLoading ? '读取中…' : cloudModified ? new Date(cloudModified).toLocaleString('zh-CN', { hour12: false }) : '暂无云端策略'}</time></div>
+              <div className="cloud-watch-actions">
+                {([['upload', '上传', '本地资产替换云端'], ['download', '下载', '接收云端，替换当前策略'], ['merge', '合并', '保留两端资产，本地当前策略优先']] as const).map(([mode, label, description]) => (
+                  <button key={mode} type="button" className={mode === 'merge' ? 'is-primary' : ''} disabled={isBusy || cloudLoading} onClick={() => void onCloudTransfer(mode, label)}>
+                    <strong>{cloudMode === mode ? `${label}中…` : label}</strong><span>{description}</span>
+                  </button>
+                ))}
+              </div>
+              <p className="cloud-watch-hint">合并将不同的云端当前策略存为备份，不拼接规则；下载前自动备份本地当前策略，已有历史备份继续保留。</p>
+              {cloudMode && cloudProgress ? <p className="cloud-notice cloud-progress" role="status">{cloudProgress}</p> : null}
+              {cloudFeedback ? <p className="cloud-notice" role="status">{cloudFeedback}</p> : null}
+            </section>
+          </div>
+        ) : null}
 
         <div className="strategy-asset-switcher" role="tablist" aria-label="策略资产类型">
           <button
@@ -773,9 +845,6 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
               </button>
               <button className="strategy-asset-btn" type="button" onClick={() => void onExportBundle()} disabled={isBusy}>
                 {busyAction === 'exporting-bundle' ? '打包中...' : '导出资产包'}
-              </button>
-              <button className="strategy-asset-btn" type="button" onClick={() => navigateToStrategyPage('rank')} disabled={isBusy}>
-                进入打分策略页
               </button>
               <button
                 className={backupViewMode === 'auto' ? 'strategy-asset-btn strategy-asset-btn-active' : 'strategy-asset-btn'}
@@ -958,9 +1027,6 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
                 disabled={isBusy}
               >
                 {busyAction === 'exporting-chip-bundle' ? '打包中...' : '导出资产包'}
-              </button>
-              <button className="strategy-asset-btn" type="button" onClick={() => navigateToStrategyPage('chip')} disabled={isBusy}>
-                进入筹码策略页
               </button>
               <button
                 className={backupViewMode === 'auto' ? 'strategy-asset-btn strategy-asset-btn-active' : 'strategy-asset-btn'}

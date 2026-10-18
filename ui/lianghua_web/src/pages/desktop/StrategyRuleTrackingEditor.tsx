@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import type { TrackDefinition } from '../../apis/strategyTracking'
-import './css/StrategyTrackingPanel.css'
+import './css/StrategyRuleTrackingEditor.css'
 
 function TrackingPointsInput({ value = 0, onChange }: { value?: number; onChange: (value: number) => void }) {
   const [input, setInput] = useState({ value, text: String(value) })

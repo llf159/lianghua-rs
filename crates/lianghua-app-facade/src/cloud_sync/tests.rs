@@ -42,7 +42,9 @@ fn two_devices_keep_conflicts_deduplicate_and_recover() {
                 *worker_mutations.lock().unwrap() += 1;
             }
             assert!(
-                path.starts_with("/dav/lianghua-rs/") || path.starts_with("/dav/watch-transfer/")
+                path.starts_with("/dav/lianghua-rs/")
+                    || path.starts_with("/dav/watch-transfer/")
+                    || path.starts_with("/dav/strategy-transfer/")
             );
             let mut headers = BTreeMap::new();
             loop {
@@ -535,6 +537,78 @@ fn two_devices_keep_conflicts_deduplicate_and_recover() {
         fs::read(transfer_a.join("watch_observe.json")).unwrap(),
         b"[]"
     );
+    // 策略复用同一传输流程：上传不改本地、下载只读云端、合并保留双方当前版本。
+    let strategy_a = temp.path().join("strategy-a");
+    let strategy_b = temp.path().join("strategy-b");
+    fs::create_dir_all(&strategy_a).unwrap();
+    fs::create_dir_all(&strategy_b).unwrap();
+    let mut strategy_config = config.clone();
+    strategy_config.folder = "strategy-transfer".into();
+    save_config(&transfer_a, strategy_config.clone()).unwrap();
+    save_config(&transfer_b, strategy_config).unwrap();
+    fs::write(strategy_a.join("score_rule.toml"), "rules = [1]").unwrap();
+    fs::write(strategy_b.join("score_rule.toml"), "rules = [2]").unwrap();
+    fs::write(strategy_b.join("ind.toml"), "local indicator").unwrap();
+    let sent = transfer_strategies(
+        &transfer_a,
+        &strategy_a,
+        WatchlistTransferMode::Upload,
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(sent.result.uploaded, 1);
+    assert_eq!(
+        fs::read(strategy_a.join("score_rule.toml")).unwrap(),
+        b"rules = [1]"
+    );
+    let before = *mutations.lock().unwrap();
+    let received = transfer_strategies(
+        &transfer_b,
+        &strategy_b,
+        WatchlistTransferMode::Download,
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(received.result.downloaded, 1);
+    assert_eq!(*mutations.lock().unwrap(), before);
+    assert_eq!(
+        fs::read(strategy_b.join("score_rule.toml")).unwrap(),
+        b"rules = [1]"
+    );
+    assert_eq!(
+        fs::read(strategy_b.join("ind.toml")).unwrap(),
+        b"local indicator"
+    );
+    assert!(strategy_b.join("strategy_backups").is_dir());
+    fs::write(strategy_b.join("score_rule.toml"), "rules = [3]").unwrap();
+    let merged = transfer_strategies(
+        &transfer_b,
+        &strategy_b,
+        WatchlistTransferMode::Merge,
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(merged.result.uploaded, 1);
+    assert_eq!(
+        fs::read(strategy_b.join("score_rule.toml")).unwrap(),
+        b"rules = [3]"
+    );
+    let kept = strategy_b
+        .join("strategy_backups")
+        .join(format!("cloud-{}", digest(b"rules = [1]")));
+    assert_eq!(
+        fs::read(kept.join("score_rule.toml")).unwrap(),
+        b"rules = [1]"
+    );
+    assert!(kept.join("meta.json").exists());
+    let unchanged = transfer_strategies(
+        &transfer_b,
+        &strategy_b,
+        WatchlistTransferMode::Merge,
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(unchanged.result.skipped, 1);
     stopped.store(true, Ordering::Relaxed);
     let _ = TcpStream::connect(address);
     worker.join().unwrap();

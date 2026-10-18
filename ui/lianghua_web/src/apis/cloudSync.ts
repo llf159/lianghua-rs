@@ -184,3 +184,7 @@ export function cloudPathLabel(path: string) {
     )[path] ?? path
   );
 }
+
+export function transferStrategyCloud(mode: WatchlistTransferMode) {
+  return invoke<CloudSyncResult>("transfer_strategy_cloud", { mode });
+}

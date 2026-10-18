@@ -1,7 +1,9 @@
 mod bundles;
 mod database;
 mod dav;
+mod strategies;
 mod watchlists;
+pub use strategies::transfer as transfer_strategies;
 
 pub use watchlists::{
     TransferMode as WatchlistTransferMode, TransferResult as WatchlistTransferResult,

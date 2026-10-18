@@ -531,3 +531,22 @@
     flex: 1 1 auto;
   }
 }
+
+.strategy-asset-cloud-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1160;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(15, 23, 42, 0.38);
+}
+
+.strategy-asset-cloud-overlay .cloud-watch-modal {
+  max-height: calc(100dvh - 32px);
+  overflow: auto;
+  border: 1px solid #dbe3ee;
+  border-radius: 14px;
+  padding: 14px;
+  box-shadow: 0 24px 52px rgba(15, 23, 42, 0.22);
+}

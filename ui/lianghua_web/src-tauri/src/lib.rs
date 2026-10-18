@@ -3104,6 +3104,7 @@ pub fn run() {
             cloud_sync_bridge::test_cloud_sync_connection,
             cloud_sync_bridge::run_cloud_sync,
             cloud_sync_bridge::transfer_watchlist_cloud,
+            cloud_sync_bridge::transfer_strategy_cloud,
             cloud_sync_bridge::estimate_cloud_sync_upload,
             cloud_sync_bridge::list_cloud_sync_data,
             cloud_sync_bridge::restore_cloud_sync_version,

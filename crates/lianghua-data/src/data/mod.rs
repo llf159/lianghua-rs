@@ -368,7 +368,6 @@ pub struct DataReader {
     pub query_tail_rows_sql: String,
     pub cols_table: Vec<(String, String)>,
     pub runtime_index_cols: Vec<RuntimeIndexCol>,
-    rest_days: Option<HashMap<String, f64>>,
 }
 
 #[derive(Debug, Clone)]
@@ -516,7 +515,6 @@ impl DataReader {
                 .iter()
                 .map(|(_, runtime_key)| runtime_key.clone())
                 .collect::<HashSet<_>>();
-            selected_runtime_keys.insert("REST_DAYS".to_string());
             for index_col in &runtime_index_cols {
                 selected_runtime_keys.insert(index_col.runtime_key.clone());
             }
@@ -571,33 +569,12 @@ impl DataReader {
             select_cols.join(",\n")
         );
 
-        let rest_days = if required_runtime_keys.is_some_and(|keys| keys.contains("REST_DAYS")) {
-            let mut calendar = load_trade_date_list(source_dir)?;
-            calendar.sort();
-            calendar.dedup();
-            Some(
-                calendar
-                    .windows(2)
-                    .map(|dates| {
-                        let today = chrono::NaiveDate::parse_from_str(&dates[0], "%Y%m%d")
-                            .map_err(|e| format!("交易日历日期无效 {}: {e}", dates[0]))?;
-                        let next = chrono::NaiveDate::parse_from_str(&dates[1], "%Y%m%d")
-                            .map_err(|e| format!("交易日历日期无效 {}: {e}", dates[1]))?;
-                        Ok((dates[0].clone(), (next - today).num_days() as f64))
-                    })
-                    .collect::<Result<HashMap<_, _>, String>>()?,
-            )
-        } else {
-            None
-        };
-
         Ok(Self {
             conn,
             query_sql,
             query_tail_rows_sql,
             cols_table: db_cols_table,
             runtime_index_cols,
-            rest_days,
         })
     }
 
@@ -636,7 +613,7 @@ impl DataReader {
         }
 
         let mut out = RowData { trade_dates, cols };
-        self.inject_derived_fields(&mut out)?;
+        self.inject_estimated_market_cap(&mut out)?;
         self.inject_runtime_index(&mut out)?;
         out.validate()?;
         Ok(out)
@@ -686,7 +663,7 @@ impl DataReader {
         }
 
         let mut out = RowData { trade_dates, cols };
-        self.inject_derived_fields(&mut out)?;
+        self.inject_estimated_market_cap(&mut out)?;
         self.inject_runtime_index(&mut out)?;
         out.validate()?;
         Ok(out)
@@ -773,7 +750,7 @@ impl DataReader {
         }
 
         for row_data in result.values_mut() {
-            self.inject_derived_fields(row_data)?;
+            self.inject_estimated_market_cap(row_data)?;
         }
         result.retain(|_, row_data| !row_data.trade_dates.is_empty());
         if !result.is_empty() && !self.runtime_index_cols.is_empty() {
@@ -787,7 +764,7 @@ impl DataReader {
         Ok(result)
     }
 
-    fn inject_derived_fields(&self, row_data: &mut RowData) -> Result<(), String> {
+    fn inject_estimated_market_cap(&self, row_data: &mut RowData) -> Result<(), String> {
         let series = (0..row_data.trade_dates.len())
             .map(|index| {
                 extras::estimate_market_cap(
@@ -797,16 +774,6 @@ impl DataReader {
             })
             .collect();
         row_data.cols.insert("TOTAL_MV_YI".to_string(), series);
-        if let Some(rest_days) = &self.rest_days {
-            row_data.cols.insert(
-                "REST_DAYS".to_string(),
-                row_data
-                    .trade_dates
-                    .iter()
-                    .map(|date| rest_days.get(date).copied())
-                    .collect(),
-            );
-        }
         Ok(())
     }
 
@@ -1645,7 +1612,6 @@ impl IndsData {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
     use std::fs::{create_dir_all, remove_dir_all};
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2033,50 +1999,6 @@ when = "C > O"
             row_data.cols["I300_MA5"]
         );
 
-        let _ = remove_dir_all(source_dir);
-    }
-
-    #[test]
-    fn data_reader_uses_planned_calendar_for_rest_days() {
-        let source_dir = temp_dir_path("runtime-rest-days");
-        create_dir_all(&source_dir).expect("create temp dir");
-        std::fs::write(
-            source_dir.join("trade_calendar.csv"),
-            "cal_date\n20260928\n20260929\n20260930\n20261008\n20261009\n20261012\n",
-        )
-        .expect("write planned calendar");
-        let conn = Connection::open(source_dir.join("stock_data.db")).expect("open db");
-        conn.execute_batch(
-            "CREATE TABLE stock_data(ts_code VARCHAR, trade_date VARCHAR, adj_type VARCHAR, close DOUBLE);
-             INSERT INTO stock_data VALUES
-             ('000001.SZ','20260928','qfq',10),
-             ('000001.SZ','20260930','qfq',10),
-             ('000001.SZ','20261009','qfq',10),
-             ('000001.SZ','20261012','qfq',10);",
-        )
-        .expect("create quotes with missing stock session and no future quotes");
-        drop(conn);
-        let reader = DataReader::new_with_runtime_keys(
-            source_dir.to_str().unwrap(),
-            &HashSet::from(["C".to_string(), "REST_DAYS".to_string()]),
-        )
-        .expect("build calendar reader");
-        let row = reader
-            .load_one("000001.SZ", "qfq", "20260928", "20261012")
-            .expect("load one");
-        assert_eq!(
-            row.cols["REST_DAYS"],
-            vec![Some(1.0), Some(8.0), Some(3.0), None]
-        );
-        let tail = reader
-            .load_one_tail_rows("000001.SZ", "qfq", "20260930", 1)
-            .expect("load tail");
-        assert_eq!(tail.cols["REST_DAYS"], vec![Some(8.0)]);
-        let batch = reader
-            .load_batch(&["000001.SZ".to_string()], "qfq", "20260928", "20261012")
-            .expect("load batch");
-        assert_eq!(batch["000001.SZ"].cols["REST_DAYS"], row.cols["REST_DAYS"]);
-        drop(reader);
         let _ = remove_dir_all(source_dir);
     }
 
