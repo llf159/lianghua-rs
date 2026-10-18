@@ -319,7 +319,9 @@ function buildPreparedDraft(
     }
     return {
       ...track,
+      name: track.name.trim(),
       capture,
+      start: track.start?.trim() || undefined,
       invalidate: track.invalidate?.trim() || undefined,
       eligible: track.eligible?.trim() || undefined,
       signal: track.signal?.trim() || undefined,

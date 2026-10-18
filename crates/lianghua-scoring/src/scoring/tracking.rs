@@ -13,13 +13,13 @@ use lianghua_core::{
 use lianghua_model::scoring::TrackingScoreState;
 use serde::{Deserialize, Serialize};
 
-use super::{CachedRule, RuleScoreSeries, tools::cyq_chen_runtime_key_names};
+use super::{CachedRule, RuleSceneMeta, RuleScoreSeries, tools::cyq_chen_runtime_key_names};
 use crate::data::{self, RuntimeKeyCollectOptions, ScoreConfig};
 
 pub fn config_hash(config: &str) -> String {
     let mut hash = DefaultHasher::new();
     // Invalidate checkpoints when scoring/event semantics change.
-    4u32.hash(&mut hash);
+    5u32.hash(&mut hash);
     config.hash(&mut hash);
     hash.finish().to_string()
 }
@@ -187,6 +187,20 @@ impl ScoringTrackingPlan {
         self.tracks.is_empty()
     }
 
+    pub fn score_rule_names(&self) -> impl Iterator<Item = String> + '_ {
+        self.tracks
+            .iter()
+            .filter_map(|(definition, _, source)| source.map(|_| definition.score_name()))
+    }
+
+    pub fn extend_scene_meta(&self, meta: &mut Vec<RuleSceneMeta>) {
+        for (_, _, source) in &self.tracks {
+            if let Some(source) = source {
+                meta.push(meta[*source].clone());
+            }
+        }
+    }
+
     pub fn expressions(&self) -> Vec<&crate::expr::parser::Stmts> {
         self.tracks
             .iter()
@@ -223,7 +237,7 @@ impl ScoringTrackingPlan {
         start: &str,
         code: &str,
         total: &mut [f64],
-        details: &mut [RuleScoreSeries],
+        details: &mut Vec<RuleScoreSeries>,
     ) -> Result<Vec<TrackingScoreState>, String> {
         if self.is_empty() {
             return Ok(Vec::new());
@@ -272,6 +286,11 @@ impl ScoringTrackingPlan {
         });
         let (from, mut states) = checkpoint.unwrap_or_default();
         for (definition, program, source) in &self.tracks {
+            let mut contribution = source.map(|_| RuleScoreSeries {
+                name: definition.score_name(),
+                series: vec![0.0; dates.len()],
+                triggered: vec![false; dates.len()],
+            });
             let prepared = program.prepare(rt)?;
             let state = states.entry(definition.id.clone()).or_default();
             let mut index = dates
@@ -295,11 +314,14 @@ impl ScoringTrackingPlan {
                 };
                 let score =
                     prepared.advance(state, definition, session, quoted_index, rt, source_score)?;
-                if let (Some(index), Some(source)) = (quoted_index, source) {
+                if let (Some(index), Some(contribution)) = (quoted_index, &mut contribution) {
                     total[index] += score;
-                    details[*source].series[index] += score;
-                    details[*source].triggered[index] |= score != 0.0;
+                    contribution.series[index] = score;
+                    contribution.triggered[index] = score != 0.0;
                 }
+            }
+            if let Some(contribution) = contribution {
+                details.push(contribution);
             }
         }
         let checkpoint = RankingTrackCheckpoint {

@@ -750,6 +750,16 @@ pub fn get_scene_statistics_page(
                 for rule in rules {
                     out.entry(rule.scene_name).or_default().insert(rule.name);
                 }
+                let config = crate::data::ScoreConfig::load(source_path)?;
+                for track in config.track.iter().filter(|track| track.enabled) {
+                    if let Some(source) = config.rule.iter().find(|rule| {
+                        rule.id.as_ref() == track.source.as_ref() && track.source.is_some()
+                    }) && let Some(names) = out.get_mut(&source.scene_name)
+                        && names.contains(&source.name)
+                    {
+                        names.insert(track.score_name());
+                    }
+                }
 
                 Ok(out)
             })(&source_path)?;

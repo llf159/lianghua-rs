@@ -12,7 +12,7 @@ use crate::{data::result_db_path, scoring_model::ScoreSummary};
 
 const EPS: f64 = 1e-12;
 const MAX_LAYER_COUNT: usize = 100;
-const DEFAULT_TOP_KS: [usize; 4] = [1, 5, 20, 100];
+const DEFAULT_TOP_KS: [usize; 6] = [1, 5, 20, 100, 500, 1000];
 
 pub const DEFAULT_CONVOLUTION_KERNEL_NAME: &str = "H30-L50";
 pub const DEFAULT_CONVOLUTION_WINDOW: usize = 30;
@@ -1722,7 +1722,16 @@ mod tests {
             .find(|item| item.top_k == 5)
             .expect("Top 5 summary");
         assert_eq!(top_five.sample_count, 6);
-        assert_eq!(metrics.top_k_period_summaries.len(), 8);
+        for top_k in [500, 1000] {
+            let summary = metrics
+                .top_k_summaries
+                .iter()
+                .find(|item| item.top_k == top_k)
+                .expect("Expanded Top-K summary");
+            assert_eq!(summary.sample_count, 6);
+            assert_opt_close(summary.avg_daily_residual_return, Some(1.0 / 3.0));
+        }
+        assert_eq!(metrics.top_k_period_summaries.len(), 12);
         assert!(
             metrics
                 .top_k_period_summaries
@@ -1738,14 +1747,14 @@ mod tests {
     }
 
     #[test]
-    fn rank_metrics_select_top_hundred_without_sorting_the_full_day() {
+    fn rank_metrics_select_top_thousand_without_sorting_the_full_day() {
         let trade_date = "20240102";
-        let samples = (1..=150)
+        let samples = (1..=1500)
             .rev()
             .map(|rank| RuleLayerSamplePoint {
                 ts_code: format!("{rank:06}.SZ"),
                 trade_date: trade_date.to_string(),
-                rule_score: (151 - rank) as f64,
+                rule_score: (1501 - rank) as f64,
                 residual_return: rank as f64,
                 er_change: 0.0,
             })
@@ -1761,7 +1770,7 @@ mod tests {
                     )
                 })
                 .collect(),
-            day_max_ranks: HashMap::from([(trade_date.to_string(), 150)]),
+            day_max_ranks: HashMap::from([(trade_date.to_string(), 1500)]),
         };
 
         let metrics = calc_rank_layer_metrics_with_lookup(
@@ -1778,7 +1787,14 @@ mod tests {
         )
         .expect("rank metrics should build");
 
-        for (top_k, expected_avg) in [(1, 1.0), (5, 3.0), (20, 10.5), (100, 50.5)] {
+        for (top_k, expected_avg) in [
+            (1, 1.0),
+            (5, 3.0),
+            (20, 10.5),
+            (100, 50.5),
+            (500, 250.5),
+            (1000, 500.5),
+        ] {
             let summary = metrics
                 .top_k_summaries
                 .iter()

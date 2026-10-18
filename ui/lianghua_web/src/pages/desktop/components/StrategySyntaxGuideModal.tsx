@@ -87,6 +87,7 @@ const SYNTAX_GUIDE_FIELD_SECTIONS: SyntaxGuideFieldSection[] = [
     fields: [
       { name: 'ZHANG', scope: '通用', description: '涨停幅比例，例如普通股约 0.095、创业板/科创板约 0.195、北交所约 0.295、ST 约 0.045。', example: 'PCT_CHG >= ZHANG * 100' },
       { name: 'TOTAL_MV_YI', scope: '通用', description: '推测流通市值，单位“亿”；AMOUNT（千元） ÷ TOR（%） ÷ 1000，按成交均价计价。成交额或换手率缺失、非正时为空。', example: 'TOTAL_MV_YI <= 300' },
+      { name: 'REST_DAYS', scope: '通用', description: '按已下载交易日历计算，当日至下一市场交易日相隔的自然日数；普通周五为3，长假前通常至少4。日历末日或未收录日期为空，不用个股停牌天数推算。', example: 'REST_DAYS >= 4 AND PCT_CHG < 0 AND V < REF(V,1)' },
       { name: 'S_RANK', scope: '通用', description: '走势相似榜排名；按已计算并保存的交易日逐日注入，未计算日期为空值。', example: 'S_RANK <= 100' },
       { name: 'I / ISZ / I300', scope: '通用', description: '上证指数 / 深证成指 / 沪深300 的日涨幅，单位是百分比。', example: 'PCT_CHG > I300 + 2' },
       { name: 'I500 / ICY / I50 / I1000', scope: '通用', description: '中证500 / 创业板指 / 上证50 / 中证1000 的日涨幅，单位是百分比。', example: 'I1000 > I50' },

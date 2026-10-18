@@ -22,7 +22,7 @@ use scoring::tracking::input_stamp;
 
 static TRACKING_RUN: Mutex<()> = Mutex::new(());
 // Bump when expression or event semantics change; cached states must then be replayed.
-const TRACKING_VERSION: u32 = 4;
+const TRACKING_VERSION: u32 = 5;
 
 #[derive(Serialize)]
 pub struct TrackingSource {
@@ -714,11 +714,21 @@ bonus_points = 1.0
         assert_eq!(page.resumed_symbols, 1);
         assert_eq!(page.rows[0].captured["A_LOW"], 7.0);
         assert!(page.rows[0].stopped.is_none());
-        let page = run_strategy_tracking(dir, Some("20240112")).unwrap();
-        assert_eq!(page.rows[0].started, "20240110");
-        assert_eq!(page.rows[0].source_score, Some(6.0));
+        let page = run_strategy_tracking(dir, Some("20240110")).unwrap();
+        assert_eq!(page.rows[0].started, "20240102");
+        assert!(!page.rows[0].observing);
+        assert_eq!(page.rows[0].score, 5.0);
+        let page = run_strategy_tracking(dir, Some("20240111")).unwrap();
+        assert_eq!(page.rows[0].started, "20240102");
+        assert_eq!(page.rows[0].source_score, Some(7.0));
         assert_eq!(page.rows[0].reason.as_deref(), Some("missing_quote"));
         assert!(!page.rows[0].signal_today);
+        assert!(
+            run_strategy_tracking(dir, Some("20240112"))
+                .unwrap()
+                .rows
+                .is_empty()
+        );
         assert!(run_strategy_tracking(dir, None).unwrap().rows.is_empty());
         assert_eq!(fs::read(data::score_rule_path(dir)).unwrap(), config);
         assert!(!data::result_db_path(dir).exists());
@@ -733,8 +743,39 @@ bonus_points = 1.0
         let result = data::open_db_readonly(data::result_db_path(dir)).unwrap();
         let score: f64 = result.query_row("SELECT total_score FROM score_summary WHERE ts_code='000001.SZ' AND trade_date='20240104'", [], |row| row.get(0)).unwrap();
         assert_eq!(score, 55.0);
+        let tracking_score: f64 = result.query_row("SELECT rule_score FROM rule_details WHERE ts_code='000001.SZ' AND trade_date='20240104' AND rule_name='跟踪·先缩量后反弹'", [], |row| row.get(0)).unwrap();
+        assert_eq!(tracking_score, 5.0);
+        let raw_count: i64 = result.query_row("SELECT count(*) FROM rule_details WHERE ts_code='000001.SZ' AND trade_date='20240104' AND rule_name='组合起点'", [], |row| row.get(0)).unwrap();
+        assert_eq!(raw_count, 0);
         let previous = load_snapshot(dir).unwrap().unwrap().stocks;
         drop(result);
+        let defaults = crate::statistics::get_rule_layer_backtest_defaults(dir.into()).unwrap();
+        assert!(
+            defaults
+                .rule_options
+                .iter()
+                .any(|name| name == "跟踪·先缩量后反弹")
+        );
+        let (memory, profile) = scoring::runner::scoring_all_to_memory_with_mode(
+            dir,
+            None,
+            "qfq",
+            "20240102",
+            "20240104",
+            scoring::runner::ScoringMemoryMode::RuleBacktest,
+        )
+        .unwrap();
+        let tracked = memory
+            .compact_rule_rows
+            .iter()
+            .find(|row| {
+                let summary = &memory.summary_rows[row.summary_index as usize];
+                profile.rule_names[row.rule_id as usize] == "跟踪·先缩量后反弹"
+                    && summary.ts_code == "000001.SZ"
+                    && summary.trade_date == "20240104"
+            })
+            .unwrap();
+        assert_eq!(tracked.rule_score, 5.0);
         scoring::runner::scoring_all_to_db(dir, None, "qfq", "20240102", "20240104", None).unwrap();
         let full = load_snapshot(dir).unwrap().unwrap().stocks;
         for (code, checkpoint) in &previous {
@@ -768,6 +809,7 @@ bonus_points = 1.0
         draft.name = "新规则带跟踪".into();
         let mut attached = cfg.track[0].clone();
         attached.id = "attached".into();
+        attached.name = "新规则带跟踪".into();
         attached.source = Some("self".into());
         draft.tracking = Some(vec![attached]);
         let page = super::super::manage::create_strategy_manage_rule(dir, draft.clone()).unwrap();

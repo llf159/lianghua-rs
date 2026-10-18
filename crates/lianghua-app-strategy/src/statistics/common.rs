@@ -113,5 +113,28 @@ pub(in crate::statistics) fn load_rule_meta(
         );
     }
 
+    let config = crate::data::ScoreConfig::load(source_path)?;
+    for track in config.track.iter().filter(|track| track.enabled) {
+        let Some(source) = config
+            .rule
+            .iter()
+            .find(|rule| rule.id.as_ref() == track.source.as_ref() && track.source.is_some())
+        else {
+            continue;
+        };
+        if !meta_map.contains_key(&source.name) {
+            continue;
+        }
+        let name = track.score_name();
+        order.push(name.clone());
+        meta_map.insert(name, RuleMeta {
+            when: track.signal.clone().unwrap_or_else(|| "1".into()),
+            explain: format!("来源：{}；独立跟踪计分，观察期限 {} 个市场交易日，已得分保留至明确失效或计分结束。", source.name, track.ttl),
+            trigger_mode: "tracking".into(),
+            is_each: false,
+            points: track.points + track.steps.iter().map(|step| step.points).sum::<f64>(),
+        });
+    }
+
     Ok((order, meta_map))
 }

@@ -71,6 +71,7 @@ const KNOWN_EXPRESSION_IDENTIFIERS = new Set([
   "S_RANK",
   "ZHANG",
   "TOTAL_MV_YI",
+  "REST_DAYS",
   "TIME",
   "RT_OP",
   "RT_FH",

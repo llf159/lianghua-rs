@@ -18,9 +18,12 @@ __pycache__
 market*
 !crates/lianghua-app-strategy/src/statistics/market_activity.rs
 !crates/lianghua-app-strategy/src/statistics/market_activity_model.json
-/src/bin
-research
-scripts
+# 本地研究脚本、报告和实验结果
+/src/bin/
+/research/
+/scripts/
+/crates/lianghua-app-strategy/src/bin/structure_cycle_research.rs
+/crates/lianghua-scoring/src/bin/tracking_research.rs
 
 # 本地研究记录（兼容旧根目录位置）
 /RESEARCH_SUMMARY.md

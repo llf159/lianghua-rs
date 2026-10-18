@@ -677,7 +677,7 @@ pub fn scoring_all_to_db(
         },
         end_date,
     )?;
-    let rule_scene_meta: Vec<RuleSceneMeta> =
+    let mut rule_scene_meta: Vec<RuleSceneMeta> =
         ScoreRule::load_rules_with_strategy_path(source_dir, strategy_path)?
             .into_iter()
             .map(|rule| RuleSceneMeta {
@@ -685,6 +685,7 @@ pub fn scoring_all_to_db(
                 stage: rule.stage,
             })
             .collect();
+    tracking.extend_scene_meta(&mut rule_scene_meta);
     let scenes = ScoreScene::load_scenes_with_strategy_path(source_dir, strategy_path)?;
     let prepare_ms = prepare_started_at.elapsed().as_millis() as u64;
 
@@ -813,7 +814,11 @@ pub fn scoring_all_to_db(
         stock_count: tc_list.len(),
         writer,
         warnings,
-        rule_names: rules_cache.iter().map(|rule| rule.name.clone()).collect(),
+        rule_names: rules_cache
+            .iter()
+            .map(|rule| rule.name.clone())
+            .chain(tracking.score_rule_names())
+            .collect(),
     };
     (|profile: &ScoringRunProfile| {
         println!(
@@ -952,7 +957,7 @@ pub fn scoring_all_to_memory_with_mode(
         },
         end_date,
     )?;
-    let rule_scene_meta: Vec<RuleSceneMeta> =
+    let mut rule_scene_meta: Vec<RuleSceneMeta> =
         ScoreRule::load_rules_with_strategy_path(source_dir, strategy_path)?
             .into_iter()
             .map(|rule| RuleSceneMeta {
@@ -960,6 +965,7 @@ pub fn scoring_all_to_memory_with_mode(
                 stage: rule.stage,
             })
             .collect();
+    tracking.extend_scene_meta(&mut rule_scene_meta);
     let scenes = ScoreScene::load_scenes_with_strategy_path(source_dir, strategy_path)?;
     let prepare_ms = prepare_started_at.elapsed().as_millis() as u64;
 
@@ -1034,7 +1040,11 @@ pub fn scoring_all_to_memory_with_mode(
             ..ScoreWriteProfile::default()
         },
         warnings,
-        rule_names: rules_cache.iter().map(|rule| rule.name.clone()).collect(),
+        rule_names: rules_cache
+            .iter()
+            .map(|rule| rule.name.clone())
+            .chain(tracking.score_rule_names())
+            .collect(),
     };
     Ok((batch, profile))
 }
@@ -1115,7 +1125,7 @@ pub fn scoring_single_period(
         st_list.contains(ts_code),
         total_share_map.get(ts_code).copied(),
     )?;
-    let rule_scene_meta: Vec<RuleSceneMeta> =
+    let mut rule_scene_meta: Vec<RuleSceneMeta> =
         ScoreRule::load_rules_with_strategy_path(source_dir, strategy_path)?
             .into_iter()
             .map(|rule| RuleSceneMeta {
@@ -1123,6 +1133,7 @@ pub fn scoring_single_period(
                 stage: rule.stage,
             })
             .collect();
+    tracking.extend_scene_meta(&mut rule_scene_meta);
     let scenes = ScoreScene::load_scenes_with_strategy_path(source_dir, strategy_path)?;
     let (summary, details, _, scenes, _, _) = scoring_single_core(
         row_data,

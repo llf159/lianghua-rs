@@ -22,6 +22,7 @@ pub struct TrackDefinition {
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// Optional explicit trigger; source still identifies the score's scene and stage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start: Option<String>,
     pub ttl: usize,
@@ -472,9 +473,11 @@ impl TrackProgram {
                 .start
                 .as_deref()
                 .is_some_and(|s| s.trim().is_empty())
-            || definition.source.is_some() == definition.start.is_some()
+            || (definition.source.is_none() && definition.start.is_none())
         {
-            return Err("跟踪须选择原规则或填写开始表达式，且只能选择一种起点".to_string());
+            return Err(
+                "跟踪须关联原规则或填写开始表达式；已填写时以开始表达式建立起点".to_string(),
+            );
         }
         for name in definition.capture.keys() {
             if !name.starts_with("A_")
@@ -572,11 +575,13 @@ impl TrackProgram {
 }
 
 impl TrackDefinition {
+    pub fn score_name(&self) -> String {
+        format!("跟踪·{}", self.name)
+    }
+
     pub fn expired(&self, event: &TrackEvent, session: usize) -> bool {
         session.saturating_sub(event.started) > self.ttl
-            && (event.stopped.is_some()
-                || self.score_until.is_none()
-                || event.score_started.is_none())
+            && (event.stopped.is_some() || event.score_started.is_none())
     }
 }
 
@@ -957,7 +962,7 @@ mod tests {
             id: "hold".into(),
             name: "hold".into(),
             enabled: true,
-            source: None,
+            source: Some("discovery".into()),
             start: Some("C = 10".into()),
             ttl: 2,
             capture: BTreeMap::new(),
@@ -991,7 +996,7 @@ mod tests {
         let scores = (0..6)
             .map(|day| {
                 program
-                    .advance(&mut state, &definition, day, Some(day), &rt, None)
+                    .advance(&mut state, &definition, day, Some(day), &rt, Some(0.0))
                     .unwrap()
             })
             .collect::<Vec<_>>();
@@ -1027,6 +1032,87 @@ mod tests {
             invalid.advance(3, &definition, evidence);
             assert!(invalid.event.as_ref().unwrap().stopped.is_some());
         }
+    }
+
+    #[test]
+    fn awarded_points_survive_ttl_until_logic_is_invalidated() {
+        let mut definition = TrackDefinition {
+            id: "logic".into(),
+            name: "logic".into(),
+            enabled: true,
+            source: Some("rule".into()),
+            start: None,
+            ttl: 2,
+            capture: BTreeMap::from([("A_LOW".into(), "C * 0.9".into())]),
+            invalidate: Some("C < A_LOW".into()),
+            eligible: Some("C <= 11".into()),
+            steps: vec![TrackStep {
+                name: "progress".into(),
+                when: "C > 10".into(),
+                points: 2.0,
+            }],
+            signal: Some("C > 11".into()),
+            points: 3.0,
+            score_until: None,
+        };
+        let rt = Runtime {
+            vars: HashMap::from([(
+                "C".into(),
+                Value::NumSeries(vec![
+                    Some(10.0),
+                    Some(11.0),
+                    Some(10.0),
+                    Some(12.0),
+                    Some(8.0),
+                    Some(10.0),
+                ]),
+            )]),
+        };
+        let compiled = TrackProgram::compile(&definition).unwrap();
+        let program = compiled.prepare(&rt).unwrap();
+        let mut state = TrackState::default();
+        let mut resumed = TrackState::default();
+        for day in 0..6 {
+            let score = program
+                .advance(&mut state, &definition, day, Some(day), &rt, Some(6.0))
+                .unwrap();
+            assert_eq!(score, [0.0, 2.0, 2.0, 2.0, 0.0, 0.0][day]);
+            if day == 2 {
+                resumed = state.clone();
+            } else if day > 2 {
+                compiled
+                    .prepare(&rt)
+                    .unwrap()
+                    .advance(&mut resumed, &definition, day, Some(day), &rt, Some(6.0))
+                    .unwrap();
+                assert_eq!(state, resumed);
+            }
+            if day == 3 {
+                let event = state.event.as_ref().unwrap();
+                assert_eq!(event.started, 0);
+                assert_eq!(event.completed, vec![1]);
+                assert_eq!(event.first_signal, None);
+                assert!(!definition.expired(event, day));
+            }
+            if day == 4 {
+                assert_eq!(
+                    state.event.as_ref().unwrap().reason.as_deref(),
+                    Some("invalidated")
+                );
+            }
+        }
+        assert_eq!(state.event.as_ref().unwrap().started, 5);
+        // A zero-point observation still expires; TTL does not create an immortal waiting event.
+        definition.steps[0].points = 0.0;
+        let compiled = TrackProgram::compile(&definition).unwrap();
+        let program = compiled.prepare(&rt).unwrap();
+        let mut state = TrackState::default();
+        for day in 0..4 {
+            program
+                .advance(&mut state, &definition, day, Some(day), &rt, Some(6.0))
+                .unwrap();
+        }
+        assert_eq!(state.event.as_ref().unwrap().started, 3);
     }
 
     #[test]

@@ -736,7 +736,7 @@ fn apply_rule_tracking(
             return Err(format!("跟踪ID重复：{}", track.id));
         }
         track.source = Some(source.clone());
-        track.start = None;
+        track.start = track.start.take().filter(|value| !value.trim().is_empty());
         TrackProgram::compile(track)
             .map_err(|error| format!("后续跟踪 {}：{error}", track.name))?;
     }
@@ -1176,8 +1176,8 @@ mod tests {
     use duckdb::{Connection, params};
 
     use super::{
-        StrategyManageRuleDraft, check_strategy_manage_rule_draft, parse_rule_file_text,
-        set_strategy_manage_rule_enabled, set_strategy_manage_scene_enabled,
+        StrategyManageRuleDraft, apply_rule_tracking, check_strategy_manage_rule_draft,
+        parse_rule_file_text, set_strategy_manage_rule_enabled, set_strategy_manage_scene_enabled,
     };
     use crate::data::source_db_path;
 
@@ -1187,6 +1187,42 @@ mod tests {
             .expect("clock")
             .as_nanos();
         std::env::temp_dir().join(format!("lianghua_strategy_manage_{unique}"))
+    }
+
+    #[test]
+    fn editing_zero_score_rule_preserves_explicit_tracking_start() {
+        let mut file = parse_rule_file_text(
+            r#"
+version = 1
+scene = []
+[[rule]]
+id = "discovery"
+name = "发现"
+scene = "洗盘"
+kind = "single"
+stage = "confirm"
+scope_windows = 1
+scope_way = "LAST"
+when = "C > O"
+points = 0.0
+explain = "观察"
+[[track]]
+id = "confirmation"
+name = "确认"
+source = "discovery"
+start = "C > O"
+ttl = 20
+points = 3.0
+"#,
+        )
+        .expect("parse zero-score discovery and explicit start");
+        let tracking = file.track.clone();
+        apply_rule_tracking(&mut file, "发现", Some(tracking)).expect("edit rule tracking");
+        let saved = toml::to_string(&file).expect("serialize edited rule");
+        let saved = parse_rule_file_text(&saved).expect("reload edited rule");
+        assert_eq!(saved.track[0].source.as_deref(), Some("discovery"));
+        assert_eq!(saved.track[0].start.as_deref(), Some("C > O"));
+        assert_eq!(saved.track[0].points, 3.0);
     }
 
     #[test]

@@ -1221,7 +1221,7 @@ export default function SceneLayerBacktestPage() {
             <div className="scene-layer-layer-summary">
               <h3>Top-K 直接组合检验（每日等权）</h3>
               <p className="scene-layer-caption">
-                直接检验实际会买到的头部股票；当日不足 K 只使用有效样本，HAC t值按持有期重叠修正标准误，避免普通t值虚高。
+                在有效后验样本中按原排名取前 K 只，缺数据时可能补入原榜更靠后的股票；这是等权收益统计，未模拟连续持仓。HAC t值按持有期重叠修正标准误。
               </p>
               <div className="scene-layer-contrib-table-wrap">
                 <table className="scene-layer-contrib-table">

@@ -1731,16 +1731,32 @@ pub fn get_stock_detail_strategy_snapshot(
             let config: ScoreConfig =
                 toml::from_str(&text).map_err(|e| format!("解析规则文件失败: {e}"))?;
 
-            Ok(config
+            let mut metadata = config
                 .rule
-                .into_iter()
+                .iter()
                 .map(|rule| RuleMeta {
-                    rule_name: rule.name,
-                    scene_name: rule.scene_name,
-                    explain: rule.explain,
-                    when: rule.when,
+                    rule_name: rule.name.clone(),
+                    scene_name: rule.scene_name.clone(),
+                    explain: rule.explain.clone(),
+                    when: rule.when.clone(),
                 })
-                .collect())
+                .collect::<Vec<_>>();
+            for track in config.track.iter().filter(|track| track.enabled) {
+                if let Some(source) = config.rule.iter().find(|rule| {
+                    track.source.is_some() && rule.id.as_ref() == track.source.as_ref()
+                }) {
+                    metadata.push(RuleMeta {
+                        rule_name: track.score_name(),
+                        scene_name: source.scene_name.clone(),
+                        explain: format!(
+                            "{}的独立后续跟踪分；已得分保留至策略失效或计分结束。",
+                            source.name
+                        ),
+                        when: track.signal.clone().unwrap_or_else(|| "1".into()),
+                    });
+                }
+            }
+            Ok(metadata)
         })(source_path)?;
 
         let mut triggered = Vec::new();
