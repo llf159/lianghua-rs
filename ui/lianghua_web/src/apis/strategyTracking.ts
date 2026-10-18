@@ -5,6 +5,7 @@ export type TrackDefinition = {
   source?: string
   start?: string
   ttl: number
+  max_age?: number
   capture?: Record<string, string>
   invalidate?: string
   eligible?: string

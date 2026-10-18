@@ -72,6 +72,7 @@ export default function StrategyRuleTrackingEditor({
                         enabled,
                         source: 'self',
                         ttl: 20,
+                        max_age: 20,
                         steps: [],
                       },
                     ],
@@ -132,6 +133,20 @@ export default function StrategyRuleTrackingEditor({
                           onChange={(event) =>
                             updateTrack(index, { ttl: Number(event.target.value) })
                           }
+                        />
+                        <span>个市场交易日</span>
+                      </div>
+                    </label>
+                    <label className="strategy-manage-field">
+                      <span>跟踪总期限（含保分）</span>
+                      <div>
+                        <input
+                          type="number"
+                          min={item.ttl || 1}
+                          step="1"
+                          inputMode="numeric"
+                          value={item.max_age ?? item.ttl ?? ''}
+                          onChange={(event) => updateTrack(index, { max_age: Number(event.target.value) })}
                         />
                         <span>个市场交易日</span>
                       </div>
@@ -348,7 +363,7 @@ export default function StrategyRuleTrackingEditor({
                   <details className="strategy-rule-tracking-detail">
                     <summary>
                       <strong>计分保留到何时</strong>
-                      <span>{item.score_until?.trim() ? '按表达式结束' : '默认保留至策略失效'}</span>
+                      <span>{item.score_until?.trim() ? '按表达式结束' : '最迟到跟踪总期限结束'}</span>
                     </summary>
                     <div className="strategy-rule-tracking-detail-body">
                       <label className="strategy-manage-field">
@@ -364,18 +379,18 @@ export default function StrategyRuleTrackingEditor({
                         />
                       </label>
                       <p className="strategy-manage-note">
-                        留空时，已得分超过观察期限仍保留，直到策略失效。填写后，条件为真当天停止并清零，优先于当天步骤和确认；例如 SCORE_AGE &gt;= 5 表示首次得分后第 5 日结束。
+                        已得分最迟在跟踪总期限结束后清零，也可因策略失效提前结束。填写结束条件后，条件为真当天停止并清零，优先于当天步骤和确认；例如 SCORE_AGE &gt;= 5 表示首次得分后第 5 日结束。
                       </p>
                     </div>
                   </details>
                   <details className="strategy-rule-editor-help">
                     <summary>跟踪说明与变量</summary>
                     <ul>
-                      <li>起点当天为第 0 日，之后按市场交易日观察；原条件不再满足仍可跟踪。重复发现不换起点、不续期。</li>
+                      <li>起点当天为第 0 日，之后按市场交易日观察；原条件不再满足仍可跟踪。只在最近的跟踪总期限内选择起点，窗口内重复发现不换起点、不续期。</li>
                       <li>冻结值只在起点取一次，后续通过 A_变量引用。</li>
                       <li>永久失效会结束事件；当日资格不满足只跳过当天，不撤回已取得的分数。缺行情或必要指标也会结束事件并清零，原期限结束后才允许新建。</li>
                       <li>步骤按顺序完成，每天最多一步；步骤分当天取得并保留。确认条件最早在全部步骤完成后的下一市场交易日判断，留空表示符合资格即成立；确认分只增加一次，与步骤分相加。</li>
-                      <li>观察期限只限制等待新步骤和确认；尚未得分的事件到期结束，已得分的事件保留原起点和分数，直到策略失效或计分结束条件成立。</li>
+                      <li>观察期限限制新步骤和确认；跟踪总期限从起点计算，到期后包含已得分在内全部清零。起点为第 0 日，总期限第 N 日仍有效，第 N+1 日到期。</li>
                       <li>AGE：距起点日数；SCORE_AGE：首次得分后日数；SIGNAL_AGE：首次确认后日数。尚未得分或确认时对应值为 -1。COMPLETED_STEPS：已完成步骤数；TRIGGER_SCORE：起点分值。</li>
                       <li>跟踪独立计分，在规则明细与回测中以「跟踪·名称」单列；与原策略分一起计入总分。保存后计算排名会更新结果，也可单独回放。分值可填负数，填 0 只观察。</li>
                     </ul>

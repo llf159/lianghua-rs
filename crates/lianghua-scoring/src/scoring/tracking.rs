@@ -19,7 +19,7 @@ use crate::data::{self, RuntimeKeyCollectOptions, ScoreConfig};
 pub fn config_hash(config: &str) -> String {
     let mut hash = DefaultHasher::new();
     // Invalidate checkpoints when scoring/event semantics change.
-    5u32.hash(&mut hash);
+    6u32.hash(&mut hash);
     config.hash(&mut hash);
     hash.finish().to_string()
 }
@@ -69,7 +69,6 @@ pub struct ScoringTrackingPlan {
     config_hash: String,
     stamp: String,
     computed_at: u128,
-    previous: HashMap<String, (String, RankingTrackCheckpoint)>,
     config_path: std::path::PathBuf,
 }
 
@@ -116,31 +115,6 @@ impl ScoringTrackingPlan {
         calendar.sort();
         calendar.dedup();
         let config_hash = config_hash(&config);
-        let mut previous = HashMap::new();
-        if !tracks.is_empty() && data::result_db_path(source).exists() {
-            let conn =
-                data::open_db_readonly(data::result_db_path(source)).map_err(|e| e.to_string())?;
-            let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name='strategy_tracking_state')", [], |row| row.get(0)).map_err(|e| e.to_string())?;
-            if exists {
-                let mut stmt = conn.prepare("SELECT ts_code, trade_date, state_json FROM strategy_tracking_state WHERE config_hash=?").map_err(|e| e.to_string())?;
-                let rows = stmt
-                    .query_map([&config_hash], |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                        ))
-                    })
-                    .map_err(|e| e.to_string())?;
-                for row in rows {
-                    let (code, date, state) = row.map_err(|e| e.to_string())?;
-                    // An unusable checkpoint is an optimization miss, never a scoring failure.
-                    if let Ok(state) = serde_json::from_str(&state) {
-                        previous.insert(code, (date, state));
-                    }
-                }
-            }
-        }
         Ok(Self {
             config_path: data::resolve_strategy_path(source, strategy_path),
             tracks,
@@ -148,7 +122,6 @@ impl ScoringTrackingPlan {
             calendar,
             config_hash,
             stamp: input_stamp(source)?.to_string(),
-            previous,
             computed_at: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_err(|e| e.to_string())?
@@ -185,6 +158,30 @@ impl ScoringTrackingPlan {
 
     pub fn is_empty(&self) -> bool {
         self.tracks.is_empty()
+    }
+
+    pub fn warmup_need(&self, base: usize) -> Result<usize, String> {
+        let mut need = base;
+        for (definition, program, _) in &self.tracks {
+            let expression_need = program
+                .expressions()
+                .into_iter()
+                .map(|expression| {
+                    lianghua_core::expr::validation::estimate_expression_warmup(
+                        expression.program(),
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .max()
+                .unwrap_or(0);
+            need = need.max(
+                definition
+                    .max_age()
+                    .saturating_add(base.max(expression_need)),
+            );
+        }
+        Ok(need)
     }
 
     pub fn score_rule_names(&self) -> impl Iterator<Item = String> + '_ {
@@ -251,10 +248,10 @@ impl ScoringTrackingPlan {
             .iter()
             .map(|&index| (index, details[index].series.clone()))
             .collect::<HashMap<_, _>>();
-        let signature = |limit: &str, sessions: usize| {
+        let signature = {
             let mut hash = DefaultHasher::new();
-            self.calendar[..sessions].hash(&mut hash);
-            let count = dates.partition_point(|date| date.as_str() <= limit);
+            self.calendar.hash(&mut hash);
+            let count = dates.partition_point(|date| date.as_str() <= as_of.as_str());
             dates[..count].hash(&mut hash);
             let mut keys = rt.vars.keys().collect::<Vec<_>>();
             keys.sort();
@@ -276,58 +273,32 @@ impl ScoringTrackingPlan {
             }
             hash.finish()
         };
-        let checkpoint = self.previous.get(code).and_then(|(date, old)| {
-            if date.as_str() >= start {
-                return None;
-            }
-            let session = self.calendar.binary_search(date).ok()?;
-            (old.signature == signature(date, session + 1))
-                .then_some((session + 1, old.states.clone()))
-        });
-        let (from, mut states) = checkpoint.unwrap_or_default();
+        let mut states = BTreeMap::new();
         for (definition, program, source) in &self.tracks {
-            let mut contribution = source.map(|_| RuleScoreSeries {
-                name: definition.score_name(),
-                series: vec![0.0; dates.len()],
-                triggered: vec![false; dates.len()],
-            });
-            let prepared = program.prepare(rt)?;
-            let state = states.entry(definition.id.clone()).or_default();
-            let mut index = dates
-                .partition_point(|date| self.calendar.get(from).is_some_and(|start| date < start));
-            for (session, date) in self.calendar.iter().enumerate().skip(from) {
-                while index < dates.len() && dates[index] < *date {
-                    index += 1;
+            let (scores, state) = program.rolling_scores(
+                definition,
+                rt,
+                dates,
+                &self.calendar,
+                start,
+                source.map(|index| sources[&index].as_slice()),
+            )?;
+            if source.is_some() {
+                for (value, score) in total.iter_mut().zip(&scores) {
+                    *value += score;
                 }
-                let quoted_index = (dates.get(index) == Some(date)).then_some(index);
-                let source_score = if state
-                    .event
-                    .as_ref()
-                    .is_none_or(|event| definition.expired(event, session))
-                {
-                    match (source, quoted_index) {
-                        (Some(source), Some(index)) => Some(sources[source][index]),
-                        _ => None,
-                    }
-                } else {
-                    None
-                };
-                let score =
-                    prepared.advance(state, definition, session, quoted_index, rt, source_score)?;
-                if let (Some(index), Some(contribution)) = (quoted_index, &mut contribution) {
-                    total[index] += score;
-                    contribution.series[index] = score;
-                    contribution.triggered[index] = score != 0.0;
-                }
+                details.push(RuleScoreSeries {
+                    name: definition.score_name(),
+                    triggered: scores.iter().map(|score| *score != 0.0).collect(),
+                    series: scores,
+                });
             }
-            if let Some(contribution) = contribution {
-                details.push(contribution);
-            }
+            states.insert(definition.id.clone(), state);
         }
         let checkpoint = RankingTrackCheckpoint {
             computed_at: self.computed_at,
-            resumed: from > 0,
-            signature: signature(as_of, self.calendar.len()),
+            resumed: false,
+            signature,
             states,
         };
         Ok(vec![TrackingScoreState {

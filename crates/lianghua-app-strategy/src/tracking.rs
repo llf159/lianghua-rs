@@ -22,7 +22,7 @@ use scoring::tracking::input_stamp;
 
 static TRACKING_RUN: Mutex<()> = Mutex::new(());
 // Bump when expression or event semantics change; cached states must then be replayed.
-const TRACKING_VERSION: u32 = 5;
+const TRACKING_VERSION: u32 = 6;
 
 #[derive(Serialize)]
 pub struct TrackingSource {
@@ -418,13 +418,17 @@ pub fn run_strategy_tracking(
         .chain(rules.iter().flat_map(|rule| rule.expression_programs()))
         .collect();
     let chip_keys = scoring::tools::collect_used_cyq_chen_runtime_keys(&expressions);
+    let plan = scoring::tracking::ScoringTrackingPlan::load(source, None, &rules, &as_of)?;
+    let warmup_need = plan.warmup_need(scoring::tools::warmup_rows_estimate(source, None)?)?;
+    let query_start = scoring::tools::calc_query_start_date(source, warmup_need, &as_of)?;
+
     scoring::runner::ensure_expression_dependencies_ready(
         source,
         &expressions,
         &chip_keys,
-        &calendar[0],
         &as_of,
-        0,
+        &as_of,
+        warmup_need,
         None,
         "qfq",
     )?;
@@ -448,7 +452,7 @@ pub fn run_strategy_tracking(
         },
     );
     let reader = DataReader::new_with_runtime_keys(source, &required)?;
-    let symbols = reader.list_ts_code("qfq", "00000000", &as_of)?;
+    let symbols = reader.list_ts_code("qfq", &query_start, &as_of)?;
     let chips = scoring::tools::CyqChenFieldInjector::new(source, &chip_keys);
     let similarity = scoring::tools::SimilarityRankFieldInjector::new(
         source,
@@ -459,12 +463,12 @@ pub fn run_strategy_tracking(
     let st_list = scoring::tools::load_st_list(source)?;
     let mut warnings = HashSet::new();
     let mut stocks = BTreeMap::new();
-    let mut resumed_symbols = 0;
-    let reusable = previous
-        .as_ref()
-        .filter(|s| s.config == config && s.as_of <= as_of && calendar.starts_with(&s.calendar));
+    let resumed_symbols = 0;
     for code in symbols {
-        let mut row = reader.load_one(&code, "qfq", "00000000", &as_of)?;
+        let mut row = reader.load_one(&code, "qfq", &query_start, &as_of)?;
+        if row.trade_dates.len() < warmup_need.saturating_add(1) {
+            row = reader.load_one_tail_rows(&code, "qfq", &as_of, warmup_need.saturating_add(1))?;
+        }
         scoring::tools::inject_stock_extra_fields(&mut row, &code, st_list.contains(&code), None)?;
         warnings.extend(chips.inject(&mut row, &code));
         similarity.inject(&mut row, &code)?;
@@ -480,10 +484,10 @@ pub fn run_strategy_tracking(
             let (values, _) = scoring::evaluate_cached_rule_scores(rule, &mut rt)?;
             scores.insert(source_names[rule.name.as_str()].to_string(), values);
         }
-        let signature = |limit: &str, sessions: &[String]| {
+        let signature = {
             let mut hash = DefaultHasher::new();
-            sessions.hash(&mut hash);
-            let count = dates.partition_point(|date| date.as_str() <= limit);
+            calendar.hash(&mut hash);
+            let count = dates.partition_point(|date| date.as_str() <= as_of.as_str());
             dates[..count].hash(&mut hash);
             let mut keys = rt.vars.keys().collect::<Vec<_>>();
             keys.sort();
@@ -503,48 +507,19 @@ pub fn run_strategy_tracking(
             }
             hash.finish()
         };
-        let checkpoint = reusable.and_then(|s| {
-            s.stocks
-                .get(&code)
-                .filter(|old| old.signature == signature(&s.as_of, &s.calendar))
-                .map(|old| (s.calendar.len(), old.states.clone()))
-        });
-        let (from, mut states) = checkpoint.unwrap_or_default();
-        if from > 0 {
-            resumed_symbols += 1;
-        }
+        let mut states = BTreeMap::new();
         for (definition, program) in tracks.iter().zip(&programs) {
-            let state = states.entry(definition.id.clone()).or_default();
-            let prepared = program.prepare(&rt)?;
-            let mut index =
-                dates.partition_point(|date| calendar.get(from).is_some_and(|start| date < start));
-            for (session, date) in calendar.iter().enumerate().skip(from) {
-                while index < dates.len() && dates[index] < *date {
-                    index += 1;
-                }
-                let quoted_index = (dates.get(index) == Some(date)).then_some(index);
-                let source_score = if state
-                    .event
-                    .as_ref()
-                    .is_none_or(|event| definition.expired(event, session))
-                {
-                    match (definition.source.as_deref(), quoted_index) {
-                        (Some(id), Some(index)) => Some(scores[id][index]),
-                        _ => None,
-                    }
-                } else {
-                    None
-                };
-                prepared.advance(state, definition, session, quoted_index, &rt, source_score)?;
-            }
+            let (_, state) = program.rolling_scores(
+                definition,
+                &rt,
+                &dates,
+                &calendar,
+                &as_of,
+                definition.source.as_ref().map(|id| scores[id].as_slice()),
+            )?;
+            states.insert(definition.id.clone(), state);
         }
-        stocks.insert(
-            code,
-            TrackingCheckpoint {
-                signature: signature(&as_of, &calendar),
-                states,
-            },
-        );
+        stocks.insert(code, TrackingCheckpoint { signature, states });
     }
     if stamp != input_stamp(source)? {
         return Err("计算期间行情或配置发生变化，本次跟踪结果未保存，请重新计算".into());
@@ -662,6 +637,7 @@ bonus_points = 1.0
             source: Some("组合起点".into()),
             start: None,
             ttl: 5,
+            max_age: Some(20),
             capture: BTreeMap::from([
                 ("A_LOW".into(), "L".into()),
                 ("A_CLOSE".into(), "C".into()),
@@ -682,13 +658,18 @@ bonus_points = 1.0
         let id = page.definitions[0].source.clone().unwrap();
         assert_ne!(id, "组合起点");
         let config = fs::read(data::score_rule_path(dir)).unwrap();
+        let rules = scoring::rule_cache::cache_rule_build(dir, None).unwrap();
+        let plan =
+            scoring::tracking::ScoringTrackingPlan::load(dir, None, &rules, "20240112").unwrap();
+        assert_eq!(plan.warmup_need(7).unwrap(), 27);
+
         let page = run_strategy_tracking(dir, Some("2024-01-03")).unwrap();
         assert_eq!(page.rows[0].source_score, Some(7.0));
         assert_eq!(page.rows[0].completed, vec!["20240103"]);
         assert!(!page.rows[0].signal_today);
         assert_eq!(page.rows[0].score, 2.0);
         let page = run_strategy_tracking(dir, Some("20240104")).unwrap();
-        assert_eq!(page.resumed_symbols, 2);
+        assert_eq!(page.resumed_symbols, 0);
         assert!(page.rows[0].signal_today);
         assert_eq!(page.rows[0].score, 5.0);
         let page = run_strategy_tracking(dir, Some("20240105")).unwrap();
@@ -711,7 +692,7 @@ bonus_points = 1.0
         drop(conn);
         assert!(get_strategy_tracking_page(dir).unwrap().stale);
         let page = run_strategy_tracking(dir, Some("20240105")).unwrap();
-        assert_eq!(page.resumed_symbols, 1);
+        assert_eq!(page.resumed_symbols, 0);
         assert_eq!(page.rows[0].captured["A_LOW"], 7.0);
         assert!(page.rows[0].stopped.is_none());
         let page = run_strategy_tracking(dir, Some("20240110")).unwrap();
@@ -732,13 +713,13 @@ bonus_points = 1.0
         assert!(run_strategy_tracking(dir, None).unwrap().rows.is_empty());
         assert_eq!(fs::read(data::score_rule_path(dir)).unwrap(), config);
         assert!(!data::result_db_path(dir).exists());
-        // Ranking shares source scores, persists states atomically, and resumes only matching prefixes.
+        // Ranking shares bounded replay semantics and publishes scores and states atomically.
         scoring::runner::scoring_all_to_db(dir, None, "qfq", "20240102", "20240103", None).unwrap();
         scoring::runner::scoring_all_to_db(dir, None, "qfq", "20240104", "20240104", None).unwrap();
         let ranked = get_strategy_tracking_page(dir).unwrap();
         assert_eq!(ranked.as_of.as_deref(), Some("20240104"));
         assert!(!ranked.stale);
-        assert_eq!(ranked.resumed_symbols, 2);
+        assert_eq!(ranked.resumed_symbols, 0);
         assert_eq!(ranked.rows[0].score, 5.0);
         let result = data::open_db_readonly(data::result_db_path(dir)).unwrap();
         let score: f64 = result.query_row("SELECT total_score FROM score_summary WHERE ts_code='000001.SZ' AND trade_date='20240104'", [], |row| row.get(0)).unwrap();
@@ -790,7 +771,7 @@ bonus_points = 1.0
         drop(conn);
         scoring::runner::scoring_all_to_db(dir, None, "qfq", "20240105", "20240105", None).unwrap();
         let revised = get_strategy_tracking_page(dir).unwrap();
-        assert_eq!(revised.resumed_symbols, 1);
+        assert_eq!(revised.resumed_symbols, 0);
         assert_eq!(revised.rows[0].captured["A_LOW"], 6.0);
 
         let managed = super::super::manage::get_strategy_manage_page(dir).unwrap();

@@ -129,7 +129,7 @@ pub(in crate::statistics) fn load_rule_meta(
         order.push(name.clone());
         meta_map.insert(name, RuleMeta {
             when: track.signal.clone().unwrap_or_else(|| "1".into()),
-            explain: format!("来源：{}；独立跟踪计分，观察期限 {} 个市场交易日，已得分保留至明确失效或计分结束。", source.name, track.ttl),
+            explain: format!("来源：{}；独立跟踪计分，观察期限 {} 个市场交易日，总期限 {} 个市场交易日（从起点计算），失效或计分结束可提前清零。", source.name, track.ttl, track.max_age()),
             trigger_mode: "tracking".into(),
             is_each: false,
             points: track.points + track.steps.iter().map(|step| step.points).sum::<f64>(),

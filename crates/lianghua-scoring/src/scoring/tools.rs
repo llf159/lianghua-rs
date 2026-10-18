@@ -817,7 +817,7 @@ pub fn preview_optional_cyq_chen_injection_warnings(
         Ok((Some(min_date), Some(max_date), actual_dates)) => {
             if min_date.as_str() > load_start_date.as_str() {
                 warnings.push(format!(
-                    "新筹码库最早可用日期为 {min_date}，晚于表达式预热加载起点 {load_start_date}；更早预热段的新筹码字段会为空。"
+                    "新筹码库最早可用日期为 {min_date}，晚于评分历史加载起点 {load_start_date}；更早预热段的新筹码字段会为空。"
                 ));
             }
             if max_date.as_str() < end_date {

@@ -438,11 +438,7 @@ pub fn preview_scoring_runtime_warnings(
 ) -> Result<Vec<String>, String> {
     let rules_cache = cache_rule_build(source_dir, strategy_path)?;
     let tracking = ScoringTrackingPlan::load(source_dir, strategy_path, &rules_cache, end_date)?;
-    let warmup_need = if tracking.is_empty() {
-        warmup_rows_estimate(source_dir, strategy_path)?
-    } else {
-        crate::data::load_trade_date_list(source_dir)?.len()
-    };
+    let warmup_need = tracking.warmup_need(warmup_rows_estimate(source_dir, strategy_path)?)?;
     let mut used_cyq_chen_keys = collect_scoring_used_cyq_chen_runtime_keys(&rules_cache);
     let programs = rules_cache
         .iter()
@@ -454,11 +450,7 @@ pub fn preview_scoring_runtime_warnings(
         source_dir,
         &programs,
         &used_cyq_chen_keys,
-        if tracking.is_empty() {
-            start_date
-        } else {
-            "00000000"
-        },
+        start_date,
         end_date,
         warmup_need,
         None,
@@ -615,22 +607,9 @@ pub fn scoring_all_to_db(
     let total_share_map = load_total_share_map(source_dir).unwrap_or_default();
     let rules_cache = cache_rule_build(source_dir, strategy_path)?;
     let tracking = ScoringTrackingPlan::load(source_dir, strategy_path, &rules_cache, end_date)?;
-    let warmup_need = if tracking.is_empty() {
-        warmup_rows_estimate(source_dir, strategy_path)?
-    } else {
-        crate::data::load_trade_date_list(source_dir)?.len()
-    };
-    let query_start_date = if tracking.is_empty() {
-        calc_query_start_date(source_dir, warmup_need, start_date)?
-    } else {
-        "00000000".into()
-    };
-    // Tracking already loads full history, so a tail query would read it a second time.
-    let need_rows = if tracking.is_empty() {
-        calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?
-    } else {
-        0
-    };
+    let warmup_need = tracking.warmup_need(warmup_rows_estimate(source_dir, strategy_path)?)?;
+    let query_start_date = calc_query_start_date(source_dir, warmup_need, start_date)?;
+    let need_rows = calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?;
     let mut used_cyq_chen_keys = collect_scoring_used_cyq_chen_runtime_keys(&rules_cache);
     let programs = rules_cache
         .iter()
@@ -642,11 +621,7 @@ pub fn scoring_all_to_db(
         source_dir,
         &programs,
         &used_cyq_chen_keys,
-        if tracking.is_empty() {
-            start_date
-        } else {
-            "00000000"
-        },
+        start_date,
         end_date,
         warmup_need,
         None,
@@ -667,16 +642,7 @@ pub fn scoring_all_to_db(
     let mut required_runtime_keys = collect_scoring_runtime_keys(&rules_cache);
     required_runtime_keys.extend(tracking.runtime_keys());
     let dr = DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
-    let tc_list = DataReader::list_ts_code(
-        &dr,
-        adj_type,
-        if tracking.is_empty() {
-            start_date
-        } else {
-            "00000000"
-        },
-        end_date,
-    )?;
+    let tc_list = DataReader::list_ts_code(&dr, adj_type, start_date, end_date)?;
     let mut rule_scene_meta: Vec<RuleSceneMeta> =
         ScoreRule::load_rules_with_strategy_path(source_dir, strategy_path)?
             .into_iter()
@@ -895,22 +861,9 @@ pub fn scoring_all_to_memory_with_mode(
     let total_share_map = load_total_share_map(source_dir).unwrap_or_default();
     let rules_cache = cache_rule_build(source_dir, strategy_path)?;
     let tracking = ScoringTrackingPlan::load(source_dir, strategy_path, &rules_cache, end_date)?;
-    let warmup_need = if tracking.is_empty() {
-        warmup_rows_estimate(source_dir, strategy_path)?
-    } else {
-        crate::data::load_trade_date_list(source_dir)?.len()
-    };
-    let query_start_date = if tracking.is_empty() {
-        calc_query_start_date(source_dir, warmup_need, start_date)?
-    } else {
-        "00000000".into()
-    };
-    // Tracking already loads full history, so a tail query would read it a second time.
-    let need_rows = if tracking.is_empty() {
-        calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?
-    } else {
-        0
-    };
+    let warmup_need = tracking.warmup_need(warmup_rows_estimate(source_dir, strategy_path)?)?;
+    let query_start_date = calc_query_start_date(source_dir, warmup_need, start_date)?;
+    let need_rows = calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?;
     let mut used_cyq_chen_keys = collect_scoring_used_cyq_chen_runtime_keys(&rules_cache);
     let programs = rules_cache
         .iter()
@@ -922,11 +875,7 @@ pub fn scoring_all_to_memory_with_mode(
         source_dir,
         &programs,
         &used_cyq_chen_keys,
-        if tracking.is_empty() {
-            start_date
-        } else {
-            "00000000"
-        },
+        start_date,
         end_date,
         warmup_need,
         None,
@@ -947,16 +896,7 @@ pub fn scoring_all_to_memory_with_mode(
     let mut required_runtime_keys = collect_scoring_runtime_keys(&rules_cache);
     required_runtime_keys.extend(tracking.runtime_keys());
     let dr = DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
-    let tc_list = DataReader::list_ts_code(
-        &dr,
-        adj_type,
-        if tracking.is_empty() {
-            start_date
-        } else {
-            "00000000"
-        },
-        end_date,
-    )?;
+    let tc_list = DataReader::list_ts_code(&dr, adj_type, start_date, end_date)?;
     let mut rule_scene_meta: Vec<RuleSceneMeta> =
         ScoreRule::load_rules_with_strategy_path(source_dir, strategy_path)?
             .into_iter()
@@ -1061,22 +1001,9 @@ pub fn scoring_single_period(
     let total_share_map = load_total_share_map(source_dir).unwrap_or_default();
     let rules_cache = cache_rule_build(source_dir, strategy_path)?;
     let tracking = ScoringTrackingPlan::load(source_dir, strategy_path, &rules_cache, end_date)?;
-    let warmup_need = if tracking.is_empty() {
-        warmup_rows_estimate(source_dir, strategy_path)?
-    } else {
-        crate::data::load_trade_date_list(source_dir)?.len()
-    };
-    let query_start_date = if tracking.is_empty() {
-        calc_query_start_date(source_dir, warmup_need, start_date)?
-    } else {
-        "00000000".into()
-    };
-    // Tracking already loads full history, so a tail query would read it a second time.
-    let need_rows = if tracking.is_empty() {
-        calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?
-    } else {
-        0
-    };
+    let warmup_need = tracking.warmup_need(warmup_rows_estimate(source_dir, strategy_path)?)?;
+    let query_start_date = calc_query_start_date(source_dir, warmup_need, start_date)?;
+    let need_rows = calc_query_need_rows(source_dir, warmup_need, start_date, end_date)?;
     let mut used_cyq_chen_keys = collect_scoring_used_cyq_chen_runtime_keys(&rules_cache);
     let programs = rules_cache
         .iter()
@@ -1088,11 +1015,7 @@ pub fn scoring_single_period(
         source_dir,
         &programs,
         &used_cyq_chen_keys,
-        if tracking.is_empty() {
-            start_date
-        } else {
-            "00000000"
-        },
+        start_date,
         end_date,
         warmup_need,
         Some(ts_code),

@@ -302,6 +302,9 @@ function buildPreparedDraft(
     if (!Number.isSafeInteger(track.ttl) || track.ttl <= 0) {
       throw new Error('跟踪观察期限必须为大于 0 的整数')
     }
+    if (!Number.isSafeInteger(track.max_age ?? track.ttl) || (track.max_age ?? track.ttl) < track.ttl) {
+      throw new Error('跟踪总期限必须为不小于观察期限的整数')
+    }
     if (!Number.isFinite(track.points ?? 0) || track.steps?.some((step) => !Number.isFinite(step.points ?? 0))) {
       throw new Error('请填写完整、有效的跟踪分值；只观察时填 0')
     }

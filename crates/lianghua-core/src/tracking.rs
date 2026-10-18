@@ -1,5 +1,5 @@
 use std::cell::{OnceCell, RefCell};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -26,6 +26,9 @@ pub struct TrackDefinition {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start: Option<String>,
     pub ttl: usize,
+    /// Maximum event age from its anchor; omitted legacy values use ttl.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_age: Option<usize>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub capture: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -453,6 +456,75 @@ pub struct TrackProgram {
 }
 
 impl TrackProgram {
+    /// Replays the last max_age market sessions independently for each output date.
+    /// Parallel window states preserve single-event suppression inside each window,
+    /// without letting an older suppressed trigger determine today's anchor.
+    pub fn rolling_scores(
+        &self,
+        definition: &TrackDefinition,
+        rt: &Runtime,
+        dates: &[String],
+        calendar: &[String],
+        start: &str,
+        source_scores: Option<&[f64]>,
+    ) -> Result<(Vec<f64>, TrackState), String> {
+        let mut scores = vec![0.0; dates.len()];
+        let first_output = calendar.partition_point(|date| date.as_str() < start);
+        let begin = first_output.saturating_sub(definition.max_age());
+        let prepared = self.prepare(rt)?;
+        let mut windows = VecDeque::<(usize, TrackState)>::new();
+        let mut index =
+            dates.partition_point(|date| calendar.get(begin).is_some_and(|first| date < first));
+        for (session, date) in calendar.iter().enumerate().skip(begin) {
+            while index < dates.len() && dates[index] < *date {
+                index += 1;
+            }
+            let quoted_index = (dates.get(index) == Some(date)).then_some(index);
+            let window_start = session.saturating_sub(definition.max_age());
+            while windows
+                .front()
+                .is_some_and(|(origin, _)| *origin < window_start)
+            {
+                windows.pop_front();
+            }
+            if session
+                <= calendar
+                    .len()
+                    .saturating_sub(1)
+                    .saturating_sub(definition.max_age())
+            {
+                windows.push_back((session, TrackState::default()));
+            }
+            for (window, (_, state)) in windows.iter_mut().enumerate() {
+                let score = prepared.advance(
+                    state,
+                    definition,
+                    session,
+                    quoted_index,
+                    rt,
+                    quoted_index
+                        .and_then(|i| source_scores.and_then(|values| values.get(i)))
+                        .copied(),
+                )?;
+                if window == 0
+                    && session >= first_output
+                    && let Some(index) = quoted_index
+                {
+                    // The oldest surviving window is exactly [session-max_age, session].
+                    // Later windows are retained only to produce future output days.
+                    scores[index] = score;
+                }
+            }
+        }
+        Ok((
+            scores,
+            windows
+                .pop_front()
+                .map(|(_, state)| state)
+                .unwrap_or_default(),
+        ))
+    }
+
     pub fn compile(definition: &TrackDefinition) -> Result<Self, String> {
         if definition.id.trim().is_empty()
             || !definition
@@ -464,6 +536,9 @@ impl TrackProgram {
         }
         if definition.name.trim().is_empty() || definition.ttl == 0 {
             return Err("跟踪名称不能为空，期限必须大于0".to_string());
+        }
+        if definition.max_age() < definition.ttl {
+            return Err("跟踪总期限不能小于观察期限".to_string());
         }
         if definition
             .source
@@ -579,9 +654,14 @@ impl TrackDefinition {
         format!("跟踪·{}", self.name)
     }
 
+    pub fn max_age(&self) -> usize {
+        self.max_age.unwrap_or(self.ttl)
+    }
+
     pub fn expired(&self, event: &TrackEvent, session: usize) -> bool {
-        session.saturating_sub(event.started) > self.ttl
-            && (event.stopped.is_some() || event.score_started.is_none())
+        let age = session.saturating_sub(event.started);
+        age > self.max_age()
+            || (age > self.ttl && (event.stopped.is_some() || event.score_started.is_none()))
     }
 }
 
@@ -888,6 +968,7 @@ mod tests {
             source: None,
             start: Some("1".into()),
             ttl: 5,
+            max_age: None,
             capture: BTreeMap::new(),
             invalidate: None,
             eligible: None,
@@ -965,6 +1046,7 @@ mod tests {
             source: Some("discovery".into()),
             start: Some("C = 10".into()),
             ttl: 2,
+            max_age: Some(6),
             capture: BTreeMap::new(),
             invalidate: Some("C < 5".into()),
             eligible: Some("C > 8".into()),
@@ -1043,6 +1125,7 @@ mod tests {
             source: Some("rule".into()),
             start: None,
             ttl: 2,
+            max_age: Some(4),
             capture: BTreeMap::from([("A_LOW".into(), "C * 0.9".into())]),
             invalidate: Some("C < A_LOW".into()),
             eligible: Some("C <= 11".into()),
@@ -1113,6 +1196,124 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(state.event.as_ref().unwrap().started, 3);
+    }
+
+    #[test]
+    fn bounded_tracking_expires_and_daily_replay_matches_ranges() {
+        let mut definition = TrackDefinition {
+            id: "bounded".into(),
+            name: "bounded".into(),
+            enabled: true,
+            source: Some("rule".into()),
+            start: None,
+            ttl: 2,
+            max_age: Some(4),
+            capture: BTreeMap::new(),
+            invalidate: None,
+            eligible: None,
+            steps: Vec::new(),
+            signal: None,
+            points: 3.0,
+            score_until: None,
+        };
+        let calendar = (0..12).map(|i| format!("{i:08}")).collect::<Vec<_>>();
+        let rt = Runtime {
+            vars: HashMap::from([("C".into(), Value::NumSeries(vec![Some(10.0); 12]))]),
+        };
+        let sources = vec![1.0; 12];
+        let program = TrackProgram::compile(&definition).unwrap();
+        let prepared = program.prepare(&rt).unwrap();
+        let mut state = TrackState::default();
+        for day in 0..=5 {
+            let score = prepared
+                .advance(&mut state, &definition, day, Some(day), &rt, Some(1.0))
+                .unwrap();
+            assert_eq!(score, if day == 0 || day == 5 { 0.0 } else { 3.0 });
+        }
+        assert_eq!(state.event.as_ref().unwrap().started, 5);
+        let (range, _) = program
+            .rolling_scores(
+                &definition,
+                &rt,
+                &calendar,
+                &calendar,
+                &calendar[3],
+                Some(&sources),
+            )
+            .unwrap();
+        for day in 3..12 {
+            let (daily, _) = program
+                .rolling_scores(
+                    &definition,
+                    &rt,
+                    &calendar[..=day],
+                    &calendar[..=day],
+                    &calendar[day],
+                    Some(&sources[..=day]),
+                )
+                .unwrap();
+            assert_eq!(range[day], daily[day]);
+        }
+        // A stop before the rolling window must not suppress a recent trigger.
+        definition.invalidate = Some("AGE >= 2".into());
+        let program = TrackProgram::compile(&definition).unwrap();
+        let (range, _) = program
+            .rolling_scores(
+                &definition,
+                &rt,
+                &calendar,
+                &calendar,
+                &calendar[0],
+                Some(&sources),
+            )
+            .unwrap();
+        for day in 0..12 {
+            let (daily, _) = program
+                .rolling_scores(
+                    &definition,
+                    &rt,
+                    &calendar[..=day],
+                    &calendar[..=day],
+                    &calendar[day],
+                    Some(&sources[..=day]),
+                )
+                .unwrap();
+            assert_eq!(range[day], daily[day]);
+        }
+        let dates = calendar
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != 5 && *i != 6)
+            .map(|(_, date)| date.clone())
+            .collect::<Vec<_>>();
+        let (range, _) = program
+            .rolling_scores(
+                &definition,
+                &rt,
+                &dates,
+                &calendar,
+                &calendar[0],
+                Some(&sources),
+            )
+            .unwrap();
+        for (index, date) in dates.iter().enumerate() {
+            let day = calendar.binary_search(date).unwrap();
+            let (daily, _) = program
+                .rolling_scores(
+                    &definition,
+                    &rt,
+                    &dates[..=index],
+                    &calendar[..=day],
+                    date,
+                    Some(&sources),
+                )
+                .unwrap();
+            assert_eq!(range[index], daily[index]);
+        }
+        definition.max_age = Some(1);
+        assert!(TrackProgram::compile(&definition).is_err());
+        definition.max_age = None;
+        assert_eq!(definition.max_age(), definition.ttl);
     }
 
     #[test]
@@ -1217,6 +1418,7 @@ mod tests {
             source: Some("rule".into()),
             start: None,
             ttl: 2,
+            max_age: Some(4),
             capture: BTreeMap::from([("A_MEAN".into(), "MA(C,2)".into())]),
             invalidate: None,
             eligible: None,
