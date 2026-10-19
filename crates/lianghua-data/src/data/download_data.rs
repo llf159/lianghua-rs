@@ -255,6 +255,9 @@ pub fn delete_one_stock_range(
     )
     .map_err(|e| format!("删除旧行情失败: {e}"))?;
 
+    if matches!(adj_type, "qfq" | "ind") {
+        crate::data::panel::invalidate(conn, start_date)?;
+    }
     Ok(())
 }
 
@@ -263,7 +266,13 @@ pub fn insert_pro_bar_rows(
     adj_type: AdjType,
     rows: &[ProBarRow],
 ) -> Result<(), String> {
-    append_rows_to_table(conn, STOCK_DATA_TABLE, adj_type, rows, None)
+    append_rows_to_table(conn, STOCK_DATA_TABLE, adj_type, rows, None)?;
+    if matches!(adj_type, AdjType::Qfq | AdjType::Ind) {
+        if let Some(start) = rows.iter().map(|row| row.trade_date.as_str()).min() {
+            crate::data::panel::invalidate(conn, start)?;
+        }
+    }
+    Ok(())
 }
 
 pub fn append_stage_pro_bar_rows(
@@ -290,6 +299,16 @@ pub fn reset_stock_data_stage_table(conn: &Connection) -> Result<(), String> {
 }
 
 pub fn flush_stock_data_stage_table(conn: &Connection) -> Result<(), String> {
+    let start: Option<String> = conn
+        .query_row(
+            &format!("SELECT min(trade_date) FROM {STOCK_DATA_STAGE_TABLE} WHERE adj_type IN ('qfq','ind')"),
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if let Some(start) = start {
+        crate::data::panel::invalidate(conn, &start)?;
+    }
     conn.execute_batch(&format!(
         "INSERT INTO {STOCK_DATA_TABLE} SELECT * FROM {STOCK_DATA_STAGE_TABLE};
          DROP TABLE IF EXISTS {STOCK_DATA_STAGE_TABLE}"
@@ -485,6 +504,9 @@ pub fn delete_trade_date_rows(
         params![adj_type_name, trade_date],
     )
     .map_err(|e| format!("删除交易日旧行情失败, trade_date={trade_date}: {e}"))?;
+    if matches!(adj_type, AdjType::Qfq | AdjType::Ind) {
+        crate::data::panel::invalidate(conn, trade_date)?;
+    }
 
     Ok(())
 }

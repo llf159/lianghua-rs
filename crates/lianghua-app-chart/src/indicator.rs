@@ -388,6 +388,17 @@ pub fn load_compiled_chart_indicator_config(
     available_db_columns: Option<&HashSet<String>>,
 ) -> Result<CompiledChartIndicatorConfig, String> {
     let source_path = source_path.as_ref();
+    let mut columns = available_db_columns.cloned();
+    if let Some(columns) = &mut columns {
+        columns.extend(
+            crate::data::panel::configured_fields(
+                source_path.to_str().ok_or("数据路径不是UTF-8")?,
+            )?
+            .into_iter()
+            .map(|(name, _)| name),
+        );
+    }
+    let available_db_columns = columns.as_ref();
     let config_path = chart_indicator_config_path(source_path);
     let cache_key = ChartIndicatorCacheKey {
         file_stamp: (|path: &Path| -> Result<ChartIndicatorFileStamp, String> {

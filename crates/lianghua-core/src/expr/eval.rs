@@ -1563,7 +1563,7 @@ impl Runtime {
 
 macro_rules! define_expression_functions {
     ($($variant:ident => $name:literal),+ $(,)?) => {
-        #[derive(Debug, Clone, Copy)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         pub(crate) enum ExpressionFunction {
             $($variant),+
         }
@@ -1589,6 +1589,26 @@ macro_rules! define_expression_functions {
 
 define_expression_functions! {
     Abs => "ABS",
+    CsMean => "CS_MEAN",
+    CsSum => "CS_SUM",
+    CsCount => "CS_COUNT",
+    CsMin => "CS_MIN",
+    CsMax => "CS_MAX",
+    CsMedian => "CS_MEDIAN",
+    CsStd => "CS_STD",
+    CsVar => "CS_VAR",
+    CsQuantile => "CS_QUANTILE",
+    CsRank => "CS_RANK",
+    CsZscore => "CS_ZSCORE",
+    CsCorr => "CS_CORR",
+    CsSpearman => "CS_SPEARMAN",
+    CsWmean => "CS_WMEAN",
+    CsTopshare => "CS_TOPSHARE",
+    Ln => "LN",
+    Exp => "EXP",
+    Sqrt => "SQRT",
+    Isvalid => "ISVALID",
+    Null => "NULL",
     Max => "MAX",
     Min => "MIN",
     Div => "DIV",
@@ -1673,6 +1693,76 @@ impl Runtime {
             });
         };
         match function {
+            ExpressionFunction::Ln
+            | ExpressionFunction::Exp
+            | ExpressionFunction::Sqrt
+            | ExpressionFunction::Isvalid
+            | ExpressionFunction::Null => {
+                if function == ExpressionFunction::Null {
+                    if !args.is_empty() {
+                        return Err(EvalErr {
+                            msg: "NULL不接受参数".into(),
+                        });
+                    }
+                    return Ok(Value::Bool(Truth::Unknown));
+                }
+                if args.len() != 1 {
+                    return Err(EvalErr {
+                        msg: format!("{fn_name}需要一个参数"),
+                    });
+                }
+                let value = self.eval_expr(&args[0])?;
+                let apply = |v: Option<f64>| -> Option<f64> {
+                    if function == ExpressionFunction::Isvalid {
+                        return Some(if v.is_some_and(f64::is_finite) {
+                            1.
+                        } else {
+                            0.
+                        });
+                    }
+                    let v = v.filter(|v| v.is_finite())?;
+                    let result = match function {
+                        ExpressionFunction::Ln => v.ln(),
+                        ExpressionFunction::Exp => v.exp(),
+                        ExpressionFunction::Sqrt => v.sqrt(),
+                        _ => unreachable!(),
+                    };
+                    result.is_finite().then_some(result)
+                };
+                if matches!(value, Value::Num(_) | Value::Bool(_)) {
+                    let scalar = match value {
+                        Value::Num(v) => Some(v),
+                        Value::Bool(v) => v.as_num(),
+                        _ => unreachable!(),
+                    };
+                    return Ok(apply(scalar)
+                        .map(Value::Num)
+                        .unwrap_or(Value::Bool(Truth::Unknown)));
+                }
+                Ok(Value::NumSeries(
+                    Value::as_num_series(&value, Value::len_of(&value))?
+                        .iter()
+                        .map(|v| apply(*v))
+                        .collect(),
+                ))
+            }
+            ExpressionFunction::CsMean
+            | ExpressionFunction::CsSum
+            | ExpressionFunction::CsCount
+            | ExpressionFunction::CsMin
+            | ExpressionFunction::CsMax
+            | ExpressionFunction::CsMedian
+            | ExpressionFunction::CsStd
+            | ExpressionFunction::CsVar
+            | ExpressionFunction::CsQuantile
+            | ExpressionFunction::CsRank
+            | ExpressionFunction::CsZscore
+            | ExpressionFunction::CsCorr
+            | ExpressionFunction::CsSpearman
+            | ExpressionFunction::CsWmean
+            | ExpressionFunction::CsTopshare => Err(EvalErr {
+                msg: format!("{fn_name}需要全市场上下文，请在指标管理中选择市场或横截面范围后补算"),
+            }),
             ExpressionFunction::Abs => self.impl_abs(args),
             ExpressionFunction::Max => self.impl_max(args),
             ExpressionFunction::Min => self.impl_min(args),

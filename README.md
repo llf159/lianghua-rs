@@ -8,6 +8,7 @@
 
 - [跟踪策略：配置、观察与续算](docs/tracking-strategies.md)
 - [坚果云 WebDAV 同步：配置、备份与故障排查](docs/cloud-sync.md)
+- [自定义指标：逐股、市场与横截面](docs/indicator-system.md)
 
 ## 工程维护
 

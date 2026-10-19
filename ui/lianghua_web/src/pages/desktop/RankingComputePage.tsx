@@ -209,6 +209,7 @@ function isCalculationBehind(
 function buildEmptyIndicatorDraft(): IndicatorManageDraft {
   return {
     name: '',
+    scope: 'stock',
     expr: '',
     prec: 2,
   }
@@ -619,6 +620,7 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
     setIndicatorEditorMode('edit')
     setIndicatorDraft({
       name: item.name,
+      scope: item.scope,
       expr: item.expr,
       prec: item.prec,
     })
@@ -654,6 +656,7 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
     }
 
     const nextDraft: IndicatorManageDraft = {
+      scope: indicatorDraft.scope,
       name: indicatorDraft.name.trim(),
       expr: indicatorDraft.expr.trim(),
       prec: Math.max(0, Number(indicatorDraft.prec) || 0),
@@ -661,6 +664,7 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
 
     const currentItems = indicatorItems.map((item) => ({
       name: item.name,
+      scope: item.scope,
       expr: item.expr,
       prec: item.prec,
     }))
@@ -683,6 +687,7 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
       .filter((current) => current.name !== item.name)
       .map((current) => ({
         name: current.name,
+        scope: current.scope,
         expr: current.expr,
         prec: current.prec,
       }))
@@ -700,7 +705,7 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
         <div className="data-download-indicator-editor-head">
           <div>
             <h4>{title}</h4>
-            <p>只保留名称、表达式和精度三个字段。</p>
+            <p>逐股按股票历史计算；市场输出每日共享值；横截面输出每日各股的值。跨股票范围在整轮行情完成后计算，按配置顺序引用前面的指标。</p>
           </div>
           <button
             className="data-download-secondary-btn"
@@ -727,6 +732,14 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
             />
           </label>
 
+          <label className="data-download-field">
+            <span>计算范围</span>
+            <select value={indicatorDraft.scope} onChange={(event) => setIndicatorDraft((current) => current ? { ...current, scope: event.target.value as IndicatorManageDraft['scope'] } : current)}>
+              <option value="stock">逐股</option>
+              <option value="market">市场（每日共享）</option>
+              <option value="cross_section">横截面（每日各股）</option>
+            </select>
+          </label>
           <label className="data-download-field">
             <span>精度</span>
             <input
@@ -2118,7 +2131,7 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
                           <div className="data-download-indicator-card-head">
                             <div>
                               <div className="data-download-indicator-card-name">{item.name}</div>
-                              <div className="data-download-indicator-card-meta">精度 {item.prec}</div>
+                              <div className="data-download-indicator-card-meta">{item.scope === 'market' ? '市场' : item.scope === 'cross_section' ? '横截面' : '逐股'} · 精度 {item.prec}</div>
                             </div>
                             <div className="data-download-indicator-card-actions">
                               <button

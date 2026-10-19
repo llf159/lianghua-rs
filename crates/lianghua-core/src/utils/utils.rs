@@ -410,6 +410,30 @@ pub fn impl_expr_warmup(
 
                     max_need = win_need.max(cond_need.max(value_need) + max_win);
                 }
+                ExpressionFunction::Ln
+                | ExpressionFunction::Exp
+                | ExpressionFunction::Sqrt
+                | ExpressionFunction::Isvalid
+                | ExpressionFunction::Null
+                | ExpressionFunction::CsMean
+                | ExpressionFunction::CsSum
+                | ExpressionFunction::CsCount
+                | ExpressionFunction::CsMin
+                | ExpressionFunction::CsMax
+                | ExpressionFunction::CsMedian
+                | ExpressionFunction::CsStd
+                | ExpressionFunction::CsVar
+                | ExpressionFunction::CsQuantile
+                | ExpressionFunction::CsRank
+                | ExpressionFunction::CsZscore
+                | ExpressionFunction::CsCorr
+                | ExpressionFunction::CsSpearman
+                | ExpressionFunction::CsWmean
+                | ExpressionFunction::CsTopshare => {
+                    for arg in args {
+                        max_need = max_need.max(impl_expr_warmup(arg, locals, consts)?);
+                    }
+                }
                 ExpressionFunction::Abs => {
                     let mut it = args.into_iter();
                     let src = it

@@ -206,6 +206,7 @@ export type DataDownloadProgress = {
 }
 
 export type IndicatorManageItem = {
+  scope: "stock" | "market" | "cross_section"
   index: number
   name: string
   expr: string
@@ -213,6 +214,7 @@ export type IndicatorManageItem = {
 }
 
 export type IndicatorManageDraft = {
+  scope: "stock" | "market" | "cross_section"
   name: string
   expr: string
   prec: number

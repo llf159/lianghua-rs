@@ -10,7 +10,7 @@ use duckdb::params_from_iter;
 
 use crate::{
     data::{
-        DataReader, IndsData, RowData, STOCK_DATA_RUNTIME_FIELDS, ind_toml_path,
+        DataReader, IndicatorScope, IndsData, RowData, STOCK_DATA_RUNTIME_FIELDS, ind_toml_path,
         runtime::row_into_rt,
     },
     download::ProBarRow,
@@ -72,8 +72,12 @@ fn collect_calculated_indicators(
 }
 
 fn compile_indicator_defs(inds: Vec<crate::data::IndData>) -> Result<Vec<IndsCache>, String> {
+    crate::data::panel::validate_definitions(&inds)?;
     let mut out = Vec::with_capacity(128);
-    for ind in inds {
+    for ind in inds
+        .into_iter()
+        .filter(|ind| ind.scope == IndicatorScope::Stock)
+    {
         let stmt = parse_expression_program(&ind.expr)
             .map_err(|e| format!("表达式解析错误在{}:{}", e.idx, e.msg))?;
         validate_expression_functions(&stmt)?;

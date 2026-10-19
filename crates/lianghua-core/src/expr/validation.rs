@@ -131,6 +131,11 @@ pub fn estimate_expression_warmup(stmts: &Stmts) -> Result<usize, String> {
         }
     }
 
+    // eval_program also returns the value of a final assignment.
+    if let Some(Stmt::Assign { name, .. }) = stmts.item.last() {
+        expression_need = expression_need.max(locals.get(name).copied().unwrap_or(0));
+    }
+
     Ok(expression_need)
 }
 
@@ -148,6 +153,10 @@ mod tests {
         )
         .expect("expression should parse");
 
+        assert_eq!(estimate_expression_warmup(&program), Ok(5));
+
+        let program = parse_expression_program("N := 5; X := MA(C, N); X := REF(X, 1)")
+            .expect("assignment output should parse");
         assert_eq!(estimate_expression_warmup(&program), Ok(5));
     }
 

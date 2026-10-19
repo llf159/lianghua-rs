@@ -31,6 +31,11 @@ type SyntaxGuideDynamicFunction = {
 }
 
 const SYNTAX_GUIDE_FUNCTIONS: SyntaxGuideFunction[] = [
+  { name: 'LN / EXP / SQRT / ISVALID / NULL', signature: 'LN(x)、EXP(x)、SQRT(x)、ISVALID(x)、NULL()', returns: '数值', description: '自然对数、指数、平方根、有效值检测和显式空值；数学定义域错误或溢出为空。', example: 'IF(ISVALID(C), LN(C), NULL())' },
+  { name: 'CS_MEAN / CS_SUM / CS_COUNT / CS_MIN / CS_MAX / CS_MEDIAN / CS_STD / CS_VAR', signature: 'CS_MEAN(x[, filter[, group]])，其余同形', returns: '每日共享值或组内各股值', description: '只用于市场／横截面指标。按同一天的股票统计，filter筛选、数值group分组；忽略无效x，STD/VAR使用样本口径。COUNT统计有效值数量。', example: 'MA(CS_MEAN(PCT_CHG, LISTED_DAYS>=60), 5)' },
+  { name: 'CS_RANK / CS_ZSCORE', signature: 'CS_RANK(x[, filter[, group]])', returns: '每日各股值', description: '全市场或组内百分位排名／样本标准差标准化。RANK从小到大，平均并列名次除以样本数；不等同于时间窗口GRANK/LRANK。', example: 'CS_RANK(SUM(PCT_CHG,10), LISTED_DAYS>=60)' },
+  { name: 'CS_CORR / CS_SPEARMAN / CS_WMEAN', signature: 'CS_CORR(x,y[, filter[, group]])；CS_WMEAN(x,weight[, filter[, group]])', returns: '每日共享值或组内各股值', description: 'Pearson相关、平均并列秩相关、非负权重加权均值；数据成对有效才参与。', example: 'CS_SPEARMAN(PCT_CHG, AMOUNT/REF(MA(AMOUNT,20),1))' },
+  { name: 'CS_QUANTILE / CS_TOPSHARE', signature: 'CS_QUANTILE(x,q[, filter[, group]])；CS_TOPSHARE(x,q[, filter[, group]])', returns: '每日共享值或组内各股值', description: 'q为[0,1]常数：线性插值分位数／最大ceil(q×样本数)项的合计占比。TOPSHARE要求非负x。', example: 'CS_TOPSHARE(AMOUNT,0.1,LISTED_DAYS>=60)' },
   { name: 'ABS', signature: 'ABS(x)', returns: '数值序列', description: '取绝对值。', example: '输入 [-2, 3] -> 输出 [2, 3]' },
   { name: 'MAX', signature: 'MAX(a, b)', returns: '数值序列', description: '逐项取较大值。', example: 'a=[1,5], b=[2,3] -> [2,5]' },
   { name: 'MIN', signature: 'MIN(a, b)', returns: '数值序列', description: '逐项取较小值。', example: 'a=[1,5], b=[2,3] -> [1,3]' },
@@ -88,6 +93,7 @@ const SYNTAX_GUIDE_FIELD_SECTIONS: SyntaxGuideFieldSection[] = [
       { name: 'ZHANG', scope: '通用', description: '涨停幅比例，例如普通股约 0.095、创业板/科创板约 0.195、北交所约 0.295、ST 约 0.045。', example: 'PCT_CHG >= ZHANG * 100' },
       { name: 'TOTAL_MV_YI', scope: '通用', description: '推测流通市值，单位“亿”；AMOUNT（千元） ÷ TOR（%） ÷ 1000，按成交均价计价。成交额或换手率缺失、非正时为空。', example: 'TOTAL_MV_YI <= 300' },
       { name: 'S_RANK', scope: '通用', description: '走势相似榜排名；按已计算并保存的交易日逐日注入，未计算日期为空值。', example: 'S_RANK <= 100' },
+      { name: '自定义市场／横截面指标', scope: '通用', description: '在指标管理选择市场或横截面范围，使用CS_MEAN、CS_RANK、CS_SPEARMAN等跨股票函数，补算后按用户定义名称直接引用。市场同日共享，横截面同日各股不同；实时未保存日期为空。', example: 'MY_MARKET > 0 AND MY_RANK > 0.8' },
       { name: 'I / ISZ / I300', scope: '通用', description: '上证指数 / 深证成指 / 沪深300 的日涨幅，单位是百分比。', example: 'PCT_CHG > I300 + 2' },
       { name: 'I500 / ICY / I50 / I1000', scope: '通用', description: '中证500 / 创业板指 / 上证50 / 中证1000 的日涨幅，单位是百分比。', example: 'I1000 > I50' },
       { name: '指数字段_指标列名', scope: '通用', description: '读取对应指数在 stock_data 中的原始数值，按交易日与股票对齐；支持 O、H、L、C、V 等行情别名及自定义指标列。指数没有该日数据时为空值。', example: 'I_PCT_CHG > 1 AND I300_C > I300_MA5' },
@@ -125,7 +131,7 @@ const SYNTAX_GUIDE_FIELD_SECTIONS: SyntaxGuideFieldSection[] = [
     title: '9. 指标列自动注入',
     note: 'DataReader 会把 stock_data 里实际存在的数值列自动转成大写变量；这通常是行情基础列之外的指标列，不等于 stock_list.csv 里的市值字段都会天然出现在这里。',
     fields: [
-      { name: '已落库指标列 / 自定义数值列', scope: '按数据源实际情况', description: '只有已经写进 stock_data 的数值列才可直接引用，变量名会自动转成大写。', example: 'MY_IND > MA(MY_IND, 5)' },
+      { name: '已落库指标列 / 自定义数值列', scope: '按数据源实际情况', description: '已落库逐股指标和配置中的市场／横截面指标都可按名称引用；配置变更或修复待补算时为空。', example: 'MY_IND > MA(MY_IND, 5)' },
     ],
   },
   {

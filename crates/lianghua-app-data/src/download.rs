@@ -245,6 +245,7 @@ pub struct DataDownloadCyqChenMaintenanceStatus {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IndicatorManageItem {
+    pub scope: crate::data::IndicatorScope,
     pub index: usize,
     pub name: String,
     pub expr: String,
@@ -262,6 +263,8 @@ pub struct IndicatorManagePageData {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IndicatorManageDraft {
+    #[serde(default)]
+    pub scope: crate::data::IndicatorScope,
     pub name: String,
     pub expr: String,
     pub prec: usize,
@@ -275,6 +278,7 @@ struct IndicatorManageFile {
 
 #[derive(Serialize)]
 struct IndicatorManageFileItem {
+    scope: crate::data::IndicatorScope,
     name: String,
     expr: String,
     prec: usize,
@@ -1397,10 +1401,7 @@ pub fn prepare_stock_data_indicator_columns_rebuild_run(
     }
 
     ensure_default_indicator_manage_file(&source_path)?;
-    let inds_cache = cache_ind_build(&source_path)?;
-    if inds_cache.is_empty() {
-        return Err("指标配置不存在或为空，请先维护 ind.toml。".to_string());
-    }
+    cache_ind_build(&source_path)?;
 
     Ok(PreparedStockDataIndicatorColumnsRebuildRun {
         source_path,
@@ -1985,36 +1986,41 @@ pub fn run_prepared_stock_data_indicator_columns_delete(
 ) -> Result<DataDownloadRunResult, String> {
     let conn = open_source_db_conn(&prepared.source_path)?;
     let indicator_columns = list_stock_data_indicator_columns(&conn)?;
+    let count = indicator_columns.len()
+        + if crate::data::panel::has_values(&conn)? {
+            crate::data::panel::configured_fields(&prepared.source_path)?.len()
+        } else {
+            0
+        };
 
     if let Some(cb) = progress_cb {
         cb(lianghua_download::download::runner::DownloadProgress {
             phase: "delete_stock_data_indicator_columns".to_string(),
             finished: 0,
-            total: indicator_columns.len(),
+            total: count,
             current_label: None,
-            message: if indicator_columns.is_empty() {
-                "stock_data 当前没有可删除的指标列。".to_string()
+            message: if count == 0 {
+                "原始库当前没有可删除的指标列。".to_string()
             } else {
-                format!(
-                    "开始删除 {} 个行情指标列，只保留基础行情列。",
-                    indicator_columns.len()
-                )
+                format!("开始删除 {} 个行情指标列，只保留基础行情列。", count)
             },
         });
     }
 
     with_transaction(&conn, |tx| {
         drop_stock_data_columns(tx, &indicator_columns)?;
+        tx.execute_batch("DROP TABLE IF EXISTS indicator_panel_values; DROP TABLE IF EXISTS indicator_panel_state; DROP TABLE IF EXISTS indicator_panel_sessions; DROP TABLE IF EXISTS market_environment; DROP TABLE IF EXISTS market_environment_state;")
+            .map_err(|e|format!("删除跨股票指标失败: {e}"))?;
         Ok(())
     })?;
 
     if let Some(cb) = progress_cb {
         cb(lianghua_download::download::runner::DownloadProgress {
             phase: "delete_stock_data_indicator_columns".to_string(),
-            finished: indicator_columns.len(),
-            total: indicator_columns.len(),
+            finished: count,
+            total: count,
             current_label: None,
-            message: format!("指标列删除完成，共删除 {} 列。", indicator_columns.len()),
+            message: format!("指标列删除完成，共删除 {} 列。", count),
         });
     }
 
@@ -2025,7 +2031,7 @@ pub fn run_prepared_stock_data_indicator_columns_delete(
         action_label: prepared.action_label.clone(),
         elapsed_ms: 0,
         summary: DataDownloadSummary {
-            success_count: indicator_columns.len() as u64,
+            success_count: count as u64,
             failed_count: 0,
             saved_rows: 0,
             concept_performance_rows: 0,
@@ -2043,9 +2049,6 @@ pub fn run_prepared_stock_data_indicator_columns_rebuild(
     ensure_stock_data_ready_for_derived(&prepared.source_path)?;
     ensure_default_indicator_manage_file(&prepared.source_path)?;
     let inds_cache = cache_ind_build(&prepared.source_path)?;
-    if inds_cache.is_empty() {
-        return Err("指标配置不存在或为空，请先维护 ind.toml。".to_string());
-    }
 
     let indicator_names = inds_cache
         .iter()
@@ -2055,6 +2058,42 @@ pub fn run_prepared_stock_data_indicator_columns_rebuild(
     let work_items = list_stock_data_indicator_work_items(&conn)?;
     if work_items.is_empty() {
         return Err("stock_data 没有可补算的行情记录。".to_string());
+    }
+
+    let report_panel = |finished: usize, total: usize, name: &str| {
+        if let Some(cb) = progress_cb {
+            cb(DownloadProgress {
+                phase: "panel_indicators".into(),
+                finished,
+                total,
+                current_label: Some(name.to_string()),
+                message: format!("跨股票指标 {finished}/{total}：{name}"),
+            });
+        }
+    };
+    if inds_cache.is_empty() {
+        let panel_days = crate::data::panel::refresh_with_progress(
+            &conn,
+            &prepared.source_path,
+            true,
+            Some(&report_panel),
+        )?;
+        return Ok(DataDownloadRunResult {
+            action: prepared.action.clone(),
+            action_label: prepared.action_label.clone(),
+            elapsed_ms: 0,
+            summary: DataDownloadSummary {
+                success_count: panel_days as u64,
+                failed_count: 0,
+                saved_rows: 0,
+                concept_performance_rows: 0,
+                failed_items: Vec::new(),
+            },
+            completion_details: vec![format!(
+                "跨股票指标已补算{panel_days}个交易日；没有配置逐股指标。"
+            )],
+            status: get_data_download_status(&prepared.source_path)?,
+        });
     }
 
     if let Some(cb) = progress_cb {
@@ -2112,7 +2151,13 @@ pub fn run_prepared_stock_data_indicator_columns_rebuild(
     let mut committed_rows = 0_u64;
     let mut finished_groups = 0_usize;
     let write_result = (|| -> Result<(), String> {
-        with_transaction(&conn, |tx| ensure_indicator_columns(tx, &indicator_names))?;
+        with_transaction(&conn, |tx| {
+            ensure_indicator_columns(tx, &indicator_names)?;
+            if let Some(start) = work_items.iter().map(|item| item.start_date.as_str()).min() {
+                crate::data::panel::invalidate(tx, start)?;
+            }
+            Ok(())
+        })?;
 
         loop {
             reset_stock_data_indicator_stage_table(&conn, &indicator_names)?;
@@ -2201,6 +2246,21 @@ pub fn run_prepared_stock_data_indicator_columns_rebuild(
         }
     })?;
     compute_result?;
+    if let Some(cb) = progress_cb {
+        cb(DownloadProgress {
+            phase: "panel_indicators".into(),
+            finished: 0,
+            total: 1,
+            current_label: None,
+            message: "补算跨股票指标。".into(),
+        });
+    }
+    let panel_days = crate::data::panel::refresh_with_progress(
+        &conn,
+        &prepared.source_path,
+        true,
+        Some(&report_panel),
+    )?;
 
     let status = get_data_download_status(&prepared.source_path)?;
 
@@ -2215,7 +2275,7 @@ pub fn run_prepared_stock_data_indicator_columns_rebuild(
             concept_performance_rows: 0,
             failed_items: Vec::new(),
         },
-        completion_details: Vec::new(),
+        completion_details: vec![format!("跨股票指标已补算{panel_days}个交易日。")],
         status,
     })
 }
@@ -2238,6 +2298,7 @@ pub fn get_indicator_manage_page(source_path: &str) -> Result<IndicatorManagePag
             .enumerate()
             .map(|(index, item)| IndicatorManageItem {
                 index,
+                scope: item.scope,
                 name: item.name,
                 expr: item.expr,
                 prec: item.prec,
@@ -2270,6 +2331,7 @@ fn ensure_default_indicator_manage_file(source_path: &str) -> Result<(), String>
     let text = build_indicator_manage_toml(&(|| -> Vec<IndicatorManageDraft> {
         vec![
             IndicatorManageDraft {
+                scope: crate::data::IndicatorScope::Stock,
                 name: "J".to_string(),
                 expr: (r#"RSV1 := RSV(C, H, L, 9);
 K1 := SMA(RSV1, 3, 1);
@@ -2279,6 +2341,7 @@ D1 := SMA(K1, 3, 1);
                 prec: 2,
             },
             IndicatorManageDraft {
+                scope: crate::data::IndicatorScope::Stock,
                 name: "ER".to_string(),
                 expr: (r#"N := 20;
 (C - REF(C, N)) / SUM(ABS(C - REF(C, 1)), N);"#)
@@ -2306,6 +2369,7 @@ fn build_indicator_manage_toml(items: &[IndicatorManageDraft]) -> Result<String,
             }
 
             Ok(IndicatorManageFileItem {
+                scope: item.scope,
                 name,
                 expr,
                 prec: item.prec,
@@ -2320,6 +2384,7 @@ fn build_indicator_manage_toml(items: &[IndicatorManageDraft]) -> Result<String,
     .map_err(|e| format!("序列化指标配置失败: {e}"))?;
 
     let parsed_items = IndsData::parse_from_text(&text)?;
+    crate::data::panel::validate_definitions(&parsed_items)?;
     for item in parsed_items {
         let program = parse_expression_program(&item.expr)
             .map_err(|e| format!("指标 {} 表达式解析错误在{}:{}", item.name, e.idx, e.msg))?;

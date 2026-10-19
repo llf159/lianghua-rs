@@ -147,7 +147,14 @@ fn parse_and_compile_chart_indicator_settings(
     text: &str,
 ) -> Result<(ChartIndicatorConfig, ChartIndicatorSettingsSummary), String> {
     let config = parse_chart_indicator_config(text)?;
-    let db_columns = load_stock_data_columns_if_available(source_path)?;
+    let mut db_columns = load_stock_data_columns_if_available(source_path)?;
+    if let Some(columns) = &mut db_columns {
+        columns.extend(
+            crate::data::panel::configured_fields(source_path)?
+                .into_iter()
+                .map(|(name, _)| name),
+        );
+    }
     compile_chart_indicator_config(&config, db_columns.as_ref())?;
     let summary = summarize_chart_indicator_config_with_columns(source_path, &config, db_columns)?;
     Ok((config, summary))
@@ -174,7 +181,7 @@ fn summarize_chart_indicator_config_with_columns(
         .iter()
         .map(|panel| panel.tooltips.len())
         .sum::<usize>();
-    let database_indicator_columns = match db_columns {
+    let mut database_indicator_columns = match db_columns {
         Some(columns) => (|columns: HashSet<String>| -> Vec<String> {
             let mut indicator_columns = columns
                 .into_iter()
@@ -209,6 +216,13 @@ fn summarize_chart_indicator_config_with_columns(
             Vec::new()
         }
     };
+    database_indicator_columns.extend(
+        crate::data::panel::configured_fields(source_path)?
+            .into_iter()
+            .map(|(name, _)| name),
+    );
+    database_indicator_columns.sort();
+    database_indicator_columns.dedup();
 
     Ok(ChartIndicatorSettingsSummary {
         panel_count,

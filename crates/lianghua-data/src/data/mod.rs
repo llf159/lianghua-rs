@@ -7,6 +7,7 @@ pub mod download_data;
 pub mod download_state;
 pub mod dragon_tiger_data;
 pub mod extras;
+pub mod panel;
 pub mod runtime;
 pub mod scoring_store;
 pub mod similarity_data;
@@ -21,7 +22,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use duckdb::{Connection, params};
+use duckdb::{
+    Connection,
+    arrow::array::{Array, Float64Array, StringArray},
+    params,
+};
 use serde::{Deserialize, Deserializer, de};
 
 use crate::expr::{
@@ -314,7 +319,8 @@ fn collect_expr_runtime_keys(
 
             let runtime_key = name.to_ascii_uppercase();
             if runtime_key == "TOTAL_MV_YI" {
-                keys.insert("C".to_string());
+                keys.insert("AMOUNT".to_string());
+                keys.insert("TOR".to_string());
                 return;
             }
             if let Some((_, db_key)) = options
@@ -368,6 +374,8 @@ pub struct DataReader {
     pub query_tail_rows_sql: String,
     pub cols_table: Vec<(String, String)>,
     pub runtime_index_cols: Vec<RuntimeIndexCol>,
+    pub runtime_panel_fields: Vec<String>,
+    pub source_dir: String,
 }
 
 #[derive(Debug, Clone)]
@@ -479,9 +487,13 @@ impl DataReader {
             db_cols_table.push((col.clone(), runtime_key));
         }
 
+        let configured_panel = panel::configured_fields(source_dir)?;
         let mut runtime_index_cols = Vec::new();
         if let Some(required_runtime_keys) = required_runtime_keys {
             for runtime_key in required_runtime_keys {
+                if configured_panel.iter().any(|(name, _)| name == runtime_key) {
+                    continue;
+                }
                 let (prefix, field_name) = runtime_key
                     .split_once('_')
                     .map_or((runtime_key.as_str(), "PCT_CHG"), |(prefix, field)| {
@@ -510,6 +522,14 @@ impl DataReader {
                 });
             }
         }
+        let include_panel = required_runtime_keys.is_none();
+        let runtime_panel_fields = configured_panel
+            .iter()
+            .filter(|(key, _)| {
+                required_runtime_keys.map_or(include_panel, |keys| keys.contains(key))
+            })
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
         if let Some(required_runtime_keys) = required_runtime_keys {
             let mut selected_runtime_keys = db_cols_table
                 .iter()
@@ -518,6 +538,8 @@ impl DataReader {
             for index_col in &runtime_index_cols {
                 selected_runtime_keys.insert(index_col.runtime_key.clone());
             }
+            selected_runtime_keys.extend(runtime_panel_fields.iter().cloned());
+            selected_runtime_keys.insert("TOTAL_MV_YI".to_string());
             let mut missing_runtime_keys = required_runtime_keys
                 .iter()
                 .filter(|runtime_key| !runtime_key_required(&selected_runtime_keys, runtime_key))
@@ -575,6 +597,8 @@ impl DataReader {
             query_tail_rows_sql,
             cols_table: db_cols_table,
             runtime_index_cols,
+            runtime_panel_fields,
+            source_dir: source_dir.to_string(),
         })
     }
 
@@ -615,6 +639,7 @@ impl DataReader {
         let mut out = RowData { trade_dates, cols };
         self.inject_estimated_market_cap(&mut out)?;
         self.inject_runtime_index(&mut out)?;
+        self.inject_panel(ts_code, &mut out)?;
         out.validate()?;
         Ok(out)
     }
@@ -665,6 +690,7 @@ impl DataReader {
         let mut out = RowData { trade_dates, cols };
         self.inject_estimated_market_cap(&mut out)?;
         self.inject_runtime_index(&mut out)?;
+        self.inject_panel(ts_code, &mut out)?;
         out.validate()?;
         Ok(out)
     }
@@ -712,8 +738,8 @@ impl DataReader {
             .conn
             .prepare(&sql)
             .map_err(|e| format!("预编译批量查询SQL失败:{e}"))?;
-        let mut rows = stmt
-            .query(params![adj_type, start_date, end_date])
+        let batches = stmt
+            .query_arrow(params![adj_type, start_date, end_date])
             .map_err(|e| {
                 format!(
                     "执行批量查询失败: 原始行情库={}, adj_type={adj_type}, 区间={start_date}-{end_date}, 股票={}: {e}",
@@ -723,31 +749,53 @@ impl DataReader {
             })?;
 
         let mut result: HashMap<String, RowData> = HashMap::new();
-        while let Some(row) = rows.next().map_err(|e| format!("读取批量数据行失败:{e}"))? {
-            let ts_code: String = row.get(0).map_err(|e| format!("读取ts_code失败:{e}"))?;
-            let trade_date: String = row.get(1).map_err(|e| format!("读取trade_date失败:{e}"))?;
-
-            let entry = result.entry(ts_code).or_insert_with(|| {
-                let mut cols: HashMap<String, Vec<Option<f64>>> = HashMap::new();
-                for (_, key) in &self.cols_table {
-                    cols.insert(key.clone(), Vec::new());
+        // SQL above fixes numeric columns to DOUBLE; decode each Arrow column
+        // once per batch rather than redispatching types for every cell.
+        for batch in batches {
+            let codes = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or("批量查询ts_code不是字符串")?;
+            let dates = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or("批量查询trade_date不是字符串")?;
+            let numeric = (0..self.cols_table.len())
+                .map(|index| {
+                    batch
+                        .column(index + 2)
+                        .as_any()
+                        .downcast_ref::<Float64Array>()
+                        .ok_or("批量查询数值列不是DOUBLE")
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            for index in 0..batch.num_rows() {
+                if codes.is_null(index) || dates.is_null(index) {
+                    return Err("批量行情的股票代码或交易日为空".into());
                 }
-                RowData {
-                    trade_dates: Vec::new(),
-                    cols,
-                }
-            });
-
-            entry.trade_dates.push(trade_date);
-
-            for (i, (_, key)) in self.cols_table.iter().enumerate() {
-                let value: Option<f64> =
-                    row.get(i + 2).map_err(|e| format!("读取{}失败:{e}", key))?;
-                if let Some(series) = entry.cols.get_mut(key) {
-                    series.push(value);
+                let entry = result
+                    .entry(codes.value(index).to_string())
+                    .or_insert_with(|| RowData {
+                        trade_dates: Vec::new(),
+                        cols: self
+                            .cols_table
+                            .iter()
+                            .map(|(_, key)| (key.clone(), Vec::new()))
+                            .collect(),
+                    });
+                entry.trade_dates.push(dates.value(index).to_string());
+                for ((_, key), column) in self.cols_table.iter().zip(&numeric) {
+                    entry
+                        .cols
+                        .get_mut(key)
+                        .expect("selected column")
+                        .push((!column.is_null(index)).then(|| column.value(index)));
                 }
             }
         }
+        drop(stmt);
 
         for row_data in result.values_mut() {
             self.inject_estimated_market_cap(row_data)?;
@@ -761,7 +809,32 @@ impl DataReader {
             }
         }
 
+        if !result.is_empty() && !self.runtime_panel_fields.is_empty() {
+            let values = panel::load_values(
+                &self.conn,
+                &self.source_dir,
+                &self.runtime_panel_fields,
+                ts_codes,
+                start_date,
+                end_date,
+            )?;
+            for (code, row) in result.iter_mut() {
+                panel::inject_values(row, code, &self.runtime_panel_fields, &values);
+                row.validate()?;
+            }
+        }
+
         Ok(result)
+    }
+
+    fn inject_panel(&self, ts_code: &str, row: &mut RowData) -> Result<(), String> {
+        panel::inject_fields(
+            &self.conn,
+            &self.source_dir,
+            ts_code,
+            row,
+            &self.runtime_panel_fields.iter().cloned().collect(),
+        )
     }
 
     fn inject_estimated_market_cap(&self, row_data: &mut RowData) -> Result<(), String> {
@@ -1538,8 +1611,19 @@ pub struct IndsData {
     pub ind: Vec<IndData>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IndicatorScope {
+    #[default]
+    Stock,
+    Market,
+    CrossSection,
+}
+
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
 pub struct IndData {
+    #[serde(default)]
+    pub scope: IndicatorScope,
     pub name: String,
     pub expr: String,
     pub prec: usize,
@@ -1575,6 +1659,26 @@ impl IndsData {
         for (i, ind) in inds.iter().enumerate() {
             let n = i + 1;
             let name = ind.name.trim();
+            if name.starts_with("__CS_INTERNAL_") {
+                return Err("指标名不能使用内部前缀__CS_INTERNAL_".into());
+            }
+            if ind.scope != IndicatorScope::Stock
+                && (STOCK_DATA_RUNTIME_FIELDS.iter().any(|field| {
+                    field.runtime_key == name || field.db_column.eq_ignore_ascii_case(name)
+                }) || RUNTIME_INDEX_COLS.iter().any(|(_, key)| *key == name)
+                    || matches!(
+                        name,
+                        "SESSION"
+                            | "LISTED_DAYS"
+                            | "TOTAL_MV_YI"
+                            | "RANK"
+                            | "SCORE"
+                            | "S_RANK"
+                            | "ZHANG"
+                    ))
+            {
+                return Err(format!("跨股票指标{name}不能覆盖基础输入字段"));
+            }
 
             if name.is_empty() {
                 return Err(format!("第{n}个指标的输出名称为空"));
@@ -1849,7 +1953,7 @@ when = "C > O"
     }
 
     #[test]
-    fn total_mv_yi_expression_collects_close_dependency() {
+    fn total_mv_yi_expression_collects_amount_and_turnover_dependencies() {
         use super::{RuntimeKeyCollectOptions, collect_runtime_keys_from_expr_programs};
         use crate::expr::parser::{Parser, lex_all};
 
@@ -1865,7 +1969,9 @@ when = "C > O"
             },
         );
 
-        assert!(keys.contains("C"));
+        assert!(keys.contains("AMOUNT"));
+        assert!(keys.contains("TOR"));
+        assert!(!keys.contains("C"));
         assert!(!keys.contains("TOTAL_MV"));
         assert!(!keys.contains("TOTAL_MV_YI"));
     }

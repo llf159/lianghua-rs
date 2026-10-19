@@ -1,0 +1,103 @@
+# Optional examples: append entries to ind.toml, or add them in indicator management.
+# These names have no special treatment in the engine.
+version = 1
+
+# 方向顺畅度，近10日有向对数收益／绝对对数收益，范围[-1,1]。
+[[ind]]
+name = "MKT_D10"
+scope = "market"
+prec = 12
+expr = """
+R := CS_MEAN(PCT_CHG, LISTED_DAYS>=60);
+L := LN(1+R/100);
+D := SUM(ABS(L),10);
+IF(D>0, SUM(L,10)/D, NULL());
+"""
+
+# 强弱延续，此前5日强弱各20%股票的当日日内收益差，再平滑5日，单位百分点。
+[[ind]]
+name = "MKT_F5"
+scope = "market"
+prec = 12
+expr = """
+P := (EXP(SUM(LN(MAX(0.000001,1+REF(PCT_CHG,1)/100)),5))-1)*100;
+OK := LISTED_DAYS>=60 AND COUNT(ISVALID(PCT_CHG),7)=7 AND O>0 AND H>=C AND H>=O AND L<=C AND L<=O;
+Q := CS_RANK(P,OK);
+MA(CS_MEAN((C/O-1)*100,OK AND Q>0.8)-CS_MEAN((C/O-1)*100,OK AND Q<=0.2),5);
+"""
+
+# 收盘位置，个股日内收盘相对高低区间的位置均值，再平滑5日。
+[[ind]]
+name = "MKT_CP5"
+scope = "market"
+prec = 12
+expr = "MA(CS_MEAN((2*C-H-L)/(H-L),LISTED_DAYS>=60 AND O>0 AND H>=C AND H>=O AND L<=C AND L<=O AND H>L),5)"
+
+# 量价配合，日涨跌与相对前20日报价均额的Spearman相关，再平滑5日。
+[[ind]]
+name = "MKT_VA5"
+scope = "market"
+prec = 12
+expr = "MA(CS_SPEARMAN(PCT_CHG,AMOUNT/REF(MA(AMOUNT,20),1),LISTED_DAYS>=60 AND COUNT(ISVALID(C),21)=21 AND REF(MA(AMOUNT,20),1)>0),5)"
+
+# 领涨保留，相邻不重叠5日最强组的Jaccard交并比例，再平滑5日。
+[[ind]]
+name = "MKT_LO5"
+scope = "market"
+prec = 12
+expr = """
+P := (EXP(SUM(LN(MAX(0.000001,1+PCT_CHG/100)),5))-1)*100;
+OK := LISTED_DAYS>=60 AND COUNT(ISVALID(PCT_CHG),11)=11;
+A := CS_RANK(P,OK);
+B := CS_RANK(REF(P,5),OK);
+U := CS_COUNT(1,A>0.8 OR B>0.8);
+MA(IF(U>0,CS_COUNT(1,A>0.8 AND B>0.8)/U,NULL()),5);
+"""
+
+# 成交集中，成交额前10%股票占总成交额比例，再平滑5日。
+[[ind]]
+name = "MKT_AC5"
+scope = "market"
+prec = 12
+expr = "MA(CS_TOPSHARE(AMOUNT,0.1,LISTED_DAYS>=60 AND AMOUNT>=0),5)"
+
+# 相对冲击，绝对涨跌／成交额的对数相对自身前20日报价基准的变化，中位数平滑5日。
+[[ind]]
+name = "MKT_IS5"
+scope = "market"
+prec = 12
+expr = """
+I := LN(MAX(ABS(PCT_CHG),0.01)/AMOUNT);
+MA(CS_MEDIAN(I-REF(MA(I,20),1),LISTED_DAYS>=60 AND AMOUNT>0 AND COUNT(ISVALID(C),21)=21),5);
+"""
+
+# 共同波动，20日市场等权收益样本方差／该方差与平均个股截面样本方差之和。
+[[ind]]
+name = "MKT_CF20"
+scope = "market"
+prec = 12
+expr = """
+R := CS_MEAN(PCT_CHG,LISTED_DAYS>=60);
+S := STD(R,20);
+V := S*S*20/19;
+D := MA(CS_VAR(PCT_CHG,LISTED_DAYS>=60),20);
+IF(V+D>0,V/(V+D),NULL());
+"""
+
+# 下跌尾部，跌超3%比例减涨超3%比例，再平滑5日。
+[[ind]]
+name = "MKT_DT5"
+scope = "market"
+prec = 12
+expr = "MA(CS_MEAN(IF(PCT_CHG < -3,1,0)-IF(PCT_CHG>3,1,0),LISTED_DAYS>=60),5)"
+
+# 大小盘分歧，小市值<100亿、大市值>=500亿，两组方向相反的最近5日比例。
+[[ind]]
+name = "MKT_SC5"
+scope = "market"
+prec = 12
+expr = """
+S := CS_MEAN(PCT_CHG,LISTED_DAYS>=60 AND TOTAL_MV_YI<100);
+L := CS_MEAN(PCT_CHG,LISTED_DAYS>=60 AND TOTAL_MV_YI>=500);
+MA(IF(ISVALID(S) AND ISVALID(L),S*L<0,NULL()),5);
+"""

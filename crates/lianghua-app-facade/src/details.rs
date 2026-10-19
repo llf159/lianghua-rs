@@ -754,6 +754,13 @@ fn inject_chart_indicator_extra_runtime_fields(
     ts_code: &str,
     input_fields: &HashSet<String>,
 ) -> Result<(), String> {
+    crate::data::panel::inject_fields(
+        &crate::data::open_db_readonly(source_db_path(source_path)).map_err(|e| e.to_string())?,
+        source_path,
+        ts_code,
+        row_data,
+        input_fields,
+    )?;
     if input_fields.contains("ZHANG") || input_fields.contains("TOTAL_MV_YI") {
         let is_st = input_fields.contains("ZHANG")
             && load_st_list(source_path)
@@ -916,9 +923,14 @@ fn query_kline_with_compiled(
 
     let column_lookup = build_case_insensitive_column_lookup(&db_columns);
     let base_columns = resolve_kline_base_columns(&column_lookup)?;
+    let panel_fields = crate::data::panel::configured_fields(source_path)?
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect::<HashSet<_>>();
     let dependency_columns = compiled
         .database_indicator_columns
         .iter()
+        .filter(|db_col| !panel_fields.contains(&db_col.to_ascii_uppercase()))
         .filter(|db_col| {
             !base_columns
                 .iter()

@@ -291,6 +291,46 @@ fn sync_gaini_bx_range(
     Ok(bx_row_count)
 }
 
+fn maintain_panel_indicators(
+    conn: &Connection,
+    source_dir: &str,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
+) -> Result<(), String> {
+    emit_progress(
+        progress_cb,
+        "panel_indicators",
+        0,
+        1,
+        None,
+        "正在更新原始库跨股票指标。".to_string(),
+    );
+    let report = |finished: usize, total: usize, name: &str| {
+        emit_progress(
+            progress_cb,
+            "panel_indicators",
+            finished,
+            total,
+            Some(name.to_string()),
+            format!("跨股票指标 {finished}/{total}：{name}"),
+        )
+    };
+    let days = crate::data::panel::refresh_with_progress(conn, source_dir, false, Some(&report))
+        .map_err(|e| {
+            format!(
+                "行情已提交，跨股票指标补算失败；待补算区间保留，可在数据管理中执行指标列补算：{e}"
+            )
+        })?;
+    emit_progress(
+        progress_cb,
+        "panel_indicators",
+        1,
+        1,
+        None,
+        format!("跨股票指标已更新，共{days}个交易日。"),
+    );
+    Ok(())
+}
+
 fn build_missing_ths_concept_items(
     source_dir: &str,
 ) -> Result<
@@ -1896,6 +1936,9 @@ fn download_selected_stocks_with_mode(
                 ),
             );
         }
+        if adj_type == AdjType::Qfq {
+            maintain_panel_indicators(&conn, source_dir, progress_cb)?;
+        }
         emit_progress(
             progress_cb,
             "done",
@@ -1922,9 +1965,12 @@ fn download_selected_stocks_with_mode(
         "缺失股票补全结束",
         progress_cb,
     )?;
-    if adj_type == AdjType::Qfq && summary.saved_rows > 0 {
-        summary.concept_performance_rows +=
-            sync_gaini_bx_range(conn, source_dir, start_date, end_date, progress_cb)?;
+    if adj_type == AdjType::Qfq {
+        maintain_panel_indicators(&conn, source_dir, progress_cb)?;
+        if summary.saved_rows > 0 {
+            summary.concept_performance_rows +=
+                sync_gaini_bx_range(conn, source_dir, start_date, end_date, progress_cb)?;
+        }
     }
     emit_progress(
         progress_cb,
@@ -1946,8 +1992,6 @@ pub fn download_selected_indices(
 ) -> Result<DownloadSummary, String> {
     let effective_trade_date = end_date.to_string();
     let source_dir = config.source_dir.as_str();
-    let client = TushareClient::new(config.token.clone(), config.limit_calls_per_min)?;
-    let pool = build_download_pool(config.threads)?;
     let db_path = source_db_path(source_dir);
     let db_path_str = db_path
         .to_str()
@@ -1956,9 +2000,12 @@ pub fn download_selected_indices(
     let conn = Connection::open(db_path_str).map_err(|e| format!("数据库连接错误:{e}"))?;
 
     if ts_codes.is_empty() {
+        maintain_panel_indicators(&conn, source_dir, progress_cb)?;
         return Ok(DownloadSummary::default());
     }
 
+    let client = TushareClient::new(config.token.clone(), config.limit_calls_per_min)?;
+    let pool = build_download_pool(config.threads)?;
     let total_tasks = ts_codes.len();
     let mut committed_tasks = 0usize;
     let mut total = DownloadSummary::default();
@@ -2043,6 +2090,9 @@ pub fn download_selected_indices(
     }
 
     checkpoint_stock_data(&conn)?;
+    if total.failed_count == 0 {
+        maintain_panel_indicators(&conn, source_dir, progress_cb)?;
+    }
     emit_progress(
         progress_cb,
         "done",
@@ -2144,7 +2194,7 @@ pub fn download_indices_after_basic_data(
         ),
     );
 
-    match load_latest_trade_date(source_dir, AdjType::Ind)? {
+    let start_date = match load_latest_trade_date(source_dir, AdjType::Ind)? {
         Some(last_saved_trade_date) if last_saved_trade_date.as_str() < effective_trade_date => {
             let trade_dates = load_trade_date_list(source_dir)?;
             let pending_trade_dates: Vec<String> = trade_dates
@@ -2153,32 +2203,25 @@ pub fn download_indices_after_basic_data(
                 .filter(|d| d.as_str() <= effective_trade_date)
                 .cloned()
                 .collect();
-            if pending_trade_dates.is_empty() {
-                return Ok(DownloadSummary::default());
-            }
-            download_selected_indices(
-                config,
-                &INDEX_TS_CODES
-                    .iter()
-                    .map(|code| code.to_string())
-                    .collect::<Vec<_>>(),
-                pending_trade_dates[0].as_str(),
-                effective_trade_date,
-                progress_cb,
-            )
+            pending_trade_dates.into_iter().next()
         }
-        Some(_) => Ok(DownloadSummary::default()),
-        None => download_selected_indices(
-            config,
-            &INDEX_TS_CODES
-                .iter()
-                .map(|code| code.to_string())
-                .collect::<Vec<_>>(),
-            config.start_date.as_str(),
-            effective_trade_date,
-            progress_cb,
-        ),
-    }
+        Some(_) => None,
+        None => Some(config.start_date.clone()),
+    };
+    let ts_codes = if start_date.is_some() {
+        INDEX_TS_CODES.iter().map(|code| code.to_string()).collect()
+    } else {
+        Vec::new()
+    };
+    // Also finish the panel phase when indexes are already current: the stock
+    // phase or an interrupted previous run may still have left dirty results.
+    download_selected_indices(
+        config,
+        &ts_codes,
+        start_date.as_deref().unwrap_or(effective_trade_date),
+        effective_trade_date,
+        progress_cb,
+    )
 }
 
 pub fn download_pending_all_market(
@@ -2186,7 +2229,14 @@ pub fn download_pending_all_market(
     progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<DownloadSummary, String> {
     let effective_trade_date = init_stock_basic_data(config, progress_cb)?;
-    download_pending_all_market_after_basic_data(config, effective_trade_date.as_str(), progress_cb)
+    let summary = download_pending_all_market_after_basic_data(
+        config,
+        effective_trade_date.as_str(),
+        progress_cb,
+    )?;
+    let conn = Connection::open(source_db_path(&config.source_dir)).map_err(|e| e.to_string())?;
+    maintain_panel_indicators(&conn, &config.source_dir, progress_cb)?;
+    Ok(summary)
 }
 
 fn download_pending_all_market_after_basic_data(
@@ -2825,9 +2875,18 @@ pub fn download(
     progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<DownloadSummary, String> {
     let effective_trade_date = init_stock_basic_data(config, progress_cb)?;
-    download_after_basic_data(config, effective_trade_date.as_str(), progress_cb)
+    let summary = download_after_basic_data(config, effective_trade_date.as_str(), progress_cb)?;
+    if config.adj_type == AdjType::Qfq {
+        let conn =
+            Connection::open(source_db_path(&config.source_dir)).map_err(|e| e.to_string())?;
+        maintain_panel_indicators(&conn, &config.source_dir, progress_cb)?;
+    }
+    Ok(summary)
 }
 
+/// Stock phase of a combined download. Finish with
+/// `download_indices_after_basic_data` to publish cross-stock indicators only
+/// after both stock and index inputs have been committed.
 pub fn download_after_basic_data(
     config: &DownloadRuntimeConfig,
     effective_trade_date: &str,
@@ -2906,6 +2965,153 @@ mod tests {
             snapshot_row_count,
             market_value_row_count,
         }
+    }
+
+    #[test]
+    fn panel_refresh_waits_for_indexes_and_preserves_assignment_warmup() {
+        let directory = temp_source_dir("panel-index-order");
+        let dates = (1..=11)
+            .map(|day| format!("202501{day:02}"))
+            .collect::<Vec<_>>();
+        write_trade_calendar(
+            &directory,
+            &dates.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+        let source = directory.to_str().unwrap();
+        fs::write(
+            stock_list_path(source),
+            "ts_code,list_date\n000001.SZ,20250101\n",
+        )
+        .unwrap();
+        fs::write(
+            crate::data::ind_toml_path(source),
+            r#"version=1
+[[ind]]
+name="TEST_BASE"
+scope="market"
+expr="CS_MEAN(PCT_CHG-I)"
+prec=6
+[[ind]]
+name="TEST_MA"
+scope="market"
+expr="X := MA(TEST_BASE,5)"
+prec=6
+"#,
+        )
+        .unwrap();
+        init_stock_data_db(source_db_path(source).to_str().unwrap()).unwrap();
+        let conn = Connection::open(source_db_path(source)).unwrap();
+        for (day, date) in dates.iter().take(10).enumerate() {
+            conn.execute("INSERT INTO stock_data(ts_code,trade_date,adj_type,pct_chg) VALUES ('000001.SZ',?,'qfq',?),('000001.SH',?,'ind',0)", duckdb::params![date, day + 1, date]).unwrap();
+        }
+        assert_eq!(
+            crate::data::panel::refresh(&conn, source, false).unwrap(),
+            10
+        );
+        let mut row = ProBarRow {
+            ts_code: "000001.SZ".into(),
+            trade_date: dates[10].clone(),
+            open: 10.,
+            high: 11.,
+            low: 9.,
+            close: 11.,
+            pre_close: 10.,
+            change: 1.,
+            pct_chg: 11.,
+            vol: 100.,
+            amount: 1000.,
+            turnover_rate: Some(1.),
+            volume_ratio: None,
+            moneyflow: None,
+        };
+        crate::data::download_data::insert_pro_bar_rows(
+            &conn,
+            AdjType::Qfq,
+            std::slice::from_ref(&row),
+        )
+        .unwrap();
+        drop(conn);
+
+        let config = DownloadRuntimeConfig {
+            source_dir: source.into(),
+            adj_type: AdjType::Qfq,
+            token: String::new(),
+            start_date: dates[0].clone(),
+            end_date: dates[10].clone(),
+            threads: 1,
+            retry_times: 0,
+            limit_calls_per_min: 1,
+            include_turnover: true,
+            allow_stale_stock_list: false,
+        };
+        // The combined stock phase must not publish a result while today's
+        // index quote is still missing, even when no stock download is needed.
+        download_after_basic_data(&config, &dates[10], None).unwrap();
+        let conn = Connection::open(source_db_path(source)).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT max(trade_date) FROM indicator_panel_sessions",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            dates[9]
+        );
+        row.ts_code = "000001.SH".into();
+        row.pct_chg = 0.;
+        let mut index = PreparedStockDownload {
+            ts_code: row.ts_code.clone(),
+            start_date: row.trade_date.clone(),
+            end_date: row.trade_date.clone(),
+            adj_type: AdjType::Ind,
+            rows: vec![row],
+            indicators: HashMap::new(),
+        };
+        write_prepared_stock_batch(&conn, std::slice::from_ref(&index), false).unwrap();
+        drop(conn);
+        // No network requests: all indexes are now current, but the final phase
+        // must still consume the dirty range left by the stock/index writes.
+        download_indices_after_basic_data(&config, &dates[10], None).unwrap();
+        let reader = DataReader::new(source).unwrap();
+        let values = reader
+            .load_one_tail_rows("000001.SZ", "qfq", &dates[10], 1)
+            .unwrap();
+        assert_eq!(values.cols["TEST_BASE"], vec![Some(11.)]);
+        assert_eq!(values.cols["TEST_MA"], vec![Some(9.)]);
+        drop(reader);
+
+        // A historical index correction must also invalidate later results,
+        // and the incremental repair must agree with a complete rebuild.
+        let conn = Connection::open(source_db_path(source)).unwrap();
+        index.start_date = dates[9].clone();
+        index.end_date = dates[9].clone();
+        index.rows[0].trade_date = dates[9].clone();
+        index.rows[0].pct_chg = 5.;
+        write_prepared_stock_batch(&conn, std::slice::from_ref(&index), false).unwrap();
+        let requested = vec!["TEST_BASE".into(), "TEST_MA".into()];
+        assert!(
+            crate::data::panel::load_values(&conn, source, &requested, &[], &dates[9], &dates[10])
+                .unwrap()
+                .is_empty()
+        );
+        drop(conn);
+        download_indices_after_basic_data(&config, &dates[10], None).unwrap();
+        let reader = DataReader::new(source).unwrap();
+        let repaired = reader
+            .load_one_tail_rows("000001.SZ", "qfq", &dates[10], 1)
+            .unwrap();
+        assert_eq!(repaired.cols["TEST_MA"], vec![Some(8.)]);
+        drop(reader);
+        let conn = Connection::open(source_db_path(source)).unwrap();
+        crate::data::panel::refresh(&conn, source, true).unwrap();
+        drop(conn);
+        let reader = DataReader::new(source).unwrap();
+        let rebuilt = reader
+            .load_one_tail_rows("000001.SZ", "qfq", &dates[10], 1)
+            .unwrap();
+        assert_eq!(repaired.cols["TEST_MA"], rebuilt.cols["TEST_MA"]);
+        drop(reader);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

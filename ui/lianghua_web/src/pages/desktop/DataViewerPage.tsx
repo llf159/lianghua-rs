@@ -30,7 +30,7 @@ const DATASET_OPTIONS: DatasetOption[] = [
   {
     id: 'stock-data-base',
     label: '原始行情库',
-    description: '查看 stock_data，基础列在前，指标列紧随其后。',
+    description: '查看原始行情及指标列，市场及横截面指标按日期与股票显示。',
     requiredFileId: 'source-db',
     supportsTradeDate: true,
     supportsTsCode: true,

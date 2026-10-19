@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 
 use duckdb::Connection;
@@ -210,7 +211,30 @@ pub fn preview_managed_source_dataset(
                 .ok_or_else(|| "stock_data.db 路径不是有效 UTF-8".to_string())?;
             let conn = crate::data::open_db_readonly(db_path_str)
                 .map_err(|error| format!("打开 stock_data.db 失败: {error}"))?;
-            let relation = quote_ident("stock_data");
+            let fields = crate::data::panel::configured_fields(source_path_str)?;
+            let relation = if crate::data::panel::has_values(&conn)? && !fields.is_empty() {
+                let signature = crate::data::panel::config_signature(
+                    &crate::data::panel::definitions(source_path_str)?,
+                )?
+                .replace('\'', "''");
+                let fields=fields.iter().map(|(key,scope)| {
+                    let code=if *scope==crate::data::IndicatorScope::Market {"''"}else{"s.ts_code"};
+                    format!("(SELECT v.value FROM indicator_panel_values v JOIN indicator_panel_state m ON m.id=1 AND m.version=1 AND m.signature='{signature}' WHERE v.name='{}' AND v.ts_code={code} AND v.trade_date=s.trade_date AND (m.dirty_from IS NULL OR v.trade_date<m.dirty_from)) AS {}",key.replace('\'',"''"),quote_ident(key))
+                }).collect::<Vec<_>>().join(",");
+                let names = crate::data::panel::configured_fields(source_path_str)?
+                    .into_iter()
+                    .map(|(key, _)| key)
+                    .collect::<HashSet<_>>();
+                let physical = load_relation_columns(&conn, &quote_ident("stock_data"))?
+                    .into_iter()
+                    .filter(|key| !names.contains(&key.to_ascii_uppercase()))
+                    .map(|key| format!("s.{}", quote_ident(&key)))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!("(SELECT {physical},{fields} FROM stock_data s)")
+            } else {
+                quote_ident("stock_data")
+            };
             let columns = load_relation_columns(&conn, &relation)?;
             let base_columns = [
                 "ts_code",
