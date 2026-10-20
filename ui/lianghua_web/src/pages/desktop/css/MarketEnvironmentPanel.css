@@ -1,0 +1,247 @@
+.market-environment {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.market-environment h3,
+.market-environment h4,
+.market-environment p {
+  margin: 0;
+}
+
+.market-environment h3 {
+  font-size: 17px;
+}
+
+.market-environment h4 {
+  font-size: 15px;
+}
+
+.market-env-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.market-env-summary {
+  display: grid;
+  gap: 9px;
+  padding: 14px;
+  border: 1px solid #dbe5ed;
+  border-radius: 10px;
+  background: #f4f8fb;
+  min-width: 0;
+}
+
+.market-env-dates,
+.market-env-returns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  color: #64748b;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.market-env-notice,
+.market-env-coverage {
+  color: #7c5a12;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.market-env-coverage {
+  color: #64748b;
+  font-variant-numeric: tabular-nums;
+}
+
+.market-environment .market-env-verdict {
+  color: #1e293b;
+  font-size: 21px;
+  line-height: 1.5;
+}
+
+.market-env-narrative {
+  display: grid;
+  gap: 12px;
+  color: #334155;
+  font-size: 14px;
+  line-height: 1.85;
+  overflow-wrap: anywhere;
+}
+
+.market-env-returns b {
+  color: #334155;
+  font-size: 14px;
+}
+
+.market-env-evidence > summary,
+.market-env-other > summary {
+  cursor: pointer;
+  color: #64748b;
+  font-size: 13px;
+  padding: 4px 0;
+}
+
+.market-env-evidence[open] > summary {
+  margin-bottom: 12px;
+}
+
+.market-env-evidence > .market-env-coverage {
+  margin: 8px 0 12px;
+}
+
+.market-env-feedback {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.market-env-feedback > h4 {
+  grid-column: 1 / -1;
+  color: #334155;
+}
+
+.market-env-feedback-row {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid #e1e7ef;
+  border-radius: 10px;
+}
+
+.market-env-feedback-row p {
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.market-env-other[open] > summary {
+  margin-bottom: 12px;
+}
+
+.market-env-groups {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  min-width: 0;
+}
+
+.market-env-group {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  padding: 12px;
+  border: 1px solid #e1e7ef;
+  border-radius: 10px;
+  min-width: 0;
+}
+
+.market-env-group > h4 {
+  color: #334155;
+  padding-bottom: 4px;
+}
+
+.market-env-reading {
+  display: grid;
+  gap: 5px;
+  padding: 10px 0;
+  border-top: 1px solid #edf1f6;
+  min-width: 0;
+}
+
+.market-env-reading-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.market-env-reading-head span {
+  color: #475569;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.market-env-reading-head strong {
+  color: #1e293b;
+  font-size: 17px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.market-env-reading-meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 3px 10px;
+  color: #64748b;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.market-env-reading p {
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.market-env-history {
+  color: #64748b;
+  font-size: 11px;
+}
+
+.market-env-history summary {
+  cursor: pointer;
+  color: #64748b;
+  line-height: 1.7;
+}
+
+.market-env-history span {
+  display: block;
+  line-height: 1.6;
+}
+
+.market-env-history-empty {
+  color: #94a3b8;
+}
+
+.market-env-sparkline {
+  display: block;
+  width: 100%;
+  height: 46px;
+  margin: 4px 0;
+  overflow: visible;
+}
+
+.market-env-sparkline line {
+  stroke: #e2e8f0;
+  stroke-width: 1;
+}
+
+.market-env-sparkline path {
+  fill: none;
+  stroke: #64748b;
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+@media (max-width: 1000px) {
+  .market-env-feedback,
+  .market-env-groups {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 650px) {
+  .market-env-heading {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+}

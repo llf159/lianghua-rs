@@ -18,8 +18,10 @@ __pycache__
 !/docs/indicator-market-examples.toml
 /strategies
 market*
+!/docs/market-environment-analysis.md
 !crates/lianghua-app-strategy/src/statistics/market_activity.rs
 !crates/lianghua-app-strategy/src/statistics/market_activity_model.json
+!crates/lianghua-app-strategy/src/statistics/market_environment.rs
 # 本地研究脚本、报告和实验结果
 /src/bin/
 /research/

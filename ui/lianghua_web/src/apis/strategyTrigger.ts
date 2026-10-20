@@ -555,65 +555,69 @@ export type MarketAnalysisData = {
   daily: MarketAnalysisSnapshot
 }
 
-export type StructureState = 'up' | 'down' | 'up_broken' | 'down_broken' | 'insufficient'
+export type MarketEnvironmentGroup = 'direction' | 'volume' | 'risk'
 
-export type StructureEventKind = 'up_started' | 'down_started' | 'up_renewed' | 'down_renewed' |
-  'up_invalidated' | 'down_invalidated' | 'up_reclaimed' | 'down_reclaimed' |
-  'failed_up_breakout' | 'failed_down_breakout'
-
-export type MarketStructureLevel = {
-  degree: number
-  state: StructureState
-  phase: 'advance' | 'pullback' | 'decline' | 'rebound' | 'transition' | 'unknown'
-  stage: 'started' | 'continued' | 'unresolved'
-  can_restore_previous: boolean
-  state_since: string | null
-  guard: { price: number; trade_date: string; confirmed_date: string; confirmation_bars: number } | null
-  breakout_price: number | null
-  next_trigger_price: number | null
-  guard_distance_pct: number | null
-  child_state: StructureState | null
-  parent_state: StructureState | null
-  pivot_count: number
-  events: { trade_date: string; kind: StructureEventKind; price: number; level_price: number }[]
+export type MarketEnvironmentPoint = {
+  trade_date: string
+  value: number | null
 }
 
-export type MarketStructureData = {
-  trade_date: string | null
+export type MarketEnvironmentDimension = {
+  group: MarketEnvironmentGroup
+  key: string
+  label: string
+  unit: string
+  value: number | null
+  change_5d: number | null
+  interpretation: string
+  sample_count: number
+  sample_label: string
+  history: MarketEnvironmentPoint[]
+}
+
+export type MarketEnvironmentCoverage = {
+  expected_stocks: number
+  quoted_stocks: number
+  suspended_or_gapped_stocks: number
+  missing_stocks: number
+  unknown_listing_stocks: number
+  ratio: number | null
+  required_ratio: number
+}
+
+export type MarketEnvironmentFeedback = {
+  key: string
+  label: string
+  rate_pct: number | null
+  change_5d_pp: number | null
+  events: number
+  successes: number
+  stocks: number
+  description: string
+}
+
+export type MarketEnvironmentData = {
+  reference_trade_date: string | null
+  analysis_trade_date: string | null
   latest_trade_date: string | null
-  base_swing_pct: number
+  fallback_reason: string | null
+  coverage: MarketEnvironmentCoverage | null
+  return_5d_pct: number | null
+  return_10d_pct: number | null
+  breadth_10d_pct: number | null
+  feedback: MarketEnvironmentFeedback[]
+  phase: string | null
+  headline: string
   summary: string
-  activity: {
-    scopes: {
-      scope: 'all_a' | 'sh_sz'
-      observed_stocks: number
-      invalid_volume_stocks: number
-      invalid_amount_stocks: number
-      volume: { total: number | null; day_ratio: number | null; week_ratio: number | null; week_change: number | null }
-      amount: { total: number | null; day_ratio: number | null; week_ratio: number | null; week_change: number | null }
-    }[]
-    outlook: { horizon: number; expected_return_pct: number; activity_adjustment_pp: number }[]
-    outlook_status: string
-    model_fit_end: string
-    validation_data_asof: string
-  }
-  consensus: { degree: number; up_count: number; down_count: number; broken_count: number; unavailable_count: number; description: string }[]
-  indexes: {
-    code: string
-    name: string
-    trade_date: string | null
-    close: number | null
-    current: boolean
-    levels: MarketStructureLevel[]
-    chart: { trade_date: string; close: number; guards: (number | null)[]; states: StructureState[] }[]
-  }[]
+  status: 'ok' | 'insufficient'
+  dimensions: MarketEnvironmentDimension[]
 }
 
-export async function getMarketStructure(query: {
+export async function getMarketEnvironment(query: {
   sourcePath: string
   referenceTradeDate?: string
 }) {
-  return invoke<MarketStructureData>('get_market_structure', query)
+  return invoke<MarketEnvironmentData>('get_market_environment', query)
 }
 
 export type DragonTigerMarketSummary = {

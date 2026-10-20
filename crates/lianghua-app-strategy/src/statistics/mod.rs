@@ -3,6 +3,7 @@ mod common;
 mod detail_cache;
 mod market;
 mod market_activity;
+mod market_environment;
 mod page;
 mod structure_cycle;
 #[cfg(test)]
@@ -24,6 +25,11 @@ pub use detail_cache::get_cached_rule_layer_backtest_detail;
 pub use market::{
     MarketAnalysisData, MarketAnalysisSnapshot, MarketContributionData, MarketContributorItem,
     MarketRankItem, get_market_analysis, get_market_contribution,
+};
+pub use market_environment::{
+    MarketEnvironmentCoverage, MarketEnvironmentData, MarketEnvironmentDimension,
+    MarketEnvironmentFeedback, MarketEnvironmentGroup, MarketEnvironmentPoint,
+    MarketEnvironmentStatus, get_market_environment,
 };
 pub use page::{
     SceneContributionSummary, SceneStageRow, SceneStatisticsPageData, StrategyChartPayload,

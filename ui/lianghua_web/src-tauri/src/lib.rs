@@ -193,7 +193,7 @@ use {
         get_cached_rule_layer_backtest_detail as core_get_cached_rule_layer_backtest_detail,
         get_market_analysis as core_get_market_analysis,
         get_market_contribution as core_get_market_contribution,
-        get_market_structure as core_get_market_structure,
+        get_market_environment as core_get_market_environment,
         get_rule_layer_backtest_defaults as core_get_rule_layer_backtest_defaults,
         get_scene_layer_backtest_defaults as core_get_scene_layer_backtest_defaults,
         get_scene_statistics_page as core_get_scene_statistics_page,
@@ -208,7 +208,7 @@ use {
         run_transient_rank_layer_backtest as core_run_transient_rank_layer_backtest,
         run_transient_rule_layer_backtest as core_run_transient_rule_layer_backtest,
         run_transient_scene_layer_backtest as core_run_transient_scene_layer_backtest,
-        MarketAnalysisData, MarketContributionData, MarketStructureData, RankLayerBacktestData,
+        MarketAnalysisData, MarketContributionData, MarketEnvironmentData, RankLayerBacktestData,
         RuleExpressionValidationData, RuleExpressionValidationManualStrategy,
         RuleLayerBacktestData, RuleLayerBacktestDefaultsData, RuleValidationUnknownConfig,
         SceneLayerBacktestData, SceneLayerBacktestDefaultsData, SceneStatisticsPageData,
@@ -1458,15 +1458,15 @@ async fn get_cached_rule_layer_backtest_detail(
 }
 
 #[tauri::command]
-async fn get_market_structure(
+async fn get_market_environment(
     source_path: String,
     reference_trade_date: Option<String>,
-) -> Result<MarketStructureData, String> {
+) -> Result<MarketEnvironmentData, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
             .read()
             .unwrap_or_else(|e| e.into_inner());
-        core_get_market_structure(source_path, reference_trade_date)
+        core_get_market_environment(source_path, reference_trade_date)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -3216,7 +3216,7 @@ pub fn run() {
             get_rule_layer_backtest_defaults,
             get_cached_rule_layer_backtest_detail,
             get_market_analysis,
-            get_market_structure,
+            get_market_environment,
             get_dragon_tiger_market_data,
             get_dragon_tiger_stock_detail,
             get_dragon_tiger_seat_statistics,

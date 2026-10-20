@@ -12,7 +12,7 @@ import { filterBoardItems, isStBoard, useConceptExclusions } from "../../shared/
 import { readJsonStorage, readStoredSourcePath, writeJsonStorage } from "../../shared/storage";
 import { STOCK_PICK_BOARD_OPTIONS } from "../../shared/stockPickShared";
 import DragonTigerMarketPanel from "./components/DragonTigerMarketPanel";
-import MarketStructurePanel from "./components/MarketStructurePanel";
+import MarketEnvironmentPanel from "./components/MarketEnvironmentPanel";
 import "./css/SceneLayerBacktestPage.css";
 
 function formatDateLabel(value?: string | null) {
@@ -573,7 +573,7 @@ export default function MarketAnalysisPage() {
       </section>
 
       {!initializing && sourcePath ? (
-        <MarketStructurePanel
+        <MarketEnvironmentPanel
           sourcePath={sourcePath}
           referenceTradeDate={normalizeDateInput(referenceDateInput) || undefined}
         />
