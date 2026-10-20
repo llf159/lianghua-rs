@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use lianghua_model::scoring::SceneResolvedStage;
 
@@ -17,10 +17,58 @@ pub mod runner;
 pub mod tools;
 pub mod tracking;
 
+#[derive(Debug, PartialEq)]
 enum ScopeHit {
     Bool(bool),
-    EachOffsets(Vec<usize>),
+    Count(usize),
     Recent(Option<usize>),
+}
+
+#[derive(Default)]
+struct ScopeWindowState {
+    hit_count: usize,
+    last_hit: Option<usize>,
+    consecutive: usize,
+    last_consecutive: Option<usize>,
+}
+
+impl ScopeWindowState {
+    fn advance(&mut self, scopeway: ScopeWay, windows: usize, bs: &[Truth], i: usize) -> ScopeHit {
+        let hit = bs[i].is_true();
+        if matches!(scopeway, ScopeWay::Last) {
+            return ScopeHit::Bool(hit);
+        }
+        self.hit_count += usize::from(hit);
+        if i >= windows {
+            self.hit_count -= usize::from(bs[i - windows].is_true());
+        }
+        if hit {
+            self.last_hit = Some(i);
+            self.consecutive += 1;
+        } else {
+            self.consecutive = 0;
+        }
+        let start = (i + 1).saturating_sub(windows);
+        match scopeway {
+            ScopeWay::Last => ScopeHit::Bool(hit),
+            ScopeWay::Any => ScopeHit::Bool(self.hit_count > 0),
+            ScopeWay::Each => ScopeHit::Count(self.hit_count),
+            ScopeWay::Recent => {
+                ScopeHit::Recent(self.last_hit.filter(|&day| day >= start).map(|day| i - day))
+            }
+            ScopeWay::Consec(len) => {
+                if self.consecutive >= len {
+                    self.last_consecutive = Some(i);
+                }
+                ScopeHit::Bool(
+                    len == 0
+                        || self
+                            .last_consecutive
+                            .is_some_and(|end| end >= start && end - start + 1 >= len),
+                )
+            }
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -128,6 +176,7 @@ fn restore_runtime_values(rt: &mut Runtime, snapshots: &[RuntimeSnapshotEntry]) 
     }
 }
 
+#[cfg(test)]
 fn hit_scopeway(scopeway: ScopeWay, windows: usize, bs: &[Truth], i: usize) -> ScopeHit {
     match scopeway {
         ScopeWay::Last => ScopeHit::Bool(bs[i].is_true()),
@@ -158,13 +207,7 @@ fn hit_scopeway(scopeway: ScopeWay, windows: usize, bs: &[Truth], i: usize) -> S
         }
         ScopeWay::Each => {
             let start = (i + 1).saturating_sub(windows);
-            let mut offsets = Vec::new();
-            for j in start..=i {
-                if bs[j].is_true() {
-                    offsets.push(i - j);
-                }
-            }
-            ScopeHit::EachOffsets(offsets)
+            ScopeHit::Count(bs[start..=i].iter().filter(|truth| truth.is_true()).count())
         }
         ScopeWay::Recent => {
             let start = (i + 1).saturating_sub(windows);
@@ -190,7 +233,7 @@ fn score_from_dist_points(value: usize, dps: &[DistPoint]) -> f64 {
 fn scope_hit_triggered(hit: &ScopeHit) -> bool {
     match hit {
         ScopeHit::Bool(ok) => *ok,
-        ScopeHit::EachOffsets(offsets) => !offsets.is_empty(),
+        ScopeHit::Count(count) => *count > 0,
         ScopeHit::Recent(value) => value.is_some(),
     }
 }
@@ -267,6 +310,20 @@ fn scoring_rule_cache(
             }
             let mut scores = Vec::with_capacity(len);
             let mut triggered = Vec::with_capacity(len);
+            let mut daily_parts = if matches!(rule.scope_way, ScopeWay::Any | ScopeWay::Each) {
+                vec![None; len]
+            } else {
+                Vec::new()
+            };
+            let mut best_days = VecDeque::<(usize, usize)>::new();
+            let mut condition_states = if matches!(rule.scope_way, ScopeWay::Consec(_)) {
+                (0..combination.conditions.len())
+                    .map(|_| ScopeWindowState::default())
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            let mut consecutive_hits = vec![false; combination.conditions.len()];
 
             for index in 0..len {
                 let start = if matches!(rule.scope_way, ScopeWay::Last) {
@@ -274,7 +331,18 @@ fn scoring_rule_cache(
                 } else {
                     (index + 1).saturating_sub(rule.scope_windows)
                 };
+                if matches!(rule.scope_way, ScopeWay::Consec(_)) {
+                    for (condition, state) in condition_states.iter_mut().enumerate() {
+                        consecutive_hits[condition] = scope_hit_triggered(&state.advance(
+                            rule.scope_way,
+                            rule.scope_windows,
+                            &condition_hits[condition],
+                            index,
+                        ));
+                    }
+                }
                 if missing_prefix[index + 1] != missing_prefix[start] {
+                    best_days.clear();
                     scores.push(0.0);
                     triggered.push(false);
                     continue;
@@ -284,19 +352,29 @@ fn scoring_rule_cache(
                         condition_hits[condition][index].is_true()
                     }),
                     ScopeWay::Any => {
-                        let best_day = (start..=index)
-                            .max_by_key(|day| {
-                                (
-                                    condition_hits
-                                        .iter()
-                                        .filter(|hits| hits[*day].is_true())
-                                        .count(),
-                                    *day,
-                                )
+                        while best_days.front().is_some_and(|&(day, _)| day < start) {
+                            best_days.pop_front();
+                        }
+                        // After an incomplete window, rebuild only when a usable window returns.
+                        let first_day = if best_days.is_empty() { start } else { index };
+                        for day in first_day..=index {
+                            let count = condition_hits
+                                .iter()
+                                .filter(|hits| hits[day].is_true())
+                                .count();
+                            while best_days
+                                .back()
+                                .is_some_and(|&(_, previous)| previous <= count)
+                            {
+                                best_days.pop_back();
+                            }
+                            best_days.push_back((day, count));
+                        }
+                        let best_day = best_days.front().map_or(index, |&(day, _)| day);
+                        *daily_parts[best_day].get_or_insert_with(|| {
+                            combination_score_parts(combination, |condition| {
+                                condition_hits[condition][best_day].is_true()
                             })
-                            .unwrap_or(index);
-                        combination_score_parts(combination, |condition| {
-                            condition_hits[condition][best_day].is_true()
                         })
                     }
                     ScopeWay::Each => {
@@ -304,9 +382,11 @@ fn scoring_rule_cache(
                         let mut bonus_total = 0.0;
                         let mut any_triggered = false;
                         for day in start..=index {
-                            let (day_base, day_bonus, day_triggered) =
-                                combination_score_parts(combination, |condition| {
-                                    condition_hits[condition][day].is_true()
+                            let (day_base, day_bonus, day_triggered) = *daily_parts[day]
+                                .get_or_insert_with(|| {
+                                    combination_score_parts(combination, |condition| {
+                                        condition_hits[condition][day].is_true()
+                                    })
                                 });
                             if day_triggered {
                                 base_total += day_base;
@@ -317,12 +397,7 @@ fn scoring_rule_cache(
                         (base_total, bonus_total, any_triggered)
                     }
                     ScopeWay::Consec(_) => combination_score_parts(combination, |condition| {
-                        scope_hit_triggered(&hit_scopeway(
-                            rule.scope_way,
-                            rule.scope_windows,
-                            &condition_hits[condition],
-                            index,
-                        ))
+                        consecutive_hits[condition]
                     }),
                     ScopeWay::Recent => {
                         return Err("组合策略不支持 RECENT scope_way".to_string());
@@ -368,6 +443,7 @@ fn scoring_rule_cache(
     let bs = truths;
     let mut out = Vec::with_capacity(bs.len());
     let mut triggered = Vec::with_capacity(bs.len());
+    let mut scope_state = ScopeWindowState::default();
 
     for i in 0..bs.len() {
         let start = if matches!(rule.scope_way, ScopeWay::Last) {
@@ -375,12 +451,13 @@ fn scoring_rule_cache(
         } else {
             (i + 1).saturating_sub(rule.scope_windows)
         };
-        if missing_prefix[i + 1] != missing_prefix[start] {
+        let complete = missing_prefix[i + 1] == missing_prefix[start];
+        let hit = scope_state.advance(rule.scope_way, rule.scope_windows, &bs, i);
+        if !complete {
             out.push(0.0);
             triggered.push(false);
             continue;
         }
-        let hit = hit_scopeway(rule.scope_way, rule.scope_windows, &bs, i);
         triggered.push(scope_hit_triggered(&hit));
         let s = (|scopeway: ScopeHit, dps: Option<&[DistPoint]>, points: f64| -> f64 {
             match scopeway {
@@ -391,17 +468,17 @@ fn scoring_rule_cache(
                         0.0
                     }
                 }
-                ScopeHit::EachOffsets(offsets) => {
-                    if offsets.is_empty() {
-                        return 0.0;
-                    }
-                    if let Some(dp) = dps {
-                        offsets
-                            .iter()
-                            .map(|distance| score_from_dist_points(*distance, dp))
+                ScopeHit::Count(count) => {
+                    if count == 0 {
+                        0.0
+                    } else if let Some(dp) = dps {
+                        // Preserve the original chronological floating-point addition order.
+                        (start..=i)
+                            .filter(|&day| bs[day].is_true())
+                            .map(|day| score_from_dist_points(i - day, dp))
                             .sum::<f64>()
                     } else {
-                        offsets.len() as f64 * points
+                        count as f64 * points
                     }
                 }
                 ScopeHit::Recent(v) => {
@@ -717,6 +794,46 @@ mod tests {
     }
 
     #[test]
+    fn sliding_scope_matches_window_scan() {
+        use super::{ScopeWindowState, hit_scopeway};
+        use crate::expr::eval::Truth;
+
+        // All short three-state histories, including zero/oversized windows and runs.
+        for pattern in 0..3usize.pow(6) {
+            let mut code = pattern;
+            let truths = (0..6)
+                .map(|_| {
+                    let truth = [Truth::False, Truth::True, Truth::Unknown][code % 3];
+                    code /= 3;
+                    truth
+                })
+                .collect::<Vec<_>>();
+            for window in [0, 1, 2, 4, 8] {
+                for way in [
+                    ScopeWay::Last,
+                    ScopeWay::Any,
+                    ScopeWay::Each,
+                    ScopeWay::Recent,
+                    ScopeWay::Consec(0),
+                    ScopeWay::Consec(1),
+                    ScopeWay::Consec(3),
+                    ScopeWay::Consec(8),
+                ] {
+                    let mut state = ScopeWindowState::default();
+                    for i in 0..truths.len() {
+                        let expected = hit_scopeway(way, window, &truths, i);
+                        let actual = state.advance(way, window, &truths, i);
+                        assert_eq!(
+                            actual, expected,
+                            "pattern={pattern}, window={window}, way={way:?}, day={i}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn cached_rule_restores_overwritten_base_series() {
         let mut runtime = runtime_with_close_series(&[1.0, 2.0, 3.0]);
         let overwrite_rule = cached_rule("C := REF(C, 1); C > 0");
@@ -871,6 +988,21 @@ mod tests {
 
         assert_eq!(scores, vec![13.0, 13.0, 23.0]);
         assert_eq!(triggered, vec![true, true, true]);
+
+        runtime.vars.insert(
+            "C".into(),
+            Value::NumSeries(vec![
+                Some(1.0),
+                None,
+                Some(1.0),
+                Some(2.0),
+                Some(2.0),
+                Some(3.0),
+            ]),
+        );
+        let (scores, triggered) = evaluate_cached_rule_scores(&rule, &mut runtime).unwrap();
+        assert_eq!(scores, vec![13.0, 0.0, 0.0, 0.0, 13.0, 23.0]);
+        assert_eq!(triggered, vec![true, false, false, false, true, true]);
     }
 
     #[test]

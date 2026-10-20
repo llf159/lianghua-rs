@@ -1,6 +1,6 @@
 use crate::expr::parser::{BinaryOp, Expr, Stmt, Stmts, UnaryOp};
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -718,89 +718,101 @@ impl Runtime {
     }
 
     fn impl_hhv(&mut self, args: &[Expr]) -> Result<Value, EvalErr> {
-        if args.len() != 2 {
-            return Err(EvalErr {
-                msg: "HHV需要两个参数".to_string(),
-            });
-        }
-
-        let v = self.eval_expr(&args[0])?;
-        let len = Value::len_of(&v);
-        let num_series = Value::as_num_series(&v, len)?;
-        let mut out = Vec::with_capacity(len);
-        let ori_n = Value::as_num(&self.eval_expr(&args[1])?)?;
-        let std_n = { if ori_n as i64 <= 0 { 1 } else { ori_n as usize } };
-
-        for i in 0..len {
-            if i + 1 < std_n {
-                out.push(None);
-                continue;
-            }
-
-            let start = i + 1 - std_n;
-            let mut max = match num_series[start] {
-                Some(v) => v,
-                None => {
-                    out.push(None);
-                    continue;
-                }
-            };
-
-            let mut complete = true;
-            for value in &num_series[start..=i] {
-                let Some(value) = value else {
-                    complete = false;
-                    break;
-                };
-                if *value > max {
-                    max = *value;
-                }
-            }
-            out.push(complete.then_some(max));
-        }
-        Ok(Value::NumSeries(out))
+        self.impl_fixed_extreme(args, "HHV", true)
     }
 
     fn impl_llv(&mut self, args: &[Expr]) -> Result<Value, EvalErr> {
+        self.impl_fixed_extreme(args, "LLV", false)
+    }
+
+    fn impl_fixed_extreme(
+        &mut self,
+        args: &[Expr],
+        name: &str,
+        highest: bool,
+    ) -> Result<Value, EvalErr> {
         if args.len() != 2 {
             return Err(EvalErr {
-                msg: "LLV需要两个参数".to_string(),
+                msg: format!("{name}需要两个参数"),
             });
         }
-
-        let v = self.eval_expr(&args[0])?;
-        let len = Value::len_of(&v);
-        let num_series = Value::as_num_series(&v, len)?;
-        let mut out = Vec::with_capacity(len);
+        let value = self.eval_expr(&args[0])?;
+        let len = Value::len_of(&value);
+        let values = Value::as_num_series(&value, len)?;
         let ori_n = Value::as_num(&self.eval_expr(&args[1])?)?;
-        let std_n = { if ori_n as i64 <= 0 { 1 } else { ori_n as usize } };
-
-        for i in 0..len {
-            if i + 1 < std_n {
-                out.push(None);
-                continue;
-            }
-
-            let start = i + 1 - std_n;
-            let mut min = match num_series[start] {
-                Some(v) => v,
-                None => {
+        let period = if ori_n as i64 <= 0 { 1 } else { ori_n as usize };
+        if period == 1 {
+            return Ok(Value::NumSeries(values.into_owned()));
+        }
+        if period > len {
+            return Ok(Value::NumSeries(vec![None; len]));
+        }
+        let mut out = Vec::with_capacity(len);
+        // Small windows cost less to scan than to maintain a deque.
+        if period <= 8 {
+            for i in 0..len {
+                if i + 1 < period {
                     out.push(None);
                     continue;
                 }
-            };
-
-            let mut complete = true;
-            for value in &num_series[start..=i] {
-                let Some(value) = value else {
-                    complete = false;
-                    break;
-                };
-                if *value < min {
-                    min = *value;
+                let window = &values[i + 1 - period..=i];
+                let mut extreme = window[0];
+                for value in window {
+                    match (extreme, value) {
+                        (Some(previous), Some(value)) => {
+                            if if highest {
+                                *value > previous
+                            } else {
+                                *value < previous
+                            } {
+                                extreme = Some(*value);
+                            }
+                        }
+                        _ => {
+                            extreme = None;
+                            break;
+                        }
+                    }
                 }
+                out.push(extreme);
             }
-            out.push(complete.then_some(min));
+            return Ok(Value::NumSeries(out));
+        }
+        let mut extrema = VecDeque::<(usize, f64)>::new();
+        let mut missing = 0usize;
+        for i in 0..len {
+            let start = (i + 1).saturating_sub(period);
+            if i >= period {
+                missing -= usize::from(values[i - period].is_none());
+            }
+            while extrema.front().is_some_and(|&(day, _)| day < start) {
+                extrema.pop_front();
+            }
+            match values[i] {
+                None => missing += 1,
+                Some(value) if !value.is_nan() => {
+                    // Strict comparison retains the oldest equal value, including signed zero.
+                    while extrema.back().is_some_and(|&(_, previous)| {
+                        if highest {
+                            previous < value
+                        } else {
+                            previous > value
+                        }
+                    }) {
+                        extrema.pop_back();
+                    }
+                    extrema.push_back((i, value));
+                }
+                Some(_) => {}
+            }
+            out.push(if i + 1 < period || missing > 0 {
+                None
+            } else if values[start].is_some_and(f64::is_nan) {
+                // The original scan starts at the first value: a leading NaN stays NaN.
+                values[start]
+            } else {
+                extrema.front().map(|&(_, value)| value)
+            });
         }
         Ok(Value::NumSeries(out))
     }
@@ -2199,6 +2211,68 @@ impl Value {
                     .map(Truth::from_num)
                     .collect(),
             )),
+        }
+    }
+}
+
+#[test]
+fn fixed_extrema_match_scan_bit_for_bit() {
+    use crate::expr::parser::{Parser, lex_all};
+
+    let mut values = (0..256)
+        .map(|i| match i % 19 {
+            0 => None,
+            1 => Some(f64::NAN),
+            2 => Some(-0.0),
+            3 => Some(0.0),
+            4 => Some(f64::INFINITY),
+            5 => Some(f64::NEG_INFINITY),
+            _ => Some(((i * 73) % 101) as f64 - 50.0),
+        })
+        .collect::<Vec<_>>();
+    values.extend((0..80).map(|i| Some(if i % 2 == 0 { -0.0 } else { 0.0 })));
+    values.extend((0..80).map(|i| Some(f64::from_bits(0x7ff8_0000_0000_0001 + i))));
+    values.extend((0..128).map(|i| Some(((i * 73) % 101) as f64 - 50.0)));
+    let mut runtime = Runtime::default();
+    runtime
+        .vars
+        .insert("C".into(), Value::NumSeries(values.clone()));
+    for period in [0, 1, 2, 3, 7, 8, 9, 18, 19, 64, 300, 600] {
+        for highest in [false, true] {
+            let name = if highest { "HHV" } else { "LLV" };
+            let program = Parser::new(lex_all(&format!("{name}(C, {period})")))
+                .parse_main()
+                .unwrap();
+            let actual = runtime.eval_program(&program).unwrap();
+            let actual = Value::as_num_series(&actual, values.len()).unwrap();
+            for (i, actual) in actual.iter().enumerate() {
+                let period = period.max(1);
+                let expected = if i + 1 < period {
+                    None
+                } else {
+                    let window = &values[i + 1 - period..=i];
+                    if window.iter().any(Option::is_none) {
+                        None
+                    } else {
+                        let mut extreme = window[0].unwrap();
+                        for value in window.iter().flatten() {
+                            if if highest {
+                                *value > extreme
+                            } else {
+                                *value < extreme
+                            } {
+                                extreme = *value;
+                            }
+                        }
+                        Some(extreme)
+                    }
+                };
+                assert_eq!(
+                    actual.map(f64::to_bits),
+                    expected.map(f64::to_bits),
+                    "{name}, period={period}, day={i}"
+                );
+            }
         }
     }
 }
