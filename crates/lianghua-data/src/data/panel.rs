@@ -266,9 +266,10 @@ pub fn inject_fields(
     Ok(())
 }
 
-struct Source<'a> {
-    conn: &'a Connection,
-    source: &'a str,
+struct Source {
+    reader: DataReader,
+    input_columns: Vec<(String, String)>,
+    index_columns: Vec<super::RuntimeIndexCol>,
     dates: Vec<String>,
     day_lookup: HashMap<String, usize>,
     sessions: Vec<usize>,
@@ -277,7 +278,7 @@ struct Source<'a> {
     listed: BTreeMap<String, usize>,
 }
 
-impl PanelSource for Source<'_> {
+impl PanelSource for Source {
     fn date_count(&self) -> usize {
         self.dates.len()
     }
@@ -301,20 +302,23 @@ impl PanelSource for Source<'_> {
             .filter(|k| !vars.contains_key(*k) && !matches!(k.as_str(), "SESSION" | "LISTED_DAYS"))
             .cloned()
             .collect::<HashSet<_>>();
-        let reader = if required.is_empty() {
-            None
-        } else {
-            Some(DataReader::new_inner(
-                self.source,
-                Some(&required),
-                Some(self.conn.try_clone().map_err(|e| e.to_string())?),
-            )?)
-        };
+        self.reader.cols_table = self
+            .input_columns
+            .iter()
+            .filter(|(_, key)| required.contains(key) || matches!(key.as_str(), "AMOUNT" | "TOR"))
+            .cloned()
+            .collect();
+        self.reader.runtime_index_cols = self
+            .index_columns
+            .iter()
+            .filter(|column| required.contains(&column.runtime_key))
+            .cloned()
+            .collect();
         let all_days = (0..self.dates.len()).collect::<Vec<_>>();
         let mut out = vec![vec![f64::NAN; self.dates.len()]; self.stocks.len()];
         for (batch_index, codes) in self.stocks.chunks(64).enumerate() {
-            let mut batch = if let Some(reader) = &reader {
-                reader.load_batch(
+            let mut batch = if !required.is_empty() {
+                self.reader.load_batch(
                     codes,
                     "qfq",
                     &self.dates[0],
@@ -528,7 +532,7 @@ pub fn refresh_with_progress(
                 && !matches!(key.as_str(), "SESSION" | "LISTED_DAYS")
         }));
     }
-    DataReader::new_inner(
+    let reader = DataReader::new_inner(
         source,
         Some(&raw_inputs),
         Some(conn.try_clone().map_err(|e| e.to_string())?),
@@ -541,6 +545,47 @@ pub fn refresh_with_progress(
     let dates = calendar[warm_index..end_index].to_vec();
     if dates.is_empty() {
         return Ok(0);
+    }
+    if let Some(cb) = progress {
+        cb(
+            0,
+            panel_defs.len() + 1,
+            &format!(
+                "输出{}~{}；读取{}~{}（含预热）",
+                start, last, dates[0], last
+            ),
+        );
+    }
+    // Batched stock predicates use sequential scans in DuckDB. Materialize a
+    // suffix once, so each subexpression/batch scans only its warmup range.
+    // Keep full replays streaming from the original table to avoid copying
+    // the complete history into a second table.
+    if warm_index > calendar.partition_point(|d| d < &first) && !raw_inputs.is_empty() {
+        let mut columns = vec![
+            "ts_code".to_string(),
+            "trade_date".to_string(),
+            "adj_type".to_string(),
+        ];
+        columns.extend(reader.cols_table.iter().map(|(column, _)| column.clone()));
+        columns.extend(
+            reader
+                .runtime_index_cols
+                .iter()
+                .map(|column| column.db_column.clone()),
+        );
+        columns.sort();
+        columns.dedup();
+        let columns = columns
+            .iter()
+            .map(|column| format!("\"{}\"", column.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(",");
+        // The shadow table belongs only to this reader's session. Writers and
+        // the original connection continue to see the persistent stock_data.
+        reader.conn.execute(
+            &format!("CREATE TEMP TABLE stock_data AS SELECT {columns} FROM stock_data WHERE adj_type IN ('qfq','ind') AND trade_date BETWEEN ? AND ?"),
+            params![dates[0], last],
+        ).map_err(|e| format!("准备跨股票指标增量行情失败: {e}"))?;
     }
     let day_lookup = dates
         .iter()
@@ -585,8 +630,9 @@ pub fn refresh_with_progress(
     }
     drop(stmt);
     let source_data = Source {
-        conn,
-        source,
+        input_columns: reader.cols_table.clone(),
+        index_columns: reader.runtime_index_cols.clone(),
+        reader,
         dates,
         day_lookup,
         sessions: (warm_index..end_index).collect(),
@@ -825,6 +871,11 @@ scope="market"
 expr="EMA(MY_MEAN,3)"
 prec=12
 [[ind]]
+name="MY_INDEX"
+scope="market"
+expr="CS_MEAN(PCT_CHG+I_CLOSE)"
+prec=12
+[[ind]]
 name="MY_ZERO"
 scope="market"
 expr="cs_count(1,PCT_CHG>10)"
@@ -849,6 +900,10 @@ prec=12
         init_stock_data_db(super::super::source_db_path(source).to_str().unwrap()).unwrap();
         let conn = Connection::open(super::super::source_db_path(source)).unwrap();
         for (day, date) in dates.iter().enumerate().skip(80) {
+            conn.execute(
+                "INSERT INTO stock_data(ts_code,trade_date,adj_type,close) VALUES('000001.SH',?,'ind',?)",
+                params![date, 100. + (day - 80) as f64],
+            ).unwrap();
             for (stock, code) in ["A", "B", "C", "D"].iter().enumerate() {
                 if stock == 3 && day == 88 {
                     continue;
@@ -895,6 +950,7 @@ prec=12
         );
         drop(selected);
         assert_eq!(row.cols["MY_MEAN"][0], Some(2.5));
+        assert_eq!(row.cols["MY_INDEX"][0], Some(102.5));
         assert_eq!(row.cols["MY_RANK"][0], Some(0.375));
         assert_eq!(row.cols["MY_GROUP"][0], Some(1.));
         assert_eq!(row.cols["MY_NESTED"][0], Some(5.));
@@ -963,6 +1019,14 @@ prec=12
         refresh(&conn, source, false).unwrap();
         invalidate(&conn, &dates[95]).unwrap();
         assert_eq!(refresh(&conn, source, false).unwrap(), 5);
+        // The incremental reader's temporary stock_data must neither hide nor
+        // replace persistent history (including index inputs) for the caller.
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM stock_data", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            98
+        );
         let partial = reader.load_one("A", "qfq", &dates[80], &dates[99]).unwrap();
         refresh(&conn, source, true).unwrap();
         let full = reader.load_one("A", "qfq", &dates[80], &dates[99]).unwrap();
