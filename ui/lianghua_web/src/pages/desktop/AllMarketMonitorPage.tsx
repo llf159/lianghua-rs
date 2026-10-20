@@ -2782,10 +2782,10 @@ export default function AllMarketMonitorPage() {
                   className={`all-market-volume-switch${volumeRatioEnabled ? " is-active" : ""}`}
                   role="switch"
                   aria-checked={volumeRatioEnabled}
-                  title="独立控制量比分时基准补齐，可在实时监控暂停时开启"
+                  title="每次开启先检查一次本地日线和股票列表，可在实时监控暂停时拉取"
                   onClick={() => {
                     setVolumeRatioStatus(
-                      volumeRatioEnabled ? "已暂停" : "准备拉取…",
+                      volumeRatioEnabled ? "已暂停" : "检查本地数据…",
                     );
                     setVolumeRatioEnabled((value) => !value);
                   }}

@@ -63,7 +63,7 @@ struct StockMeta {
 }
 
 #[derive(Debug, Clone)]
-struct SourceMetaCacheEntry {
+pub(super) struct SourceMetaCacheEntry {
     stocks: Vec<StockMeta>,
     warning: Option<String>,
 }
@@ -269,7 +269,7 @@ impl RealtimeQuoteProvider {
     }
 }
 
-fn source_meta_cache() -> &'static Mutex<HashMap<String, Arc<SourceMetaCacheEntry>>> {
+pub(super) fn source_meta_cache() -> &'static Mutex<HashMap<String, Arc<SourceMetaCacheEntry>>> {
     SOURCE_META_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -1234,6 +1234,7 @@ pub fn get_all_market_monitor_snapshot(
             .quote_trade_date
             .as_deref()
             .unwrap_or(&now.format("%Y%m%d").to_string()),
+        false,
     );
     let daily_baselines = match daily_baselines {
         Ok(baselines) => baselines,

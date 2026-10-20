@@ -114,7 +114,13 @@ impl<S: PanelSource> PanelRuntime<S> {
                 Some(PanelValue::Scalar(_) | PanelValue::Market(_))
             )
         });
-        let result = if stock {
+        // In particular, prepare(CS_RANK(...)) is already a complete matrix.
+        // Passing that identifier through the stock runtime copies every row.
+        let result = if let Expr::Ident(name) = &expr
+            && let Some(value) = self.vars.get(name)
+        {
+            Ok(value.clone())
+        } else if stock {
             self.source.eval_stock(&expr, &self.vars)
         } else {
             let constant = identifiers
@@ -257,21 +263,27 @@ impl<S: PanelSource> PanelRuntime<S> {
                 groups.entry(key).or_default().push((stock, x, y));
             }
             for members in groups.values() {
-                let x = members.iter().map(|v| v.1).collect::<Vec<_>>();
-                let mean = x.iter().sum::<f64>() / x.len() as f64;
-                let variance = (x.len() > 1).then(|| {
-                    x.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (x.len() - 1) as f64
+                let mean = if matches!(name, "CS_MEAN" | "CS_VAR" | "CS_STD" | "CS_ZSCORE") {
+                    members.iter().map(|v| v.1).sum::<f64>() / members.len() as f64
+                } else {
+                    0.
+                };
+                let variance = (members.len() > 1
+                    && matches!(name, "CS_VAR" | "CS_STD" | "CS_ZSCORE"))
+                .then(|| {
+                    members.iter().map(|v| (v.1 - mean).powi(2)).sum::<f64>()
+                        / (members.len() - 1) as f64
                 });
                 let value = match name {
-                    "CS_COUNT" => Some(x.len() as f64),
-                    "CS_SUM" => Some(x.iter().sum()),
+                    "CS_COUNT" => Some(members.len() as f64),
+                    "CS_SUM" => Some(members.iter().map(|v| v.1).sum()),
                     "CS_MEAN" => Some(mean),
-                    "CS_MIN" => x.iter().copied().reduce(f64::min),
-                    "CS_MAX" => x.iter().copied().reduce(f64::max),
+                    "CS_MIN" => members.iter().map(|v| v.1).reduce(f64::min),
+                    "CS_MAX" => members.iter().map(|v| v.1).reduce(f64::max),
                     "CS_VAR" => variance,
                     "CS_STD" => variance.map(f64::sqrt),
                     "CS_MEDIAN" | "CS_QUANTILE" => {
-                        let mut sorted = x.clone();
+                        let mut sorted = members.iter().map(|v| v.1).collect::<Vec<_>>();
                         sorted.sort_by(f64::total_cmp);
                         let position =
                             if name == "CS_MEDIAN" { 0.5 } else { q } * (sorted.len() - 1) as f64;
@@ -285,23 +297,24 @@ impl<S: PanelSource> PanelRuntime<S> {
                             .then(|| members.iter().map(|v| v.1 * v.2).sum::<f64>() / total)
                     }
                     "CS_TOPSHARE" => {
-                        let total = x.iter().sum::<f64>();
-                        let mut sorted = x.clone();
+                        let total = members.iter().map(|v| v.1).sum::<f64>();
+                        let mut sorted = members.iter().map(|v| v.1).collect::<Vec<_>>();
                         sorted.sort_by(|a, b| b.total_cmp(a));
-                        (total > 0. && x.iter().all(|v| *v >= 0.)).then(|| {
+                        (total > 0. && sorted.iter().all(|v| *v >= 0.)).then(|| {
                             sorted
                                 .iter()
-                                .take((q * x.len() as f64).ceil() as usize)
+                                .take((q * members.len() as f64).ceil() as usize)
                                 .sum::<f64>()
                                 / total
                         })
                     }
                     "CS_CORR" | "CS_SPEARMAN" => {
+                        let x = members.iter().map(|v| v.1).collect::<Vec<_>>();
                         let y = members.iter().map(|v| v.2).collect::<Vec<_>>();
                         let (x, y) = if name == "CS_SPEARMAN" {
                             (cross_section_ranks(&x), cross_section_ranks(&y))
                         } else {
-                            (x.clone(), y)
+                            (x, y)
                         };
                         let a = x.iter().sum::<f64>() / x.len() as f64;
                         let b = y.iter().sum::<f64>() / y.len() as f64;
@@ -313,6 +326,7 @@ impl<S: PanelSource> PanelRuntime<S> {
                         })
                     }
                     "CS_RANK" => {
+                        let x = members.iter().map(|v| v.1).collect::<Vec<_>>();
                         let ranks = cross_section_ranks(&x);
                         for (member, rank) in members.iter().zip(ranks) {
                             stocks[member.0][day] = rank / members.len() as f64;
@@ -365,4 +379,58 @@ pub fn cross_section_ranks(values: &[f64]) -> Vec<f64> {
         start = end;
     }
     ranks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::expr::validation::parse_expression_program;
+
+    struct Source;
+
+    impl PanelSource for Source {
+        fn eval_stock(
+            &mut self,
+            _: &Expr,
+            _: &HashMap<String, PanelValue>,
+        ) -> Result<PanelValue, String> {
+            panic!("a prepared panel identifier must not run through stock evaluation")
+        }
+        fn stock_count(&self) -> usize {
+            2
+        }
+        fn date_count(&self) -> usize {
+            2
+        }
+        fn present(&self, _: usize, _: usize) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn panel_identifiers_share_storage_and_aggregates_skip_stock_evaluation() {
+        let input = Arc::new(vec![vec![1., f64::NAN], vec![3., 2.]]);
+        let mut rt = PanelRuntime::new(Source);
+        rt.vars
+            .insert("X".into(), PanelValue::Stocks(input.clone()));
+        let value = rt
+            .eval_program(&parse_expression_program("X").unwrap())
+            .unwrap();
+        let PanelValue::Stocks(shared) = value else {
+            panic!("expected stock matrix")
+        };
+        assert!(Arc::ptr_eq(&input, &shared));
+        let rank = rt
+            .eval_program(&parse_expression_program("CS_RANK(X)").unwrap())
+            .unwrap();
+        assert_eq!(rank.at(0, 0), Some(0.5));
+        assert_eq!(rank.at(1, 0), Some(1.));
+        assert_eq!(rank.at(0, 1), None);
+        let mean = rt
+            .eval_program(&parse_expression_program("CS_MEAN(X)").unwrap())
+            .unwrap();
+        assert_eq!(mean.at(0, 0), Some(2.));
+        assert_eq!(mean.at(0, 1), Some(2.));
+        assert!(!rt.vars.keys().any(|key| key.starts_with("__CS_INTERNAL_")));
+    }
 }

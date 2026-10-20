@@ -867,6 +867,26 @@ fn set_all_market_volume_ratio_paused(paused: bool) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn manage_volume_ratio_cache(
+    app: tauri::AppHandle,
+    clear: bool,
+) -> Result<market::volume_ratio::VolumeRatioCacheStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        let source = crate::warehouse::warehouse_root(&app)?.join("source");
+        let source_path = source.to_str().ok_or("数据仓库路径不是有效 UTF-8")?;
+        if clear {
+            market::volume_ratio::clear_cache(source_path)?;
+        }
+        market::volume_ratio::inspect_cache(source_path)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 async fn get_all_market_monitor_snapshot(
     source_path: String,
     realtime_provider: Option<String>,
@@ -3164,6 +3184,7 @@ pub fn run() {
             validate_intraday_monitor_template_expression,
             get_all_market_monitor_snapshot,
             set_all_market_volume_ratio_paused,
+            manage_volume_ratio_cache,
             eastmoney_session::open_eastmoney_verification,
             eastmoney_session::use_eastmoney_verified_session,
             eastmoney_session::stop_eastmoney_verified_session,

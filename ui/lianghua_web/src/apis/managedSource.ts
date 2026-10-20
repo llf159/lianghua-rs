@@ -11,6 +11,18 @@ import {
 
 export const DEFAULT_MANAGED_SOURCE_DIR = 'source'
 
+export type VolumeRatioCacheStatus = {
+  path: string
+  exists: boolean
+  size_bytes: number
+  stock_count: number
+  trade_dates: string[]
+}
+
+export async function manageVolumeRatioCache(clear = false) {
+  return invoke<VolumeRatioCacheStatus>('manage_volume_ratio_cache', { clear })
+}
+
 export const MANAGED_SOURCE_FILES = [
   {
     id: 'source-db',

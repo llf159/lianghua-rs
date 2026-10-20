@@ -6,7 +6,7 @@ use std::{
 };
 
 use duckdb::{Connection, params};
-use lianghua_data::data::source_db_path;
+use lianghua_data::data::{load_stock_list, load_trade_date_list, source_db_path};
 use lianghua_provider::crawler::{
     SinaQuote,
     volume_ratio::{
@@ -168,6 +168,7 @@ struct Cache {
     local_loaded_at: Option<Instant>,
     local_error: Option<String>,
     paused: bool,
+    preflight_checked: bool,
     msn_enabled: bool,
     next_request_at: [Option<Instant>; 3],
     cooldown_until: [Option<Instant>; 3],
@@ -175,6 +176,75 @@ struct Cache {
 }
 
 impl Cache {
+    fn check_before_fetch(&mut self) -> Result<(), String> {
+        if self.paused || self.preflight_checked {
+            return Ok(());
+        }
+        let dates = load_trade_date_list(&self.source_path)?;
+        if !dates.contains(&self.date) {
+            return Err(format!(
+                "交易日历未覆盖行情日期 {}，请先更新原始数据和交易日历，再开启量比拉取。",
+                self.date
+            ));
+        }
+        let required_date = dates
+            .iter()
+            .filter(|date| *date < &self.date)
+            .max()
+            .ok_or("交易日历缺少上一交易日，请先更新交易日历。")?;
+        let conn = crate::data::open_db_readonly(source_db_path(&self.source_path))
+            .map_err(|e| format!("检查量比原始行情库失败: {e}"))?;
+        let latest_date: Option<String> = conn
+            .query_row(
+                "SELECT MAX(trade_date) FROM stock_data WHERE adj_type='qfq' AND trade_date < ?",
+                [&self.date],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("检查量比日线日期失败: {e}"))?;
+        if latest_date.as_ref().is_none_or(|date| date < required_date) {
+            return Err(format!(
+                "量比拉取需要日线更新至 {required_date}，本地行情日前最新日线为 {}。请先更新原始行情库，再开启量比拉取。",
+                latest_date.as_deref().unwrap_or("无数据")
+            ));
+        }
+        drop(conn);
+        let stocks = load_stock_list(&self.source_path)?;
+        let list_date = stocks.iter().filter_map(|row| row.get(6)).max();
+        if list_date.is_none_or(|date| date < required_date) {
+            return Err(format!(
+                "量比拉取需要股票列表更新至 {required_date}，本地列表日期为 {}。请先刷新股票列表，再开启量比拉取。",
+                list_date.map(String::as_str).unwrap_or("未知")
+            ));
+        }
+        // 开启时强制读取最新均量，避免沿用更新原始库之前的 60 秒缓存。
+        let baselines = super::daily_baseline::load(&self.source_path, &self.date, true)?;
+        self.local_averages = baselines
+            .rows
+            .iter()
+            .filter_map(|(code, row)| row.average_volume.map(|average| (code.clone(), average)))
+            .collect();
+        self.local_error = baselines.volume_error.clone();
+        self.local_loaded_at = Some(Instant::now());
+        for (code, entry) in &self.entries {
+            let baseline = match entry {
+                Entry::Ready(baseline)
+                | Entry::Pending(Some(baseline))
+                | Entry::Failed {
+                    baseline: Some(baseline),
+                    ..
+                } => baseline,
+                _ => continue,
+            };
+            if let Some(average) = self.local_averages.get(code)
+                && (baseline.data.average_daily_volume - average).abs() > average.abs() * 1e-9
+            {
+                return Err("已有量比缓存使用的五日均量与当前原始库不一致，请到“数据管理 → 量比数据”清空缓存后重新拉取。".into());
+            }
+        }
+        self.preflight_checked = true;
+        Ok(())
+    }
+
     fn restore(&mut self) -> Result<(), String> {
         self.store = None;
         self.dirty.clear();
@@ -307,6 +377,7 @@ impl Cache {
             return;
         }
         self.paused = paused;
+        self.preflight_checked = false;
         self.generation += 1;
         self.revision += 1;
         // 中止排队和等待限速的任务，但保留已完成基准及其高点。
@@ -381,6 +452,110 @@ pub fn set_fetch_paused(paused: bool) -> Result<(), String> {
         .lock()
         .map_err(|_| "量比缓存锁已损坏".to_string())?
         .set_paused(paused);
+    if !paused {
+        // 更新列表后直接重新开启即可，无需重启应用才能去掉退市股票。
+        super::all_market_monitor::source_meta_cache()
+            .lock()
+            .map_err(|_| "股票基础信息缓存锁已损坏")?
+            .clear();
+    }
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+pub struct VolumeRatioCacheStatus {
+    pub path: String,
+    pub exists: bool,
+    pub size_bytes: u64,
+    pub stock_count: u64,
+    pub trade_dates: Vec<String>,
+}
+
+pub fn inspect_cache(source_path: &str) -> Result<VolumeRatioCacheStatus, String> {
+    let _state = CACHE
+        .get_or_init(|| Arc::new(Mutex::new(Cache::default())))
+        .lock()
+        .map_err(|_| "量比缓存锁已损坏")?;
+    let path = Path::new(source_path).join("intraday_volume_ratio.sqlite3");
+    let mut status = VolumeRatioCacheStatus {
+        path: path.to_string_lossy().into_owned(),
+        exists: path.exists(),
+        size_bytes: 0,
+        stock_count: 0,
+        trade_dates: Vec::new(),
+    };
+    if !status.exists {
+        return Ok(status);
+    }
+    let conn =
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| format!("打开量比缓存失败: {e}"))?;
+    conn.busy_timeout(Duration::from_secs(2))
+        .map_err(|e| e.to_string())?;
+    let exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='baselines_v2')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if exists {
+        status.stock_count = conn
+            .query_row("SELECT COUNT(*) FROM baselines_v2", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map_err(|e| e.to_string())? as u64;
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT trade_date FROM baselines_v2 ORDER BY trade_date DESC")
+            .map_err(|e| e.to_string())?;
+        status.trade_dates = stmt
+            .query_map([], |row| row.get(0))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?;
+    }
+    for suffix in ["", "-wal", "-shm"] {
+        match std::fs::metadata(format!("{}{suffix}", status.path)) {
+            Ok(metadata) => status.size_bytes += metadata.len(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("读取量比缓存大小失败: {error}")),
+        }
+    }
+    Ok(status)
+}
+
+pub fn clear_cache(source_path: &str) -> Result<(), String> {
+    let mut state = CACHE
+        .get_or_init(|| Arc::new(Mutex::new(Cache::default())))
+        .lock()
+        .map_err(|_| "量比缓存锁已损坏")?;
+    if state.source_path == source_path {
+        // 即使已经暂停，也必须使在途任务失效，避免清空后重新落盘。
+        state.generation += 1;
+        state.revision += 1;
+        state.paused = true;
+        state.preflight_checked = false;
+        state.entries.clear();
+        state.dirty.clear();
+        state.local_averages.clear();
+        state.local_loaded_at = None;
+        state.local_error = None;
+        state.persistence_error = None;
+        state.store = None;
+        state.source_path.clear();
+    }
+    // 所有缓存连接均已关闭，持锁删除主文件和 WAL，损坏缓存也可清理。
+    for name in [
+        "intraday_volume_ratio.sqlite3",
+        "intraday_volume_ratio.sqlite3-wal",
+        "intraday_volume_ratio.sqlite3-shm",
+    ] {
+        match std::fs::remove_file(Path::new(source_path).join(name)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("清空量比缓存失败: {error}")),
+        }
+    }
     Ok(())
 }
 
@@ -414,12 +589,14 @@ pub fn snapshot(
         state.revision += 1;
         state.generation += 1;
         state.local_loaded_at = None;
+        state.preflight_checked = false;
         state.persistence_error = None;
         if let Err(error) = state.restore() {
             state.persistence_error = Some(error);
         }
     }
     state.last_poll = Some(Instant::now());
+    state.check_before_fetch()?;
     let now = chrono::Utc::now().with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap());
     // 开关随轮询更新，09:50 前排队的任务也能在门槛到达后使用 MSN。
     state.msn_enabled = now.format("%Y%m%d").to_string() == trade_date
@@ -428,7 +605,7 @@ pub fn snapshot(
         .local_loaded_at
         .is_none_or(|at| at.elapsed() >= Duration::from_secs(60))
     {
-        let result = super::daily_baseline::load(source_path, trade_date);
+        let result = super::daily_baseline::load(source_path, trade_date, false);
         match result {
             Ok(baselines) => {
                 state.local_averages = baselines
@@ -704,6 +881,148 @@ pub fn snapshot(
 mod tests {
     use super::*;
     use lianghua_provider::crawler::volume_ratio::TencentVolumeRatioPoint;
+
+    #[test]
+    fn preflight_checks_previous_session_once_and_rejects_old_baselines() {
+        let directory = std::env::temp_dir().join(format!(
+            "volume-ratio-preflight-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let source = directory.to_str().unwrap();
+        std::fs::write(
+            directory.join("trade_calendar.csv"),
+            "cal_date\n20261012\n20261013\n20261014\n20261015\n20261016\n20261019\n",
+        )
+        .unwrap();
+        std::fs::write(directory.join("stock_list.csv"), "ts_code,symbol,name,area,industry,list_date,trade_date\n000001.SZ,000001,A,,,19910101,20261015\n").unwrap();
+        let conn = Connection::open(source_db_path(source)).unwrap();
+        conn.execute_batch("CREATE TABLE stock_data(ts_code VARCHAR, trade_date VARCHAR, adj_type VARCHAR, vol DOUBLE, close DOUBLE);
+            INSERT INTO stock_data SELECT '000001.SZ', '202610' || i::VARCHAR, 'qfq', 100, 10 FROM range(12,16) t(i);").unwrap();
+        drop(conn);
+        super::super::daily_baseline::load(source, "20261019", false).unwrap();
+        let mut cache = Cache {
+            source_path: source.into(),
+            date: "20261019".into(),
+            ..Default::default()
+        };
+        assert!(
+            cache
+                .check_before_fetch()
+                .unwrap_err()
+                .contains("日线更新至 20261016")
+        );
+        let conn = Connection::open(source_db_path(source)).unwrap();
+        conn.execute_batch("INSERT INTO stock_data VALUES ('000001.SZ','20261016','qfq',600,10)")
+            .unwrap();
+        drop(conn);
+        assert!(
+            cache
+                .check_before_fetch()
+                .unwrap_err()
+                .contains("股票列表更新至 20261016")
+        );
+        std::fs::write(directory.join("stock_list.csv"), "ts_code,symbol,name,area,industry,list_date,trade_date\n000001.SZ,000001,A,,,19910101,20261016\n").unwrap();
+        cache.check_before_fetch().unwrap();
+        assert_eq!(cache.local_averages["000001.SZ"], 200.0);
+        std::fs::remove_file(directory.join("trade_calendar.csv")).unwrap();
+        cache.check_before_fetch().unwrap(); // 同一轮通过后不再读取文件。
+        cache.set_paused(true);
+        cache.set_paused(false);
+        assert!(cache.check_before_fetch().is_err());
+        std::fs::write(
+            directory.join("trade_calendar.csv"),
+            "cal_date\n20261016\n20261019\n",
+        )
+        .unwrap();
+        cache.entries.insert(
+            "000001.SZ".into(),
+            Entry::Ready(Baseline {
+                data: TencentVolumeRatioData {
+                    trade_date: "20261019".into(),
+                    average_daily_volume: 100.0,
+                    volume_to_hands: 1.0,
+                    points: Vec::new(),
+                },
+                source: 0,
+                observed_high: 0.0,
+                observed_opening_high: 0.0,
+                next_point: 0,
+                loaded_at: Instant::now(),
+            }),
+        );
+        assert!(cache.check_before_fetch().unwrap_err().contains("清空缓存"));
+        drop(cache);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn cache_management_counts_wal_data_and_cancels_live_tasks() {
+        let directory = std::env::temp_dir().join(format!(
+            "volume-ratio-manage-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let source = directory.to_str().unwrap();
+        assert!(!inspect_cache(source).unwrap().exists);
+        let generation = {
+            let mut state = CACHE.get().unwrap().lock().unwrap();
+            *state = Cache {
+                source_path: source.into(),
+                date: "20261019".into(),
+                ..Default::default()
+            };
+            state.restore().unwrap();
+            state.entries.insert(
+                "000001.SZ".into(),
+                Entry::Pending(Some(Baseline {
+                    data: TencentVolumeRatioData {
+                        trade_date: "20261019".into(),
+                        average_daily_volume: 100.0,
+                        volume_to_hands: 1.0,
+                        points: Vec::new(),
+                    },
+                    source: 0,
+                    observed_high: 0.0,
+                    observed_opening_high: 0.0,
+                    next_point: 0,
+                    loaded_at: Instant::now(),
+                })),
+            );
+            state.dirty.insert("000001.SZ".into());
+            state.persist().unwrap();
+            state.generation
+        };
+        let status = inspect_cache(source).unwrap();
+        assert_eq!(status.stock_count, 1);
+        assert_eq!(status.trade_dates, ["20261019"]);
+        assert!(status.size_bytes > 0);
+        clear_cache(source).unwrap();
+        {
+            let state = CACHE.get().unwrap().lock().unwrap();
+            assert!(state.paused && state.entries.is_empty() && state.dirty.is_empty());
+            assert!(state.store.is_none() && state.generation > generation);
+        }
+        assert!(!inspect_cache(source).unwrap().exists);
+        for name in [
+            "intraday_volume_ratio.sqlite3",
+            "intraday_volume_ratio.sqlite3-wal",
+            "intraday_volume_ratio.sqlite3-shm",
+        ] {
+            std::fs::write(directory.join(name), "broken").unwrap();
+        }
+        clear_cache(source).unwrap();
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+        std::fs::remove_dir(directory).unwrap();
+    }
 
     #[test]
     fn persisted_baselines_restore_opening_high_and_isolate_trade_dates() {

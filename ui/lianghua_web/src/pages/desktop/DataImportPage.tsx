@@ -11,13 +11,16 @@ import {
   importManagedSourceZip,
   inspectManagedSourceStatus,
   isDirectoryImportSupported,
+  manageVolumeRatioCache,
   removeManagedSourceFile,
   type ManagedSourceImportProgress,
   type ManagedSourceImportProgressCallback,
   type ManagedSourceDirectoryImportResult,
   type ManagedSourceFileId,
   type ManagedSourceStatus,
+  type VolumeRatioCacheStatus,
 } from '../../apis/managedSource'
+import ConfirmDialog from '../../shared/ConfirmDialog'
 import './css/DataImportPage.css'
 import CloudSyncPanel from './components/CloudSyncPanel'
 
@@ -30,6 +33,7 @@ type BusyAction =
   | 'exporting-cache'
   | 'importing-cache'
   | 'clearing'
+  | 'clearing-volume-ratio'
   | `deleting-file:${ManagedSourceFileId}`
   | `exporting-file:${ManagedSourceFileId}`
   | `file:${ManagedSourceFileId}`
@@ -126,6 +130,9 @@ export default function DataImportPage() {
   const [busyAction, setBusyAction] = useState<BusyAction>('loading')
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
+  const [volumeRatioCache, setVolumeRatioCache] = useState<VolumeRatioCacheStatus | null>(null)
+  const [volumeRatioCacheError, setVolumeRatioCacheError] = useState('')
+  const [confirmClearVolumeRatio, setConfirmClearVolumeRatio] = useState(false)
   const activeImportSessionRef = useRef<number | null>(null)
   const nextImportSessionRef = useRef(0)
   const busyActionRef = useRef<BusyAction>('loading')
@@ -133,7 +140,16 @@ export default function DataImportPage() {
   const inspectStatusWithTimeout = useCallback(async () => {
     const STATUS_TIMEOUT_MS = 20_000
     return await Promise.race([
-      inspectManagedSourceStatus(),
+      inspectManagedSourceStatus().then(async (nextStatus) => {
+        try {
+          setVolumeRatioCache(await manageVolumeRatioCache())
+          setVolumeRatioCacheError('')
+        } catch (cacheError) {
+          setVolumeRatioCache(null)
+          setVolumeRatioCacheError(String(cacheError))
+        }
+        return nextStatus
+      }),
       new Promise<never>((_, reject) => {
         setTimeout(() => {
           reject(new Error('读取状态超时，请重试'))
@@ -416,6 +432,17 @@ export default function DataImportPage() {
     )
   }
 
+  async function onClearVolumeRatioCache() {
+    const nextStatus = await runAction('clearing-volume-ratio', '清空量比数据失败', () =>
+      manageVolumeRatioCache(true),
+    )
+    if (!nextStatus) return
+    setVolumeRatioCache(nextStatus)
+    setVolumeRatioCacheError('')
+    setConfirmClearVolumeRatio(false)
+    setNotice('量比缓存已清空，后台拉取已停止。更新原始数据后，可到实时监控页重新开启量比拉取。')
+  }
+
   return (
     <div className="settings-page">
       <CloudSyncPanel disabled={busyAction !== 'idle'} onBusyChange={setCloudBusy} onSynced={() => void onRefresh()} />
@@ -492,6 +519,42 @@ export default function DataImportPage() {
 
         {notice ? <div className="settings-notice">{notice}</div> : null}
         {error ? <div className="settings-error">{error}</div> : null}
+      </section>
+
+      <section className="settings-card">
+        <div className="settings-section-head">
+          <div>
+            <h3 className="settings-subtitle-head">量比数据</h3>
+            <p className="settings-section-note">当天的量比分时基准与开盘高点。更新原始行情库后，可清空旧缓存再重新拉取。</p>
+          </div>
+          <button
+            className="settings-danger-btn"
+            type="button"
+            onClick={() => setConfirmClearVolumeRatio(true)}
+            disabled={isBusy || (!volumeRatioCache?.exists && !volumeRatioCacheError)}
+          >
+            {busyAction === 'clearing-volume-ratio' ? '清空中...' : '清空量比数据'}
+          </button>
+        </div>
+        <div className="settings-summary-grid">
+          <div className="settings-summary-item">
+            <span>缓存日期</span>
+            <strong>{volumeRatioCache?.trade_dates.join('、') || '暂无数据'}</strong>
+          </div>
+          <div className="settings-summary-item">
+            <span>已缓存股票</span>
+            <strong>{volumeRatioCache ? `${volumeRatioCache.stock_count} 只` : '--'}</strong>
+          </div>
+          <div className="settings-summary-item">
+            <span>占用空间</span>
+            <strong>{formatBytes(volumeRatioCache?.size_bytes ?? null)}</strong>
+          </div>
+          <div className="settings-summary-item settings-summary-item-wide">
+            <span>缓存路径</span>
+            <strong className="settings-path-value">{volumeRatioCache?.path ?? '--'}</strong>
+          </div>
+        </div>
+        {volumeRatioCacheError ? <div className="settings-error">读取量比数据失败：{volumeRatioCacheError}</div> : null}
       </section>
 
       <section className="settings-card">
@@ -574,6 +637,16 @@ export default function DataImportPage() {
         </div>
       </section>
 
+      <ConfirmDialog
+        open={confirmClearVolumeRatio}
+        title="清空量比数据？"
+        message="将停止后台拉取并清空量比分时基准与开盘高点。之后需重新开启量比拉取。"
+        confirmText="清空"
+        danger
+        busy={isBusy}
+        onConfirm={() => void onClearVolumeRatioCache()}
+        onCancel={() => setConfirmClearVolumeRatio(false)}
+      />
     </div>
   )
 }

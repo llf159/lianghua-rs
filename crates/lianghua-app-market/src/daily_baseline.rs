@@ -27,13 +27,18 @@ struct CacheEntry {
     data: Result<Arc<DailyBaselines>, String>,
 }
 
-pub(crate) fn load(source_path: &str, trade_date: &str) -> Result<Arc<DailyBaselines>, String> {
+pub(crate) fn load(
+    source_path: &str,
+    trade_date: &str,
+    force_reload: bool,
+) -> Result<Arc<DailyBaselines>, String> {
     static CACHE: OnceLock<Mutex<HashMap<String, CacheEntry>>> = OnceLock::new();
     let mut cache = CACHE
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .map_err(|_| "监控日线基准缓存锁已损坏".to_string())?;
-    if let Some(entry) = cache.get(source_path)
+    if !force_reload
+        && let Some(entry) = cache.get(source_path)
         && entry.trade_date == trade_date
         && entry.loaded_at.elapsed() < Duration::from_secs(60)
     {
