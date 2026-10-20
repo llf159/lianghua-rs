@@ -666,6 +666,33 @@ pub(crate) fn snapshot_rank_compute_strategy(
     }
 
     let source_root = resolve_source_root(data_root, source_dir)?;
+    let snapshot_root = managed_rank_compute_snapshot_root(&source_root);
+    if snapshot_root.exists() {
+        for entry in std::fs::read_dir(&snapshot_root).map_err(|error| error.to_string())? {
+            let entry = entry.map_err(|error| error.to_string())?;
+            if !entry
+                .file_type()
+                .map_err(|error| error.to_string())?
+                .is_dir()
+            {
+                continue;
+            }
+            let backup_id = entry.file_name().to_string_lossy().to_string();
+            let backup_file_path = entry.path().join(STRATEGY_RULE_FILE_NAME);
+            if !backup_file_path.is_file() {
+                continue;
+            }
+            let Ok(meta) = read_strategy_backup_meta(&source_root, &backup_id) else {
+                continue;
+            };
+            if meta.source_kind == "rank_compute"
+                && files_have_same_content(strategy_file_path, &backup_file_path)?
+            {
+                return Ok(backup_file_path);
+            }
+        }
+    }
+
     let backup_id = current_strategy_backup_id();
     let backup_dir = managed_rank_compute_snapshot_dir(&source_root, &backup_id);
     std::fs::create_dir_all(&backup_dir).map_err(|error| error.to_string())?;
@@ -1457,8 +1484,9 @@ pub async fn import_managed_strategy_backup(
 #[cfg(test)]
 mod tests {
     use super::{
-        delete_managed_result_db_inner, normalize_archive_root, strip_archive_root,
-        write_strategy_backup_meta_atomically, StrategyBackupMeta,
+        delete_managed_result_db_inner, managed_rank_compute_snapshot_root, normalize_archive_root,
+        snapshot_rank_compute_strategy, strip_archive_root, write_strategy_backup_meta_atomically,
+        StrategyBackupMeta,
     };
     use std::{
         path::Path,
@@ -1561,6 +1589,67 @@ mod tests {
         }));
 
         std::fs::remove_dir_all(temp_dir).unwrap();
+    }
+
+    #[test]
+    fn reuses_rank_compute_snapshot_when_strategy_content_is_unchanged() {
+        let unique_suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let data_root = std::env::temp_dir().join(format!(
+            "lianghua-rank-snapshot-reuse-test-{}-{unique_suffix}",
+            std::process::id()
+        ));
+        let source_root = data_root.join("source");
+        std::fs::create_dir_all(&source_root).unwrap();
+        let active_file = source_root.join("score_rule.toml");
+        std::fs::write(&active_file, "rules = [1]\n").unwrap();
+
+        let first = snapshot_rank_compute_strategy(
+            &data_root,
+            "source",
+            &active_file,
+            Some("20261020"),
+            Some("20261020"),
+        )
+        .unwrap();
+        let repeated = snapshot_rank_compute_strategy(
+            &data_root,
+            "source",
+            &active_file,
+            Some("20261021"),
+            Some("20261021"),
+        )
+        .unwrap();
+        assert_eq!(first, repeated);
+        assert_eq!(
+            std::fs::read_dir(managed_rank_compute_snapshot_root(&source_root))
+                .unwrap()
+                .count(),
+            1
+        );
+
+        std::fs::write(&active_file, "rules = [2]\n").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let changed = snapshot_rank_compute_strategy(
+            &data_root,
+            "source",
+            &active_file,
+            Some("20261022"),
+            Some("20261022"),
+        )
+        .unwrap();
+        assert_ne!(first, changed);
+        assert!(!first.exists());
+        assert_eq!(
+            std::fs::read_dir(managed_rank_compute_snapshot_root(&source_root))
+                .unwrap()
+                .count(),
+            1
+        );
+
+        std::fs::remove_dir_all(data_root).unwrap();
     }
 }
 
