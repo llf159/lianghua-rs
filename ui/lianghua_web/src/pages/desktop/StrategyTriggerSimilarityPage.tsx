@@ -520,7 +520,7 @@ export default function StrategyTriggerSimilarityPage() {
           <div>
             <h3>策略触发未来走势排行榜</h3>
             <p>
-              先从全部历史评分走势的未来表现反推启动点，再读取启动窗口中的策略触发序列；预测周期{' '}
+              历史按评分资格与策略触发抽样，覆盖完整结果分布；评价周期{' '}
               {rankingData?.outcomeTradeDays ?? outcomeTradeDaysInput} 日
             </p>
           </div>
@@ -559,10 +559,9 @@ export default function StrategyTriggerSimilarityPage() {
               </span>
             </div>
             <p className="trigger-sim-direction-note">
-              历史质量由未来超额分位45%、MFE分位25%、MAE分位20%和上涨持续性分位10%组成；
-              取首次进入每日横截面前20%的成功启动，以及首次进入后20%的失败对照。规则不决定历史样本身份，
-              但启动窗口必须存在策略触发，当前股票也必须在观察窗口内有触发。预测分由相似成功/失败模板的
-              连续质量加权并结合有效样本置信度后，在当日股票池内转为百分位；有效样本数至少达到 8 才进入排名。
+              按相似历史的收缩超额收益排序，收益从次日开盘至评价末日收盘，未扣交易成本。
+              有效样本数至少达到 8 才进入排名；匹配提升仅作参考，不参与排名门槛。样本支持不是置信概率。
+
             </p>
             {rankingData.timings.length > 0 ? (
               <details className="trigger-sim-indicator-details">
@@ -588,18 +587,18 @@ export default function StrategyTriggerSimilarityPage() {
                 <tr>
                   <th>排名</th>
                   <th>股票</th>
-                  <th>预测分</th>
+                  <th>榜内分</th>
                   <th>模板收缩超额</th>
                   <th>模板超额胜率</th>
                   <th>模板收益 / 超额</th>
                   <th>模板 MFE / MAE</th>
-                  <th>置信度</th>
+                  <th>支持系数</th>
                   <th>样本</th>
                   <th>相似度</th>
                   <th>策略触发</th>
                   <th>当前策略排名</th>
-                  <th>最相似成功模板</th>
-                  <th>最相似失败模板</th>
+                  <th>跑赢案例</th>
+                  <th>跑输案例</th>
                 </tr>
               </thead>
               <tbody>
@@ -641,7 +640,7 @@ export default function StrategyTriggerSimilarityPage() {
                           {formatPercent(row.expectedMaePct)}
                         </span>
                       </td>
-                      <td>{formatPercent(row.confidence * 100, 1)}</td>
+                      <td>{formatNumber(row.confidence, 2)}</td>
                       <td>
                         {row.sampleCount}
                         <span className="trigger-sim-date-separator">

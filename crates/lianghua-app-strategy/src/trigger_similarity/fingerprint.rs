@@ -173,7 +173,7 @@ pub(super) fn build_trigger_fingerprint(
         .enumerate()
         .map(|(i, date)| (date.as_str(), i))
         .collect::<HashMap<_, _>>();
-    let mut by_rule = HashMap::<usize, Vec<RuleTriggerHit>>::new();
+    let mut by_rule = std::collections::BTreeMap::<usize, Vec<RuleTriggerHit>>::new();
     let mut total_count = vec![Some(0.0); window_dates.len()];
     let mut total_score = vec![Some(0.0); window_dates.len()];
     for event in events {
@@ -521,7 +521,6 @@ pub(super) fn weighted_rule_timing_similarity_with_masses(
     })
 }
 
-#[cfg(test)]
 pub(super) fn trigger_fingerprint_similarity(
     target: &TriggerFingerprint,
     candidate: &TriggerFingerprint,

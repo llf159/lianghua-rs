@@ -108,45 +108,127 @@ pub(super) fn build_indicator_channels(
         .collect()
 }
 
+pub(super) fn build_indicator_fingerprint(
+    rows: &[MarketObservation],
+    columns: &[String],
+    segments: usize,
+) -> ChannelFingerprint {
+    let mut fingerprint =
+        build_channel_fingerprint(build_indicator_channels(rows, columns.len(), segments));
+    // 已知指标按经济含义归组，自定义字段作为一组；不让字段数量改变组间权重。
+    fingerprint.channel_groups = columns
+        .iter()
+        .map(|name| {
+            let name = name.to_ascii_lowercase();
+            let family = name
+                .split(['_', '.', '('])
+                .next()
+                .unwrap_or(&name)
+                .trim_end_matches(|c: char| c.is_ascii_digit());
+            match family {
+                "ma" | "ema" | "sma" | "macd" | "dif" | "dea" | "trix" | "dmi" | "adx" => 0,
+                "kdj" | "k" | "d" | "j" | "rsi" | "wr" | "cci" | "bias" | "roc" | "mtm" => 1,
+                "atr" | "boll" | "std" | "stddev" | "hv" | "volatility" => 2,
+                "obv" | "vr" | "vma" | "volume" | "turnover" => 3,
+                "flow" | "moneyflow" | "netflow" | "mf" => 4,
+                "cyq" | "chip" | "winner" | "cost" => 5,
+                _ => 6,
+            }
+        })
+        .collect();
+    fingerprint
+}
+
 pub(super) fn build_environment_fingerprint_map(
     environment: &MarketEnvironment,
     all_trade_dates: &[String],
     window_trade_days: usize,
     segments: usize,
-) -> HashMap<String, Vec<Option<Vec<f64>>>> {
+) -> HashMap<String, ChannelFingerprint> {
     all_trade_dates
         .iter()
         .enumerate()
         .map(|(end_index, end_date)| {
             let start_index = (end_index + 1).saturating_sub(window_trade_days);
-            (
-                end_date.clone(),
-                (|environment: &MarketEnvironment,
-                  window_dates: &[String],
-                  segments: usize|
-                 -> Vec<Option<Vec<f64>>> {
-                    (0..environment.channel_count)
-                        .map(|index| {
-                            let series = window_dates
-                                .iter()
-                                .map(|date| {
-                                    environment
-                                        .by_date
-                                        .get(date)
-                                        .and_then(|v| v.get(index))
-                                        .copied()
-                                        .flatten()
-                                })
-                                .collect::<Vec<_>>();
-                            temporal_signature(&series, segments, true)
+            (end_date.clone(), {
+                let window_dates = &all_trade_dates[start_index..=end_index];
+                let mut channels = Vec::with_capacity(environment.channel_count);
+                let mut state_values = Vec::with_capacity(environment.channel_count);
+                for index in 0..environment.channel_count {
+                    let series = window_dates
+                        .iter()
+                        .map(|date| {
+                            environment
+                                .by_date
+                                .get(date)
+                                .and_then(|values| values.get(index))
+                                .copied()
+                                .flatten()
                         })
-                        .collect()
-                })(
-                    environment,
-                    &all_trade_dates[start_index..=end_index],
-                    segments,
-                ),
-            )
+                        .collect::<Vec<_>>();
+                    channels.push(temporal_signature(&series, segments, true));
+                    let values = series
+                        .iter()
+                        .flatten()
+                        .copied()
+                        .filter(|value| {
+                            value.is_finite() && (!matches!(index, 2 | 6) || *value >= 0.0)
+                        })
+                        .map(|value| {
+                            if matches!(index, 2 | 6) {
+                                value.ln_1p()
+                            } else {
+                                value
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    let state = if values.len() < 2 {
+                        None
+                    } else {
+                        let mean = values.iter().sum::<f64>() / values.len() as f64;
+                        let std = (values
+                            .iter()
+                            .map(|value| (value - mean).powi(2))
+                            .sum::<f64>()
+                            / values.len() as f64)
+                            .sqrt();
+                        // 状态保留数值幅度，绝对涨跌与换手率用log1p压缩长尾，不做窗口归一化。
+                        // 成交额仍使用窗口之前的历史基线，避免长期市场扩容让绝对量额不可比。
+                        let (center, scale) = match index {
+                            3 => (0.5, 0.25),
+                            4 => (0.0, 0.1),
+                            5 => {
+                                let previous = all_trade_dates
+                                    [start_index.saturating_sub(252)..start_index]
+                                    .iter()
+                                    .filter_map(|date| {
+                                        environment
+                                            .by_date
+                                            .get(date)
+                                            .and_then(|values| values.get(index))
+                                            .copied()
+                                            .flatten()
+                                    })
+                                    .filter(|value| value.is_finite())
+                                    .collect::<Vec<_>>();
+                                if previous.is_empty() {
+                                    state_values.push(None);
+                                    continue;
+                                }
+                                (previous.iter().sum::<f64>() / previous.len() as f64, 1.0)
+                            }
+                            _ => (0.0, 1.0),
+                        };
+                        Some([(mean - center) / scale, std / scale])
+                    };
+                    state_values.push(state);
+                }
+                let mut fingerprint = build_channel_fingerprint(channels);
+                fingerprint.dimension += state_values.iter().flatten().count() * 2;
+                fingerprint.has_vectors |= state_values.iter().any(Option::is_some);
+                fingerprint.state_values = state_values;
+                fingerprint
+            })
         })
         .collect()
 }
@@ -256,8 +338,10 @@ pub(super) fn build_channel_fingerprint(vectors: Vec<Option<Vec<f64>>>) -> Chann
         channel_offsets.push(normalized_values.len());
     }
     ChannelFingerprint {
+        channel_groups: vec![0; channel_states.len()],
         channel_offsets,
         normalized_values,
+        state_values: Vec::new(),
         channel_states,
         dimension,
         has_vectors,
@@ -266,11 +350,11 @@ pub(super) fn build_channel_fingerprint(vectors: Vec<Option<Vec<f64>>>) -> Chann
 }
 
 pub(super) fn share_environment_fingerprints(
-    fingerprints: HashMap<String, Vec<Option<Vec<f64>>>>,
+    fingerprints: HashMap<String, ChannelFingerprint>,
 ) -> HashMap<String, Arc<ChannelFingerprint>> {
     fingerprints
         .into_iter()
-        .map(|(trade_date, vectors)| (trade_date, Arc::new(build_channel_fingerprint(vectors))))
+        .map(|(trade_date, fingerprint)| (trade_date, Arc::new(fingerprint)))
         .collect()
 }
 
@@ -281,6 +365,10 @@ pub(super) fn cached_channel_similarity(
     if target.all_channels_nonzero
         && candidate.all_channels_nonzero
         && target.channel_offsets == candidate.channel_offsets
+        && target.state_values.is_empty()
+        && candidate.state_values.is_empty()
+        && target.channel_groups.iter().all(|group| *group == 0)
+        && candidate.channel_groups.iter().all(|group| *group == 0)
     {
         let channel_count = target.channel_states.len();
         let cosine_sum = dot_product(&target.normalized_values, &candidate.normalized_values);
@@ -288,8 +376,8 @@ pub(super) fn cached_channel_similarity(
             .then(|| (50.0 * (1.0 + cosine_sum / channel_count as f64)).clamp(0.0, 100.0));
     }
 
-    let mut score_sum = 0.0;
-    let mut score_count = 0;
+    let mut group_sums = [0.0; 7];
+    let mut group_counts = [0_usize; 7];
     for index in 0..target
         .channel_states
         .len()
@@ -313,10 +401,27 @@ pub(super) fn cached_channel_similarity(
         } else {
             (50.0 * (1.0 + dot_product(left, right))).clamp(0.0, 100.0)
         };
-        score_sum += score;
-        score_count += 1;
+        let group = usize::from(target.channel_groups[index]);
+        group_sums[group] += score;
+        group_counts[group] += 1;
     }
-    (score_count > 0).then(|| score_sum / score_count as f64)
+    for (left, right) in target.state_values.iter().zip(&candidate.state_values) {
+        if let (Some(left), Some(right)) = (left, right) {
+            let distance = (left[0] - right[0]).hypot(left[1] - right[1]);
+            group_sums[0] += 100.0 / (1.0 + distance);
+            group_counts[0] += 1;
+        }
+    }
+    let groups = group_counts.iter().filter(|count| **count > 0).count();
+    (groups > 0).then(|| {
+        group_sums
+            .iter()
+            .zip(group_counts)
+            .filter(|(_, count)| *count > 0)
+            .map(|(sum, count)| sum / count as f64)
+            .sum::<f64>()
+            / groups as f64
+    })
 }
 
 pub(super) fn final_similarity(
@@ -345,7 +450,6 @@ mod tests {
     use crate::trigger_similarity::ANCHOR_CHUNK_SIZE;
     use crate::trigger_similarity::INDICATOR_SIMILARITY_WEIGHT;
     use crate::trigger_similarity::MARKET_SIMILARITY_WEIGHT;
-    use crate::trigger_similarity::MIN_SAMPLE_GAP_TRADE_DAYS;
     use crate::trigger_similarity::MarketObservation;
     use crate::trigger_similarity::PRICE_VOLUME_SIMILARITY_WEIGHT;
     use crate::trigger_similarity::TRIGGER_SIMILARITY_WEIGHT;
@@ -364,12 +468,119 @@ mod tests {
     use crate::trigger_similarity::load::load_market_schema;
     use crate::trigger_similarity::load::open_result_conn;
     use crate::trigger_similarity::ranking::samples::build_ranking_samples_for_chunk;
-    use crate::trigger_similarity::ranking::samples::load_outcome_selected_anchors;
+    use crate::trigger_similarity::ranking::samples::load_history_anchors;
     use crate::trigger_similarity::sample::load_benchmark_rows;
-    use lianghua_app_shared::build_name_map;
 
     use std::collections::HashMap;
     use std::sync::Arc;
+
+    #[test]
+    fn market_fingerprints_retain_level_and_use_only_past_observations() {
+        let dates: Vec<String> = (1..=3).map(|day| format!("202401{day:02}")).collect();
+        let mut falling = crate::trigger_similarity::MarketEnvironment {
+            channel_count: 1,
+            by_date: dates
+                .iter()
+                .enumerate()
+                .map(|(index, date)| (date.clone(), vec![Some(index as f64 - 2.0)]))
+                .collect(),
+        };
+        let rising = crate::trigger_similarity::MarketEnvironment {
+            channel_count: 1,
+            by_date: dates
+                .iter()
+                .enumerate()
+                .map(|(index, date)| (date.clone(), vec![Some(index as f64)]))
+                .collect(),
+        };
+        let left = build_environment_fingerprint_map(&falling, &dates, 3, 2);
+        let right = build_environment_fingerprint_map(&rising, &dates, 3, 2);
+        assert_eq!(
+            left[&dates[2]].normalized_values,
+            right[&dates[2]].normalized_values
+        );
+        assert!(cached_channel_similarity(&left[&dates[2]], &right[&dates[2]]).unwrap() < 99.0);
+        falling.by_date.insert(dates[2].clone(), vec![Some(1000.0)]);
+        let revised = build_environment_fingerprint_map(&falling, &dates, 3, 2);
+        assert_eq!(
+            revised[&dates[1]].normalized_values,
+            left[&dates[1]].normalized_values
+        );
+        assert_eq!(
+            revised[&dates[1]].state_values,
+            left[&dates[1]].state_values
+        );
+    }
+
+    #[test]
+    fn market_states_distinguish_positive_levels_and_volatility() {
+        let dates = vec!["20240101".to_string(), "20240102".to_string()];
+        for (channel, low, high) in [(2, 1.0, 4.0), (3, 0.3, 0.7), (6, 3.0, 10.0)] {
+            let fingerprints = [low, (low + high) / 2.0, high].map(|level| {
+                let mut values = vec![None; 7];
+                values[channel] = Some(level);
+                let environment = crate::trigger_similarity::MarketEnvironment {
+                    channel_count: 7,
+                    by_date: dates
+                        .iter()
+                        .map(|date| (date.clone(), values.clone()))
+                        .collect(),
+                };
+                build_environment_fingerprint_map(&environment, &dates, 2, 2)
+                    .remove(&dates[1])
+                    .unwrap()
+            });
+            let equal = cached_channel_similarity(&fingerprints[0], &fingerprints[0]).unwrap();
+            let near = cached_channel_similarity(&fingerprints[0], &fingerprints[1]).unwrap();
+            let far = cached_channel_similarity(&fingerprints[0], &fingerprints[2]).unwrap();
+            assert_eq!(equal, 100.0);
+            assert!(
+                equal > near && near > far && far < 75.0,
+                "channel={channel}: {near}, {far}"
+            );
+        }
+        let fingerprints = [1.0, 3.0].map(|amplitude| {
+            let environment = crate::trigger_similarity::MarketEnvironment {
+                channel_count: 1,
+                by_date: HashMap::from([
+                    (dates[0].clone(), vec![Some(-amplitude)]),
+                    (dates[1].clone(), vec![Some(amplitude)]),
+                ]),
+            };
+            build_environment_fingerprint_map(&environment, &dates, 2, 2)
+                .remove(&dates[1])
+                .unwrap()
+        });
+        assert_eq!(
+            fingerprints[0].normalized_values,
+            fingerprints[1].normalized_values
+        );
+        assert!(cached_channel_similarity(&fingerprints[0], &fingerprints[1]).unwrap() < 75.0);
+    }
+
+    #[test]
+    fn duplicate_indicator_columns_do_not_change_family_weights() {
+        let mut target =
+            build_channel_fingerprint(vec![Some(vec![1.0, 0.0]), Some(vec![0.0, 1.0])]);
+        let mut candidate =
+            build_channel_fingerprint(vec![Some(vec![1.0, 0.0]), Some(vec![1.0, 0.0])]);
+        target.channel_groups = vec![0, 1];
+        candidate.channel_groups = vec![0, 1];
+        let expected = cached_channel_similarity(&target, &candidate);
+        let mut target = build_channel_fingerprint(vec![
+            Some(vec![1.0, 0.0]),
+            Some(vec![1.0, 0.0]),
+            Some(vec![0.0, 1.0]),
+        ]);
+        let mut candidate = build_channel_fingerprint(vec![
+            Some(vec![1.0, 0.0]),
+            Some(vec![1.0, 0.0]),
+            Some(vec![1.0, 0.0]),
+        ]);
+        target.channel_groups = vec![0, 0, 1];
+        candidate.channel_groups = vec![0, 0, 1];
+        assert_eq!(cached_channel_similarity(&target, &candidate), expected);
+    }
 
     #[test]
     fn cached_channels_preserve_missing_zero_and_mismatched_vector_scores() {
@@ -550,7 +761,7 @@ mod tests {
     fn market_fingerprints_are_shared_by_trade_date() {
         let shared = share_environment_fingerprints(HashMap::from([(
             "20240102".to_string(),
-            vec![Some(vec![1.0, 2.0, 3.0])],
+            build_channel_fingerprint(vec![Some(vec![1.0, 2.0, 3.0])]),
         )]));
         let first = shared.get("20240102").expect("market fingerprint");
         let second = Arc::clone(first);
@@ -595,25 +806,9 @@ mod tests {
         let benchmark_rows =
             load_benchmark_rows(&conn, &all_trade_dates[0], &target_date, "000001.SH")
                 .expect("load benchmark");
-        let name_map = build_name_map(&source_path).unwrap_or_default();
-        let (selected, _) = load_outcome_selected_anchors(
-            &conn,
-            &earliest_date,
-            &cutoff_date,
-            &target_date,
-            &all_trade_dates,
-            20,
-            horizon,
-            &benchmark_rows,
-            &environment_fingerprints,
-            environment_fingerprints.get(&target_date).map(Arc::as_ref),
-            MIN_SAMPLE_GAP_TRADE_DAYS,
-        )
-        .expect("load selected anchors");
-        let anchors = selected
-            .into_iter()
-            .map(|selected| selected.anchor)
-            .collect::<Vec<_>>();
+        let (anchors, _) =
+            load_history_anchors(&conn, &earliest_date, &cutoff_date, &all_trade_dates, 20)
+                .expect("load selected anchors");
         let anchor_count = anchors.len();
         let started = std::time::Instant::now();
         let mut built = 0;
@@ -634,7 +829,6 @@ mod tests {
                 &all_trade_dates,
                 &environment_fingerprints,
                 &benchmark_rows,
-                &name_map,
                 5,
                 horizon,
                 &target_date,

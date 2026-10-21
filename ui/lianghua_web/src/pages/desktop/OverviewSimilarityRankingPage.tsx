@@ -257,15 +257,17 @@ export default function OverviewSimilarityRankingPage() {
           <th>股票</th>
           <th>三日优排名</th>
           <th>总市值(亿)</th>
-          <th>预测分</th>
+          <th title="按收缩超额排序后的榜内名次刻度，不是收益率或成功概率">榜内分</th>
+          <th>证据状态</th>
           <th>收缩超额</th>
           <th>超额胜率</th>
           <th>收益 / 超额</th>
           <th>MFE / MAE</th>
-          <th>置信度</th>
-          <th>相似度</th>
-          <th>最相似成功模板</th>
-          <th>最相似失败模板</th>
+          <th title="有效样本数仅衡量权重集中程度；后验段数按实际起止日期取最多不重叠区间，不代表独立样本数">样本支持</th>
+          <th>匹配程度</th>
+          <th>超额分歧</th>
+          <th>跑赢案例</th>
+          <th>跑输案例</th>
           <th>概念</th>
         </tr>
       </thead>
@@ -423,6 +425,14 @@ export default function OverviewSimilarityRankingPage() {
               {data.inputSignatureVerified ? '本地水位核验通过' : '已同步快照（本机历史不足，未复核水位）'}
             </span>
           </div>
+          <p className="trigger-sim-direction-note">
+            历史样本覆盖上涨、普通与下跌结果，按相似历史的收缩超额收益排序。有效样本数至少达到8才排名；匹配提升仅作参考，不参与排名门槛。榜内分和样本支持均不代表成功概率。
+          </p>
+          <details className="trigger-sim-indicator-details">
+            <summary>计算耗时与样本口径</summary>
+            <p>收益从次日开盘到第 {data.outcomeTradeDays} 个交易日收盘，未扣交易成本；MFE / MAE 描述期间路径。超额分歧为近邻超额收益的加权标准差。</p>
+            <p>{data.timings.map((timing) => `${timing.label} ${formatElapsed(timing.elapsedMs)}`).join(' · ')}</p>
+          </details>
           <StickyHorizontalTable
             scrollClassName="trigger-sim-ranking-scroll"
             stickyHeader={
@@ -476,6 +486,7 @@ export default function OverviewSimilarityRankingPage() {
                       <td>{row.bestRank3d ?? '--'}</td>
                       <td>{formatNumber(row.totalMvYi, 2)}</td>
                       <td>{formatNumber(row.rankingScore)}</td>
+                      <td>{row.diagnostics.status === 'available' ? '可排名' : '样本不足'}</td>
                       <td className={outcomeTone(row.shrunkExcessReturnPct)}>
                         {formatPercent(row.shrunkExcessReturnPct)}
                       </td>
@@ -486,15 +497,22 @@ export default function OverviewSimilarityRankingPage() {
                       <td>
                         {formatPercent(row.expectedMfePct)} / {formatPercent(row.expectedMaePct)}
                       </td>
-                      <td>{formatPercent(row.confidence * 100, 1)}</td>
+                      <td title={`支持系数 ${formatNumber(row.confidence, 2)}，不是置信概率`}>
+                        <div>{formatNumber(row.effectiveSampleCount, 1)} / {row.sampleCount}</div>
+                        <small>{row.diagnostics.outcomePeriodCount} 段不重叠后验</small>
+                      </td>
                       <td>
-                        {formatNumber(row.averageSimilarity)} / {formatNumber(row.bestSimilarity)}
+                        <div>{formatNumber(row.averageSimilarity)} / {formatNumber(row.bestSimilarity)}</div>
+                        <small title={`背景候选相似度90分位 ${formatNumber(row.diagnostics.backgroundSimilarityP90)}；差值仅作参考，不参与排名门槛`}>
+                          近邻−背景 {formatNumber(row.diagnostics.similarityLift)}
+                        </small>
+                      </td>
+                      <td>{formatPercent(row.diagnostics.excessReturnStdPct)}</td>
+                      <td className="trigger-sim-template-cell">
+                        {renderTemplateMatch('跑赢', successMatch)}
                       </td>
                       <td className="trigger-sim-template-cell">
-                        {renderTemplateMatch('成功', successMatch)}
-                      </td>
-                      <td className="trigger-sim-template-cell">
-                        {renderTemplateMatch('失败', failureMatch)}
+                        {renderTemplateMatch('跑输', failureMatch)}
                       </td>
                       <td className="trigger-sim-concept-cell" title={conceptText}>
                         {conceptText}

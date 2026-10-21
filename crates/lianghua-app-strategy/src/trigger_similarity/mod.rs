@@ -11,7 +11,7 @@ mod test_support;
 pub use load::list_strategy_trigger_similarity_benchmark_index_codes;
 pub use page::get_strategy_trigger_similarity_page;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 pub(super) const DEFAULT_WINDOW_TRADE_DAYS: usize = 20;
@@ -124,7 +124,7 @@ pub struct StrategyTriggerSimilarityPageData {
     pub items: Vec<StrategyTriggerSimilarityRow>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct Anchor {
     id: usize,
     ts_code: String,
@@ -181,7 +181,7 @@ pub(super) struct FutureObservation {
     low: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct Outcome {
     start_trade_date: String,
     end_trade_date: String,
@@ -197,10 +197,12 @@ pub(super) struct BenchmarkObservation {
     close: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct ChannelFingerprint {
     channel_offsets: Vec<usize>,
+    channel_groups: Vec<u8>,
     normalized_values: Vec<f64>,
+    state_values: Vec<Option<[f64; 2]>>,
     channel_states: Vec<u8>,
     dimension: usize,
     has_vectors: bool,
@@ -224,15 +226,15 @@ impl EventFingerprint {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub(super) struct RuleTriggerHit {
     day_index: usize,
     score: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct TriggerFingerprint {
-    by_rule: HashMap<usize, Vec<RuleTriggerHit>>,
+    by_rule: std::collections::BTreeMap<usize, Vec<RuleTriggerHit>>,
     total_count: Vec<f64>,
     total_score: Vec<f64>,
     total_count_norm: f64,

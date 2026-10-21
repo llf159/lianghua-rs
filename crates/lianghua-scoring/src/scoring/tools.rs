@@ -62,6 +62,7 @@ impl SimilarityRankFieldInjector {
             })
             .flatten();
         let conn = conn.filter(|conn| {
+                if !crate::data::similarity_algorithm_is_current(conn, "").unwrap_or(false) { return false; }
             conn.query_row(
                 "SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_schema='main' AND table_name='strategy_trigger_similarity_summary'",
                 [],
@@ -937,6 +938,12 @@ mod tests {
              INSERT INTO strategy_trigger_similarity_summary VALUES ('20240103', '000001.SZ', 7);",
         )
         .expect("seed similarity summary");
+        conn.execute_batch("CREATE TABLE strategy_trigger_similarity_active_config(id INTEGER, algorithm_version VARCHAR)").unwrap();
+        conn.execute(
+            "INSERT INTO strategy_trigger_similarity_active_config VALUES (1, ?)",
+            [crate::data::SIMILARITY_ALGORITHM_VERSION],
+        )
+        .unwrap();
         drop(conn);
 
         let mut row_data = RowData {
@@ -953,6 +960,17 @@ mod tests {
             row_data.cols.get("S_RANK").map(Vec::as_slice),
             Some([None, Some(7.0)].as_slice())
         );
+        let conn = duckdb::Connection::open(source_dir.join("strategy_similarity.db")).unwrap();
+        conn.execute(
+            "UPDATE strategy_trigger_similarity_active_config SET algorithm_version='old'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        SimilarityRankFieldInjector::new(source_path, true)
+            .inject(&mut row_data, "000001.SZ")
+            .unwrap();
+        assert_eq!(row_data.cols["S_RANK"], vec![None, None]);
         std::fs::remove_dir_all(source_dir).expect("remove temp source directory");
     }
 

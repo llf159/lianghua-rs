@@ -282,6 +282,8 @@ fn load_rank_context(conn: &Connection) -> Result<RankCacheEntry, String> {
         "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_catalog='similarity_db' AND table_schema='main' AND table_name='strategy_trigger_similarity_summary')",
         [], |row| row.get::<_, bool>(0),
     ).unwrap_or(false);
+    let similarity_board = similarity_board
+        && crate::data::similarity_algorithm_is_current(conn, "similarity_db").unwrap_or(false);
     let latest_sim_cte = if similarity_board {
         r#",
         latest_sim AS (
@@ -1655,11 +1657,21 @@ mod tests {
                         ('20261013','similarity_only',1);",
                 )
                 .unwrap();
+                conn.execute_batch("CREATE TABLE similarity_db.strategy_trigger_similarity_active_config(id INTEGER, algorithm_version VARCHAR)").unwrap();
+                conn.execute("INSERT INTO similarity_db.strategy_trigger_similarity_active_config VALUES (1, ?)", [crate::data::SIMILARITY_ALGORITHM_VERSION]).unwrap();
             }
             let context = load_rank_context(&conn).unwrap();
             assert_eq!(context.rank_date, "20261012");
             assert_eq!(context.ranks["a"].rank, Some(50));
             assert_eq!(context.ranks["a"].best_rank_3d, Some(10));
+            if similarity_board {
+                conn.execute("UPDATE similarity_db.strategy_trigger_similarity_active_config SET algorithm_version='old'", []).unwrap();
+                assert_eq!(
+                    load_rank_context(&conn).unwrap().ranks["a"].similarity_rank,
+                    None
+                );
+                conn.execute("UPDATE similarity_db.strategy_trigger_similarity_active_config SET algorithm_version=?", [crate::data::SIMILARITY_ALGORITHM_VERSION]).unwrap();
+            }
             assert_eq!(context.ranks["a"].total_score, Some(120.0));
             assert_eq!(
                 context.ranks["a"].similarity_rank,

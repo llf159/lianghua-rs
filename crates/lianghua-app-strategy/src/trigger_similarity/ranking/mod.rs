@@ -1,3 +1,4 @@
+mod cache;
 mod page;
 mod run;
 pub(crate) mod samples;
@@ -13,6 +14,7 @@ pub use store::get_strategy_trigger_similarity_active_config;
 
 use crate::trigger_similarity::*;
 
+pub(super) use lianghua_data::data::SIMILARITY_ALGORITHM_VERSION as ALGORITHM_VERSION;
 use serde::Deserialize;
 use serde::Serialize;
 use std::cell::RefCell;
@@ -26,31 +28,7 @@ use std::sync::atomic::AtomicUsize;
 use std::time::Instant;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
-pub(super) const ALGORITHM_VERSION: &str = "outcome-reverse-startup-ranking-v13";
-pub(super) const SUCCESS_QUALITY_THRESHOLD: f64 = 0.80;
-pub(super) const FAILURE_QUALITY_THRESHOLD: f64 = 0.20;
-pub(super) const MARKET_HISTORY_BUCKETS: usize = 8;
-pub(super) const SEMANTIC_DEFINITION_SIGNATURE_PREFIX: &str = "definitions-v1|";
-
-#[derive(Debug, Clone)]
-pub(super) struct OutcomePathRow {
-    date_index: usize,
-    open: Option<f64>,
-    high: Option<f64>,
-    low: Option<f64>,
-    close: Option<f64>,
-    pct_chg: Option<f64>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(super) struct RawOutcomeLabel {
-    stock_index: usize,
-    date_index: usize,
-    excess_return_pct: f64,
-    mfe_pct: f64,
-    mae_pct: f64,
-    persistence: f64,
-}
+pub(super) const SEMANTIC_DEFINITION_SIGNATURE_PREFIX: &str = "definitions-v2|";
 
 pub(super) static RANKING_COMPUTE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 pub(super) static RANKING_PROGRESS: OnceLock<Mutex<Option<StrategyTriggerRankingProgress>>> =
@@ -127,6 +105,22 @@ pub struct StrategyTriggerRankingMatch {
     pub mae_pct: f64,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RankingDiagnostics {
+    pub status: String,
+    pub background_similarity_p90: Option<f64>,
+    pub similarity_lift: Option<f64>,
+    pub excess_return_std_pct: Option<f64>,
+    pub outcome_period_count: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(super) struct RankingEvidence {
+    pub matches: Vec<StrategyTriggerRankingMatch>,
+    pub diagnostics: RankingDiagnostics,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StrategyTriggerRankingRow {
@@ -155,6 +149,8 @@ pub struct StrategyTriggerRankingRow {
     pub trigger_count: usize,
     pub total_mv_yi: Option<f64>,
     pub top_matches: Vec<StrategyTriggerRankingMatch>,
+    #[serde(default)]
+    pub diagnostics: RankingDiagnostics,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -223,15 +219,7 @@ pub(super) struct RankingSample {
     outcome: Option<Outcome>,
     total_score: Option<f64>,
     original_rank: Option<i64>,
-    template_quality_score: Option<f64>,
     template_class: i8,
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct OutcomeSelectedAnchor {
-    pub(in crate::trigger_similarity) anchor: Anchor,
-    pub(in crate::trigger_similarity) quality_score: f64,
-    pub(in crate::trigger_similarity) quality_class: i8,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -282,15 +270,13 @@ pub(super) struct RankingTargetScratch {
     candidate_generations: Vec<u32>,
     generation: u32,
     candidate_indices: Vec<usize>,
-    success_candidate_upper_buckets: Vec<Vec<usize>>,
-    failure_candidate_upper_buckets: Vec<Vec<usize>>,
-    success_heap: BinaryHeap<Reverse<ScoredCandidate>>,
-    failure_heap: BinaryHeap<Reverse<ScoredCandidate>>,
+    candidate_upper_buckets: Vec<Vec<usize>>,
+    heap: BinaryHeap<Reverse<ScoredCandidate>>,
     prune_stats: RankingPruneStats,
 }
 
 impl RankingTargetScratch {
-    fn prepare(&mut self, candidate_count: usize, per_class_limit: usize) {
+    fn prepare(&mut self, candidate_count: usize, candidate_limit: usize) {
         self.candidate_intersection_weights
             .resize(candidate_count, 0.0);
         self.candidate_timing_upper_weights
@@ -308,27 +294,18 @@ impl RankingTargetScratch {
             self.generation = 1;
         }
         self.candidate_indices.clear();
-        for buckets in [
-            &mut self.success_candidate_upper_buckets,
-            &mut self.failure_candidate_upper_buckets,
-        ] {
-            if buckets.is_empty() {
-                buckets.resize_with(101, Vec::new);
-            } else {
-                for bucket in buckets {
-                    bucket.clear();
-                }
+        if self.candidate_upper_buckets.is_empty() {
+            self.candidate_upper_buckets.resize_with(101, Vec::new);
+        } else {
+            for bucket in &mut self.candidate_upper_buckets {
+                bucket.clear();
             }
         }
         self.prune_stats = RankingPruneStats::default();
-        self.success_heap.clear();
-        self.failure_heap.clear();
-        let required_capacity = per_class_limit + 1;
-        if self.success_heap.capacity() < required_capacity {
-            self.success_heap.reserve(required_capacity);
-        }
-        if self.failure_heap.capacity() < required_capacity {
-            self.failure_heap.reserve(required_capacity);
+        self.heap.clear();
+        let required_capacity = candidate_limit + 1;
+        if self.heap.capacity() < required_capacity {
+            self.heap.reserve(required_capacity);
         }
     }
 

@@ -11,7 +11,9 @@ pub mod panel;
 pub mod runtime;
 pub mod scoring_store;
 pub mod similarity_data;
-pub use similarity_data::attach_similarity_db;
+pub use similarity_data::{
+    SIMILARITY_ALGORITHM_VERSION, attach_similarity_db, similarity_algorithm_is_current,
+};
 mod stock_data_fields;
 
 pub use stock_data_fields::{STOCK_DATA_KEY_COLUMN_DEFS, STOCK_DATA_RUNTIME_FIELDS};

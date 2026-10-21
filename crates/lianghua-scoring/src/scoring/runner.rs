@@ -394,7 +394,10 @@ pub fn ensure_expression_dependencies_ready(
         ))
         .map_err(|e| e.to_string())?;
         let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_catalog=? AND table_name=?)", [alias, table], |row| row.get(0)).map_err(|e| e.to_string())?;
-        if !exists {
+        if !exists
+            || (alias == "similarity"
+                && !crate::data::similarity_algorithm_is_current(&conn, alias)?)
+        {
             continue;
         }
         if alias == "chips" {
@@ -1128,6 +1131,13 @@ mod tests {
         let saved = duckdb::Connection::open(crate::data::similarity_db_path(path)).unwrap();
         saved.execute_batch("CREATE TABLE strategy_trigger_similarity_summary(ts_code VARCHAR, trade_date VARCHAR, rank INTEGER);
             INSERT INTO strategy_trigger_similarity_summary VALUES ('A','20260105',1),('A','20260109',1)").unwrap();
+        saved.execute_batch("CREATE TABLE strategy_trigger_similarity_active_config(id INTEGER, algorithm_version VARCHAR)").unwrap();
+        saved
+            .execute(
+                "INSERT INTO strategy_trigger_similarity_active_config VALUES (1, ?)",
+                [crate::data::SIMILARITY_ALGORITHM_VERSION],
+            )
+            .unwrap();
         drop(saved);
         let saved = duckdb::Connection::open(crate::data::cyq_chen_db_path(path)).unwrap();
         saved.execute_batch("CREATE TABLE cyq_chen_snapshot(ts_code VARCHAR, trade_date VARCHAR, adj_type VARCHAR);

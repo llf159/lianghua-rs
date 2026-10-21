@@ -153,7 +153,6 @@ pub fn get_strategy_trigger_similarity_page(
         all_trade_dates: &all_trade_dates,
         environment_fingerprints: &environment_fingerprints,
         benchmark_rows: &benchmark_rows,
-        name_map: &name_map,
         pool_segments,
         outcome_trade_days,
         target_trade_date: &resolved_trade_date,

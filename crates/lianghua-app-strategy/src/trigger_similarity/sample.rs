@@ -1,5 +1,5 @@
 use crate::trigger_similarity::channel::{
-    build_channel_fingerprint, build_indicator_channels, build_price_volume_channels,
+    build_channel_fingerprint, build_indicator_fingerprint, build_price_volume_channels,
     market_category_features,
 };
 use crate::trigger_similarity::fingerprint::build_trigger_fingerprint;
@@ -108,7 +108,6 @@ pub(super) struct SampleBuildContext<'a> {
     pub(super) all_trade_dates: &'a [String],
     pub(super) environment_fingerprints: &'a HashMap<String, Arc<ChannelFingerprint>>,
     pub(super) benchmark_rows: &'a HashMap<String, BenchmarkObservation>,
-    pub(super) name_map: &'a HashMap<String, String>,
     pub(super) pool_segments: usize,
     pub(super) outcome_trade_days: usize,
     pub(super) target_trade_date: &'a str,
@@ -164,16 +163,13 @@ pub(super) fn build_samples_for_chunk(
                 price_volume: build_channel_fingerprint(build_price_volume_channels(
                     market_rows,
                     context.pool_segments,
-                    market_category_features(
-                        &anchor.ts_code,
-                        context.name_map.get(&anchor.ts_code).map(String::as_str),
-                    ),
+                    market_category_features(&anchor.ts_code, None),
                 )),
-                indicators: build_channel_fingerprint(build_indicator_channels(
+                indicators: build_indicator_fingerprint(
                     market_rows,
-                    context.schema.indicator_columns.len(),
+                    &context.schema.indicator_columns,
                     context.pool_segments,
-                )),
+                ),
                 market: context
                     .environment_fingerprints
                     .get(&anchor.end_trade_date)
@@ -320,61 +316,84 @@ pub(super) fn summarize_outcomes(
     }
 }
 
+pub(super) struct RatingWindow<'a> {
+    pub index: usize,
+    pub ts_code: &'a str,
+    pub anchor_end: &'a str,
+    pub outcome_start: &'a str,
+    pub outcome_end: &'a str,
+}
+
+pub(super) fn select_rating_indices<'a>(
+    windows: impl IntoIterator<Item = RatingWindow<'a>>,
+    all_trade_dates: &[String],
+    window_trade_days: usize,
+    outcome_trade_days: usize,
+) -> Vec<usize> {
+    let same_stock_exclusion = window_trade_days.max(outcome_trade_days).max(1);
+    let mut selected = Vec::<(RatingWindow<'_>, usize)>::with_capacity(RATING_SAMPLE_LIMIT);
+    for window in windows {
+        if window.outcome_start.is_empty() || window.outcome_start > window.outcome_end {
+            continue;
+        }
+        let Ok(end_index) =
+            all_trade_dates.binary_search_by(|date| date.as_str().cmp(window.anchor_end))
+        else {
+            continue;
+        };
+        let nearby_outcome_count = selected
+            .iter()
+            .filter(|(previous, _)| {
+                previous.outcome_start <= window.outcome_end
+                    && window.outcome_start <= previous.outcome_end
+            })
+            .count();
+        if nearby_outcome_count >= RATING_MAX_PER_OUTCOME_WINDOW {
+            continue;
+        }
+        if selected.iter().any(|(previous, previous_index)| {
+            previous.ts_code == window.ts_code
+                && (previous_index.abs_diff(end_index) < same_stock_exclusion
+                    || (previous.outcome_start <= window.outcome_end
+                        && window.outcome_start <= previous.outcome_end))
+        }) {
+            continue;
+        }
+        selected.push((window, end_index));
+        if selected.len() >= RATING_SAMPLE_LIMIT {
+            break;
+        }
+    }
+    selected
+        .into_iter()
+        .map(|(window, _)| window.index)
+        .collect()
+}
+
 pub(super) fn build_rating_sample(
     sorted_items: &[StrategyTriggerSimilarityRow],
     all_trade_dates: &[String],
     window_trade_days: usize,
     outcome_trade_days: usize,
 ) -> Vec<StrategyTriggerSimilarityRow> {
-    let date_indices = all_trade_dates
-        .iter()
-        .enumerate()
-        .map(|(index, date)| (date.as_str(), index))
-        .collect::<HashMap<_, _>>();
-    let same_stock_exclusion = window_trade_days.max(outcome_trade_days).max(1);
-    let outcome_exclusion = outcome_trade_days.max(1);
-    let mut selected = Vec::with_capacity(RATING_SAMPLE_LIMIT);
-    let mut selected_end_indices = Vec::<usize>::with_capacity(RATING_SAMPLE_LIMIT);
-    let mut selected_by_stock = HashMap::<&str, Vec<usize>>::new();
-
-    for item in sorted_items {
-        if item.forward_excess_return_pct.is_none() {
-            continue;
-        }
-        let Some(end_index) = date_indices
-            .get(item.candidate_end_trade_date.as_str())
-            .copied()
-        else {
-            continue;
-        };
-        let nearby_outcome_count = selected_end_indices
-            .iter()
-            .filter(|selected_index| selected_index.abs_diff(end_index) < outcome_exclusion)
-            .count();
-        if nearby_outcome_count >= RATING_MAX_PER_OUTCOME_WINDOW {
-            continue;
-        }
-        if selected_by_stock
-            .get(item.ts_code.as_str())
-            .is_some_and(|indices| {
-                indices
-                    .iter()
-                    .any(|selected_index| selected_index.abs_diff(end_index) < same_stock_exclusion)
+    select_rating_indices(
+        sorted_items.iter().enumerate().filter_map(|(index, item)| {
+            item.forward_excess_return_pct?;
+            Some(RatingWindow {
+                index,
+                ts_code: &item.ts_code,
+                anchor_end: &item.candidate_end_trade_date,
+                outcome_start: &item.outcome_start_trade_date,
+                outcome_end: &item.outcome_end_trade_date,
             })
-        {
-            continue;
-        }
-        selected_end_indices.push(end_index);
-        selected_by_stock
-            .entry(item.ts_code.as_str())
-            .or_default()
-            .push(end_index);
-        selected.push(item.clone());
-        if selected.len() >= RATING_SAMPLE_LIMIT {
-            break;
-        }
-    }
-    selected
+        }),
+        all_trade_dates,
+        window_trade_days,
+        outcome_trade_days,
+    )
+    .into_iter()
+    .map(|index| sorted_items[index].clone())
+    .collect()
 }
 
 #[cfg(test)]
@@ -459,6 +478,37 @@ mod tests {
             selected
                 .iter()
                 .map(|item| item.ts_code.as_str())
+                .collect::<Vec<_>>(),
+            vec!["A", "B", "C", "E"]
+        );
+    }
+
+    #[test]
+    fn rating_sample_uses_actual_outcome_dates_after_suspension() {
+        let dates = (1..=30)
+            .map(|day| format!("202401{day:02}"))
+            .collect::<Vec<_>>();
+        let rows = [
+            ("A", 1, 2, 20),
+            ("A", 8, 9, 13),
+            ("B", 6, 7, 22),
+            ("C", 11, 12, 24),
+            ("D", 16, 17, 21),
+            ("E", 21, 22, 26),
+        ]
+        .into_iter()
+        .map(|(code, anchor, start, end)| {
+            let mut row = similarity_row(code, &dates[anchor - 1]);
+            row.outcome_start_trade_date = dates[start - 1].clone();
+            row.outcome_end_trade_date = dates[end - 1].clone();
+            row
+        })
+        .collect::<Vec<_>>();
+        let selected = build_rating_sample(&rows, &dates, 5, 3);
+        assert_eq!(
+            selected
+                .iter()
+                .map(|row| row.ts_code.as_str())
                 .collect::<Vec<_>>(),
             vec!["A", "B", "C", "E"]
         );

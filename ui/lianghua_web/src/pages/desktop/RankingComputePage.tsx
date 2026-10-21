@@ -1708,8 +1708,8 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
         <div className="ranking-compute-summary">
           <div className="ranking-compute-summary-item">
             <span>走势相似排行榜计算</span>
-            <strong>未来表现反推启动模板 + 四通道精确相似度</strong>
-            <small>完整历史候选参与，使用策略触发、量价、指标和市场环境；结果在“排名总览 → 走势相似排名”查看。</small>
+            <strong>完整结果历史样本 + 四通道相似度</strong>
+            <small>历史按资格与触发抽样，保留普通结果并复用已校验指纹；结果在“排名总览 → 走势相似排名”查看。</small>
           </div>
         </div>
 

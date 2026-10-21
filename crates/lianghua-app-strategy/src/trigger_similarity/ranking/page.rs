@@ -3,7 +3,8 @@ use crate::trigger_similarity::ranking::store::{
     parse_config_key, table_exists,
 };
 use crate::trigger_similarity::ranking::{
-    ALGORITHM_VERSION, RankingMeta, StrategyTriggerRankingPageData, StrategyTriggerRankingRow,
+    ALGORITHM_VERSION, RankingEvidence, RankingMeta, StrategyTriggerRankingPageData,
+    StrategyTriggerRankingRow,
 };
 use crate::trigger_similarity::*;
 
@@ -206,15 +207,26 @@ pub fn get_strategy_trigger_similarity_ranking_page(
             .map(|value| value.data_signature.clone())
             .unwrap_or_default()
     };
-    let is_fresh = meta.as_ref().is_some_and(|value| {
-        !input_signature_verified || value.data_signature == current_signature
-    });
-    let stale_reason = match &meta {
-        None => Some("尚未计算该日期的全市场排行榜".to_string()),
-        Some(value) if input_signature_verified && value.data_signature != current_signature => {
-            Some("行情或策略触发数据已更新，已存排行榜自动失效".to_string())
+    let version_matches = get_strategy_trigger_similarity_active_config(&conn)?
+        .map_or(meta.is_none(), |config| {
+            config.algorithm_version == ALGORITHM_VERSION
+        });
+    let is_fresh = version_matches
+        && meta.as_ref().is_some_and(|value| {
+            !input_signature_verified || value.data_signature == current_signature
+        });
+    let stale_reason = if !version_matches {
+        Some("相似榜算法已升级，请重新计算后使用".to_string())
+    } else {
+        match &meta {
+            None => Some("尚未计算该日期的全市场排行榜".to_string()),
+            Some(value)
+                if input_signature_verified && value.data_signature != current_signature =>
+            {
+                Some("行情或策略触发数据已更新，已存排行榜自动失效".to_string())
+            }
+            Some(_) => None,
         }
-        Some(_) => None,
     };
     let items = if is_fresh {
         (|conn: &Connection,
@@ -274,6 +286,8 @@ pub fn get_strategy_trigger_similarity_ranking_page(
             {
                 let matches_json: String =
                     row.get(21).map_err(|e| format!("读取相似事件失败: {e}"))?;
+                let evidence: RankingEvidence = serde_json::from_str(&matches_json)
+                    .map_err(|e| format!("读取相似榜证据失败，请重算: {e}"))?;
                 out.push(StrategyTriggerRankingRow {
                     rank: row
                         .get::<_, Option<i64>>(0)
@@ -291,7 +305,7 @@ pub fn get_strategy_trigger_similarity_ranking_page(
                         .map_err(|e| format!("读取三日优排名失败: {e}"))?,
                     ranking_score: row.get(7).map_err(|e| format!("读取排行分失败: {e}"))?,
                     prediction_signal: row.get(8).map_err(|e| format!("读取预测信号失败: {e}"))?,
-                    confidence: row.get(9).map_err(|e| format!("读取置信度失败: {e}"))?,
+                    confidence: row.get(9).map_err(|e| format!("读取样本支持失败: {e}"))?,
                     sample_count: row
                         .get::<_, i64>(10)
                         .map_err(|e| format!("读取样本数失败: {e}"))?
@@ -324,7 +338,8 @@ pub fn get_strategy_trigger_similarity_ranking_page(
                         .map_err(|e| format!("读取触发数失败: {e}"))?
                         .max(0) as usize,
                     total_mv_yi: None,
-                    top_matches: serde_json::from_str(&matches_json).unwrap_or_default(),
+                    top_matches: evidence.matches,
+                    diagnostics: evidence.diagnostics,
                 });
             }
             Ok(out)

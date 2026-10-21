@@ -129,6 +129,13 @@ export type StrategyTriggerRankingRow = {
   bestSimilarity?: number | null
   triggerCount: number
   topMatches: StrategyTriggerRankingMatch[]
+  diagnostics: {
+    status: 'available' | 'insufficient_samples'
+    backgroundSimilarityP90?: number | null
+    similarityLift?: number | null
+    excessReturnStdPct?: number | null
+    outcomePeriodCount: number
+  }
 }
 
 export type StrategyTriggerRankingTiming = {
