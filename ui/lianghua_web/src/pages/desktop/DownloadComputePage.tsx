@@ -196,6 +196,7 @@ export default function DownloadComputePage() {
     } finally {
       await refreshDailyCompletion()
       dailyWorkflowRunningRef.current = false
+      setRankingStatusRefreshSignal((current) => current + 1)
     }
   }
 

@@ -339,6 +339,11 @@
   table-layout: fixed;
 }
 
+.trigger-sim-overview-page .trigger-sim-ranking-table {
+  width: 2430px;
+  min-width: 2430px;
+}
+
 .trigger-sim-table th,
 .trigger-sim-table td {
   border-bottom: 1px solid #e6ebf2;
@@ -450,6 +455,12 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.trigger-sim-overview-page .trigger-sim-concept-cell {
+  width: 780px;
+  min-width: 780px;
+  max-width: 780px;
 }
 
 .trigger-sim-rules-cell {

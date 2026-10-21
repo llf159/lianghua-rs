@@ -836,8 +836,8 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
       )
       setSimilarityTradeDateInput((current) =>
         syncSuggestedInputs
-          ? compactDateToInput(nextStatus.resultDb.maxTradeDate)
-          : current || compactDateToInput(nextStatus.resultDb.maxTradeDate),
+          ? compactDateToInput(nextStatus.sourceDb.maxTradeDate)
+          : current || compactDateToInput(nextStatus.sourceDb.maxTradeDate),
       )
       setCyqFactorInput((current) =>
         current.trim() !== '' ? current : String(nextStatus.cyqFactor ?? 50),

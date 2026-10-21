@@ -258,24 +258,22 @@ export default function OverviewSimilarityRankingPage() {
           <th>三日优排名</th>
           <th>总市值(亿)</th>
           <th title="按收缩超额排序后的榜内名次刻度，不是收益率或成功概率">榜内分</th>
-          <th>证据状态</th>
           <th>收缩超额</th>
           <th>超额胜率</th>
           <th>收益 / 超额</th>
           <th>MFE / MAE</th>
-          <th title="有效样本数仅衡量权重集中程度；后验段数按实际起止日期取最多不重叠区间，不代表独立样本数">样本支持</th>
           <th>匹配程度</th>
           <th>超额分歧</th>
           <th>跑赢案例</th>
           <th>跑输案例</th>
-          <th>概念</th>
+          <th className="trigger-sim-concept-cell">概念</th>
         </tr>
       </thead>
     )
   }
 
   return (
-    <div className="trigger-sim-page">
+    <div className="trigger-sim-page trigger-sim-overview-page">
       <section className="trigger-sim-card trigger-sim-query-card">
         <div className="trigger-sim-head">
           <div>
@@ -486,7 +484,6 @@ export default function OverviewSimilarityRankingPage() {
                       <td>{row.bestRank3d ?? '--'}</td>
                       <td>{formatNumber(row.totalMvYi, 2)}</td>
                       <td>{formatNumber(row.rankingScore)}</td>
-                      <td>{row.diagnostics.status === 'available' ? '可排名' : '样本不足'}</td>
                       <td className={outcomeTone(row.shrunkExcessReturnPct)}>
                         {formatPercent(row.shrunkExcessReturnPct)}
                       </td>
@@ -496,10 +493,6 @@ export default function OverviewSimilarityRankingPage() {
                       </td>
                       <td>
                         {formatPercent(row.expectedMfePct)} / {formatPercent(row.expectedMaePct)}
-                      </td>
-                      <td title={`支持系数 ${formatNumber(row.confidence, 2)}，不是置信概率`}>
-                        <div>{formatNumber(row.effectiveSampleCount, 1)} / {row.sampleCount}</div>
-                        <small>{row.diagnostics.outcomePeriodCount} 段不重叠后验</small>
                       </td>
                       <td>
                         <div>{formatNumber(row.averageSimilarity)} / {formatNumber(row.bestSimilarity)}</div>

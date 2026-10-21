@@ -5,7 +5,7 @@ use chrono::{Local, Timelike};
 use duckdb::{AccessMode, Config, Connection};
 use serde::{Deserialize, Serialize};
 
-use crate::data::download_state::{load_listing_history_gaps, load_pending_stock_repairs};
+use crate::data::download_state::{load_pending_derived_rebuilds, load_pending_stock_repairs};
 use crate::data::{load_stock_list, load_trade_date_list, source_db_path};
 use lianghua_download::download::runner::INDEX_TS_CODES;
 
@@ -66,9 +66,9 @@ pub fn check_databases(source_path: &str) -> Result<DatabaseCheckReport, String>
         source_ready: false, target_trade_date: None, stock_count: 0, row_count: 0,
         checks: Vec::new(), issues: Vec::new(),
         limitations: vec![
-            "历史起点按 max(stock_list.csv 上市日，全库历史起点) 对照，仅作提示；停牌、恢复上市也可能导致起点偏晚。".to_string(),
+            "上市日不等于首个可交易日；停牌、恢复上市及主动限定下载区间均可造成起点偏晚，不据此报告行情缺失或提供修复。".to_string(),
             "下载已检查增量价格衔接并持久登记补救计划；计算事务保证结果整体提交，不重复检查价格衔接、重复行、排名及结果表间完整性，也不复用正式算法抽样重算。".to_string(),
-            "只提示影响已有结果的待重算区间；缺失结果和纯新增日期允许存在。策略、指标配置及成分资料变化仍由相应计算入口处理。".to_string(),
+            "重算提示依据持久待重算记录与已有结果日期的交集，不代表已验证结果数值错误；跨库提交中断也可能留下未清账记录。缺失结果和纯新增日期允许存在。策略、指标配置及成分资料变化仍由相应计算入口处理。".to_string(),
             "检测只读，不证明全库数值正确；文件读取失败单独报告，不自动删除或覆盖数据库。".to_string(),
         ],
     };
@@ -130,27 +130,6 @@ pub fn check_databases(source_path: &str) -> Result<DatabaseCheckReport, String>
         }
         .to_string(),
     });
-    for gap in load_listing_history_gaps(source_path, &source)? {
-        let mut issue = stock_issue(
-            &gap.ts_code,
-            &names,
-            "truncated",
-            "行情历史起点待核验",
-            vec![DatabaseComparison {
-                label: "行情起点".to_string(),
-                expected: gap.start_date.clone(),
-                actual: ranges
-                    .get(&gap.ts_code)
-                    .map(|range| range.0.clone())
-                    .unwrap_or_else(|| "无".to_string()),
-            }],
-            Some(gap.start_date),
-            end.clone(),
-        );
-        issue.severity = "warning".to_string();
-        issue.blocks_derived = false;
-        report.issues.push(issue);
-    }
     for pending in load_pending_stock_repairs(&source)? {
         let mut issue = stock_issue(
             &pending.ts_code,
@@ -170,7 +149,7 @@ pub fn check_databases(source_path: &str) -> Result<DatabaseCheckReport, String>
     }
     report.checks.push(DatabaseCheck {
         id: "truncated".to_string(),
-        title: "历史起点与未完成修复".to_string(),
+        title: "未完成行情修复".to_string(),
         status: "passed".to_string(),
         summary: format!("{} 只股票", report.stock_count),
     });
@@ -260,6 +239,7 @@ pub fn check_databases(source_path: &str) -> Result<DatabaseCheckReport, String>
     });
     // 跨库提交无法原子清账：结果提交后中断仍可能留下欠账，按已有结果判断。
     // 每个结果库独立报告读取失败，避免一个坏文件吞掉其他项目。
+    let pending_rebuilds = load_pending_derived_rebuilds(&source);
     for (component, file, table, label) in [
         (
             "concept",
@@ -321,12 +301,13 @@ pub fn check_databases(source_path: &str) -> Result<DatabaseCheckReport, String>
                 return Ok(());
             }
             check.status = "passed".to_string();
-            check.summary = "已有结果可读取，无受影响的重算欠账".to_string();
-            let ranges = crate::data::download_state::load_pending_derived_rebuild_ranges(
-                source_path,
-                component,
-            )?;
-            for item in ranges {
+            check.summary = "已有结果可读取，无重叠的待重算记录".to_string();
+            let pending_rebuilds = pending_rebuilds.as_ref().map_err(|error| error.clone())?;
+            // 沿用本次检查的源库和结果库快照，不另开连接读取其他时点的维护状态。
+            for item in pending_rebuilds
+                .iter()
+                .filter(|item| item.component == component)
+            {
                 // 待重算区间可能早于已有结果；只按已有结果实际覆盖的日期提示需要重算的范围。
                 let affected: (Option<String>, Option<String>) = results
                     .query_row(
@@ -338,14 +319,18 @@ pub fn check_databases(source_path: &str) -> Result<DatabaseCheckReport, String>
                 let Some((affected_first, affected_last)) = affected.0.zip(affected.1) else {
                     continue;
                 };
-                check.summary = "已有结果受行情变更影响，待重算".to_string();
+                check.summary = "已有结果范围存在待重算记录，完成状态待确认".to_string();
                 report.issues.push(DatabaseIssue {
-                    id: format!("pending-derived:{component}:{}", item.start_date),
+                    id: format!("pending-derived:{component}:{affected_first}"),
                     check_id: check_id.clone(),
                     database: file.to_string(),
                     severity: "warning".to_string(),
-                    title: format!("行情变更后{label}待重算"),
+                    title: format!("{label}存在待重算记录"),
                     comparisons: vec![DatabaseComparison {
+                        label: "待重算记录区间".to_string(),
+                        expected: "已有结果范围内无待重算记录".to_string(),
+                        actual: format!("{} 至 {}", item.start_date, item.end_date),
+                    }, DatabaseComparison {
                         label: "后续计算状态".to_string(),
                         expected: if component == "concept" {
                             "重算受影响区间的概念／行业表现；再次更新行情也会补做未完成的重算"
@@ -356,7 +341,7 @@ pub fn check_databases(source_path: &str) -> Result<DatabaseCheckReport, String>
                         }
                         .to_string(),
                         actual: format!(
-                            "已有结果的 {} 至 {} 尚未按修订后行情重算；只计算最新一天不会清除其他历史欠账",
+                            "已有结果的 {} 至 {} 与待重算记录重叠，尚无完成确认；可能尚未重算，也可能结果已提交但清账中断。只计算最新一天不会清除其他历史记录",
                             affected_first, affected_last
                         ),
                     }],
@@ -692,22 +677,18 @@ mod tests {
                 .iter()
                 .any(|issue| matches!(issue.check_id.as_str(), "chip" | "legacy-chip" | "ranking"))
         );
+        // 停牌或恢复上市可以使首条行情晚于上市日，不能据此报告缺失或提供修复。
         assert!(
-            report
+            !report
                 .issues
                 .iter()
-                .any(|issue| issue.id == "truncated:000002.SZ"
-                    && issue.start_date.as_deref() == Some("20201029")
-                    && issue.check_id == "truncated"
-                    && issue.comparisons[0].expected == "20201029"
-                    && issue.comparisons[0].actual == "20260806"
-                    && !issue.blocks_derived)
+                .any(|issue| issue.check_id == "truncated")
         );
         assert!(
             report
                 .checks
                 .iter()
-                .any(|check| check.id == "truncated" && check.status == "warning")
+                .any(|check| check.id == "truncated" && check.status == "passed")
         );
         assert!(
             report
