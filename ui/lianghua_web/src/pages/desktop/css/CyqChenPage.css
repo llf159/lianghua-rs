@@ -563,3 +563,42 @@ body .cyq-chen-bin-table-wrap {
   overflow: auto !important;
   overscroll-behavior: contain;
 }
+
+.cyq-chen-compare-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0;
+  font-size: 13px;
+}
+
+.cyq-chen-compare-toggle input {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
+.cyq-chen-comparison {
+  margin: 14px 0;
+  padding: 12px;
+  border: 1px solid #dbe3ef;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.cyq-chen-comparison h4 { margin: 0 0 8px; }
+.cyq-chen-comparison p { color: #526078; font-size: 13px; line-height: 1.6; }
+.cyq-chen-comparison summary { cursor: pointer; font-size: 13px; }
+.cyq-chen-comparison .cyq-chen-universe-status {
+  padding: 8px 10px;
+  border-left: 3px solid #a66b16;
+  background: #fff4de;
+  color: #704912;
+}
+.cyq-chen-comparison-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+  gap: 12px;
+}
+.cyq-chen-comparison-metrics dt { color: #526078; font-size: 12px; }
+.cyq-chen-comparison-metrics dd { margin: 4px 0 0; font-size: 15px; font-weight: 600; }

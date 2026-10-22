@@ -2461,6 +2461,7 @@ export default function CyqChenPage() {
   const [savedRuns, setSavedRuns] = useState<SavedRun[]>([])
   const [selectedTradeDate, setSelectedTradeDate] = useState('')
   const [chipPeakMode, setChipPeakMode] = useState<ChipPeakMode>('total')
+  const [compareMechanisms, setCompareMechanisms] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
@@ -2473,6 +2474,10 @@ export default function CyqChenPage() {
     return selectedSnapshotByDate(result.snapshots, tradeDate)
   }, [result, selectedTradeDate])
 
+  const selectedMechanismDay = result?.mechanismComparison?.days.find(
+    (day) => day.tradeDate === selectedSnapshot?.tradeDate,
+  )
+  const selectedOrigin = selectedSnapshot?.origin
   const chartRows = useMemo(() => buildChartRows(result), [result])
   const chartPanels = result?.klinePayload?.panels ?? []
   const snapshotOptions = result?.snapshots ?? []
@@ -2648,6 +2653,7 @@ export default function CyqChenPage() {
       const nextSourcePath = sourcePath || await ensureManagedSourcePath()
       setSourcePath(nextSourcePath)
       const nextResult = await runCyqChenSingleStockTest({
+        compareMechanisms,
         sourcePath: nextSourcePath,
         tsCode: resolvedTestTsCode,
         startDate: normalizeDateInput(startDateInput) || null,
@@ -2748,6 +2754,10 @@ export default function CyqChenPage() {
             <input type="number" min={0.01} step={0.1} value={bucketPctInput} onChange={(event) => setBucketPctInput(event.target.value)} />
           </label>
         </div>
+        <label className="cyq-chen-compare-toggle">
+          <input type="checkbox" checked={compareMechanisms} onChange={(event) => setCompareMechanisms(event.target.checked)} disabled={loading} />
+          <span>比较筹码生成机制（额外计算两次）</span>
+        </label>
         <div className="cyq-chen-run-row">
           <button className="cyq-chen-primary-btn cyq-chen-run-btn" type="button" onClick={runTest} disabled={loading}>
             {loading ? '计算中...' : '计算'}
@@ -2819,6 +2829,60 @@ export default function CyqChenPage() {
             </select>
           </label>
         </div>
+
+        {selectedMechanismDay ? (
+          <section className="cyq-chen-comparison" aria-label="筹码生成机制对照">
+            <h4>筹码生成机制对照 · {selectedMechanismDay.tradeDate}</h4>
+            {result?.mechanismComparison?.universeVerified !== true ? (
+              <p className="cyq-chen-universe-status" role="status">流通总体未经核实：以下为固定总体假设下的模型对照。历史解禁、增发等变化尚未核对，初始未知库存不包含这些事件引入的未知成本。</p>
+            ) : null}
+            <p>同一行情、网格与初始化，模拟从 {result?.mechanismComparison?.simulationStartDate ?? '--'} 开始。下方图表仍显示当前规则。</p>
+            <div className="cyq-chen-bin-table-wrap">
+              <table className="cyq-chen-bin-table">
+                <thead><tr><th>生成方式</th><th>总平均成本</th><th>获利盘</th><th>模型主力份额</th></tr></thead>
+                <tbody>
+                  <tr><td>当前规则</td><td>{formatNumber(selectedMechanismDay.currentAvgCost)}</td><td>{formatRatioPercent(selectedMechanismDay.currentProfitRatio)}</td><td>{formatNumber(selectedSnapshot?.mainTotal)}</td></tr>
+                  <tr><td>关闭延迟归属修正</td><td>{formatNumber(selectedMechanismDay.withoutPosteriorAvgCost)}</td><td>{formatRatioPercent(selectedMechanismDay.withoutPosteriorProfitRatio)}</td><td>{formatNumber(selectedMechanismDay.withoutPosteriorMainTotal)}</td></tr>
+                  <tr><td>等概率参照（含初值估计）</td><td>{formatNumber(selectedMechanismDay.referenceImputedAvgCost)}</td><td>{formatRatioPercent(selectedMechanismDay.referenceImputedProfitRatio)}</td><td>无身份含义</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <dl className="cyq-chen-comparison-metrics">
+              <div><dt>固定总体假设下的初始未知库存</dt><dd>{formatRatioPercent(selectedMechanismDay.referenceUnknownRatio)}</dd></div>
+              <div><dt>剔除初值后的已知成本均价</dt><dd>{formatNumber(selectedMechanismDay.referenceKnownAvgCost)}</dd></div>
+              <div><dt>包含未知成本的获利盘范围</dt><dd>{formatRatioPercent(selectedMechanismDay.referenceProfitRatioLower)} – {formatRatioPercent(selectedMechanismDay.referenceProfitRatioUpper)}</dd></div>
+              <div><dt>当前与关闭归属修正的最大累计分布差</dt><dd>{formatNumber(selectedMechanismDay.posteriorCdfDistance * 100)} 个百分点</dd></div>
+              <div><dt>当前与中性参照的最大累计分布差</dt><dd>{formatNumber(selectedMechanismDay.referenceCdfDistance * 100)} 个百分点</dd></div>
+            </dl>
+            <p>未知库存按实际换手逐日扣减；已知成本未放大成全部流通盘。获利盘范围只反映未知成本，不是置信区间。对照采用固定流通总体假设，尚未处理解禁、增发等股本变化。</p>
+            {selectedOrigin && selectedSnapshot ? (
+              <>
+                <h4>当前模型库存来源（每 100 份）</h4>
+                <div className="cyq-chen-bin-table-wrap">
+                  <table className="cyq-chen-bin-table">
+                    <thead><tr><th>生成方式</th><th>主力：初始残留</th><th>主力：后续成交</th><th>散户：初始残留</th><th>散户：后续成交</th></tr></thead>
+                    <tbody>
+                      <tr><td>当前规则</td><td>{formatNumber(selectedOrigin.initialMain)}</td><td>{formatNumber(Math.max(0, selectedSnapshot.mainTotal - selectedOrigin.initialMain))}</td><td>{formatNumber(selectedOrigin.initialRetail)}</td><td>{formatNumber(Math.max(0, selectedSnapshot.retailTotal - selectedOrigin.initialRetail))}</td></tr>
+                      {selectedMechanismDay.withoutPosteriorOrigin ? (
+                        <tr><td>关闭延迟归属修正</td><td>{formatNumber(selectedMechanismDay.withoutPosteriorOrigin.initialMain)}</td><td>{formatNumber(Math.max(0, selectedMechanismDay.withoutPosteriorMainTotal - selectedMechanismDay.withoutPosteriorOrigin.initialMain))}</td><td>{formatNumber(selectedMechanismDay.withoutPosteriorOrigin.initialRetail)}</td><td>{formatNumber(Math.max(0, 100 - selectedMechanismDay.withoutPosteriorMainTotal - selectedMechanismDay.withoutPosteriorOrigin.initialRetail))}</td></tr>
+                      ) : null}
+                    </tbody>
+                  </table>
+                </div>
+                <p>初始残留来自模拟起点前的库存，后续成交只统计目前仍存活的份额。两者均为模型来源；归属修正保留来源，不代表新买入。这里的初始残留不是中性参照的未知比例，也不包含解禁等事件引入的未知成本。</p>
+              </>
+            ) : (
+              <p>当前快照缺少库存来源记录，不能推断初始残留为零。从模拟起点重新计算后可查看来源分解。</p>
+            )}
+            {selectedSnapshot?.flow ? (
+              <details>
+                <summary>当日模型交易与归属变化（每 100 份）</summary>
+                <p>主力归属买入 {formatNumber(selectedSnapshot.flow.mainBought)}，卖出 {formatNumber(selectedSnapshot.flow.mainSold)}；散户归属买入 {formatNumber(selectedSnapshot.flow.retailBought)}，卖出 {formatNumber(selectedSnapshot.flow.retailSold)}。</p>
+                <p>转归主力 {formatNumber(selectedSnapshot.flow.reclassifiedToMain)}，转归散户 {formatNumber(selectedSnapshot.flow.reclassifiedToRetail)}。归属修正没有产生新交易，可能经后续出库影响成本分布。</p>
+              </details>
+            ) : null}
+          </section>
+        ) : null}
 
         <div className="cyq-chen-project-chart">
           <div className="cyq-chen-chart-title">

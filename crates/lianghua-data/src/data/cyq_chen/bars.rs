@@ -116,6 +116,61 @@ pub(super) fn bucket_step(bucket_pct: f64) -> f64 {
     1.0 + bucket_pct / 100.0
 }
 
+pub(super) fn build_initial_buckets(
+    min_price: f64,
+    max_price: f64,
+    step: f64,
+) -> Result<Vec<ChipBucket>, String> {
+    if !min_price.is_finite() || !max_price.is_finite() {
+        return Ok(Vec::new());
+    }
+    if !step.is_finite() || step <= 1.0 {
+        return Err("bucket_pct必须是有限正数".to_string());
+    }
+
+    let mut boundaries = vec![min_price];
+    let mut upper = min_price;
+    while upper + EPS < max_price {
+        upper *= step;
+        if !upper.is_finite() {
+            return Err("动态分桶价格边界出现非有限数值".to_string());
+        }
+        if upper <= *boundaries.last().expect("boundary exists") + EPS {
+            return Err("动态分桶价格边界未递增".to_string());
+        }
+        boundaries.push(upper);
+    }
+
+    if boundaries.len() == 1 {
+        boundaries.push(min_price * step);
+    }
+
+    let bucket_count = boundaries.len() - 1;
+    let main_each = 50.0 / bucket_count as f64;
+    let retail_each = 50.0 / bucket_count as f64;
+
+    let mut buckets = Vec::with_capacity(bucket_count);
+    for index in 0..bucket_count {
+        buckets.push(ChipBucket {
+            price_low: boundaries[index],
+            price_high: boundaries[index + 1],
+            main_chip: main_each,
+            retail_chip: retail_each,
+            pending: Vec::new(),
+            origin: Some(super::ChenChipOrigin {
+                initial_main: main_each,
+                initial_retail: retail_each,
+            }),
+            rateo: None,
+            rateh: None,
+            ratel: None,
+            ratec: None,
+        });
+    }
+
+    Ok(buckets)
+}
+
 pub(super) fn compute_bucket_rate_series(
     bars: &[Option<ChenChipBar>],
     cost_price: f64,
@@ -236,6 +291,7 @@ pub(super) fn expand_buckets_for_bar(
                 main_chip: 0.0,
                 retail_chip: 0.0,
                 pending: Vec::new(),
+                origin: Some(Default::default()),
                 rateo: rate_series.as_ref().map(|series| Arc::clone(&series.0)),
                 rateh: rate_series.as_ref().map(|series| Arc::clone(&series.1)),
                 ratel: rate_series.as_ref().map(|series| Arc::clone(&series.2)),
@@ -263,6 +319,7 @@ pub(super) fn expand_buckets_for_bar(
                 main_chip: 0.0,
                 retail_chip: 0.0,
                 pending: Vec::new(),
+                origin: Some(Default::default()),
                 rateo: rate_series.as_ref().map(|series| Arc::clone(&series.0)),
                 rateh: rate_series.as_ref().map(|series| Arc::clone(&series.1)),
                 ratel: rate_series.as_ref().map(|series| Arc::clone(&series.2)),
@@ -373,6 +430,7 @@ mod tests {
             main_chip: 50.0,
             retail_chip: 50.0,
             pending: Vec::new(),
+            origin: None,
             rateo: None,
             rateh: None,
             ratel: None,

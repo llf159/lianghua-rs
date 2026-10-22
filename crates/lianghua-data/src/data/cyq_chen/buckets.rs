@@ -61,6 +61,12 @@ pub(super) fn apply_weighted_sell(
             if sell_amount > EPS {
                 let bucket = &mut buckets[entry.bucket_index];
                 let survival = (available - sell_amount) / available;
+                if let Some(origin) = &mut bucket.origin {
+                    match entry.holder {
+                        ChipHolder::Main => origin.initial_main *= survival,
+                        ChipHolder::Retail => origin.initial_retail *= survival,
+                    }
+                }
                 for lot in &mut bucket.pending {
                     match entry.holder {
                         ChipHolder::Main => lot.main_chip *= survival,
@@ -129,6 +135,18 @@ pub(super) fn sanitize_buckets(buckets: &mut [ChipBucket]) -> Result<(), String>
         if bucket.main_chip < -EPS || bucket.retail_chip < -EPS {
             return Err("筹码分桶出现负筹码".to_string());
         }
+        if let Some(origin) = &mut bucket.origin {
+            origin.validate(bucket.main_chip, bucket.retail_chip, &bucket.pending)?;
+            if bucket.main_chip == 0.0 {
+                origin.initial_main = 0.0;
+            }
+            if bucket.retail_chip == 0.0 {
+                origin.initial_retail = 0.0;
+            }
+        } else if bucket.total_chip() == 0.0 {
+            // Once legacy inventory is exhausted, subsequent buys have a known origin.
+            bucket.origin = Some(Default::default());
+        }
     }
     Ok(())
 }
@@ -147,6 +165,10 @@ pub(super) fn normalize_buckets(buckets: &mut [ChipBucket]) -> Result<(), String
     for bucket in buckets.iter_mut() {
         bucket.main_chip *= scale;
         bucket.retail_chip *= scale;
+        if let Some(origin) = &mut bucket.origin {
+            origin.initial_main *= scale;
+            origin.initial_retail *= scale;
+        }
         for lot in &mut bucket.pending {
             lot.main_chip *= scale;
             lot.retail_chip *= scale;
@@ -206,6 +228,7 @@ pub(super) fn build_snapshot(
     for (index, bucket) in buckets.iter().enumerate() {
         let total_chip = bucket.total_chip();
         bins.push(ChenChipBin {
+            origin: bucket.origin,
             index,
             price: finite_value(bucket.price())?,
             price_low: finite_value(bucket.price_low)?,
@@ -287,6 +310,15 @@ pub(super) fn build_snapshot(
         .ok_or_else(|| "价格分桶为空，无法输出快照".to_string())?;
 
     Ok(ChenChipSnapshot {
+        origin: buckets
+            .iter()
+            .try_fold(super::ChenChipOrigin::default(), |mut total, bucket| {
+                let origin = bucket.origin?;
+                total.initial_main += origin.initial_main;
+                total.initial_retail += origin.initial_retail;
+                Some(total)
+            }),
+        flow: None,
         trap_coef: None,
         real_loss20: None,
         feature_version: None,
@@ -402,6 +434,7 @@ mod tests {
                 main_chip: 0.1,
                 retail_chip: 10.0,
                 pending: Vec::new(),
+                origin: None,
                 rateo: None,
                 rateh: None,
                 ratel: None,
@@ -413,6 +446,7 @@ mod tests {
                 main_chip: 0.1,
                 retail_chip: 10.0,
                 pending: Vec::new(),
+                origin: None,
                 rateo: None,
                 rateh: None,
                 ratel: None,

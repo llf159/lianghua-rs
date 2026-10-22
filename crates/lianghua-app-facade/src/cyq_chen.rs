@@ -13,9 +13,10 @@ use crate::{
     data::{
         DataReader, RowData, chip_change_rule_path,
         cyq_chen::{
-            ChenChipConfig, ChenChipSnapshot, ChipChangeConfig, ChipChangeStrategy,
-            collect_chen_chip_runtime_keys, compute_chen_chip_snapshots_with_compiled_config,
-            round_chen_chip_snapshot,
+            ChenChipConfig, ChenChipMechanismComparison, ChenChipSnapshot, ChipChangeConfig,
+            ChipChangeStrategy, collect_chen_chip_runtime_keys,
+            compute_chen_chip_mechanism_comparison,
+            compute_chen_chip_snapshots_with_compiled_config, round_chen_chip_snapshot,
         },
         load_trade_date_list, source_db_path,
     },
@@ -30,6 +31,8 @@ const EMPTY_CHIP_CHANGE_TEMPLATE: &str = "version = 1\n";
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CyqChenSingleStockRequest {
+    #[serde(default)]
+    pub compare_mechanisms: bool,
     pub source_path: String,
     pub ts_code: String,
     pub start_date: Option<String>,
@@ -60,6 +63,7 @@ pub struct CyqChenSingleStockData {
     pub kline: Vec<CyqChenKlineRow>,
     pub kline_payload: Option<DetailKlinePayload>,
     pub snapshots: Vec<ChenChipSnapshot>,
+    pub mechanism_comparison: Option<ChenChipMechanismComparison>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1040,6 +1044,7 @@ pub fn run_cyq_chen_single_stock_test(
                     kline: Vec::new(),
                     kline_payload: None,
                     snapshots: Vec::new(),
+                    mechanism_comparison: None,
                 });
             }
             Err(err) => return Err(err),
@@ -1054,6 +1059,7 @@ pub fn run_cyq_chen_single_stock_test(
             kline: Vec::new(),
             kline_payload: None,
             snapshots: Vec::new(),
+            mechanism_comparison: None,
         });
     }
 
@@ -1144,27 +1150,29 @@ pub fn run_cyq_chen_single_stock_test(
     })(source_path, &ts_code, &start_date, &end_date)?;
     let output_start_date =
         resolve_output_start_date(&row_data, &start_date, &end_date, config.warmup_days);
-    let mut snapshots: Vec<ChenChipSnapshot> =
+    let (mut snapshots, mechanism_comparison) =
         if let Some(output_start_date) = output_start_date.as_deref() {
-            compute_chen_chip_snapshots_with_compiled_config(
-                &row_data,
-                output_start_date,
-                &compiled_chip_config,
-                config,
-            )?
-            .into_iter()
-            .filter(|snapshot| {
-                snapshot
-                    .trade_date
-                    .as_deref()
-                    .map(|trade_date| {
-                        trade_date >= start_date.as_str() && trade_date <= end_date.as_str()
-                    })
-                    .unwrap_or(false)
-            })
-            .collect()
+            if request.compare_mechanisms {
+                let (snapshots, comparison) = compute_chen_chip_mechanism_comparison(
+                    &row_data,
+                    output_start_date,
+                    &compiled_chip_config,
+                    config,
+                )?;
+                (snapshots, Some(comparison))
+            } else {
+                (
+                    compute_chen_chip_snapshots_with_compiled_config(
+                        &row_data,
+                        output_start_date,
+                        &compiled_chip_config,
+                        config,
+                    )?,
+                    None,
+                )
+            }
         } else {
-            Vec::new()
+            (Vec::new(), None)
         };
     for snapshot in &mut snapshots {
         round_chen_chip_snapshot(snapshot);
@@ -1178,6 +1186,7 @@ pub fn run_cyq_chen_single_stock_test(
         kline,
         kline_payload,
         snapshots,
+        mechanism_comparison,
     })
 }
 
@@ -1315,6 +1324,7 @@ mod tests {
         prepare_source_db(&source_dir);
 
         let data = run_cyq_chen_single_stock_test(CyqChenSingleStockRequest {
+            compare_mechanisms: true,
             source_path: source_dir.to_str().expect("utf8 path").to_string(),
             ts_code: "000001".to_string(),
             start_date: Some("20260401".to_string()),
@@ -1336,6 +1346,17 @@ mod tests {
         assert_eq!(data.kline.len(), 4);
         assert_eq!(data.output_start_date.as_deref(), Some("20260403"));
         assert_eq!(data.snapshots.len(), 2);
+        let comparison = data.mechanism_comparison.as_ref().unwrap();
+        assert_eq!(
+            serde_json::to_value(comparison).unwrap()["universeVerified"],
+            false
+        );
+        assert_eq!(comparison.days.len(), data.snapshots.len());
+        assert!(comparison.days[0].reference_unknown_ratio > 0.0);
+        assert!(comparison.days[0].without_posterior_origin.is_some());
+        assert!(data.snapshots[0].origin.is_some());
+        assert!(data.snapshots[0].flow.is_some());
+        assert!(!source_dir.join("cyq_chen.db").exists());
 
         fs::remove_dir_all(source_dir).expect("cleanup temp dir");
     }
@@ -1346,6 +1367,7 @@ mod tests {
         prepare_source_db(&source_dir);
 
         let data = run_cyq_chen_single_stock_test(CyqChenSingleStockRequest {
+            compare_mechanisms: true,
             source_path: source_dir.to_str().expect("utf8 path").to_string(),
             ts_code: "000999".to_string(),
             start_date: Some("20260401".to_string()),

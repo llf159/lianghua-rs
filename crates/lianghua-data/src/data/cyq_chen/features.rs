@@ -30,6 +30,9 @@ impl ChenChipFeatureState {
             return Err("筹码检查点总库存不守恒，请重建该股票筹码".into());
         }
         for (index, bin) in bins.iter().enumerate() {
+            if let Some(origin) = bin.origin {
+                origin.validate(bin.main_chip, bin.retail_chip, &bin.pending)?;
+            }
             if bin.index != index
                 || !bin.price_low.is_finite()
                 || !bin.price_high.is_finite()
@@ -256,6 +259,7 @@ mod tests {
             main_chip: 50.0,
             retail_chip: 50.0,
             pending: Vec::new(),
+            origin: None,
             rateo: None,
             rateh: None,
             ratel: None,
@@ -344,6 +348,7 @@ mod tests {
                 main_chip: 60.0,
                 retail_chip: 0.0,
                 pending: Vec::new(),
+                origin: None,
                 rateo: None,
                 rateh: None,
                 ratel: None,
@@ -355,6 +360,7 @@ mod tests {
                 main_chip: 40.0,
                 retail_chip: 0.0,
                 pending: Vec::new(),
+                origin: None,
                 rateo: None,
                 rateh: None,
                 ratel: None,

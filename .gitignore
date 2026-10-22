@@ -19,6 +19,7 @@ __pycache__
 /strategies
 market*
 !/docs/market-environment-analysis.md
+!/docs/chip-mechanism-comparison.md
 !crates/lianghua-app-strategy/src/statistics/market_activity.rs
 !crates/lianghua-app-strategy/src/statistics/market_activity_model.json
 !crates/lianghua-app-strategy/src/statistics/market_environment.rs

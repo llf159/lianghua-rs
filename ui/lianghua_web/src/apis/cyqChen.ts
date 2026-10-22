@@ -26,6 +26,7 @@ export type CyqChenKlineRow = {
 }
 
 export type CyqChenBin = {
+  origin?: CyqChenOrigin | null
   index: number
   price: number
   priceLow: number
@@ -42,7 +43,41 @@ export type CyqChenPercentRange = {
   concentration: number
 }
 
+export type CyqChenFlow = {
+  mainSold: number
+  retailSold: number
+  mainBought: number
+  retailBought: number
+  reclassifiedToMain: number
+  reclassifiedToRetail: number
+}
+
+export type CyqChenOrigin = {
+  initialMain: number
+  initialRetail: number
+}
+
+export type CyqChenMechanismDay = {
+  withoutPosteriorOrigin?: CyqChenOrigin | null
+  tradeDate: string
+  currentAvgCost: number
+  withoutPosteriorAvgCost: number
+  referenceImputedAvgCost: number
+  currentProfitRatio: number
+  withoutPosteriorProfitRatio: number
+  referenceImputedProfitRatio: number
+  withoutPosteriorMainTotal: number
+  posteriorCdfDistance: number
+  referenceCdfDistance: number
+  referenceUnknownRatio: number
+  referenceKnownAvgCost: number | null
+  referenceProfitRatioLower: number
+  referenceProfitRatioUpper: number
+}
+
 export type CyqChenSnapshot = {
+  origin?: CyqChenOrigin | null
+  flow?: CyqChenFlow | null
   tradeDate?: string | null
   close: number
   minPrice: number
@@ -69,9 +104,15 @@ export type CyqChenSingleStockData = {
   kline: CyqChenKlineRow[]
   klinePayload?: DetailKlinePayload | null
   snapshots: CyqChenSnapshot[]
+  mechanismComparison?: {
+    simulationStartDate: string | null
+    universeVerified: boolean
+    days: CyqChenMechanismDay[]
+  } | null
 }
 
 export type CyqChenSingleStockRequest = {
+  compareMechanisms?: boolean
   sourcePath: string
   tsCode: string
   startDate?: string | null

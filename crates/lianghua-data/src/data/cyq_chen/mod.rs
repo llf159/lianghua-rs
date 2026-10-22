@@ -1,11 +1,15 @@
 mod bars;
 mod buckets;
+mod comparison;
 mod config;
+pub use comparison::{
+    ChenChipMechanismComparison, ChenChipMechanismDay, compute_chen_chip_mechanism_comparison,
+};
 mod features;
 mod simulate;
 use crate::data::cyq_chen::bars::{
-    bucket_step, build_validated_bars, ensure_bucket_rate_series, expand_buckets_for_bar,
-    validate_row_shape,
+    bucket_step, build_initial_buckets, build_validated_bars, ensure_bucket_rate_series,
+    expand_buckets_for_bar, validate_row_shape,
 };
 use crate::data::cyq_chen::buckets::{build_snapshot, normalize_buckets, sanitize_buckets};
 use crate::data::cyq_chen::config::validate_compute_config;
@@ -111,6 +115,8 @@ impl Default for ChenChipConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChenChipBin {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<ChenChipOrigin>,
     pub index: usize,
     pub price: f64,
     pub price_low: f64,
@@ -134,6 +140,10 @@ pub struct ChenChipPercentRange {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChenChipSnapshot {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<ChenChipOrigin>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flow: Option<ChenChipFlow>,
     pub trap_coef: Option<f64>,
     pub real_loss20: Option<f64>,
     pub feature_version: Option<u32>,
@@ -155,6 +165,48 @@ pub struct ChenChipSnapshot {
     pub percent_70: ChenChipPercentRange,
     pub percent_90: ChenChipPercentRange,
     pub bins: Vec<ChenChipBin>,
+}
+
+/// Actual daily transfers in the model, in shares out of 100; reclassification is not trading.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChenChipFlow {
+    pub main_sold: f64,
+    pub retail_sold: f64,
+    pub main_bought: f64,
+    pub retail_bought: f64,
+    pub reclassified_to_main: f64,
+    pub reclassified_to_retail: f64,
+}
+
+/// Surviving pre-simulation inventory, in shares out of 100, independent of holder labels.
+/// Missing on legacy checkpoints whose provenance cannot be reconstructed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChenChipOrigin {
+    pub initial_main: f64,
+    pub initial_retail: f64,
+}
+
+impl ChenChipOrigin {
+    pub(super) fn validate(
+        &self,
+        main: f64,
+        retail: f64,
+        pending: &[PosteriorChipLot],
+    ) -> Result<(), String> {
+        if !self.initial_main.is_finite()
+            || !self.initial_retail.is_finite()
+            || self.initial_main < 0.0
+            || self.initial_retail < 0.0
+            || self.initial_main + pending.iter().map(|lot| lot.main_chip).sum::<f64>() > main + EPS
+            || self.initial_retail + pending.iter().map(|lot| lot.retail_chip).sum::<f64>()
+                > retail + EPS
+        {
+            return Err("筹码来源状态非法：初始来源与待确认成交不能超过对应持有人余额".into());
+        }
+        Ok(())
+    }
 }
 
 pub fn round_chen_chip_value(value: f64) -> f64 {
@@ -226,6 +278,7 @@ pub struct PosteriorChipLot {
 
 #[derive(Debug, Clone)]
 pub(super) struct ChipBucket {
+    origin: Option<ChenChipOrigin>,
     price_low: f64,
     price_high: f64,
     main_chip: f64,
@@ -276,6 +329,30 @@ pub fn compute_chen_chip_snapshots_with_compiled_config_with_features(
     config: ChenChipConfig,
     feature_state: &mut ChenChipFeatureState,
 ) -> Result<Vec<ChenChipSnapshot>, String> {
+    let mut snapshots = Vec::new();
+    replay_chen_chip_snapshots(
+        row_data,
+        output_start_date,
+        chip_config,
+        config,
+        feature_state,
+        |snapshot| {
+            snapshots.push(snapshot);
+            Ok(())
+        },
+    )?;
+    Ok(snapshots)
+}
+
+/// Emit each output snapshot immediately, without retaining its historical bins.
+pub(super) fn replay_chen_chip_snapshots(
+    row_data: &RowData,
+    output_start_date: &str,
+    chip_config: &CompiledChipChangeConfig,
+    config: ChenChipConfig,
+    feature_state: &mut ChenChipFeatureState,
+    mut emit: impl FnMut(ChenChipSnapshot) -> Result<(), String>,
+) -> Result<(), String> {
     validate_compute_config(config)?;
     if chip_config.version != 1 {
         return Err(format!(
@@ -302,64 +379,18 @@ pub fn compute_chen_chip_snapshots_with_compiled_config_with_features(
 
     let bars = build_validated_bars(row_data, output_start_index)?;
     if output_start_index < config.warmup_days {
-        return Ok(Vec::new());
+        return Ok(());
     }
 
     let process_start_index = output_start_index.saturating_sub(config.warmup_days);
     let Some(initial_bar) = bars[process_start_index].as_ref() else {
-        return Ok(Vec::new());
+        return Ok(());
     };
     let initial_range = (initial_bar.low, initial_bar.high);
     let step = bucket_step(config.bucket_pct);
-    let mut buckets =
-        (|min_price: f64, max_price: f64, step: f64| -> Result<Vec<ChipBucket>, String> {
-            if !min_price.is_finite() || !max_price.is_finite() {
-                return Ok(Vec::new());
-            }
-            if !step.is_finite() || step <= 1.0 {
-                return Err("bucket_pct必须是有限正数".to_string());
-            }
-
-            let mut boundaries = vec![min_price];
-            let mut upper = min_price;
-            while upper + EPS < max_price {
-                upper *= step;
-                if !upper.is_finite() {
-                    return Err("动态分桶价格边界出现非有限数值".to_string());
-                }
-                if upper <= *boundaries.last().expect("boundary exists") + EPS {
-                    return Err("动态分桶价格边界未递增".to_string());
-                }
-                boundaries.push(upper);
-            }
-
-            if boundaries.len() == 1 {
-                boundaries.push(min_price * step);
-            }
-
-            let bucket_count = boundaries.len() - 1;
-            let main_each = 50.0 / bucket_count as f64;
-            let retail_each = 50.0 / bucket_count as f64;
-
-            let mut buckets = Vec::with_capacity(bucket_count);
-            for index in 0..bucket_count {
-                buckets.push(ChipBucket {
-                    price_low: boundaries[index],
-                    price_high: boundaries[index + 1],
-                    main_chip: main_each,
-                    retail_chip: retail_each,
-                    pending: Vec::new(),
-                    rateo: None,
-                    rateh: None,
-                    ratel: None,
-                    ratec: None,
-                });
-            }
-
-            Ok(buckets)
-        })(initial_range.0, initial_range.1, step)?;
+    let mut buckets = build_initial_buckets(initial_range.0, initial_range.1, step)?;
     if buckets.is_empty() {
-        return Ok(Vec::new());
+        return Ok(());
     }
     if chip_config.sell_uses_bucket_rate_series {
         ensure_bucket_rate_series(&mut buckets, &bars);
@@ -373,12 +404,11 @@ pub fn compute_chen_chip_snapshots_with_compiled_config_with_features(
     let mut buy_runtime = build_new_participant_buy_runtime(&base_runtime, &bars)?;
     inject_strategy_expression_caches(&mut base_runtime, chip_config, ChipDirection::Sell)?;
     inject_strategy_expression_caches(&mut buy_runtime, chip_config, ChipDirection::Buy)?;
-    let mut snapshots = Vec::with_capacity(len.saturating_sub(output_start_index));
 
     for day_index in process_start_index..len {
         let Some(bar) = bars[day_index].as_ref() else {
             if day_index < output_start_index {
-                return Ok(Vec::new());
+                return Ok(());
             }
             return Err(format!(
                 "{} 缺少有效K线数据",
@@ -403,6 +433,7 @@ pub fn compute_chen_chip_snapshots_with_compiled_config_with_features(
             .collect::<Vec<_>>();
         write_main_ratio_for_day(&buckets, &mut main_ratio_history, day_index);
 
+        let main_before = buckets.iter().map(|bucket| bucket.main_chip).sum::<f64>();
         apply_sell_for_day(
             &mut buckets,
             &bars,
@@ -418,6 +449,7 @@ pub fn compute_chen_chip_snapshots_with_compiled_config_with_features(
             .map(ChipBucket::total_chip)
             .collect::<Vec<_>>();
 
+        let main_after_sell = buckets.iter().map(|bucket| bucket.main_chip).sum::<f64>();
         apply_buy_for_day(
             &mut buckets,
             bar,
@@ -431,7 +463,8 @@ pub fn compute_chen_chip_snapshots_with_compiled_config_with_features(
             .iter()
             .map(ChipBucket::total_chip)
             .collect::<Vec<_>>();
-        apply_posterior_for_day(
+        let main_after_buy = buckets.iter().map(|bucket| bucket.main_chip).sum::<f64>();
+        let (reclassified_to_main, reclassified_to_retail) = apply_posterior_for_day(
             &mut buckets,
             bar,
             &mut buy_runtime,
@@ -444,12 +477,20 @@ pub fn compute_chen_chip_snapshots_with_compiled_config_with_features(
 
         if day_index >= output_start_index {
             let mut snapshot = build_snapshot(bar, &buckets)?;
+            snapshot.flow = Some(ChenChipFlow {
+                main_sold: (main_before - main_after_sell).max(0.0),
+                retail_sold: (bar.turnover_rate - main_before + main_after_sell).max(0.0),
+                main_bought: (main_after_buy - main_after_sell).max(0.0),
+                retail_bought: (bar.turnover_rate - main_after_buy + main_after_sell).max(0.0),
+                reclassified_to_main,
+                reclassified_to_retail,
+            });
             feature_state.fill_snapshot(&mut snapshot);
-            snapshots.push(snapshot);
+            emit(snapshot)?;
         }
     }
 
-    Ok(snapshots)
+    Ok(())
 }
 
 pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config(
@@ -512,6 +553,9 @@ pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config_with_f
     let mut buckets = (|bins: &[ChenChipBin]| -> Result<Vec<ChipBucket>, String> {
         let mut buckets = Vec::with_capacity(bins.len());
         for bin in bins {
+            if let Some(origin) = bin.origin {
+                origin.validate(bin.main_chip, bin.retail_chip, &bin.pending)?;
+            }
             if !bin.price_low.is_finite()
                 || !bin.price_high.is_finite()
                 || !bin.main_chip.is_finite()
@@ -533,6 +577,7 @@ pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config_with_f
                 return Err("后验续算状态非法：待确认筹码不能超过对应持有人余额".into());
             }
             buckets.push(ChipBucket {
+                origin: bin.origin,
                 price_low: bin.price_low,
                 price_high: bin.price_high,
                 main_chip: bin.main_chip,
@@ -611,6 +656,7 @@ pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config_with_f
             .collect::<Vec<_>>();
         write_main_ratio_for_day(&buckets, &mut main_ratio_history, day_index);
 
+        let main_before = buckets.iter().map(|bucket| bucket.main_chip).sum::<f64>();
         apply_sell_for_day(
             &mut buckets,
             &bars,
@@ -626,6 +672,7 @@ pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config_with_f
             .map(ChipBucket::total_chip)
             .collect::<Vec<_>>();
 
+        let main_after_sell = buckets.iter().map(|bucket| bucket.main_chip).sum::<f64>();
         apply_buy_for_day(
             &mut buckets,
             bar,
@@ -639,7 +686,8 @@ pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config_with_f
             .iter()
             .map(ChipBucket::total_chip)
             .collect::<Vec<_>>();
-        apply_posterior_for_day(
+        let main_after_buy = buckets.iter().map(|bucket| bucket.main_chip).sum::<f64>();
+        let (reclassified_to_main, reclassified_to_retail) = apply_posterior_for_day(
             &mut buckets,
             bar,
             &mut buy_runtime,
@@ -651,6 +699,14 @@ pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config_with_f
         feature_state.observe(bar, &buckets, &before, &after_sell, &after_buy)?;
 
         let mut snapshot = build_snapshot(bar, &buckets)?;
+        snapshot.flow = Some(ChenChipFlow {
+            main_sold: (main_before - main_after_sell).max(0.0),
+            retail_sold: (bar.turnover_rate - main_before + main_after_sell).max(0.0),
+            main_bought: (main_after_buy - main_after_sell).max(0.0),
+            retail_bought: (bar.turnover_rate - main_after_buy + main_after_sell).max(0.0),
+            reclassified_to_main,
+            reclassified_to_retail,
+        });
         feature_state.fill_snapshot(&mut snapshot);
         snapshots.push(snapshot);
     }

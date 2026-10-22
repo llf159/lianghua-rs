@@ -18,7 +18,7 @@ pub(super) fn apply_posterior_for_day(
     config: &CompiledChipChangeConfig,
     len: usize,
     day: usize,
-) -> Result<(), String> {
+) -> Result<(f64, f64), String> {
     let horizon = config
         .strategies
         .iter()
@@ -26,7 +26,7 @@ pub(super) fn apply_posterior_for_day(
         .max()
         .unwrap_or(0);
     if horizon == 0 {
-        return Ok(());
+        return Ok((0.0, 0.0));
     }
     let mut decisions = Vec::new();
     for rule in config.strategies.iter().filter(|r| r.confirm_after > 0) {
@@ -50,6 +50,8 @@ pub(super) fn apply_posterior_for_day(
             decisions.push(rule);
         }
     }
+    let mut to_main = 0.0;
+    let mut to_retail = 0.0;
     for bucket in buckets {
         for lot in &mut bucket.pending {
             if lot.trade_date == bar.trade_date {
@@ -61,6 +63,8 @@ pub(super) fn apply_posterior_for_day(
                     ChipHolder::Main => lot.retail_chip * rule.bias,
                     ChipHolder::Retail => -lot.main_chip * rule.bias,
                 };
+                to_main += delta.max(0.0);
+                to_retail += (-delta).max(0.0);
                 lot.main_chip += delta;
                 lot.retail_chip -= delta;
                 bucket.main_chip += delta;
@@ -71,7 +75,7 @@ pub(super) fn apply_posterior_for_day(
             .pending
             .retain(|lot| lot.age < horizon && lot.main_chip + lot.retail_chip > EPS);
     }
-    Ok(())
+    Ok((to_main, to_retail))
 }
 
 pub(super) fn write_main_ratio_for_day(
@@ -653,6 +657,7 @@ bias = 1.0
             main_chip: 50.0,
             retail_chip: 50.0,
             pending: Vec::new(),
+            origin: None,
             rateo: None,
             rateh: None,
             ratel: None,
@@ -732,6 +737,10 @@ bias = 1.0
         .unwrap();
         for (expected, actual) in full[3..].iter().zip(&resumed) {
             assert!((expected.main_total - actual.main_total).abs() < 1e-9);
+            let expected_origin = expected.origin.unwrap();
+            let actual_origin = actual.origin.unwrap();
+            assert_close(expected_origin.initial_main, actual_origin.initial_main);
+            assert_close(expected_origin.initial_retail, actual_origin.initial_retail);
             assert!((actual.total_chips - 100.0).abs() < 1e-9);
             for bin in &actual.bins {
                 assert!(
@@ -744,6 +753,24 @@ bias = 1.0
                 assert!(bin.pending.iter().all(|l| l.age < 2));
             }
         }
+        let mut legacy_json = serde_json::to_value(&bins).unwrap();
+        for bin in legacy_json.as_array_mut().unwrap() {
+            bin.as_object_mut().unwrap().remove("origin");
+        }
+        let legacy =
+            serde_json::from_value::<Vec<crate::data::cyq_chen::ChenChipBin>>(legacy_json).unwrap();
+        let legacy_resumed = crate::data::cyq_chen::compute_chen_chip_snapshots_from_initial_bins_with_compiled_config(
+            &row, &row.trade_dates[3], &legacy, &[], &compiled, compute,
+        ).unwrap();
+        for (expected, actual) in resumed.iter().zip(&legacy_resumed) {
+            assert_close(expected.main_total, actual.main_total);
+            assert!(actual.origin.is_none());
+        }
+        let mut invalid_bins = bins.clone();
+        invalid_bins[0].origin.as_mut().unwrap().initial_main = invalid_bins[0].main_chip + 1.0;
+        assert!(crate::data::cyq_chen::compute_chen_chip_snapshots_from_initial_bins_with_compiled_config(
+            &row, &row.trade_dates[3], &invalid_bins, &[], &compiled, compute,
+        ).unwrap_err().contains("来源状态非法"));
         config.strategy[1].when = "LAST(C, 0) > C".into();
         assert!(config.compile().unwrap_err().contains("有限窗口因果函数"));
         config.strategy.pop();
@@ -831,6 +858,7 @@ bias = 1.0
                 main_chip: 30.0,
                 retail_chip: 20.0,
                 pending: Vec::new(),
+                origin: None,
                 rateo: None,
                 rateh: None,
                 ratel: None,
@@ -842,6 +870,7 @@ bias = 1.0
                 main_chip: 30.0,
                 retail_chip: 20.0,
                 pending: Vec::new(),
+                origin: None,
                 rateo: None,
                 rateh: None,
                 ratel: None,
