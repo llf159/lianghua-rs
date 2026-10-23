@@ -900,6 +900,25 @@ mod tests {
     }
 
     #[test]
+    fn stock_extra_fields_distinguishes_board_ids_and_keeps_unknown_empty() {
+        for (ts_code, expected) in [
+            ("600000.SH", Some(1.0)),
+            ("300001.SZ", Some(2.0)),
+            ("688001.SH", Some(3.0)),
+            ("830001.BJ", Some(4.0)),
+            ("000001.HK", None),
+        ] {
+            let mut row_data = RowData {
+                trade_dates: vec!["20240102".to_string()],
+                cols: HashMap::from([("C".to_string(), vec![Some(10.0)])]),
+            };
+            inject_stock_extra_fields(&mut row_data, ts_code, false, None)
+                .expect("inject stock extra fields");
+            assert_eq!(row_data.cols["BOARD_ID"], [expected]);
+        }
+    }
+
+    #[test]
     fn similarity_rank_field_aligns_saved_daily_summary_by_trade_date() {
         let source_dir = std::env::temp_dir().join(format!(
             "lianghua-similarity-rank-injector-{}",

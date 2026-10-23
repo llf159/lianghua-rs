@@ -1,5 +1,5 @@
 mod basis;
-pub use basis::{ChenChipBasis, ChenChipBasisEvent, compute_chen_chip_basis};
+pub use basis::{ChenChipBasis, compute_chen_chip_basis};
 mod bars;
 mod buckets;
 mod comparison;

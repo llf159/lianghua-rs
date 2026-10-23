@@ -96,27 +96,14 @@ export type CyqChenSnapshot = {
   bins: CyqChenBin[]
 }
 
-export type CyqChenBasisEvent = {
-  id: string
-  kind: 'newFloat' | 'proportionalSplit' | 'unhandled'
-  effectiveDate: string
-  announcementDate: string
-  acquiredDate: string
-  source: string
-  beforeShares: number | null
-  afterShares: number | null
-}
-
 export type CyqChenBasis = {
   model: string
   inputFingerprint: string
   priceCoordinate: string
   simulationStartDate: string
-  events: CyqChenBasisEvent[]
   days: {
     tradeDate: string
-    status: 'conditionalUnverified' | 'blocked'
-    processedEvents: string[]
+    status: 'conditionalUnverified'
     floatObservationAvailable: boolean
     issues: { detectedDate: string; possibleFrom: string; reason: string }[]
     values: {
@@ -131,8 +118,27 @@ export type CyqChenBasis = {
   }[]
 }
 
+export type CyqChenL2Day = {
+  tradeDate: string
+  board: string
+  status: 'observable' | 'missing' | 'invalid' | 'unverified'
+  volume: number | null
+  netMfVolume: number | null
+  netMfRatio: number | null
+  netMfRatio3d: number | null
+  largeBuyVolume: number | null
+  largeSellVolume: number | null
+  largeNetRatio: number | null
+  largeNetRatio3d: number | null
+  largeBuyDenominator: number | null
+  largeBuyShare: number | null
+  largeBuyShare3d: number | null
+  issues: string[]
+}
+
 export type CyqChenSingleStockData = {
   basis?: CyqChenBasis | null
+  l2Days: CyqChenL2Day[]
   resolvedTsCode: string
   startDate: string
   endDate: string
@@ -148,7 +154,6 @@ export type CyqChenSingleStockData = {
 }
 
 export type CyqChenSingleStockRequest = {
-  basisEvents?: CyqChenBasisEvent[]
   compareMechanisms?: boolean
   sourcePath: string
   tsCode: string

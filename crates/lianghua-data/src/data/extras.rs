@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::data::{RowData, load_stock_list};
+use lianghua_core::utils::utils::board_category;
 
 pub fn load_st_list(source_dir: &str) -> Result<HashSet<String>, String> {
     let rows = load_stock_list(source_dir)?;
@@ -67,7 +68,20 @@ pub fn inject_stock_extra_fields(
     is_st: bool,
     _fallback_total_share: Option<f64>,
 ) -> Result<(), String> {
-    inject_constant_num_fields(row_data, &[("ZHANG", Some(calc_zhang_pct(ts_code, is_st)))])?;
+    let board_id = match board_category(ts_code, None) {
+        "主板" => Some(1.0),
+        "创业板" => Some(2.0),
+        "科创板" => Some(3.0),
+        "北交所" => Some(4.0),
+        _ => None,
+    };
+    inject_constant_num_fields(
+        row_data,
+        &[
+            ("ZHANG", Some(calc_zhang_pct(ts_code, is_st))),
+            ("BOARD_ID", board_id),
+        ],
+    )?;
 
     row_data
         .cols

@@ -325,6 +325,9 @@ fn collect_expr_runtime_keys(
                 keys.insert("TOR".to_string());
                 return;
             }
+            if runtime_key == "BOARD_ID" {
+                return;
+            }
             if let Some((_, db_key)) = options
                 .aliases
                 .iter()
@@ -1677,6 +1680,7 @@ impl IndsData {
                             | "SCORE"
                             | "S_RANK"
                             | "ZHANG"
+                            | "BOARD_ID"
                     ))
             {
                 return Err(format!("跨股票指标{name}不能覆盖基础输入字段"));

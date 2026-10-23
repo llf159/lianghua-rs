@@ -11,7 +11,6 @@ import {
 import {
   getCyqChenStrategyPage,
   runCyqChenSingleStockTest,
-  type CyqChenBasisEvent,
   type CyqChenBin,
   type CyqChenKlineRow,
   type CyqChenSingleStockData,
@@ -2462,7 +2461,6 @@ export default function CyqChenPage() {
   const [savedRuns, setSavedRuns] = useState<SavedRun[]>([])
   const [selectedTradeDate, setSelectedTradeDate] = useState('')
   const [chipPeakMode, setChipPeakMode] = useState<ChipPeakMode>('total')
-  const [basisEvents, setBasisEvents] = useState<CyqChenBasisEvent[]>([])
   const [compareMechanisms, setCompareMechanisms] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -2480,6 +2478,7 @@ export default function CyqChenPage() {
     (day) => day.tradeDate === selectedSnapshot?.tradeDate,
   )
   const selectedBasisDay = result?.basis?.days.find((day) => day.tradeDate === selectedSnapshot?.tradeDate)
+  const selectedL2Day = result?.l2Days.find((day) => day.tradeDate === selectedSnapshot?.tradeDate)
   const selectedOrigin = selectedSnapshot?.origin
   const chartRows = useMemo(() => buildChartRows(result), [result])
   const chartPanels = result?.klinePayload?.panels ?? []
@@ -2601,7 +2600,6 @@ export default function CyqChenPage() {
     }
 
     setStockLookupFocused(false)
-    setBasisEvents([])
     setTsCodeInput(row.name || stdTsCode(nextCode))
   }
 
@@ -2658,7 +2656,6 @@ export default function CyqChenPage() {
       setSourcePath(nextSourcePath)
       const nextResult = await runCyqChenSingleStockTest({
         compareMechanisms,
-        basisEvents,
         sourcePath: nextSourcePath,
         tsCode: resolvedTestTsCode,
         startDate: normalizeDateInput(startDateInput) || null,
@@ -2707,7 +2704,6 @@ export default function CyqChenPage() {
                 value={tsCodeInput}
                 onChange={(event) => {
                   setStockLookupFocused(true)
-                  setBasisEvents([])
                   setTsCodeInput(event.target.value)
                 }}
                 onFocus={() => setStockLookupFocused(true)}
@@ -2760,30 +2756,6 @@ export default function CyqChenPage() {
             <input type="number" min={0.01} step={0.1} value={bucketPctInput} onChange={(event) => setBucketPctInput(event.target.value)} />
           </label>
         </div>
-        <details className="cyq-chen-basis-events">
-          <summary>基础成本：股本事件（{basisEvents.length} 条，仅用于本次计算）</summary>
-          <p>填写已核实事件及出处。股数单位为股；差异化分派、混合事件选“待处理”。按统一前复权价格重放，不代表历史当时已知。切换股票会清除事件。</p>
-          {basisEvents.map((item, index) => (
-            <fieldset key={index} disabled={loading}>
-              <legend>事件 {index + 1}</legend>
-              <div className="cyq-chen-form-grid">
-                <label><span>类型</span><select value={item.kind} onChange={(e) => setBasisEvents(basisEvents.map((v, i) => i === index ? { ...v, kind: e.target.value as CyqChenBasisEvent['kind'] } : v))}>
-                  <option value="unhandled">待处理／复杂事件</option><option value="newFloat">已核实新增流通</option><option value="proportionalSplit">已核实全体等比例送转</option>
-                </select></label>
-                {(['id', 'effectiveDate', 'announcementDate', 'acquiredDate', 'source'] as const).map((key) => (
-                  <label key={key}><span>{{ id: '事件标识', effectiveDate: '生效日 YYYYMMDD', announcementDate: '公告日 YYYYMMDD', acquiredDate: '资料取得日 YYYYMMDD', source: '公告来源／核实依据' }[key]}</span>
-                    <input value={item[key]} onChange={(e) => setBasisEvents(basisEvents.map((v, i) => i === index ? { ...v, [key]: e.target.value } : v))} />
-                  </label>
-                ))}
-                {(['beforeShares', 'afterShares'] as const).map((key) => (
-                  <label key={key}><span>{key === 'beforeShares' ? '事件前流通股数（股）' : '事件后流通股数（股）'}</span><input type="number" min="0" value={item[key] ?? ''} onChange={(e) => setBasisEvents(basisEvents.map((v, i) => i === index ? { ...v, [key]: e.target.value === '' ? null : Number(e.target.value) } : v))} /></label>
-                ))}
-              </div>
-              <button type="button" onClick={() => setBasisEvents(basisEvents.filter((_, i) => i !== index))}>删除事件</button>
-            </fieldset>
-          ))}
-          <button type="button" disabled={loading} onClick={() => setBasisEvents([...basisEvents, { id: '', kind: 'unhandled', effectiveDate: '', announcementDate: '', acquiredDate: '', source: '', beforeShares: null, afterShares: null }])}>添加事件</button>
-        </details>
         <label className="cyq-chen-compare-toggle">
           <input type="checkbox" checked={compareMechanisms} onChange={(event) => setCompareMechanisms(event.target.checked)} disabled={loading} />
           <span>比较筹码生成机制（额外计算两次）</span>
@@ -2865,7 +2837,7 @@ export default function CyqChenPage() {
             <h4>基础成本 · {selectedBasisDay.tradeDate}</h4>
             <p>身份中性估计，模拟起点 {result?.basis?.simulationStartDate}。成本采用统一前复权坐标；下方原模型图仍为身份情景。</p>
             {selectedBasisDay.values ? <>
-              <p role="status">条件估计：未发现未解释的总体矛盾，尚未完整核实全部公司行动。已处理事件：{selectedBasisDay.processedEvents.join('、') || '无'}。</p>
+              <p role="status">条件估计：股本变化按比例继承，股本变化本身不改变 K/U；尚未完整核实真实成本分布。</p>
               {!selectedBasisDay.floatObservationAvailable ? <p>当日零成交，无法用VOL/TOR反推股本，沿用已知状态；不表示已核实无事件。</p> : null}
               <dl className="cyq-chen-comparison-metrics">
                 <div><dt>成交形成的成本质量 K</dt><dd>{formatRatioPercent(selectedBasisDay.values.knownMass)}</dd></div>
@@ -2874,6 +2846,7 @@ export default function CyqChenPage() {
                 <div><dt>获利盘可行范围</dt><dd>{formatRatioPercent(selectedBasisDay.values.profitLower)}—{formatRatioPercent(selectedBasisDay.values.profitUpper)}</dd></div>
               </dl>
               <p>未知来源：{selectedBasisDay.values.unknownSources.map((u) => `${u.source === 'initial' ? '起点前库存' : u.source} ${formatRatioPercent(u.mass)}`).join('；')}。范围不是置信区间。</p>
+              {selectedBasisDay.issues.length > 0 ? <details><summary>数据质量提示（{selectedBasisDay.issues.length} 条，不阻断基础结果）</summary><ul>{selectedBasisDay.issues.map((issue, index) => <li key={index}>{issue.detectedDate}：{issue.reason}；疑似区间起点 {issue.possibleFrom}</li>)}</ul></details> : null}
               <details><summary>基础成本分桶（占全部流通总体，未放大为100%）</summary>
                 <div className="cyq-chen-bin-table-wrap"><table className="cyq-chen-bin-table">
                   <thead><tr><th>成本区间</th><th>成交质量</th><th>累计质量下界</th><th>累计质量上界</th></tr></thead>
@@ -2881,10 +2854,44 @@ export default function CyqChenPage() {
                 </table></div>
               </details>
             </> : <>
-              <p className="cyq-chen-universe-status" role="status">基础成本暂停发布：总体证据不足或存在未处理矛盾。补充核实事件后重新计算；后续换手不会自动解除此状态。</p>
-              <ul>{selectedBasisDay.issues.map((issue, index) => <li key={index}>{issue.detectedDate}：{issue.reason}；疑似区间起点 {issue.possibleFrom}</li>)}</ul>
+              <p className="cyq-chen-universe-status" role="status">基础成本未发布：本次计算未能形成有效的条件分布。</p>
             </>}
-            {result?.basis?.events.length ? <details><summary>本次计算使用的事件资料</summary><ul>{result.basis.events.map((event) => <li key={event.id}>{event.id}：生效 {event.effectiveDate}，公告 {event.announcementDate}，取得 {event.acquiredDate}；{event.source}</li>)}</ul></details> : null}
+          </section>
+        ) : null}
+
+        {selectedL2Day ? (
+          <section className="cyq-chen-comparison" aria-label="L2成交证据">
+            <h4>L2 成交证据 · {selectedL2Day.tradeDate} · {selectedL2Day.board}</h4>
+            <p>
+              主动净量、大小单方向和买方分档占比分别显示，不合成主力概率，也不影响基础 K/U。
+              当日与含当日的过去三个市场交易日分别计算；停牌或字段缺失时不跨日拼接。
+            </p>
+            <p role="status">
+              {{
+                observable: '原始字段可观测。',
+                missing: '证据不完整，缺失项保持为空。',
+                invalid: '成交分母或输入数值无效，不裁剪成合法范围。',
+                unverified: '该市场L2口径未核实，数值仅作原始记录展示。',
+              }[selectedL2Day.status]}
+            </p>
+            <dl className="cyq-chen-comparison-metrics">
+              <div><dt>主动净量 / 成交量（当日）</dt><dd>{selectedL2Day.netMfRatio == null ? '--' : formatRatioPercent(selectedL2Day.netMfRatio)}</dd></div>
+              <div><dt>主动净量 / 成交量（三日）</dt><dd>{selectedL2Day.netMfRatio3d == null ? '--' : formatRatioPercent(selectedL2Day.netMfRatio3d)}</dd></div>
+              <div><dt>大小单净量 / 成交量（当日）</dt><dd>{selectedL2Day.largeNetRatio == null ? '--' : formatRatioPercent(selectedL2Day.largeNetRatio)}</dd></div>
+              <div><dt>大小单净量 / 成交量（三日）</dt><dd>{selectedL2Day.largeNetRatio3d == null ? '--' : formatRatioPercent(selectedL2Day.largeNetRatio3d)}</dd></div>
+              <div><dt>大单买方占比（当日）</dt><dd>{selectedL2Day.largeBuyShare == null ? '--' : formatRatioPercent(selectedL2Day.largeBuyShare)}</dd></div>
+              <div><dt>大单买方占比（三日）</dt><dd>{selectedL2Day.largeBuyShare3d == null ? '--' : formatRatioPercent(selectedL2Day.largeBuyShare3d)}</dd></div>
+            </dl>
+            <details>
+              <summary>原始分母与买卖量</summary>
+              <p>
+                成交量 {formatNumber(selectedL2Day.volume)}；主动净量 {formatNumber(selectedL2Day.netMfVolume)}；
+                大单及特大单买方 {formatNumber(selectedL2Day.largeBuyVolume)}、卖方 {formatNumber(selectedL2Day.largeSellVolume)}；
+                买方四档合计 {formatNumber(selectedL2Day.largeBuyDenominator)}。
+              </p>
+              <p>分档买卖两侧分别统计，合计接近两倍成交量并不代表应迁移两倍库存。</p>
+            </details>
+            {selectedL2Day.issues.length > 0 ? <ul>{selectedL2Day.issues.map((issue) => <li key={issue}>{issue}</li>)}</ul> : null}
           </section>
         ) : null}
 

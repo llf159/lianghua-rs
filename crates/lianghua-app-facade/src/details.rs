@@ -761,7 +761,10 @@ fn inject_chart_indicator_extra_runtime_fields(
         row_data,
         input_fields,
     )?;
-    if input_fields.contains("ZHANG") || input_fields.contains("TOTAL_MV_YI") {
+    if input_fields.contains("ZHANG")
+        || input_fields.contains("BOARD_ID")
+        || input_fields.contains("TOTAL_MV_YI")
+    {
         let is_st = input_fields.contains("ZHANG")
             && load_st_list(source_path)
                 .unwrap_or_default()
