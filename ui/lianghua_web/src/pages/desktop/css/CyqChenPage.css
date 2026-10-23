@@ -135,6 +135,7 @@
 }
 
 .cyq-chen-form-grid input,
+.cyq-chen-form-grid select,
 .cyq-chen-result-head select,
 .cyq-chen-strategy-row input,
 .cyq-chen-strategy-row select,
@@ -149,6 +150,7 @@
 }
 
 .cyq-chen-form-grid input,
+.cyq-chen-form-grid select,
 .cyq-chen-result-head select,
 .cyq-chen-strategy-row input,
 .cyq-chen-strategy-row select {
@@ -602,3 +604,20 @@ body .cyq-chen-bin-table-wrap {
 }
 .cyq-chen-comparison-metrics dt { color: #526078; font-size: 12px; }
 .cyq-chen-comparison-metrics dd { margin: 4px 0 0; font-size: 15px; font-weight: 600; }
+
+.cyq-chen-basis-events {
+  margin-top: 14px;
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.cyq-chen-basis-events summary { cursor: pointer; }
+.cyq-chen-basis-events fieldset {
+  min-width: 0;
+  margin: 10px 0;
+  padding: 10px;
+  border: 1px solid #dbe3ef;
+  border-radius: 8px;
+}
+.cyq-chen-basis-events button { margin-top: 8px; min-height: 36px; }
+.cyq-chen-comparison li { overflow-wrap: anywhere; }

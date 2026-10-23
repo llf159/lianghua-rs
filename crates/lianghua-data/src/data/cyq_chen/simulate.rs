@@ -273,6 +273,70 @@ pub(super) fn apply_sell_for_day(
     Ok(())
 }
 
+pub(super) fn buy_price_weights(
+    buckets: &[ChipBucket],
+    bar: &ChenChipBar,
+) -> Result<Vec<(usize, f64)>, String> {
+    if buckets.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    if (bar.high - bar.low).abs() <= EPS {
+        let index = find_bucket_containing_price(buckets, bar.close)
+            .or_else(|| find_bucket_containing_price(buckets, bar.low))
+            .unwrap_or_else(|| nearest_bucket_index(buckets, bar.close));
+        return Ok(vec![(index, 1.0)]);
+    }
+
+    let center = (bar.open + bar.high + bar.low + bar.close) / 4.0;
+    let center = center.clamp(bar.low, bar.high);
+    let start_index = buckets.partition_point(|bucket| bucket.price_high <= bar.low + EPS);
+    let mut weights = Vec::new();
+
+    for (index, bucket) in buckets.iter().enumerate().skip(start_index) {
+        if bucket.price_low >= bar.high - EPS {
+            break;
+        }
+        let overlap_low = bucket.price_low.max(bar.low);
+        let overlap_high = bucket.price_high.min(bar.high);
+        if overlap_high <= overlap_low + EPS {
+            continue;
+        }
+        let midpoint = (overlap_low + overlap_high) / 2.0;
+        let height = (|price: f64, low: f64, center: f64, high: f64| -> f64 {
+            let slope = 2.0 / (high - low);
+            if price <= center {
+                if (center - low).abs() <= EPS {
+                    slope
+                } else {
+                    (price - low) / (center - low) * slope
+                }
+            } else if (high - center).abs() <= EPS {
+                slope
+            } else {
+                (high - price) / (high - center) * slope
+            }
+        })(midpoint, bar.low, center, bar.high);
+        let width = overlap_high - overlap_low;
+        let weight = (height * width).max(0.0);
+        if weight > EPS {
+            weights.push((index, weight));
+        }
+    }
+
+    let total_weight = weights.iter().map(|(_, weight)| *weight).sum::<f64>();
+    if !total_weight.is_finite() {
+        return Err("成交价格分布权重出现非有限数值".to_string());
+    }
+    if total_weight <= EPS {
+        let index = find_bucket_containing_price(buckets, center)
+            .unwrap_or_else(|| nearest_bucket_index(buckets, center));
+        weights.push((index, 1.0));
+    }
+
+    Ok(weights)
+}
+
 pub(super) fn apply_buy_for_day(
     buckets: &mut [ChipBucket],
     bar: &ChenChipBar,
@@ -286,67 +350,7 @@ pub(super) fn apply_buy_for_day(
         return Ok(());
     }
 
-    let weights =
-        (|buckets: &[ChipBucket], bar: &ChenChipBar| -> Result<Vec<(usize, f64)>, String> {
-            if buckets.is_empty() {
-                return Ok(Vec::new());
-            }
-
-            if (bar.high - bar.low).abs() <= EPS {
-                let index = find_bucket_containing_price(buckets, bar.close)
-                    .or_else(|| find_bucket_containing_price(buckets, bar.low))
-                    .unwrap_or_else(|| nearest_bucket_index(buckets, bar.close));
-                return Ok(vec![(index, 1.0)]);
-            }
-
-            let center = (bar.open + bar.high + bar.low + bar.close) / 4.0;
-            let center = center.clamp(bar.low, bar.high);
-            let start_index = buckets.partition_point(|bucket| bucket.price_high <= bar.low + EPS);
-            let mut weights = Vec::new();
-
-            for (index, bucket) in buckets.iter().enumerate().skip(start_index) {
-                if bucket.price_low >= bar.high - EPS {
-                    break;
-                }
-                let overlap_low = bucket.price_low.max(bar.low);
-                let overlap_high = bucket.price_high.min(bar.high);
-                if overlap_high <= overlap_low + EPS {
-                    continue;
-                }
-                let midpoint = (overlap_low + overlap_high) / 2.0;
-                let height = (|price: f64, low: f64, center: f64, high: f64| -> f64 {
-                    let slope = 2.0 / (high - low);
-                    if price <= center {
-                        if (center - low).abs() <= EPS {
-                            slope
-                        } else {
-                            (price - low) / (center - low) * slope
-                        }
-                    } else if (high - center).abs() <= EPS {
-                        slope
-                    } else {
-                        (high - price) / (high - center) * slope
-                    }
-                })(midpoint, bar.low, center, bar.high);
-                let width = overlap_high - overlap_low;
-                let weight = (height * width).max(0.0);
-                if weight > EPS {
-                    weights.push((index, weight));
-                }
-            }
-
-            let total_weight = weights.iter().map(|(_, weight)| *weight).sum::<f64>();
-            if !total_weight.is_finite() {
-                return Err("成交价格分布权重出现非有限数值".to_string());
-            }
-            if total_weight <= EPS {
-                let index = find_bucket_containing_price(buckets, center)
-                    .unwrap_or_else(|| nearest_bucket_index(buckets, center));
-                weights.push((index, 1.0));
-            }
-
-            Ok(weights)
-        })(buckets, bar)?;
+    let weights = buy_price_weights(buckets, bar)?;
     let total_weight = weights.iter().map(|(_, weight)| *weight).sum::<f64>();
     if total_weight <= EPS {
         return Ok(());

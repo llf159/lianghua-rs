@@ -13,9 +13,9 @@ use crate::{
     data::{
         DataReader, RowData, chip_change_rule_path,
         cyq_chen::{
-            ChenChipConfig, ChenChipMechanismComparison, ChenChipSnapshot, ChipChangeConfig,
-            ChipChangeStrategy, collect_chen_chip_runtime_keys,
-            compute_chen_chip_mechanism_comparison,
+            ChenChipBasis, ChenChipBasisEvent, ChenChipConfig, ChenChipMechanismComparison,
+            ChenChipSnapshot, ChipChangeConfig, ChipChangeStrategy, collect_chen_chip_runtime_keys,
+            compute_chen_chip_basis, compute_chen_chip_mechanism_comparison,
             compute_chen_chip_snapshots_with_compiled_config, round_chen_chip_snapshot,
         },
         load_trade_date_list, source_db_path,
@@ -33,6 +33,8 @@ const EMPTY_CHIP_CHANGE_TEMPLATE: &str = "version = 1\n";
 pub struct CyqChenSingleStockRequest {
     #[serde(default)]
     pub compare_mechanisms: bool,
+    #[serde(default)]
+    pub basis_events: Vec<ChenChipBasisEvent>,
     pub source_path: String,
     pub ts_code: String,
     pub start_date: Option<String>,
@@ -64,6 +66,7 @@ pub struct CyqChenSingleStockData {
     pub kline_payload: Option<DetailKlinePayload>,
     pub snapshots: Vec<ChenChipSnapshot>,
     pub mechanism_comparison: Option<ChenChipMechanismComparison>,
+    pub basis: Option<ChenChipBasis>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1030,7 +1033,8 @@ pub fn run_cyq_chen_single_stock_test(
     })(source_path, &start_date, &end_date, config.warmup_days)?
     .unwrap_or_else(|| start_date.clone());
 
-    let required_runtime_keys = collect_chen_chip_runtime_keys(&compiled_chip_config);
+    let mut required_runtime_keys = collect_chen_chip_runtime_keys(&compiled_chip_config);
+    required_runtime_keys.insert("V".into());
     let reader = DataReader::new_with_runtime_keys(source_path, &required_runtime_keys)?;
     let mut row_data =
         match reader.load_one(&ts_code, DEFAULT_ADJ_TYPE, &load_start_date, &end_date) {
@@ -1045,6 +1049,7 @@ pub fn run_cyq_chen_single_stock_test(
                     kline_payload: None,
                     snapshots: Vec::new(),
                     mechanism_comparison: None,
+                    basis: None,
                 });
             }
             Err(err) => return Err(err),
@@ -1060,6 +1065,7 @@ pub fn run_cyq_chen_single_stock_test(
             kline_payload: None,
             snapshots: Vec::new(),
             mechanism_comparison: None,
+            basis: None,
         });
     }
 
@@ -1174,6 +1180,10 @@ pub fn run_cyq_chen_single_stock_test(
         } else {
             (Vec::new(), None)
         };
+    let basis = output_start_date
+        .as_deref()
+        .map(|date| compute_chen_chip_basis(&row_data, date, config, &request.basis_events))
+        .transpose()?;
     for snapshot in &mut snapshots {
         round_chen_chip_snapshot(snapshot);
     }
@@ -1187,6 +1197,7 @@ pub fn run_cyq_chen_single_stock_test(
         kline_payload,
         snapshots,
         mechanism_comparison,
+        basis,
     })
 }
 
@@ -1325,6 +1336,7 @@ mod tests {
 
         let data = run_cyq_chen_single_stock_test(CyqChenSingleStockRequest {
             compare_mechanisms: true,
+            basis_events: Vec::new(),
             source_path: source_dir.to_str().expect("utf8 path").to_string(),
             ts_code: "000001".to_string(),
             start_date: Some("20260401".to_string()),
@@ -1346,6 +1358,9 @@ mod tests {
         assert_eq!(data.kline.len(), 4);
         assert_eq!(data.output_start_date.as_deref(), Some("20260403"));
         assert_eq!(data.snapshots.len(), 2);
+        let basis = data.basis.as_ref().unwrap();
+        assert_eq!(basis.days.len(), 2);
+        assert!(basis.days.iter().all(|day| day.values.is_some()));
         let comparison = data.mechanism_comparison.as_ref().unwrap();
         assert_eq!(
             serde_json::to_value(comparison).unwrap()["universeVerified"],
@@ -1368,6 +1383,7 @@ mod tests {
 
         let data = run_cyq_chen_single_stock_test(CyqChenSingleStockRequest {
             compare_mechanisms: true,
+            basis_events: Vec::new(),
             source_path: source_dir.to_str().expect("utf8 path").to_string(),
             ts_code: "000999".to_string(),
             start_date: Some("20260401".to_string()),

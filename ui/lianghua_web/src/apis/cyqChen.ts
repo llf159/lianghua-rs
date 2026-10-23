@@ -96,7 +96,43 @@ export type CyqChenSnapshot = {
   bins: CyqChenBin[]
 }
 
+export type CyqChenBasisEvent = {
+  id: string
+  kind: 'newFloat' | 'proportionalSplit' | 'unhandled'
+  effectiveDate: string
+  announcementDate: string
+  acquiredDate: string
+  source: string
+  beforeShares: number | null
+  afterShares: number | null
+}
+
+export type CyqChenBasis = {
+  model: string
+  inputFingerprint: string
+  priceCoordinate: string
+  simulationStartDate: string
+  events: CyqChenBasisEvent[]
+  days: {
+    tradeDate: string
+    status: 'conditionalUnverified' | 'blocked'
+    processedEvents: string[]
+    floatObservationAvailable: boolean
+    issues: { detectedDate: string; possibleFrom: string; reason: string }[]
+    values: {
+      bins: { priceLow: number; priceHigh: number; price: number; mass: number; cdfLower: number; cdfUpper: number }[]
+      knownMass: number
+      unknownMass: number
+      unknownSources: { source: string; effectiveDate: string; mass: number }[]
+      knownAvgCost: number | null
+      profitLower: number
+      profitUpper: number
+    } | null
+  }[]
+}
+
 export type CyqChenSingleStockData = {
+  basis?: CyqChenBasis | null
   resolvedTsCode: string
   startDate: string
   endDate: string
@@ -112,6 +148,7 @@ export type CyqChenSingleStockData = {
 }
 
 export type CyqChenSingleStockRequest = {
+  basisEvents?: CyqChenBasisEvent[]
   compareMechanisms?: boolean
   sourcePath: string
   tsCode: string
