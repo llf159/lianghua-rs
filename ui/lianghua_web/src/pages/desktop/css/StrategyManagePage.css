@@ -495,7 +495,8 @@
 
 .strategy-manage-recent-rule-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 520px), 1fr));
+  align-items: start;
   gap: 12px;
 }
 
@@ -505,7 +506,7 @@
 
 .strategy-manage-chip-group-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 560px), 1fr));
   gap: 14px;
 }
 
@@ -991,11 +992,9 @@
 
 .strategy-manage-rule-card-compact {
   height: auto;
-  min-height: 220px;
-}
-
-.strategy-manage-rule-card-recent {
-  grid-template-rows: auto auto auto minmax(120px, 1fr);
+  min-height: 0;
+  grid-template-rows: none;
+  align-content: start;
 }
 
 .strategy-manage-rule-card-head {
@@ -1060,17 +1059,59 @@
 }
 
 .strategy-manage-expression-preview {
+  min-width: 0;
   margin: 0;
   padding: 10px 12px;
   border: 1px solid #d6dde7;
   border-radius: 10px;
-  background: #fff;
+  background: #f8fafc;
   overflow: auto;
   font-size: 13px;
   line-height: 1.6;
-  white-space: pre-wrap;
-  word-break: break-word;
+  white-space: pre;
+  word-break: normal;
+  tab-size: 2;
   font-family: "JetBrains Mono", "SFMono-Regular", "Consolas", monospace;
+}
+
+.strategy-manage-expression-preview code {
+  font: inherit;
+}
+
+.strategy-expression-keyword {
+  color: #805229;
+  font-weight: 600;
+}
+
+.strategy-expression-comment {
+  color: #687b8d;
+}
+
+.strategy-expression-conditions {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  min-width: 0;
+}
+
+.strategy-expression-condition {
+  min-width: 0;
+}
+
+.strategy-expression-condition-heading {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 12px;
+  margin-bottom: 6px;
+  color: #526173;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.strategy-manage-rule-explanation {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .strategy-manage-rule-metrics-detail {
@@ -1379,10 +1420,6 @@
     grid-template-columns: 1fr;
   }
 
-  .strategy-manage-recent-rule-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
   .strategy-manage-rule-metrics-detail {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1396,7 +1433,7 @@
   .strategy-manage-rule-metrics,
   .strategy-manage-rule-metrics-compact,
   .strategy-manage-rule-metrics-recent {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .strategy-manage-chip-group-grid {

@@ -727,8 +727,8 @@ pub fn refresh_with_progress(
             } else {
                 rt.source.stocks.len()
             };
-            for chunk_start in (0..stock_count).step_by(64) {
-                let chunk_end = (chunk_start + 64).min(stock_count);
+            for chunk_start in (0..stock_count).step_by(128) {
+                let chunk_end = (chunk_start + 128).min(stock_count);
                 let capacity = (chunk_end - chunk_start) * (rt.source.dates.len() - output_day);
                 let mut names = StringBuilder::with_capacity(capacity, capacity * def.name.len());
                 let mut codes = StringBuilder::with_capacity(capacity, capacity * 9);

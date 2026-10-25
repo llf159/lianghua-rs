@@ -32,6 +32,7 @@ import { autoBackupManagedActiveStrategyOnEntry } from '../../apis/strategyAsset
 import StrategyAssetModal from './StrategyAssetModal'
 import StrategyDistPointsEditor from './StrategyDistPointsEditor'
 import { validateDistPointRows, type DistPointRow } from '../../shared/strategyDistPoints'
+import StrategyExpressionPreview from './StrategyExpressionPreview'
 import StrategyRuleTrackingEditor from './StrategyRuleTrackingEditor'
 import './css/StrategyManagePage.css'
 
@@ -430,16 +431,23 @@ function buildRuleSearchText(rule: StrategyManageRuleItem) {
   return `${rule.name} ${rule.scene_name} ${rule.kind ?? 'single'} ${rule.stage} ${rule.scope_way} ${rule.explain} ${rule.when} ${conditions}`.toLowerCase()
 }
 
-function buildRuleExpressionPreview(rule: StrategyManageRuleItem) {
+function RuleExpressionPreview({ rule }: { rule: StrategyManageRuleItem }) {
   if ((rule.kind ?? 'single') === 'single') {
-    return rule.when
+    return <StrategyExpressionPreview expression={rule.when} />
   }
-  return (rule.conditions ?? [])
-    .flatMap((condition, index) => [
-      `条件 ${index + 1} · ${condition.name} · 额外分 ${condition.bonus_points >= 0 ? '+' : ''}${formatNumber(condition.bonus_points)}`,
-      condition.when,
-    ])
-    .join('\n')
+  return (
+    <div className="strategy-expression-conditions">
+      {(rule.conditions ?? []).map((condition, index) => (
+        <section className="strategy-expression-condition" key={index}>
+          <div className="strategy-expression-condition-heading">
+            <strong>条件 {index + 1} · {condition.name}</strong>
+            <span>额外分 {condition.bonus_points >= 0 ? '+' : ''}{formatNumber(condition.bonus_points)}</span>
+          </div>
+          <StrategyExpressionPreview expression={condition.when} />
+        </section>
+      ))}
+    </div>
+  )
 }
 
 function buildSceneSearchText(scene: StrategyManageSceneItem) {
@@ -1850,7 +1858,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
                       </button>
                     </div>
                   </div>
-                  <p className="strategy-manage-note">{rule.explain}</p>
+                  <p className="strategy-manage-note strategy-manage-rule-explanation">{rule.explain}</p>
                   <div className="strategy-manage-rule-metrics strategy-manage-rule-metrics-recent">
                     {isCombination ? (
                       <div className="strategy-manage-summary-item strategy-manage-summary-item-dist-score">
@@ -1888,7 +1896,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
                       <strong>{rule.scope_windows}</strong>
                     </div>
                   </div>
-                  <pre className="strategy-manage-expression-preview">{buildRuleExpressionPreview(rule)}</pre>
+                  <RuleExpressionPreview rule={rule} />
                 </article>
               )
             })}
@@ -1962,7 +1970,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
                             <strong>{formatNumber(Number(strategy.bias))}</strong>
                           </div>
                         </div>
-                        <pre className="strategy-manage-expression-preview">{strategy.when}</pre>
+                        <StrategyExpressionPreview expression={strategy.when} />
                       </article>
                     ))}
                   </div>
@@ -2297,7 +2305,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
                             <strong>{rule.scope_windows}</strong>
                           </div>
                         </div>
-                        <pre className="strategy-manage-expression-preview">{buildRuleExpressionPreview(rule)}</pre>
+                        <RuleExpressionPreview rule={rule} />
                       </article>
                     )
                   })}
@@ -2395,8 +2403,9 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
                     <details className="strategy-rule-editor-help strategy-manage-field-span-full">
                       <summary>策略说明（可选）{draft.explain.trim() ? ' · 已填写' : ''}</summary>
                       <label className="strategy-manage-field">
-                        <input
+                        <textarea
                           aria-label="策略说明"
+                          rows={3}
                           value={draft.explain}
                           onChange={(event) => setDraft({ ...draft, explain: event.target.value })}
                         />

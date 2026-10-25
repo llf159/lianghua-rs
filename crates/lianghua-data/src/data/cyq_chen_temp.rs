@@ -104,6 +104,8 @@ mod tests {
             "chip_change_rule.toml",
             ".unrelated.tmp",
             ".cyq_chen.db.rebuild-backup.tmp",
+            ".cyq_chen.db.resume.tmp",
+            ".cyq_chen.db.resume.tmp.wal",
         ] {
             fs::write(dir.join(name), "keep").unwrap();
         }
@@ -117,6 +119,8 @@ mod tests {
         assert!(dir.join("cyq_chen.db.wal").exists());
         assert!(dir.join(".unrelated.tmp").exists());
         assert!(dir.join(".cyq_chen.db.rebuild-backup.tmp").exists());
+        assert!(dir.join(".cyq_chen.db.resume.tmp").exists());
+        assert!(dir.join(".cyq_chen.db.resume.tmp.wal").exists());
         drop(lock);
         assert!(lock_rebuild_directory(&dir).unwrap().is_some());
         fs::remove_dir_all(dir).unwrap();

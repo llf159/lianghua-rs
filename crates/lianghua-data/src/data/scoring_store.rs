@@ -1147,7 +1147,7 @@ pub fn write_score_batches_from_channel(
                     .appender("strategy_tracking_state_stage")
                     .map_err(|e| format!("跟踪状态appender创建失败:{e}"))?;
                 let mut group_batches = 0usize;
-                while group_batches < 32 {
+                while group_batches < 64 {
                     let Ok(message) = rx.recv() else {
                         drained = true;
                         break;

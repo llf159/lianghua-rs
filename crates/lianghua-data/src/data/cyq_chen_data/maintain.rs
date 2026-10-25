@@ -25,6 +25,7 @@ use crate::data::extras::load_total_share_map;
 use crate::data::load_trade_date_list;
 use crate::data::source_db_path;
 use duckdb::Connection;
+use duckdb::OptionalExt;
 use duckdb::params;
 use lianghua_model::DownloadProgress;
 use lianghua_model::DownloadProgressCallback;
@@ -34,8 +35,6 @@ use std::fs::create_dir_all;
 use std::path::Path;
 use std::sync::mpsc::sync_channel;
 use std::thread;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
 pub fn maintain_cyq_chen_incremental_if_db_exists(
     source_dir: &str,
     allow_strategy_rebuild: bool,
@@ -735,42 +734,122 @@ pub fn rebuild_cyq_chen_all_with_progress(
     let total_share_map = load_total_share_map(source_dir).unwrap_or_default();
     let reader = DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
     let ts_codes = reader.list_ts_code(DEFAULT_ADJ_TYPE, &load_start_date, &end_date)?;
-    let rebuild_db = (|db_path: &Path| -> Result<std::path::PathBuf, String> {
-        let parent = db_path
-            .parent()
-            .ok_or_else(|| format!("新筹码库路径缺少父目录: {}", db_path.display()))?;
-        let file_name = db_path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .ok_or_else(|| format!("新筹码库文件名不是有效UTF-8: {}", db_path.display()))?;
-        let unique_suffix = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_nanos())
-            .unwrap_or_default();
-        Ok(parent.join(format!(
-            ".{file_name}.rebuild-{}-{unique_suffix}.tmp",
-            std::process::id()
-        )))
-    })(&cyq_chen_db)?;
-    remove_cyq_chen_db_artifacts(&rebuild_db);
-    init_cyq_chen_db(&rebuild_db).inspect_err(|_| {
-        remove_cyq_chen_db_artifacts(&rebuild_db);
-    })?;
-    let rebuild_db_str = match rebuild_db.to_str() {
-        Some(path) => path.to_string(),
-        None => {
+    // 文件代次保守校验：即使日期不变，历史修订、WAL 和股票资料变化也不能混用。
+    let mut input_files = Vec::new();
+    for name in [
+        "stock_data.db",
+        "stock_data.db.wal",
+        "stock_list.csv",
+        "trade_calendar.csv",
+        "ind.toml",
+    ] {
+        let path = Path::new(source_dir).join(name);
+        let generation = match std::fs::metadata(&path) {
+            Ok(metadata) => Some((
+                metadata.len(),
+                metadata
+                    .modified()
+                    .map_err(|e| format!("读取输入修改时间失败:{e}"))?,
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(format!(
+                    "读取重建输入信息失败, path={}: {error}",
+                    path.display()
+                ));
+            }
+        };
+        input_files.push((name, generation));
+    }
+    let signature = serde_json::to_string(&(
+        &input_files,
+        &strategy_hash,
+        config,
+        &start_date,
+        &end_date,
+        &load_start_date,
+        &ts_codes,
+        super::CYQ_CHEN_SCHEMA_VERSION,
+        crate::data::cyq_chen::CYQ_CHEN_FEATURE_VERSION,
+    ))
+    .map_err(|e| format!("序列化重建输入标识失败:{e}"))?;
+    let rebuild_db = Path::new(source_dir).join(".cyq_chen.db.resume.tmp");
+    let mut completed = HashSet::<String>::new();
+    if rebuild_db.exists() {
+        // 打不开或 WAL 无法恢复时保留现场，不把 I/O 故障当成无进度而直接删库。
+        let conn = Connection::open(&rebuild_db).map_err(|e| {
+            format!(
+                "恢复新筹码重建库失败，进度保留在 {}: {e}",
+                rebuild_db.display()
+            )
+        })?;
+        let has_manifest: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name = 'cyq_chen_rebuild_input')",
+            [], |row| row.get(0),
+        ).map_err(|e| format!("读取重建标识失败:{e}"))?;
+        let previous: Option<String> = if has_manifest {
+            conn.query_row("SELECT signature FROM cyq_chen_rebuild_input", [], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(|e| format!("读取重建输入失败:{e}"))?
+        } else {
+            None
+        };
+        if previous.as_deref() == Some(&signature) {
+            let mut stmt = conn
+                .prepare("SELECT ts_code FROM cyq_chen_rebuild_done")
+                .map_err(|e| format!("读取重建进度失败:{e}"))?;
+            completed = stmt
+                .query_map([], |row| row.get(0))
+                .map_err(|e| format!("查询重建进度失败:{e}"))?
+                .collect::<Result<_, _>>()
+                .map_err(|e| format!("读取重建股票失败:{e}"))?;
+        } else {
+            drop(conn);
+            // 输入变化时丢弃整个旧代次，不能仅凭股票末日判断可复用。
             remove_cyq_chen_db_artifacts(&rebuild_db);
-            return Err("新筹码临时库路径不是有效UTF-8".to_string());
+            if rebuild_db.exists() || super::store::path_with_suffix(&rebuild_db, ".wal").exists() {
+                return Err("清理输入已变化的重建库失败，请检查磁盘后重试".into());
+            }
         }
-    };
+    }
+    init_cyq_chen_db(&rebuild_db)?;
+    {
+        let mut conn =
+            Connection::open(&rebuild_db).map_err(|e| format!("打开重建进度库失败:{e}"))?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("创建重建标识事务失败:{e}"))?;
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS cyq_chen_rebuild_input(signature VARCHAR); CREATE TABLE IF NOT EXISTS cyq_chen_rebuild_done(ts_code VARCHAR PRIMARY KEY);")
+            .map_err(|e| format!("创建重建进度表失败:{e}"))?;
+        tx.execute("DELETE FROM cyq_chen_rebuild_input", [])
+            .map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT INTO cyq_chen_rebuild_input VALUES (?)",
+            [&signature],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| format!("提交重建标识失败:{e}"))?;
+    }
+    let total_stocks = ts_codes.len();
+    let resumed_stocks = completed.len();
+    let ts_codes = ts_codes
+        .into_iter()
+        .filter(|code| !completed.contains(code))
+        .collect::<Vec<_>>();
+    let rebuild_db_str = rebuild_db
+        .to_str()
+        .ok_or_else(|| "新筹码临时库路径不是有效UTF-8".to_string())?
+        .to_string();
     if let Some(progress_cb) = progress_cb {
         progress_cb(DownloadProgress {
             phase: "compute_cyq_chen".to_string(),
-            finished: 0,
-            total: ts_codes.len(),
+            finished: resumed_stocks,
+            total: total_stocks,
             current_label: None,
             message: format!(
-                "新筹码计算已开始，区间 {} 至 {}，共 {} 只股票。",
+                "新筹码计算已开始，区间 {} 至 {}，剩余 {} 只股票，已恢复 {resumed_stocks} 只已提交进度。",
                 start_date,
                 end_date,
                 ts_codes.len()
@@ -785,13 +864,10 @@ pub fn rebuild_cyq_chen_all_with_progress(
     let compute_pool = rayon::ThreadPoolBuilder::new()
         .num_threads(compute_threads)
         .build()
-        .map_err(|e| {
-            remove_cyq_chen_db_artifacts(&rebuild_db);
-            format!("创建新筹码计算线程池失败:{e}")
-        })?;
-    let (tx, rx) = sync_channel(CYQ_CHEN_QUEUE_BOUND);
+        .map_err(|e| format!("创建新筹码计算线程池失败:{e}"))?;
+    let (tx, rx) = sync_channel(4);
     let abort_tx = tx.clone();
-    let written_stocks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let written_stocks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(resumed_stocks));
     let writer_written_stocks = std::sync::Arc::clone(&written_stocks);
     let writer_handle = thread::spawn(move || {
         write_cyq_chen_batches_from_channel(
@@ -803,7 +879,7 @@ pub fn rebuild_cyq_chen_all_with_progress(
         )
     });
 
-    let finished_stock_count = std::sync::atomic::AtomicUsize::new(0);
+    let finished_stock_count = std::sync::atomic::AtomicUsize::new(resumed_stocks);
     let profile_writes = std::env::var_os("LIANGHUA_CYQ_WRITE_PROFILE").is_some();
     let compute_result = compute_pool.install(|| {
         ts_codes.par_chunks(compute_group_size).try_for_each_init(
@@ -818,11 +894,11 @@ pub fn rebuild_cyq_chen_all_with_progress(
                         progress_cb(DownloadProgress {
                             phase: "compute_cyq_chen".to_string(),
                             finished,
-                            total: ts_codes.len(),
+                            total: total_stocks,
                             current_label: Some(ts_code.to_string()),
                             message: format!(
                                 "新筹码计算中，已计算 {finished} / {} 只股票，已写入提交 {} 只。",
-                                ts_codes.len(),
+                                total_stocks,
                                 written_stocks.load(std::sync::atomic::Ordering::Relaxed),
                             ),
                         });
@@ -864,13 +940,13 @@ pub fn rebuild_cyq_chen_all_with_progress(
         if let Some(progress_cb) = progress_cb {
             progress_cb(DownloadProgress {
                 phase: "compute_cyq_chen".to_string(),
-                finished: ts_codes.len(),
-                total: ts_codes.len(),
+                finished: total_stocks,
+                total: total_stocks,
                 current_label: None,
                 message: format!(
                     "筹码计算已结束，已写入提交 {} / {} 只股票，正在等待剩余写入及结果库收尾。",
                     written_stocks.load(std::sync::atomic::Ordering::Relaxed),
-                    ts_codes.len(),
+                    total_stocks,
                 ),
             });
         }
@@ -885,8 +961,10 @@ pub fn rebuild_cyq_chen_all_with_progress(
     let (snapshot_rows, bin_rows) = match write_rows {
         Ok(rows) => rows,
         Err(error) => {
-            remove_cyq_chen_db_artifacts(&rebuild_db);
-            return Err(error);
+            return Err(format!(
+                "{error}；已提交的新筹码进度保留在 {}，磁盘恢复后以相同输入重试可自动续算",
+                rebuild_db.display()
+            ));
         }
     };
     if snapshot_rows == 0 {
@@ -894,8 +972,10 @@ pub fn rebuild_cyq_chen_all_with_progress(
         return Err("新筹码重建未生成任何快照，旧结果保持不变，请检查行情和预热区间".into());
     }
     if let Err(error) = replace_cyq_chen_db(&rebuild_db, &cyq_chen_db) {
-        remove_cyq_chen_db_artifacts(&rebuild_db);
-        return Err(error);
+        return Err(format!(
+            "{error}；重建结果保留在 {}，重试可继续收尾",
+            rebuild_db.display()
+        ));
     }
     drop(reader);
     drop(source_conn);
@@ -903,8 +983,8 @@ pub fn rebuild_cyq_chen_all_with_progress(
     if let Some(progress_cb) = progress_cb {
         progress_cb(DownloadProgress {
             phase: "done".to_string(),
-            finished: ts_codes.len(),
-            total: ts_codes.len(),
+            finished: total_stocks,
+            total: total_stocks,
             current_label: None,
             message: format!("新筹码计算完成，写入 {snapshot_rows} 条摘要和 {bin_rows} 条分桶。"),
         });
@@ -1731,9 +1811,13 @@ bias = 0.5
             )
             .unwrap();
         let snapshot = snapshots.last().unwrap();
-        let count = 33;
-        let stage = source_dir.join("stage.db");
+        let count = 65;
+        let stage = source_dir.join(".cyq_chen.db.resume.tmp");
         super::init_cyq_chen_db(&stage).unwrap();
+        Connection::open(&stage)
+            .unwrap()
+            .execute_batch("CREATE TABLE cyq_chen_rebuild_done(ts_code VARCHAR PRIMARY KEY)")
+            .unwrap();
         let (tx, rx) = sync_channel(count + 1);
         for index in 0..count {
             tx.send(CyqChenWriteMessage::Batch(
@@ -1766,14 +1850,125 @@ bias = 0.5
         let stored: usize = conn
             .query_row("SELECT count(*) FROM cyq_chen_snapshot", [], |r| r.get(0))
             .unwrap();
-        assert!(stored <= count);
+        assert!((32..=count).contains(&stored));
+        let mut stmt = conn
+            .prepare("SELECT ts_code FROM cyq_chen_rebuild_done")
+            .unwrap();
+        let completed = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<std::collections::HashSet<_>, _>>()
+            .unwrap();
+        assert_eq!(completed.len(), stored);
+        drop(stmt);
         let metadata: usize = conn
             .query_row("SELECT count(*) FROM cyq_chen_meta", [], |r| r.get(0))
             .unwrap();
         assert_eq!(metadata, 0);
         assert_eq!(snapshot_rows_for_compare(source_path), before);
         drop(conn);
+        let (tx, rx) = sync_channel(count);
+        for index in 0..count {
+            let ts_code = format!("{index:06}.SZ");
+            if !completed.contains(&ts_code) {
+                tx.send(CyqChenWriteMessage::Batch(
+                    super::super::CyqChenWriteBatch {
+                        stocks: vec![super::super::ComputedCyqChenStock {
+                            ts_code,
+                            snapshots: vec![snapshot.clone()],
+                            replace_history: false,
+                            feature_state: Some(state.clone()),
+                        }],
+                    },
+                ))
+                .unwrap();
+            }
+        }
+        drop(tx);
+        let (rows, _) = write_cyq_chen_batches_from_channel(
+            stage.to_str().unwrap(),
+            rx,
+            config,
+            "finished".into(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(rows, count);
+        let conn = Connection::open(&stage).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM cyq_chen_rebuild_done", [], |row| {
+                row.get::<_, usize>(0)
+            })
+            .unwrap(),
+            count
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(DISTINCT ts_code) FROM cyq_chen_snapshot",
+                [],
+                |row| row.get::<_, usize>(0)
+            )
+            .unwrap(),
+            count
+        );
+        assert_eq!(snapshot_rows_for_compare(source_path), before);
+        drop(conn);
         drop(reader);
+        fs::remove_dir_all(source_dir).unwrap();
+    }
+
+    #[test]
+    fn full_rebuild_resumes_matching_inputs_and_restarts_changed_inputs() {
+        let source_dir = unique_temp_source_dir();
+        prepare_source_db(&source_dir);
+        let source = source_dir.to_str().unwrap();
+        let config = ChenChipConfig {
+            warmup_days: 2,
+            bucket_pct: 5.0,
+        };
+        let expected = rebuild_cyq_chen_all(source, config, None, None).unwrap();
+        let snapshots = snapshot_rows_for_compare(source);
+        let bins = bin_rows_for_compare(source);
+        let stage = source_dir.join(".cyq_chen.db.resume.tmp");
+        fs::copy(cyq_chen_db_path(source), &stage).unwrap();
+        {
+            let conn = Connection::open(&stage).unwrap();
+            conn.execute_batch("BEGIN; DELETE FROM cyq_chen_rebuild_done WHERE ts_code = '000001.SZ'; DELETE FROM cyq_chen_checkpoint WHERE ts_code = '000001.SZ'; DELETE FROM cyq_chen_snapshot WHERE ts_code = '000001.SZ'; DELETE FROM cyq_chen_bin WHERE ts_code = '000001.SZ'; COMMIT; CHECKPOINT;").unwrap();
+        }
+        let resumed = std::sync::atomic::AtomicUsize::new(0);
+        let progress = |event: lianghua_model::DownloadProgress| {
+            if event.message.contains("已恢复") {
+                resumed.store(event.finished, std::sync::atomic::Ordering::Relaxed);
+            }
+        };
+        let actual =
+            super::rebuild_cyq_chen_all_with_progress(source, config, None, None, Some(&progress))
+                .unwrap();
+        assert_eq!(resumed.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(actual.snapshot_rows, expected.snapshot_rows);
+        assert_eq!(actual.bin_rows, expected.bin_rows);
+        assert_eq!(snapshot_rows_for_compare(source), snapshots);
+        assert_eq!(bin_rows_for_compare(source), bins);
+        assert!(!stage.exists());
+        // 已全部提交但未发布时，只需收尾，不应重复追加。
+        fs::copy(cyq_chen_db_path(source), &stage).unwrap();
+        super::rebuild_cyq_chen_all_with_progress(source, config, None, None, Some(&progress))
+            .unwrap();
+        assert_eq!(resumed.load(std::sync::atomic::Ordering::Relaxed), 2);
+        assert_eq!(snapshot_rows_for_compare(source), snapshots);
+        fs::copy(cyq_chen_db_path(source), &stage).unwrap();
+        let changed = ChenChipConfig {
+            bucket_pct: 10.0,
+            ..config
+        };
+        super::rebuild_cyq_chen_all_with_progress(source, changed, None, None, Some(&progress))
+            .unwrap();
+        assert_eq!(resumed.load(std::sync::atomic::Ordering::Relaxed), 0);
+        let changed_snapshots = snapshot_rows_for_compare(source);
+        let changed_bins = bin_rows_for_compare(source);
+        rebuild_cyq_chen_all(source, changed, None, None).unwrap();
+        assert_eq!(snapshot_rows_for_compare(source), changed_snapshots);
+        assert_eq!(bin_rows_for_compare(source), changed_bins);
         fs::remove_dir_all(source_dir).unwrap();
     }
 

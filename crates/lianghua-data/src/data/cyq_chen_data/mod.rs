@@ -93,6 +93,7 @@ pub struct CyqChenWriteBatch {
 #[derive(Debug)]
 pub(super) struct PreparedCyqChenWriteBatch {
     stock_count: usize,
+    completed_ts_codes: Vec<String>,
     replace_ts_codes: Vec<String>,
     snapshot_rows: usize,
     bin_rows: usize,

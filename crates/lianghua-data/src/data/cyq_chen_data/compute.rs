@@ -678,7 +678,9 @@ pub(super) fn compute_prepared_cyq_chen_stock_group_batch(
             done(ts_code);
         }
     }
-    builder.finish()
+    let mut batch = builder.finish()?;
+    batch.completed_ts_codes = ts_group.to_vec();
+    Ok(batch)
 }
 
 pub(super) fn append_prepared_cyq_chen_batch_rows(
@@ -793,12 +795,21 @@ pub(super) fn write_cyq_chen_batches_from_channel(
             |row| row.get(0),
         )
         .map_err(|e| format!("检查新筹码临时库失败:{e}"))?;
-    if occupied {
+    let resumable = std::path::Path::new(db_path).file_name().and_then(|v| v.to_str())
+        == Some(".cyq_chen.db.resume.tmp")
+        && conn.query_row("SELECT count(*) FROM information_schema.tables WHERE table_name = 'cyq_chen_rebuild_done'", [], |row| row.get::<_, usize>(0))
+            .map_err(|e| format!("检查重建进度表失败:{e}"))? == 1;
+    if occupied && !resumable {
         return Err("新筹码分批重建只允许写入空临时库，禁止覆盖已有数据".to_string());
     }
     let bulk = crate::data::bulk_write::BulkWriteSettings::apply(&conn)?;
-    conn.execute_batch("SET memory_limit = '2GB'; SET threads = 4;")
-        .map_err(|e| format!("设置新筹码写库资源上限失败:{e}"))?;
+    let database_threads = std::thread::available_parallelism()
+        .map(|count| count.get().min(8))
+        .unwrap_or(4);
+    conn.execute_batch(&format!(
+        "SET memory_limit = '4GB'; SET threads = {database_threads};"
+    ))
+    .map_err(|e| format!("设置新筹码写库资源上限失败:{e}"))?;
     drop_cyq_chen_db_indexes(&conn)?;
     let writer_connections = (0..2)
         .map(|_| {
@@ -813,7 +824,13 @@ pub(super) fn write_cyq_chen_batches_from_channel(
             let worker_rx = Arc::clone(&shared_rx);
             let written_stocks = written_stocks.clone();
             std::thread::spawn(move || {
-                write_cyq_chen_batch_groups(writer_conn, worker_rx, config, written_stocks)
+                write_cyq_chen_batch_groups(
+                    writer_conn,
+                    worker_rx,
+                    config,
+                    written_stocks,
+                    resumable,
+                )
             })
         })
         .collect::<Vec<_>>();
@@ -837,6 +854,13 @@ pub(super) fn write_cyq_chen_batches_from_channel(
     }
     if let Some(error) = writer_error {
         return Err(error);
+    }
+    // 续算返回整库总量，而非仅本次新增行数。
+    if resumable {
+        (snapshot_rows, bin_rows) = conn.query_row(
+            "SELECT (SELECT count(*) FROM cyq_chen_snapshot), (SELECT count(*) FROM cyq_chen_bin)",
+            [], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).map_err(|e| format!("统计重建结果失败:{e}"))?;
     }
     let tx = conn
         .transaction()
@@ -865,6 +889,7 @@ fn write_cyq_chen_batch_groups(
     rx: Arc<Mutex<Receiver<CyqChenWriteMessage>>>,
     config: ChenChipConfig,
     written_stocks: Option<Arc<AtomicUsize>>,
+    resumable: bool,
 ) -> Result<(usize, usize), String> {
     let mut snapshot_rows = 0usize;
     let mut bin_rows = 0usize;
@@ -887,7 +912,7 @@ fn write_cyq_chen_batch_groups(
             let mut group_stocks = 0usize;
             let mut group_snapshot_rows = 0usize;
             let mut group_bin_rows = 0usize;
-            while group_batches < 32 && group_stocks < 16 && group_bin_rows < 250_000 {
+            while group_batches < 64 && group_stocks < 32 && group_bin_rows < 500_000 {
                 let started = Instant::now();
                 let message = rx
                     .lock()
@@ -910,7 +935,17 @@ fn write_cyq_chen_batch_groups(
                         return Err("临时库写入不接受增量提交标记".into());
                     }
                 };
-                group_stocks += batch.stock_count;
+                if resumable {
+                    for ts_code in &batch.completed_ts_codes {
+                        tx.execute("INSERT INTO cyq_chen_rebuild_done VALUES (?)", [ts_code])
+                            .map_err(|e| format!("保存重建股票进度失败:{e}"))?;
+                    }
+                }
+                group_stocks += if resumable {
+                    batch.completed_ts_codes.len()
+                } else {
+                    batch.stock_count
+                };
                 let started = Instant::now();
                 let (snapshots, bins) = append_prepared_cyq_chen_batch_rows(
                     &tx,
