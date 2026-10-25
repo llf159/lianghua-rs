@@ -98,7 +98,7 @@ pub(super) struct CompiledChipCachedExpr {
     assigned_names: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChenChipConfig {
     pub warmup_days: usize,

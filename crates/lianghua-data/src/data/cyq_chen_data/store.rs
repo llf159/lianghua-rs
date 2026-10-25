@@ -385,6 +385,60 @@ pub(super) fn query_latest_cyq_chen_metadata(
     Ok(Some((trade_date, config)))
 }
 
+pub fn query_cyq_chen_rebuild_status(
+    source_dir: &str,
+) -> Result<Option<super::CyqChenRebuildStatus>, String> {
+    let path = Path::new(source_dir).join(".cyq_chen.db.resume.tmp");
+    if !path.exists() {
+        return Ok(None);
+    }
+    // 只读取原始任务参数；是否仍可续算由重建入口的完整输入签名校验决定。
+    let conn =
+        crate::data::open_db_readonly(&path).map_err(|e| format!("读取新筹码重建进度失败: {e}"))?;
+    let has_manifest: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name = 'cyq_chen_rebuild_input')",
+        [], |row| row.get(0),
+    ).map_err(|e| format!("检查新筹码重建记录失败: {e}"))?;
+    if !has_manifest {
+        return Ok(None);
+    }
+    use duckdb::OptionalExt;
+    let signature: Option<String> = conn
+        .query_row("SELECT signature FROM cyq_chen_rebuild_input", [], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(|e| format!("读取新筹码重建参数失败: {e}"))?;
+    let Some(signature) = signature else {
+        return Ok(None);
+    };
+    use serde::de::IgnoredAny;
+    let (_, _, config, start_date, end_date, _, ts_codes, _, _): (
+        IgnoredAny,
+        IgnoredAny,
+        ChenChipConfig,
+        String,
+        String,
+        IgnoredAny,
+        Vec<String>,
+        IgnoredAny,
+        IgnoredAny,
+    ) = serde_json::from_str(&signature).map_err(|e| format!("解析新筹码重建参数失败: {e}"))?;
+    let completed_stocks = conn
+        .query_row("SELECT count(*) FROM cyq_chen_rebuild_done", [], |row| {
+            row.get(0)
+        })
+        .map_err(|e| format!("读取新筹码已提交进度失败: {e}"))?;
+    Ok(Some(super::CyqChenRebuildStatus {
+        start_date,
+        end_date,
+        warmup_days: config.warmup_days,
+        bucket_pct: config.bucket_pct,
+        completed_stocks,
+        total_stocks: ts_codes.len(),
+    }))
+}
+
 pub fn query_cyq_chen_strategy_maintenance_status(
     source_dir: &str,
 ) -> Result<CyqChenStrategyMaintenanceStatus, String> {

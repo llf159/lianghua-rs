@@ -1936,20 +1936,44 @@ bias = 0.5
             conn.execute_batch("BEGIN; DELETE FROM cyq_chen_rebuild_done WHERE ts_code = '000001.SZ'; DELETE FROM cyq_chen_checkpoint WHERE ts_code = '000001.SZ'; DELETE FROM cyq_chen_snapshot WHERE ts_code = '000001.SZ'; DELETE FROM cyq_chen_bin WHERE ts_code = '000001.SZ'; COMMIT; CHECKPOINT;").unwrap();
         }
         let resumed = std::sync::atomic::AtomicUsize::new(0);
+        let stage_before = fs::read(&stage).unwrap();
+        let saved = super::super::query_cyq_chen_rebuild_status(source)
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.completed_stocks, 1);
+        assert_eq!(saved.total_stocks, 2);
+        assert_eq!(saved.start_date, "20260401");
+        assert_eq!(saved.end_date, "20260408");
+        assert_eq!(saved.warmup_days, config.warmup_days);
+        assert_eq!(saved.bucket_pct, config.bucket_pct);
+        assert_eq!(fs::read(&stage).unwrap(), stage_before);
         let progress = |event: lianghua_model::DownloadProgress| {
             if event.message.contains("已恢复") {
                 resumed.store(event.finished, std::sync::atomic::Ordering::Relaxed);
             }
         };
-        let actual =
-            super::rebuild_cyq_chen_all_with_progress(source, config, None, None, Some(&progress))
-                .unwrap();
+        let actual = super::rebuild_cyq_chen_all_with_progress(
+            source,
+            ChenChipConfig {
+                warmup_days: saved.warmup_days,
+                bucket_pct: saved.bucket_pct,
+            },
+            Some(&saved.start_date),
+            Some(&saved.end_date),
+            Some(&progress),
+        )
+        .unwrap();
         assert_eq!(resumed.load(std::sync::atomic::Ordering::Relaxed), 1);
         assert_eq!(actual.snapshot_rows, expected.snapshot_rows);
         assert_eq!(actual.bin_rows, expected.bin_rows);
         assert_eq!(snapshot_rows_for_compare(source), snapshots);
         assert_eq!(bin_rows_for_compare(source), bins);
         assert!(!stage.exists());
+        assert!(
+            super::super::query_cyq_chen_rebuild_status(source)
+                .unwrap()
+                .is_none()
+        );
         // 已全部提交但未发布时，只需收尾，不应重复追加。
         fs::copy(cyq_chen_db_path(source), &stage).unwrap();
         super::rebuild_cyq_chen_all_with_progress(source, config, None, None, Some(&progress))

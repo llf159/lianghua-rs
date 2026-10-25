@@ -333,6 +333,7 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
   const [cyqChenBucketPctInput, setCyqChenBucketPctInput] = useState('1')
   const [cyqChenStartDateInput, setCyqChenStartDateInput] = useState('')
   const [cyqChenEndDateInput, setCyqChenEndDateInput] = useState('')
+  const cyqChenInputsSourceRef = useRef('')
   const [cardFeedback, setCardFeedback] = useState<CardFeedback>(() => createEmptyCardFeedback())
   const [progress, setProgress] = useState<DataDownloadProgress | null>(null)
   const [similarityProgress, setSimilarityProgress] = useState<(StrategyTriggerRankingProgress & { sampledAtMs: number }) | null>(null)
@@ -847,17 +848,14 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
           ? compactDateToInput(nextStatus.sourceDb.maxTradeDate)
           : current || compactDateToInput(nextStatus.sourceDb.maxTradeDate),
       )
-      setCyqChenWarmupDaysInput((current) =>
-        current.trim() !== '' ? current : String(nextStatus.cyqChenWarmupDays ?? 120),
-      )
-      setCyqChenBucketPctInput((current) =>
-        current.trim() !== '' ? current : String(nextStatus.cyqChenBucketPct ?? 1),
-      )
-      setCyqChenEndDateInput((current) =>
-        syncSuggestedInputs
-          ? compactDateToInput(nextStatus.sourceDb.maxTradeDate)
-          : current || compactDateToInput(nextStatus.sourceDb.maxTradeDate),
-      )
+      if (syncSuggestedInputs || cyqChenInputsSourceRef.current !== nextStatus.sourcePath) {
+        const rebuild = nextStatus.cyqChenRebuild
+        setCyqChenWarmupDaysInput(String(rebuild?.warmupDays ?? nextStatus.cyqChenWarmupDays ?? 120))
+        setCyqChenBucketPctInput(String(rebuild?.bucketPct ?? nextStatus.cyqChenBucketPct ?? 1))
+        setCyqChenStartDateInput(compactDateToInput(rebuild?.startDate ?? nextStatus.cyqChenDb.minTradeDate))
+        setCyqChenEndDateInput(compactDateToInput(rebuild?.endDate ?? nextStatus.sourceDb.maxTradeDate))
+        cyqChenInputsSourceRef.current = nextStatus.sourcePath
+      }
     } catch (loadError) {
       setFeedbackError('status', `读取数据计算状态失败: ${String(loadError)}`)
     } finally {
@@ -1912,6 +1910,9 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
             {status?.cyqChenDb
               ? ` ${describeDbRange(status.cyqChenDb)}`
               : ' 读取中...'}
+            {status?.cyqChenRebuild ? (
+              <><br />发现未完成任务，已提交 {status.cyqChenRebuild.completedStocks} / {status.cyqChenRebuild.totalStocks} 只，已回填原计算参数。保持参数、行情和策略不变可自动续算；输入变化时会重新计算。</>
+            ) : null}
           </small>
 
           <div className="ranking-compute-actions ranking-compute-cyq-actions ranking-compute-cyq-chen-actions">

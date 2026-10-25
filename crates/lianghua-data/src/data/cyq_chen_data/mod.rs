@@ -11,7 +11,9 @@ pub use maintain::{
     rebuild_cyq_chen_all_if_db_exists, rebuild_cyq_chen_all_with_progress,
     repair_cyq_chen_stocks_if_db_exists,
 };
-pub use store::{init_cyq_chen_db, query_cyq_chen_strategy_maintenance_status};
+pub use store::{
+    init_cyq_chen_db, query_cyq_chen_rebuild_status, query_cyq_chen_strategy_maintenance_status,
+};
 
 use crate::data::cyq_chen::ChenChipBin;
 use crate::data::cyq_chen::ChenChipSnapshot;
@@ -42,6 +44,17 @@ pub struct CyqChenStrategyMaintenanceStatus {
     pub has_data: bool,
     pub strategy_changed: bool,
     pub detail: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CyqChenRebuildStatus {
+    pub start_date: String,
+    pub end_date: String,
+    pub warmup_days: usize,
+    pub bucket_pct: f64,
+    pub completed_stocks: usize,
+    pub total_stocks: usize,
 }
 
 #[derive(Debug)]

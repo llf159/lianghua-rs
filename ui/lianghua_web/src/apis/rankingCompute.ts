@@ -48,6 +48,14 @@ export type RankingComputeStatus = {
   cyqChenBinRowCount: number
   cyqChenWarmupDays: number | null
   cyqChenBucketPct: number | null
+  cyqChenRebuild: {
+    startDate: string
+    endDate: string
+    warmupDays: number
+    bucketPct: number
+    completedStocks: number
+    totalStocks: number
+  } | null
   suggestedStartDate: string | null
   suggestedEndDate: string | null
   pendingRankingRebuilds: Array<{ component: string; startDate: string; endDate: string }>
