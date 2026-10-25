@@ -35,6 +35,13 @@ use std::fs::create_dir_all;
 use std::path::Path;
 use std::sync::mpsc::sync_channel;
 use std::thread;
+
+fn cyq_chen_compute_group_size(thread_count: usize) -> usize {
+    (CYQ_CHEN_GROUP_SIZE * 4)
+        .div_ceil(thread_count.max(1))
+        .max(1)
+}
+
 pub fn maintain_cyq_chen_incremental_if_db_exists(
     source_dir: &str,
     allow_strategy_rebuild: bool,
@@ -235,7 +242,8 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
         });
 
         let finished_stock_count = std::sync::atomic::AtomicUsize::new(0);
-        let compute_result = ts_codes.par_chunks(CYQ_CHEN_GROUP_SIZE).try_for_each_init(
+        let compute_group_size = cyq_chen_compute_group_size(rayon::current_num_threads());
+        let compute_result = ts_codes.par_chunks(compute_group_size).try_for_each_init(
             || -> Result<(DataReader, Connection), String> {
                 let state_conn = state_db
                     .lock()
@@ -585,7 +593,8 @@ pub fn repair_cyq_chen_stocks_if_db_exists(
     });
 
     let finished_stock_count = std::sync::atomic::AtomicUsize::new(0);
-    let compute_result = ts_codes.par_chunks(CYQ_CHEN_GROUP_SIZE).try_for_each_init(
+    let compute_group_size = cyq_chen_compute_group_size(rayon::current_num_threads());
+    let compute_result = ts_codes.par_chunks(compute_group_size).try_for_each_init(
         || DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys),
         |worker_reader, ts_group| -> Result<(), String> {
             let worker_reader = worker_reader.as_ref().map_err(Clone::clone)?;
@@ -605,9 +614,8 @@ pub fn repair_cyq_chen_stocks_if_db_exists(
                     });
                 }
             };
-            let batch = compute_cyq_chen_stock_group_batch(
+            let batch = compute_prepared_cyq_chen_stock_group_batch(
                 worker_reader,
-                None,
                 &load_start_date,
                 &start_date,
                 &end_date,
@@ -617,9 +625,8 @@ pub fn repair_cyq_chen_stocks_if_db_exists(
                 &total_share_map,
                 ts_group,
                 Some(&progress_stock_done),
-                None,
             )?;
-            tx.send(CyqChenWriteMessage::Batch(batch))
+            tx.send(CyqChenWriteMessage::PreparedBatch(batch))
                 .map_err(|e| format!("发送新筹码局部修复批次失败:{e}"))?;
             Ok(())
         },
@@ -860,7 +867,7 @@ pub fn rebuild_cyq_chen_all_with_progress(
     let compute_threads = std::thread::available_parallelism()
         .map(|count| count.get())
         .unwrap_or(1);
-    let compute_group_size = (CYQ_CHEN_GROUP_SIZE * 4).div_ceil(compute_threads).max(1);
+    let compute_group_size = cyq_chen_compute_group_size(compute_threads);
     let compute_pool = rayon::ThreadPoolBuilder::new()
         .num_threads(compute_threads)
         .build()

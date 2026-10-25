@@ -1048,10 +1048,21 @@ pub(super) fn write_cyq_chen_maintenance_batches_from_channel(
                 .map_err(|e| format!("创建cyq_chen_bin写入器失败:{e}"))?;
 
             for message in rx {
-                let batch = match message {
-                    CyqChenWriteMessage::Batch(batch) => batch,
-                    CyqChenWriteMessage::PreparedBatch(_) => {
-                        return Err("新筹码维护写入不接受预构造批次".to_string());
+                let (added_snapshot_rows, added_bin_rows) = match message {
+                    CyqChenWriteMessage::Batch(batch) => append_cyq_chen_batch_rows(
+                        &tx,
+                        &mut snapshot_app,
+                        &mut bin_app,
+                        batch,
+                        config,
+                    )?,
+                    CyqChenWriteMessage::PreparedBatch(batch) => {
+                        append_prepared_cyq_chen_batch_rows(
+                            &tx,
+                            &mut snapshot_app,
+                            &mut bin_app,
+                            batch,
+                        )?
                     }
                     CyqChenWriteMessage::Abort(reason) => {
                         abort_reason = Some(reason);
@@ -1063,13 +1074,6 @@ pub(super) fn write_cyq_chen_maintenance_batches_from_channel(
                     }
                 };
 
-                let (added_snapshot_rows, added_bin_rows) = append_cyq_chen_batch_rows(
-                    &tx,
-                    &mut snapshot_app,
-                    &mut bin_app,
-                    batch,
-                    config,
-                )?;
                 snapshot_rows += added_snapshot_rows;
                 bin_rows += added_bin_rows;
                 batch_count += 1;

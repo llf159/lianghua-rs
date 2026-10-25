@@ -149,8 +149,14 @@ function formatPhaseLabel(phase: string | null | undefined) {
       return '维护概念表现'
     case 'stock_download_done':
       return '行情阶段完成'
+    case 'panel_indicators':
+      return '市场/横截面指标'
+    case 'rebuild_cyq_history':
+      return '重建筹码历史'
+    case 'repair_cyq_history':
+      return '修复筹码历史'
     case 'maintain_cyq_incremental':
-      return '维护筹码数据'
+      return '维护筹码增量'
     case 'repair_concept_most_related':
       return '补算最相关概念'
     case 'delete_stock_data_indicator_columns':
@@ -211,6 +217,11 @@ function getProgressWorkflow(action: string | null | undefined) {
             ['download_index_bars', 'write_index_db', 'index_download_done'],
           ],
         },
+        {
+          key: 'market_indicators',
+          label: '市场指标',
+          phases: ['panel_indicators'],
+        },
       ] as ProgressWorkflowStep[]
     case 'incremental-download':
       return [
@@ -236,7 +247,21 @@ function getProgressWorkflow(action: string | null | undefined) {
             ['download_index_bars', 'write_index_db', 'index_download_done'],
           ],
         },
-        'maintain_cyq_incremental',
+        {
+          key: 'market_indicators',
+          label: '市场指标',
+          phases: ['panel_indicators'],
+        },
+        {
+          key: 'chip_history',
+          label: '筹码历史维护',
+          phases: [['rebuild_cyq_history', 'repair_cyq_history']],
+        },
+        {
+          key: 'chip_incremental',
+          label: '筹码增量维护',
+          phases: ['maintain_cyq_incremental'],
+        },
       ] as ProgressWorkflowStep[]
     case 'repair-missing-stocks':
       return [
@@ -245,6 +270,11 @@ function getProgressWorkflow(action: string | null | undefined) {
           key: 'stock_repair',
           label: '补全股票行情',
           phases: [['download_bars', 'retry_failed', 'write_db']],
+        },
+        {
+          key: 'market_indicators',
+          label: '市场指标',
+          phases: ['panel_indicators'],
         },
         'rebuild_concept_performance',
       ] as ProgressWorkflowStep[]

@@ -448,6 +448,7 @@ pub fn query_cyq_chen_strategy_maintenance_status(
             db_exists: false,
             has_data: false,
             strategy_changed: false,
+            feature_changed: false,
             detail: "未发现新筹码库 cyq_chen.db，下载后会跳过新筹码维护。".to_string(),
         });
     }
@@ -458,6 +459,7 @@ pub fn query_cyq_chen_strategy_maintenance_status(
             db_exists: true,
             has_data: false,
             strategy_changed: false,
+            feature_changed: false,
             detail: "新筹码库已存在，但还没有可维护的筹码数据。".to_string(),
         });
     }
@@ -470,6 +472,7 @@ pub fn query_cyq_chen_strategy_maintenance_status(
                 db_exists: true,
                 has_data: true,
                 strategy_changed: false,
+                feature_changed: false,
                 detail: format!("无法检查筹码策略变化: {error}"),
             });
         }
@@ -486,6 +489,7 @@ pub fn query_cyq_chen_strategy_maintenance_status(
         db_exists: true,
         has_data: true,
         strategy_changed,
+        feature_changed,
         detail: if strategy_changed {
             "检测到 chip_change_rule.toml 与新筹码库记录的策略快照不一致，增量维护会触发全量重建。"
                 .to_string()

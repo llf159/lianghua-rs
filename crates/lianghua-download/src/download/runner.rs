@@ -2000,6 +2000,14 @@ pub fn download_selected_indices(
     let conn = Connection::open(db_path_str).map_err(|e| format!("数据库连接错误:{e}"))?;
 
     if ts_codes.is_empty() {
+        emit_progress(
+            progress_cb,
+            "done",
+            0,
+            0,
+            Some(effective_trade_date),
+            "指数行情已是最新，准备更新市场及横截面指标。".to_string(),
+        );
         maintain_panel_indicators(&conn, source_dir, progress_cb)?;
         return Ok(DownloadSummary::default());
     }
@@ -2090,20 +2098,20 @@ pub fn download_selected_indices(
     }
 
     checkpoint_stock_data(&conn)?;
-    if total.failed_count == 0 {
-        maintain_panel_indicators(&conn, source_dir, progress_cb)?;
-    }
     emit_progress(
         progress_cb,
         "done",
         total_tasks,
         total_tasks,
-        Some(effective_trade_date),
+        Some(effective_trade_date.clone()),
         format!(
             "指数下载结束，成功 {} 只，失败 {} 只。",
             total.success_count, total.failed_count
         ),
     );
+    if total.failed_count == 0 {
+        maintain_panel_indicators(&conn, source_dir, progress_cb)?;
+    }
 
     Ok(total)
 }

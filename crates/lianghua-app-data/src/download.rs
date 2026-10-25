@@ -464,44 +464,13 @@ fn emit_nested_data_download_progress(
 
 fn emit_chip_maintenance_progress(
     progress_cb: Option<&DownloadProgressCallback<'_>>,
+    phase: &str,
     mut progress: DownloadProgress,
 ) {
     if let Some(cb) = progress_cb {
-        progress.phase = "maintain_cyq_incremental".to_string();
+        progress.phase = phase.to_string();
         cb(progress);
     }
-}
-
-fn hide_chip_repair_local_counter(mut progress: DownloadProgress) -> DownloadProgress {
-    let repair_done = progress.phase == "done";
-    progress.finished = 0;
-    progress.total = 0;
-    progress.message = if repair_done {
-        "断点股票的筹码局部修复已完成，正在衔接其余增量股票。".to_string()
-    } else {
-        format!("{}；局部修复提交后继续维护其余增量股票。", progress.message)
-    };
-    progress
-}
-
-fn merge_chip_repair_into_incremental_progress(
-    mut progress: DownloadProgress,
-    repaired_stock_count: usize,
-) -> DownloadProgress {
-    if repaired_stock_count == 0 || progress.total == 0 {
-        return progress;
-    }
-
-    let incremental_finished = progress.finished.min(progress.total);
-    let incremental_total = progress.total;
-    progress.finished = repaired_stock_count.saturating_add(incremental_finished);
-    progress.total = repaired_stock_count.saturating_add(incremental_total);
-    progress.message = format!(
-        "{}；断点股票已提交修复 {repaired_stock_count} 只；其余增量计算 \
-         {incremental_finished} / {incremental_total} 只，总进度 {} / {}。",
-        progress.message, progress.finished, progress.total
-    );
-    progress
 }
 
 fn with_transaction<T, F>(conn: &Connection, action: F) -> Result<T, String>
@@ -1495,15 +1464,36 @@ pub fn run_prepared_data_download(
             )?;
         drop(source_conn);
         let has_recovered_stocks = !recovered_stock_codes.is_empty();
+        let chen_maintenance_status = if prepared.chip_model == "chen" {
+            Some(query_cyq_chen_strategy_maintenance_status(
+                &prepared.source_path,
+            )?)
+        } else {
+            None
+        };
+        let history_rebuild_required = chen_maintenance_status.as_ref().is_some_and(|status| {
+            status.strategy_changed
+                || status.feature_changed
+                || (status.db_exists && !status.has_data)
+        });
         if let Some(cb) = progress_cb {
             cb(lianghua_download::download::runner::DownloadProgress {
-                phase: "maintain_cyq_incremental".to_string(),
+                phase: if history_rebuild_required {
+                    "rebuild_cyq_history"
+                } else if has_recovered_stocks {
+                    "repair_cyq_history"
+                } else {
+                    "maintain_cyq_incremental"
+                }
+                .to_string(),
                 finished: 0,
                 total: 0,
                 current_label: None,
-                message: if has_recovered_stocks {
+                message: if history_rebuild_required {
+                    "检测到筹码库需要重建，开始从历史起点计算筹码数据。".to_string()
+                } else if has_recovered_stocks {
                     format!(
-                        "有 {} 只股票待局部修复筹码，随后维护增量数据。",
+                        "有 {} 只股票因历史行情变化需要重放筹码，随后维护增量数据。",
                         recovered_stock_codes.len()
                     )
                 } else {
@@ -1517,56 +1507,42 @@ pub fn run_prepared_data_download(
                              allow_cyq_chen_strategy_rebuild: bool,
                              progress_cb: Option<&DownloadProgressCallback<'_>>|
          -> Result<Option<String>, String> {
-            let chip_progress_cb = |progress: DownloadProgress| {
-                emit_chip_maintenance_progress(progress_cb, progress);
-            };
-
             match chip_model {
                 "chen" => {
-                    let maintenance_status =
-                        query_cyq_chen_strategy_maintenance_status(source_path)?;
+                    let maintenance_status = chen_maintenance_status
+                        .as_ref()
+                        .ok_or_else(|| "缺少新筹码维护状态".to_string())?;
                     if maintenance_status.strategy_changed && !allow_cyq_chen_strategy_rebuild {
                         return Ok(Some(
                             "检测到筹码策略已变化，已按确认选择跳过新筹码全量维护。".to_string(),
                         ));
                     }
-                    let merge_repair_progress =
-                        !maintenance_status.strategy_changed && !recovered_stock_codes.is_empty();
+                    let history_rebuild_required = maintenance_status.strategy_changed
+                        || maintenance_status.feature_changed
+                        || (maintenance_status.db_exists && !maintenance_status.has_data);
                     let repair_progress_cb = |progress: DownloadProgress| {
-                        if merge_repair_progress && progress.total > 0 {
-                            emit_chip_maintenance_progress(
-                                progress_cb,
-                                hide_chip_repair_local_counter(progress),
-                            );
+                        emit_chip_maintenance_progress(progress_cb, "repair_cyq_history", progress);
+                    };
+                    let repair_summary =
+                        if history_rebuild_required || recovered_stock_codes.is_empty() {
+                            None
                         } else {
-                            emit_chip_maintenance_progress(progress_cb, progress);
-                        }
-                    };
-                    let repair_summary = if maintenance_status.strategy_changed
-                        || recovered_stock_codes.is_empty()
-                    {
-                        None
-                    } else {
-                        repair_cyq_chen_stocks_if_db_exists(
-                            source_path,
-                            recovered_stock_codes,
-                            allow_cyq_chen_strategy_rebuild,
-                            Some(&repair_progress_cb),
-                        )?
-                    };
-                    let repaired_stock_count = if repair_summary.is_some() && merge_repair_progress
-                    {
-                        recovered_stock_codes.len()
-                    } else {
-                        0
-                    };
+                            repair_cyq_chen_stocks_if_db_exists(
+                                source_path,
+                                recovered_stock_codes,
+                                allow_cyq_chen_strategy_rebuild,
+                                Some(&repair_progress_cb),
+                            )?
+                        };
                     let incremental_progress_cb = |progress: DownloadProgress| {
                         emit_chip_maintenance_progress(
                             progress_cb,
-                            merge_chip_repair_into_incremental_progress(
-                                progress,
-                                repaired_stock_count,
-                            ),
+                            if history_rebuild_required {
+                                "rebuild_cyq_history"
+                            } else {
+                                "maintain_cyq_incremental"
+                            },
+                            progress,
                         );
                     };
                     let incremental_summary = maintain_cyq_chen_incremental_if_db_exists(
@@ -1620,10 +1596,10 @@ pub fn run_prepared_data_download(
                         if repair_summary.is_none() && incremental_summary.is_none() {
                             "未发现新筹码库 cyq_chen.db，已跳过筹码数据维护。".to_string()
                         } else if snapshot_rows > 0 || bin_rows > 0 {
-                            let mode = if recovered_stock_codes.is_empty() {
-                                "增量"
-                            } else if maintenance_status.strategy_changed {
+                            let mode = if history_rebuild_required {
                                 "全量"
+                            } else if recovered_stock_codes.is_empty() {
+                                "增量"
                             } else {
                                 "局部+增量"
                             };
@@ -1641,13 +1617,16 @@ pub fn run_prepared_data_download(
                     ))
                 }
                 _ => {
+                    let repair_progress_cb = |progress: DownloadProgress| {
+                        emit_chip_maintenance_progress(progress_cb, "repair_cyq_history", progress);
+                    };
                     let repair_summary = if recovered_stock_codes.is_empty() {
                         None
                     } else {
                         repair_cyq_stocks_if_db_exists(
                             source_path,
                             recovered_stock_codes,
-                            Some(&chip_progress_cb),
+                            Some(&repair_progress_cb),
                         )?
                     };
                     let incremental_summary = maintain_cyq_incremental_if_db_exists(source_path)?;
@@ -1736,7 +1715,12 @@ pub fn run_prepared_data_download(
         }
         if let Some(cb) = progress_cb {
             cb(lianghua_download::download::runner::DownloadProgress {
-                phase: "maintain_cyq_incremental".to_string(),
+                phase: if history_rebuild_required {
+                    "rebuild_cyq_history"
+                } else {
+                    "maintain_cyq_incremental"
+                }
+                .to_string(),
                 finished: 0,
                 total: 0,
                 current_label: None,
@@ -2503,30 +2487,20 @@ mod tests {
     }
 
     #[test]
-    fn hides_the_separate_chip_repair_counter_before_incremental_progress() {
-        let mut repair_progress = progress("compute_cyq_chen", 1, 1);
-        repair_progress.current_label = Some("000001.SZ".to_string());
+    fn separates_chip_history_progress_from_incremental_counters() {
+        let observed = std::sync::Mutex::new(None);
+        let callback = |next| *observed.lock().unwrap() = Some(next);
 
-        let next = hide_chip_repair_local_counter(repair_progress);
+        emit_chip_maintenance_progress(
+            Some(&callback),
+            "repair_cyq_history",
+            progress("compute_cyq_chen", 3, 8),
+        );
 
-        assert_eq!(next.finished, 0);
-        assert_eq!(next.total, 0);
-        assert!(!next.message.contains("局部修复已完成"));
-        assert!(next.message.contains("提交后"));
-        assert!(next.message.contains("其余增量股票"));
-
-        let committed = hide_chip_repair_local_counter(progress("done", 1, 1));
-        assert!(committed.message.contains("局部修复已完成"));
-    }
-
-    #[test]
-    fn merges_repaired_stocks_into_following_chip_incremental_counter() {
-        let next =
-            merge_chip_repair_into_incremental_progress(progress("compute_cyq_chen", 6, 14), 1);
-
-        assert_eq!(next.finished, 7);
-        assert_eq!(next.total, 15);
-        assert!(next.message.contains("总进度 7 / 15"));
+        let next = observed.into_inner().unwrap().unwrap();
+        assert_eq!(next.phase, "repair_cyq_history");
+        assert_eq!(next.finished, 3);
+        assert_eq!(next.total, 8);
     }
 
     #[test]

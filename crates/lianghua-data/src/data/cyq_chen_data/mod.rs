@@ -43,6 +43,7 @@ pub struct CyqChenStrategyMaintenanceStatus {
     pub db_exists: bool,
     pub has_data: bool,
     pub strategy_changed: bool,
+    pub feature_changed: bool,
     pub detail: String,
 }
 

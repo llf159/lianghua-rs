@@ -48,6 +48,7 @@ import {
   getPhaseStep,
   getProgressCounterText,
   normalizeProgressPhase,
+  type ProgressWorkflowStep,
   useAnimatedProgressPercent,
   useProgressTiming,
 } from '../../shared/dataTaskProgressUtils'
@@ -250,6 +251,8 @@ function formatPhaseLabel(phase: string | null | undefined) {
       return '清空指标列'
     case 'rebuild_stock_data_indicator_columns':
       return '补算指标列'
+    case 'panel_indicators':
+      return '市场/横截面指标'
     case 'compute_cyq':
       return '筹码计算'
     case 'compute_cyq_chen':
@@ -270,7 +273,18 @@ function getProgressWorkflow(action: string | null | undefined) {
     case 'delete-stock-data-indicator-columns':
       return ['delete_stock_data_indicator_columns'] as string[]
     case 'rebuild-stock-data-indicator-columns':
-      return ['rebuild_stock_data_indicator_columns'] as string[]
+      return [
+        {
+          key: 'stock_indicators',
+          label: '逐股指标',
+          phases: ['rebuild_stock_data_indicator_columns'],
+        },
+        {
+          key: 'market_indicators',
+          label: '市场指标',
+          phases: ['panel_indicators'],
+        },
+      ] as ProgressWorkflowStep[]
     case 'cyq':
       return ['compute_cyq'] as string[]
     case 'cyq-chen':
