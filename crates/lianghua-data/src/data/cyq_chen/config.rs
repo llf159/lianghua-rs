@@ -154,10 +154,17 @@ impl ChipChangeConfig {
                 })(&strategy.when_ast, &(["RATEO", "RATEH", "RATEL", "RATEC"]))
         });
 
+        let sell_uses_main_ratio_history = strategies.iter().any(|strategy| {
+            strategy.direction == ChipDirection::Sell
+                && ["MAIN_CHIP_RATIO", "main_chip_ratio"]
+                    .iter()
+                    .any(|key| crate::data::expr_program_uses_runtime_key(&strategy.when_ast, key))
+        });
         Ok(CompiledChipChangeConfig {
             version: self.version,
             strategies,
             sell_uses_bucket_rate_series,
+            sell_uses_main_ratio_history,
         })
     }
 

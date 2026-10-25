@@ -17,8 +17,7 @@ use crate::data::cyq_chen::buckets::{build_snapshot, normalize_buckets, sanitize
 use crate::data::cyq_chen::config::validate_compute_config;
 use crate::data::cyq_chen::simulate::{
     apply_buy_for_day, apply_posterior_for_day, apply_sell_for_day,
-    build_new_participant_buy_runtime, inject_strategy_expression_caches, share_runtime_num_series,
-    write_main_ratio_for_day,
+    build_new_participant_buy_runtime, inject_strategy_expression_caches, write_main_ratio_for_day,
 };
 #[cfg(test)]
 mod test_support;
@@ -31,12 +30,12 @@ pub use config::{
 };
 
 use crate::data::RowData;
-use crate::data::runtime::row_into_rt;
+use crate::data::runtime::{columns_to_shared_rt, row_to_shared_rt};
 use crate::expr::parser::Stmts;
 use crate::utils::utils::round_f64_to_scale;
 use serde::Deserialize;
 use serde::Serialize;
-use std::sync::Arc;
+use std::{borrow::Cow, sync::Arc};
 pub(super) const EPS: f64 = 1e-10;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +74,7 @@ pub struct CompiledChipChangeConfig {
     pub version: u32,
     pub strategies: Vec<CompiledChipChangeStrategy>,
     sell_uses_bucket_rate_series: bool,
+    pub(in crate::data) sell_uses_main_ratio_history: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -333,11 +333,12 @@ pub fn compute_chen_chip_snapshots_with_compiled_config_with_features(
 ) -> Result<Vec<ChenChipSnapshot>, String> {
     let mut snapshots = Vec::new();
     replay_chen_chip_snapshots(
-        row_data,
+        Cow::Borrowed(row_data),
         output_start_date,
         chip_config,
         config,
         feature_state,
+        true,
         |snapshot| {
             snapshots.push(snapshot);
             Ok(())
@@ -348,11 +349,12 @@ pub fn compute_chen_chip_snapshots_with_compiled_config_with_features(
 
 /// Emit each output snapshot immediately, without retaining its historical bins.
 pub(super) fn replay_chen_chip_snapshots(
-    row_data: &RowData,
+    row_data: Cow<'_, RowData>,
     output_start_date: &str,
     chip_config: &CompiledChipChangeConfig,
     config: ChenChipConfig,
     feature_state: &mut ChenChipFeatureState,
+    retain_history_state: bool,
     mut emit: impl FnMut(ChenChipSnapshot) -> Result<(), String>,
 ) -> Result<(), String> {
     validate_compute_config(config)?;
@@ -368,7 +370,7 @@ pub(super) fn replay_chen_chip_snapshots(
         return Err("output_start_date不能为空".to_string());
     }
 
-    validate_row_shape(row_data)?;
+    validate_row_shape(&row_data)?;
     let Some(output_start_index) = row_data
         .trade_dates
         .iter()
@@ -379,7 +381,7 @@ pub(super) fn replay_chen_chip_snapshots(
         ));
     };
 
-    let bars = build_validated_bars(row_data, output_start_index)?;
+    let bars = build_validated_bars(&row_data, output_start_index)?;
     if output_start_index < config.warmup_days {
         return Ok(());
     }
@@ -398,24 +400,34 @@ pub(super) fn replay_chen_chip_snapshots(
         ensure_bucket_rate_series(&mut buckets, &bars);
     }
     let len = row_data.trade_dates.len();
-    let mut main_ratio_history: Vec<Arc<Vec<Option<f64>>>> = (0..buckets.len())
-        .map(|_| Arc::new(vec![None; len]))
-        .collect();
-    let mut base_runtime = row_into_rt(row_data.clone())?;
-    share_runtime_num_series(&mut base_runtime);
+    let mut main_ratio_history: Vec<Arc<Vec<Option<f64>>>> =
+        if chip_config.sell_uses_main_ratio_history {
+            (0..buckets.len())
+                .map(|_| Arc::new(vec![None; len]))
+                .collect()
+        } else {
+            Vec::new()
+        };
+    let (trade_dates, mut base_runtime): (Cow<'_, [String]>, _) = match row_data {
+        Cow::Borrowed(row) => (
+            Cow::Borrowed(row.trade_dates.as_slice()),
+            row_to_shared_rt(row),
+        ),
+        Cow::Owned(row) => (Cow::Owned(row.trade_dates), columns_to_shared_rt(row.cols)),
+    };
     let mut buy_runtime = build_new_participant_buy_runtime(&base_runtime, &bars)?;
     inject_strategy_expression_caches(&mut base_runtime, chip_config, ChipDirection::Sell)?;
     inject_strategy_expression_caches(&mut buy_runtime, chip_config, ChipDirection::Buy)?;
 
+    let mut before = Vec::new();
+    let mut after_sell = Vec::new();
+    let mut after_buy = Vec::new();
     for day_index in process_start_index..len {
         let Some(bar) = bars[day_index].as_ref() else {
             if day_index < output_start_index {
                 return Ok(());
             }
-            return Err(format!(
-                "{} 缺少有效K线数据",
-                row_data.trade_dates[day_index]
-            ));
+            return Err(format!("{} 缺少有效K线数据", trade_dates[day_index]));
         };
 
         expand_buckets_for_bar(
@@ -429,10 +441,8 @@ pub(super) fn replay_chen_chip_snapshots(
             chip_config.sell_uses_bucket_rate_series,
         )?;
         feature_state.align(&buckets)?;
-        let before = buckets
-            .iter()
-            .map(ChipBucket::total_chip)
-            .collect::<Vec<_>>();
+        before.clear();
+        before.extend(buckets.iter().map(ChipBucket::total_chip));
         write_main_ratio_for_day(&buckets, &mut main_ratio_history, day_index);
 
         let main_before = buckets.iter().map(|bucket| bucket.main_chip).sum::<f64>();
@@ -446,10 +456,8 @@ pub(super) fn replay_chen_chip_snapshots(
             bar.turnover_rate,
         )?;
         sanitize_buckets(&mut buckets)?;
-        let after_sell = buckets
-            .iter()
-            .map(ChipBucket::total_chip)
-            .collect::<Vec<_>>();
+        after_sell.clear();
+        after_sell.extend(buckets.iter().map(ChipBucket::total_chip));
 
         let main_after_sell = buckets.iter().map(|bucket| bucket.main_chip).sum::<f64>();
         apply_buy_for_day(
@@ -461,10 +469,8 @@ pub(super) fn replay_chen_chip_snapshots(
             day_index,
             bar.turnover_rate,
         )?;
-        let after_buy = buckets
-            .iter()
-            .map(ChipBucket::total_chip)
-            .collect::<Vec<_>>();
+        after_buy.clear();
+        after_buy.extend(buckets.iter().map(ChipBucket::total_chip));
         let main_after_buy = buckets.iter().map(|bucket| bucket.main_chip).sum::<f64>();
         let (reclassified_to_main, reclassified_to_retail) = apply_posterior_for_day(
             &mut buckets,
@@ -478,7 +484,8 @@ pub(super) fn replay_chen_chip_snapshots(
         feature_state.observe(bar, &buckets, &before, &after_sell, &after_buy)?;
 
         if day_index >= output_start_index {
-            let mut snapshot = build_snapshot(bar, &buckets)?;
+            let mut snapshot =
+                build_snapshot(bar, &buckets, retain_history_state || day_index + 1 == len)?;
             snapshot.flow = Some(ChenChipFlow {
                 main_sold: (main_before - main_after_sell).max(0.0),
                 retail_sold: (bar.turnover_rate - main_before + main_after_sell).max(0.0),
@@ -605,34 +612,35 @@ pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config_with_f
         ensure_bucket_rate_series(&mut buckets, &bars);
     }
     let len = row_data.trade_dates.len();
-    let mut main_ratio_history = (|initial_history: &[Arc<Vec<Option<f64>>>],
-                                   bucket_count: usize,
-                                   series_len: usize|
-     -> Result<Vec<Arc<Vec<Option<f64>>>>, String> {
-        if initial_history.is_empty() {
-            return Ok((0..bucket_count)
-                .map(|_| Arc::new(vec![None; series_len]))
-                .collect());
-        }
-        if initial_history.len() != bucket_count {
+    if !initial_main_ratio_history.is_empty() {
+        if initial_main_ratio_history.len() != initial_bins.len() {
             return Err("初始MAIN_CHIP_RATIO历史分桶数不匹配".to_string());
         }
-
-        for history in initial_history {
-            if history.len() != series_len {
-                return Err("初始MAIN_CHIP_RATIO历史长度不匹配".to_string());
-            }
+        if initial_main_ratio_history
+            .iter()
+            .any(|history| history.len() != len)
+        {
+            return Err("初始MAIN_CHIP_RATIO历史长度不匹配".to_string());
         }
-
-        Ok(initial_history.to_vec())
-    })(initial_main_ratio_history, initial_bins.len(), len)?;
-    let mut base_runtime = row_into_rt(row_data.clone())?;
-    share_runtime_num_series(&mut base_runtime);
+    }
+    let mut main_ratio_history = if !chip_config.sell_uses_main_ratio_history {
+        Vec::new()
+    } else if initial_main_ratio_history.is_empty() {
+        (0..initial_bins.len())
+            .map(|_| Arc::new(vec![None; len]))
+            .collect()
+    } else {
+        initial_main_ratio_history.to_vec()
+    };
+    let mut base_runtime = row_to_shared_rt(row_data);
     let mut buy_runtime = build_new_participant_buy_runtime(&base_runtime, &bars)?;
     inject_strategy_expression_caches(&mut base_runtime, chip_config, ChipDirection::Sell)?;
     inject_strategy_expression_caches(&mut buy_runtime, chip_config, ChipDirection::Buy)?;
     let mut snapshots = Vec::with_capacity(len.saturating_sub(output_start_index));
 
+    let mut before = Vec::new();
+    let mut after_sell = Vec::new();
+    let mut after_buy = Vec::new();
     for day_index in output_start_index..len {
         let Some(bar) = bars[day_index].as_ref() else {
             return Err(format!(
@@ -652,10 +660,8 @@ pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config_with_f
             chip_config.sell_uses_bucket_rate_series,
         )?;
         feature_state.align(&buckets)?;
-        let before = buckets
-            .iter()
-            .map(ChipBucket::total_chip)
-            .collect::<Vec<_>>();
+        before.clear();
+        before.extend(buckets.iter().map(ChipBucket::total_chip));
         write_main_ratio_for_day(&buckets, &mut main_ratio_history, day_index);
 
         let main_before = buckets.iter().map(|bucket| bucket.main_chip).sum::<f64>();
@@ -669,10 +675,8 @@ pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config_with_f
             bar.turnover_rate,
         )?;
         sanitize_buckets(&mut buckets)?;
-        let after_sell = buckets
-            .iter()
-            .map(ChipBucket::total_chip)
-            .collect::<Vec<_>>();
+        after_sell.clear();
+        after_sell.extend(buckets.iter().map(ChipBucket::total_chip));
 
         let main_after_sell = buckets.iter().map(|bucket| bucket.main_chip).sum::<f64>();
         apply_buy_for_day(
@@ -684,10 +688,8 @@ pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config_with_f
             day_index,
             bar.turnover_rate,
         )?;
-        let after_buy = buckets
-            .iter()
-            .map(ChipBucket::total_chip)
-            .collect::<Vec<_>>();
+        after_buy.clear();
+        after_buy.extend(buckets.iter().map(ChipBucket::total_chip));
         let main_after_buy = buckets.iter().map(|bucket| bucket.main_chip).sum::<f64>();
         let (reclassified_to_main, reclassified_to_retail) = apply_posterior_for_day(
             &mut buckets,
@@ -700,7 +702,7 @@ pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config_with_f
         normalize_buckets(&mut buckets)?;
         feature_state.observe(bar, &buckets, &before, &after_sell, &after_buy)?;
 
-        let mut snapshot = build_snapshot(bar, &buckets)?;
+        let mut snapshot = build_snapshot(bar, &buckets, true)?;
         snapshot.flow = Some(ChenChipFlow {
             main_sold: (main_before - main_after_sell).max(0.0),
             retail_sold: (bar.turnover_rate - main_before + main_after_sell).max(0.0),

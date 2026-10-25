@@ -679,126 +679,131 @@ pub fn refresh_with_progress(
         let _ = conn.execute_batch("ROLLBACK");
     }
     prepare?;
-    let count = panel_defs.len();
-    let output_day = output_index.saturating_sub(warm_index);
-    for (index, (def, program)) in panel_defs.iter().zip(&programs).enumerate() {
-        if let Some(cb) = progress {
-            cb(index, count + 1, &def.name);
-        }
-        let published = rt.vars.clone();
-        let mut value = rt
-            .eval_program(program)
-            .map_err(|e| format!("指标{}计算失败:{e}", def.name))?;
-        // Discard local assignments before rounding, so a unique output can be
-        // rounded in place instead of cloning its entire stock/date matrix.
-        rt.vars = published;
-        rt.vars
-            .retain(|key, _| last_use.get(key).is_some_and(|&last| last > index));
-        if def.scope == IndicatorScope::Market && matches!(value, PanelValue::Stocks(_)) {
-            return Err(format!(
-                "市场指标{}仍包含逐股结果，请使用CS_MEAN等聚合，或改为横截面范围",
-                def.name
-            ));
-        }
-        let scale = 10_f64.powi(def.prec as i32);
-        let round = |v: &mut f64| {
-            *v = if v.is_finite() {
-                (*v * scale).round() / scale
-            } else {
-                f64::NAN
-            };
-        };
-        match &mut value {
-            PanelValue::Scalar(v) => round(v),
-            PanelValue::Market(v) => Arc::make_mut(v).iter_mut().for_each(round),
-            PanelValue::Stocks(v) => {
-                for row in Arc::make_mut(v) {
-                    row.iter_mut().for_each(round);
-                }
+    let bulk = crate::data::bulk_write::BulkWriteSettings::apply(conn)?;
+    let write_result = (|| -> Result<usize, String> {
+        let count = panel_defs.len();
+        let output_day = output_index.saturating_sub(warm_index);
+        for (index, (def, program)) in panel_defs.iter().zip(&programs).enumerate() {
+            if let Some(cb) = progress {
+                cb(index, count + 1, &def.name);
             }
-        }
-        if let Some(cb) = progress {
-            cb(index, count + 1, &format!("保存{}", def.name));
-        }
-        let stock_count = if def.scope == IndicatorScope::Market {
-            1
-        } else {
-            rt.source.stocks.len()
-        };
-        for chunk_start in (0..stock_count).step_by(64) {
-            let chunk_end = (chunk_start + 64).min(stock_count);
-            let capacity = (chunk_end - chunk_start) * (rt.source.dates.len() - output_day);
-            let mut names = StringBuilder::with_capacity(capacity, capacity * def.name.len());
-            let mut codes = StringBuilder::with_capacity(capacity, capacity * 9);
-            let mut dates = StringBuilder::with_capacity(capacity, capacity * 8);
-            let mut values = Vec::with_capacity(capacity);
-            for stock in chunk_start..chunk_end {
-                for day in output_day..rt.source.dates.len() {
-                    if def.scope == IndicatorScope::Market || rt.source.presence[stock][day] {
-                        names.append_value(&def.name);
-                        codes.append_value(if def.scope == IndicatorScope::Market {
-                            ""
-                        } else {
-                            &rt.source.stocks[stock]
-                        });
-                        dates.append_value(&rt.source.dates[day]);
-                        values.push(value.at(stock, day));
+            let published = rt.vars.clone();
+            let mut value = rt
+                .eval_program(program)
+                .map_err(|e| format!("指标{}计算失败:{e}", def.name))?;
+            // Discard local assignments before rounding, so a unique output can be
+            // rounded in place instead of cloning its entire stock/date matrix.
+            rt.vars = published;
+            rt.vars
+                .retain(|key, _| last_use.get(key).is_some_and(|&last| last > index));
+            if def.scope == IndicatorScope::Market && matches!(value, PanelValue::Stocks(_)) {
+                return Err(format!(
+                    "市场指标{}仍包含逐股结果，请使用CS_MEAN等聚合，或改为横截面范围",
+                    def.name
+                ));
+            }
+            let scale = 10_f64.powi(def.prec as i32);
+            let round = |v: &mut f64| {
+                *v = if v.is_finite() {
+                    (*v * scale).round() / scale
+                } else {
+                    f64::NAN
+                };
+            };
+            match &mut value {
+                PanelValue::Scalar(v) => round(v),
+                PanelValue::Market(v) => Arc::make_mut(v).iter_mut().for_each(round),
+                PanelValue::Stocks(v) => {
+                    for row in Arc::make_mut(v) {
+                        row.iter_mut().for_each(round);
                     }
                 }
             }
-            let batch = RecordBatch::try_from_iter([
-                ("name", Arc::new(names.finish()) as ArrayRef),
-                ("ts_code", Arc::new(codes.finish()) as ArrayRef),
-                ("trade_date", Arc::new(dates.finish()) as ArrayRef),
-                ("value", Arc::new(Float64Array::from(values)) as ArrayRef),
-            ])
-            .map_err(|e| e.to_string())?;
-            conn.execute_batch("BEGIN").map_err(|e| e.to_string())?;
-            let write = (|| -> Result<(), String> {
-                let mut app = conn
-                    .appender("indicator_panel_values")
-                    .map_err(|e| e.to_string())?;
-                app.append_record_batch(batch).map_err(|e| e.to_string())?;
-                app.flush().map_err(|e| e.to_string())?;
-                drop(app);
-                conn.execute_batch("COMMIT").map_err(|e| e.to_string())
-            })();
-            if write.is_err() {
-                let _ = conn.execute_batch("ROLLBACK");
+            if let Some(cb) = progress {
+                cb(index, count + 1, &format!("保存{}", def.name));
             }
-            write?;
+            let stock_count = if def.scope == IndicatorScope::Market {
+                1
+            } else {
+                rt.source.stocks.len()
+            };
+            for chunk_start in (0..stock_count).step_by(64) {
+                let chunk_end = (chunk_start + 64).min(stock_count);
+                let capacity = (chunk_end - chunk_start) * (rt.source.dates.len() - output_day);
+                let mut names = StringBuilder::with_capacity(capacity, capacity * def.name.len());
+                let mut codes = StringBuilder::with_capacity(capacity, capacity * 9);
+                let mut dates = StringBuilder::with_capacity(capacity, capacity * 8);
+                let mut values = Vec::with_capacity(capacity);
+                for stock in chunk_start..chunk_end {
+                    for day in output_day..rt.source.dates.len() {
+                        if def.scope == IndicatorScope::Market || rt.source.presence[stock][day] {
+                            names.append_value(&def.name);
+                            codes.append_value(if def.scope == IndicatorScope::Market {
+                                ""
+                            } else {
+                                &rt.source.stocks[stock]
+                            });
+                            dates.append_value(&rt.source.dates[day]);
+                            values.push(value.at(stock, day));
+                        }
+                    }
+                }
+                let batch = RecordBatch::try_from_iter([
+                    ("name", Arc::new(names.finish()) as ArrayRef),
+                    ("ts_code", Arc::new(codes.finish()) as ArrayRef),
+                    ("trade_date", Arc::new(dates.finish()) as ArrayRef),
+                    ("value", Arc::new(Float64Array::from(values)) as ArrayRef),
+                ])
+                .map_err(|e| e.to_string())?;
+                conn.execute_batch("BEGIN").map_err(|e| e.to_string())?;
+                let write = (|| -> Result<(), String> {
+                    let mut app = conn
+                        .appender("indicator_panel_values")
+                        .map_err(|e| e.to_string())?;
+                    app.append_record_batch(batch).map_err(|e| e.to_string())?;
+                    app.flush().map_err(|e| e.to_string())?;
+                    drop(app);
+                    conn.execute_batch("COMMIT").map_err(|e| e.to_string())
+                })();
+                if write.is_err() {
+                    let _ = conn.execute_batch("ROLLBACK");
+                }
+                write?;
+            }
+            // Saved outputs need memory only while a later indicator depends on
+            // them. Partial rows remain hidden by dirty_from until publication.
+            if last_use.get(&def.name).is_some_and(|&last| last > index) {
+                rt.vars.insert(def.name.clone(), value);
+            }
+            if let Some(cb) = progress {
+                cb(index + 1, count + 1, &def.name);
+            }
         }
-        // Saved outputs need memory only while a later indicator depends on
-        // them. Partial rows remain hidden by dirty_from until publication.
-        if last_use.get(&def.name).is_some_and(|&last| last > index) {
-            rt.vars.insert(def.name.clone(), value);
+        conn.execute_batch("BEGIN").map_err(|e| e.to_string())?;
+        let publish = (|| -> Result<(), String> {
+            let mut app = conn
+                .appender("indicator_panel_sessions")
+                .map_err(|e| e.to_string())?;
+            for date in &calendar[output_index..end_index] {
+                app.append_row(params![date]).map_err(|e| e.to_string())?;
+            }
+            app.flush().map_err(|e| e.to_string())?;
+            drop(app);
+            conn.execute("UPDATE indicator_panel_state SET version=1,signature=?,dirty_from=NULL,listing_json=?,calendar_json=? WHERE id=1",params![signature,serde_json::to_string(&listing).map_err(|e|e.to_string())?,serde_json::to_string(&calendar[..end_index]).map_err(|e|e.to_string())?]).map_err(|e|e.to_string())?;
+            conn.execute_batch("DROP TABLE IF EXISTS market_environment;DROP TABLE IF EXISTS market_environment_state;COMMIT;").map_err(|e|e.to_string())?;
+            Ok(())
+        })();
+        if publish.is_err() {
+            let _ = conn.execute_batch("ROLLBACK");
         }
-        if let Some(cb) = progress {
-            cb(index + 1, count + 1, &def.name);
-        }
-    }
-    conn.execute_batch("BEGIN").map_err(|e| e.to_string())?;
-    let publish = (|| -> Result<(), String> {
-        let mut app = conn
-            .appender("indicator_panel_sessions")
-            .map_err(|e| e.to_string())?;
-        for date in &calendar[output_index..end_index] {
-            app.append_row(params![date]).map_err(|e| e.to_string())?;
-        }
-        app.flush().map_err(|e| e.to_string())?;
-        drop(app);
-        conn.execute("UPDATE indicator_panel_state SET version=1,signature=?,dirty_from=NULL,listing_json=?,calendar_json=? WHERE id=1",params![signature,serde_json::to_string(&listing).map_err(|e|e.to_string())?,serde_json::to_string(&calendar[..end_index]).map_err(|e|e.to_string())?]).map_err(|e|e.to_string())?;
-        conn.execute_batch("DROP TABLE IF EXISTS market_environment;DROP TABLE IF EXISTS market_environment_state;COMMIT;").map_err(|e|e.to_string())?;
-        Ok(())
+        publish?;
+        Ok(end_index - output_index)
     })();
-    if publish.is_err() {
-        let _ = conn.execute_batch("ROLLBACK");
-    }
-    publish?;
+    let rows = bulk.checkpoint_and_finish(conn, write_result)?;
     if let Some(cb) = progress {
-        cb(count + 1, count + 1, "完成");
+        cb(panel_defs.len() + 1, panel_defs.len() + 1, "完成");
     }
-    Ok(end_index - output_index)
+    Ok(rows)
 }
 
 #[cfg(test)]

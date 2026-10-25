@@ -15,10 +15,7 @@ use crate::expr::{
     },
 };
 use crate::{
-    data::{
-        DataReader, RuleKind, RuleStage, SceneDirection, ScoreConfig, runtime::row_into_rt,
-        score_rule_path,
-    },
+    data::{DataReader, RuleKind, RuleStage, SceneDirection, ScoreConfig, score_rule_path},
     scoring::tools::{
         SimilarityRankFieldInjector, collect_used_cyq_chen_runtime_keys,
         inject_optional_cyq_chen_fields, inject_stock_extra_fields, load_st_list,
@@ -583,8 +580,9 @@ fn validate_rule_definition(
             sample_ts_code,
             &used_cyq_chen_keys,
         );
+        let base_runtime = lianghua_data::data::runtime::row_to_shared_rt(&row_data);
         for (label, stmts) in &expression_programs {
-            let mut rt = row_into_rt(row_data.clone())?;
+            let mut rt = base_runtime.clone();
             let value = rt
                 .eval_program(stmts)
                 .map_err(|e| format!("策略 {label} 表达式运行错误:{}", e.msg))?;

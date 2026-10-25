@@ -119,7 +119,7 @@ pub(super) fn apply_sell_for_day(
 
         (|runtime: &mut Runtime,
           bucket: &ChipBucket,
-          main_ratio_history: Arc<Vec<Option<f64>>>,
+          main_ratio_history: Option<Arc<Vec<Option<f64>>>>,
           main_chip_total: f64,
           retail_chip_total: f64,
           bars: &[Option<ChenChipBar>],
@@ -152,12 +152,14 @@ pub(super) fn apply_sell_for_day(
                 }
             }
 
-            set_num_series_arc_with_alias(
-                runtime,
-                "MAIN_CHIP_RATIO",
-                "main_chip_ratio",
-                main_ratio_history,
-            );
+            if let Some(history) = main_ratio_history {
+                set_num_series_arc_with_alias(
+                    runtime,
+                    "MAIN_CHIP_RATIO",
+                    "main_chip_ratio",
+                    history,
+                );
+            }
             set_num_with_alias(
                 runtime,
                 "MAIN_CHIP_TOTAL",
@@ -175,7 +177,7 @@ pub(super) fn apply_sell_for_day(
         })(
             bucket_runtime,
             &buckets[bucket_index],
-            Arc::clone(&main_ratio_history[bucket_index]),
+            main_ratio_history.get(bucket_index).map(Arc::clone),
             main_chip_total,
             retail_chip_total,
             bars,
@@ -448,14 +450,6 @@ pub(super) fn build_new_participant_buy_runtime(
     Ok(runtime)
 }
 
-pub(super) fn share_runtime_num_series(runtime: &mut Runtime) {
-    for value in runtime.vars.values_mut() {
-        if let Value::NumSeries(series) = value {
-            *value = Value::SharedNumSeries(Arc::new(std::mem::take(series)));
-        }
-    }
-}
-
 pub(super) fn inject_strategy_expression_caches(
     runtime: &mut Runtime,
     chip_config: &CompiledChipChangeConfig,
@@ -652,6 +646,7 @@ bias = 1.0
         .unwrap()
         .compile()
         .unwrap();
+        assert!(compiled.sell_uses_main_ratio_history);
         let row = sample_row_data();
         let bars = super::super::bars::build_validated_bars(&row, 0).unwrap();
         let mut runtime = row_into_rt(row).unwrap();

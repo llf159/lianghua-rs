@@ -127,11 +127,12 @@ pub fn compute_chen_chip_mechanism_comparison(
         .retain(|strategy| strategy.confirm_after == 0);
     // Reduce each emitted snapshot immediately; only the current model retains historical bins.
     replay_chen_chip_snapshots(
-        row_data,
+        std::borrow::Cow::Borrowed(row_data),
         output_start_date,
         &without_posterior,
         config,
         &mut ChenChipFeatureState::default(),
+        false,
         |without| {
             let original = current
                 .get(comparison.days.len())
@@ -194,11 +195,12 @@ pub fn compute_chen_chip_mechanism_comparison(
     }
     let mut reference_index = 0;
     replay_chen_chip_snapshots(
-        row_data,
+        std::borrow::Cow::Borrowed(row_data),
         output_start_date,
         &neutral,
         config,
         &mut ChenChipFeatureState::default(),
+        false,
         |reference| {
             let original = current
                 .get(reference_index)

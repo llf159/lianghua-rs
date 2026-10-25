@@ -29,3 +29,5 @@
 ## 工程取舍
 
 - 问题：手动测试与编辑器全工作区检查叠加时，多路 Rust 编译会造成内存峰值，重复关联 workspace 根和已在成员列表中的 Tauri crate 还会启动两组检查；解决方案选择：Cargo 默认 `build.jobs = 1`，rust-analyzer 只关联根 `Cargo.toml`；解释：以编译吞吐换取桌面可用性，根工作区已包含 Tauri，无需重复关联；确有内存余量时可单次执行 `cargo check -j 2` 覆盖默认值，避免另启并行 Cargo 任务。
+
+- 问题：开发构建仅优化业务 crate 时，DuckDB 的 Rust Arrow 转换和追加桥接仍按未优化代码执行，放大数据库写入耗时；解决方案选择：`profile.dev.package.duckdb.opt-level = 3`；解释：只提高数据库桥接包的编译成本，保留其余开发调试配置；原生 DuckDB 动态库已单独编译，这个设置优化的是 Rust 桥接，不代表重新优化原生引擎或改变 release 配置。

@@ -1,6 +1,7 @@
 mod compute;
 pub use compute::{compute_cyq_chen_stock_group_batch, resolve_cyq_chen_load_start_date};
 mod maintain;
+mod prepare;
 mod store;
 #[cfg(test)]
 mod test_support;

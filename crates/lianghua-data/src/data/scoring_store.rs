@@ -1071,6 +1071,7 @@ pub fn write_score_batches_from_channel(
         profile.attach_source_db_ms = Some(attach_started_at.elapsed().as_millis() as u64);
     }
 
+    let bulk = crate::data::bulk_write::BulkWriteSettings::apply(&conn)?;
     let write_result = (|| -> Result<(), String> {
         let receive_and_append_started_at = time::Instant::now();
         drop_result_staging_tables(&conn)?;
@@ -1562,7 +1563,7 @@ pub fn write_score_batches_from_channel(
     } else {
         Ok(())
     };
-    write_result?;
+    bulk.checkpoint_and_finish(&conn, write_result)?;
     detach_source_result?;
     profile.total_ms = total_started_at.elapsed().as_millis() as u64;
 

@@ -1,6 +1,6 @@
 use crate::data::cyq_chen_data::compute::{
-    compute_cyq_chen_stock_group_batch, finish_cyq_chen_write, prepare_cyq_chen_batch_rows,
-    query_source_trade_date_range, resolve_cyq_chen_load_start_date,
+    compute_cyq_chen_stock_group_batch, compute_prepared_cyq_chen_stock_group_batch,
+    finish_cyq_chen_write, query_source_trade_date_range, resolve_cyq_chen_load_start_date,
     resolve_cyq_chen_rebuild_trade_date_range, source_stock_data_exists,
     write_cyq_chen_batches_from_channel, write_cyq_chen_maintenance_batches_from_channel,
 };
@@ -791,11 +791,20 @@ pub fn rebuild_cyq_chen_all_with_progress(
         })?;
     let (tx, rx) = sync_channel(CYQ_CHEN_QUEUE_BOUND);
     let abort_tx = tx.clone();
+    let written_stocks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let writer_written_stocks = std::sync::Arc::clone(&written_stocks);
     let writer_handle = thread::spawn(move || {
-        write_cyq_chen_batches_from_channel(&rebuild_db_str, rx, config, strategy_hash)
+        write_cyq_chen_batches_from_channel(
+            &rebuild_db_str,
+            rx,
+            config,
+            strategy_hash,
+            Some(writer_written_stocks),
+        )
     });
 
     let finished_stock_count = std::sync::atomic::AtomicUsize::new(0);
+    let profile_writes = std::env::var_os("LIANGHUA_CYQ_WRITE_PROFILE").is_some();
     let compute_result = compute_pool.install(|| {
         ts_codes.par_chunks(compute_group_size).try_for_each_init(
             || DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys),
@@ -812,15 +821,16 @@ pub fn rebuild_cyq_chen_all_with_progress(
                             total: ts_codes.len(),
                             current_label: Some(ts_code.to_string()),
                             message: format!(
-                                "新筹码计算中，已计算 {finished} / {} 只股票。",
-                                ts_codes.len()
+                                "新筹码计算中，已计算 {finished} / {} 只股票，已写入提交 {} 只。",
+                                ts_codes.len(),
+                                written_stocks.load(std::sync::atomic::Ordering::Relaxed),
                             ),
                         });
                     }
                 };
-                let batch = compute_cyq_chen_stock_group_batch(
+                let started = std::time::Instant::now();
+                let batch = compute_prepared_cyq_chen_stock_group_batch(
                     worker_reader,
-                    None,
                     &load_start_date,
                     &start_date,
                     &end_date,
@@ -830,12 +840,15 @@ pub fn rebuild_cyq_chen_all_with_progress(
                     &total_share_map,
                     ts_group,
                     Some(&progress_stock_done),
-                    None,
                 )?;
-                tx.send(CyqChenWriteMessage::PreparedBatch(
-                    prepare_cyq_chen_batch_rows(batch, config)?,
-                ))
-                .map_err(|e| format!("发送筹码批次失败:{e}"))?;
+                let compute_prepare_ms = started.elapsed().as_millis();
+                let rows = (batch.snapshot_rows, batch.bin_rows);
+                let started = std::time::Instant::now();
+                tx.send(CyqChenWriteMessage::PreparedBatch(batch))
+                    .map_err(|e| format!("发送筹码批次失败:{e}"))?;
+                if profile_writes {
+                    eprintln!("新筹码计算转列 stocks={} snapshots={} bins={} compute_prepare_ms={compute_prepare_ms} queue_wait_ms={}", ts_group.len(), rows.0, rows.1, started.elapsed().as_millis());
+                }
                 Ok(())
             },
         )
@@ -854,7 +867,11 @@ pub fn rebuild_cyq_chen_all_with_progress(
                 finished: ts_codes.len(),
                 total: ts_codes.len(),
                 current_label: None,
-                message: "筹码计算已结束，正在等待写入、事务提交及结果库收尾。".to_string(),
+                message: format!(
+                    "筹码计算已结束，已写入提交 {} / {} 只股票，正在等待剩余写入及结果库收尾。",
+                    written_stocks.load(std::sync::atomic::Ordering::Relaxed),
+                    ts_codes.len(),
+                ),
             });
         }
     }
@@ -1741,6 +1758,7 @@ bias = 0.5
             rx,
             config,
             "unfinished".to_string(),
+            None,
         )
         .unwrap_err();
         assert!(error.contains("临时库不发布"));
@@ -1791,6 +1809,7 @@ bias = 0.5
             rx,
             config,
             "changed-strategy-hash".to_string(),
+            None,
         )
         .expect_err("full rebuild should abort");
 

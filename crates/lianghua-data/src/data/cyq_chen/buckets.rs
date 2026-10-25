@@ -223,6 +223,7 @@ pub(super) fn build_percent_range(
 pub(super) fn build_snapshot(
     bar: &ChenChipBar,
     buckets: &[ChipBucket],
+    include_pending: bool,
 ) -> Result<ChenChipSnapshot, String> {
     let mut bins = Vec::with_capacity(buckets.len());
     for (index, bucket) in buckets.iter().enumerate() {
@@ -236,7 +237,11 @@ pub(super) fn build_snapshot(
             main_chip: finite_value(bucket.main_chip)?,
             retail_chip: finite_value(bucket.retail_chip)?,
             total_chip: finite_value(total_chip)?,
-            pending: bucket.pending.clone(),
+            pending: if include_pending {
+                bucket.pending.clone()
+            } else {
+                Vec::new()
+            },
         });
     }
 

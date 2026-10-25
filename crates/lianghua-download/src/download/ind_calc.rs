@@ -449,9 +449,7 @@ pub fn calc_inds_with_cache_lossy(
     row_data: &RowData,
 ) -> HashMap<String, Vec<Option<f64>>> {
     let series_len = row_data.trade_dates.len();
-    let Ok(mut rt) = row_into_rt(row_data.clone()) else {
-        return HashMap::new();
-    };
+    let mut rt = lianghua_data::data::runtime::row_to_shared_rt(row_data);
     let mut calculated = HashMap::with_capacity(inds_cache.len());
 
     for ind in inds_cache {
@@ -588,7 +586,9 @@ mod tests {
             cols: HashMap::from([("C".to_string(), vec![Some(1.23), Some(2.34)])]),
         };
 
+        let borrowed = super::calc_inds_with_cache_lossy(&cache, &row_data);
         let result = calc_inds_with_cache(&cache, row_data).expect("calculate indicators");
+        assert_eq!(result, borrowed);
 
         assert_eq!(result.get("A"), Some(&vec![Some(1.24), Some(2.35)]));
         assert_eq!(result.get("B"), Some(&vec![Some(2.48), Some(4.7)]));

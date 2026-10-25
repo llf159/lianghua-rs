@@ -1,3 +1,5 @@
+use super::prepare::CyqChenBatchBuilder;
+pub(super) use super::prepare::prepare_cyq_chen_batch_rows;
 use crate::data::cyq_chen_data::store::{
     drop_cyq_chen_db_indexes, ensure_cyq_chen_db_indexes, write_cyq_chen_meta,
 };
@@ -11,33 +13,23 @@ use crate::data::DataReader;
 use crate::data::RowData;
 use crate::data::cyq_chen::ChenChipConfig;
 use crate::data::cyq_chen::ChenChipFeatureState;
-use crate::data::cyq_chen::ChipDirection;
 use crate::data::cyq_chen::CompiledChipChangeConfig;
 use crate::data::cyq_chen::compute_chen_chip_snapshots_from_initial_bins_with_compiled_config_with_features;
 use crate::data::cyq_chen::compute_chen_chip_snapshots_with_compiled_config_with_features;
 use crate::data::cyq_chen::estimate_chen_chip_expression_warmup;
-use crate::data::cyq_chen::round_chen_chip_snapshot;
 use crate::data::cyq_chen::round_chen_chip_value;
-use crate::data::expr_program_uses_runtime_key;
 use crate::data::extras::inject_stock_extra_fields;
 use crate::data::load_trade_date_list;
 use duckdb::Appender;
 use duckdb::Connection;
-use duckdb::arrow::array::ArrayRef;
-use duckdb::arrow::array::Float64Array;
-use duckdb::arrow::array::Int32Array;
-use duckdb::arrow::array::StringArray;
-use duckdb::arrow::array::builder::StringBuilder;
-use duckdb::arrow::datatypes::DataType;
-use duckdb::arrow::datatypes::Field;
-use duckdb::arrow::datatypes::Schema;
-use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::params;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Receiver;
+use std::time::{Duration, Instant};
 pub(super) fn bucket_history_key(price_low: f64, price_high: f64) -> (u64, u64) {
     (
         round_chen_chip_value(price_low).to_bits(),
@@ -168,31 +160,16 @@ pub(super) fn resolve_first_computable_output_date(
         })
 }
 
-pub fn compute_cyq_chen_stock_group_batch(
+fn load_cyq_chen_group_rows(
     worker_reader: &DataReader,
-    state_conn: Option<&Connection>,
+    ts_group: &[String],
     load_start_date: &str,
     start_date: &str,
     end_date: &str,
-    chip_config: &CompiledChipChangeConfig,
-    config: ChenChipConfig,
-    st_list: &HashSet<String>,
-    total_share_map: &HashMap<String, f64>,
-    ts_group: &[String],
-    on_stock_done: Option<&dyn Fn(&str)>,
-    checkpoint_recovery: Option<&CyqChenCheckpointRecovery<'_>>,
-) -> Result<CyqChenWriteBatch, String> {
-    let lookback = config
-        .warmup_days
-        .max(estimate_chen_chip_expression_warmup(chip_config)?)
-        .max(usize::from(state_conn.is_some()));
-    let needs_main_ratio_history = chip_config.strategies.iter().any(|strategy| {
-        strategy.direction == ChipDirection::Sell
-            && expr_program_uses_runtime_key(&strategy.when_ast, "MAIN_CHIP_RATIO")
-    });
+    lookback: usize,
+) -> Result<HashMap<String, RowData>, String> {
     let mut rows_map =
         worker_reader.load_batch(ts_group, DEFAULT_ADJ_TYPE, load_start_date, end_date)?;
-    let mut batch = CyqChenWriteBatch::default();
     for ts_code in ts_group {
         let mut row_data = match rows_map.remove(ts_code.as_str()) {
             Some(r) => r,
@@ -258,6 +235,44 @@ pub fn compute_cyq_chen_stock_group_batch(
                 }
             }
         }
+
+        rows_map.insert(ts_code.clone(), row_data);
+    }
+    Ok(rows_map)
+}
+
+pub fn compute_cyq_chen_stock_group_batch(
+    worker_reader: &DataReader,
+    state_conn: Option<&Connection>,
+    load_start_date: &str,
+    start_date: &str,
+    end_date: &str,
+    chip_config: &CompiledChipChangeConfig,
+    config: ChenChipConfig,
+    st_list: &HashSet<String>,
+    total_share_map: &HashMap<String, f64>,
+    ts_group: &[String],
+    on_stock_done: Option<&dyn Fn(&str)>,
+    checkpoint_recovery: Option<&CyqChenCheckpointRecovery<'_>>,
+) -> Result<CyqChenWriteBatch, String> {
+    let lookback = config
+        .warmup_days
+        .max(estimate_chen_chip_expression_warmup(chip_config)?)
+        .max(usize::from(state_conn.is_some()));
+    let needs_main_ratio_history = chip_config.sell_uses_main_ratio_history;
+    let mut rows_map = load_cyq_chen_group_rows(
+        worker_reader,
+        ts_group,
+        load_start_date,
+        start_date,
+        end_date,
+        lookback,
+    )?;
+    let mut batch = CyqChenWriteBatch::default();
+    for ts_code in ts_group {
+        let row_data = rows_map
+            .remove(ts_code)
+            .ok_or_else(|| format!("缺少已加载行情: {ts_code}"))?;
 
         let stock = (|mut row_data: RowData,
                       state_conn: Option<&Connection>,
@@ -364,9 +379,9 @@ pub fn compute_cyq_chen_stock_group_batch(
                             .insert(bucket_history_key(bin.price_low, bin.price_high), index);
                     }
 
-                    let mut main_ratio_history: Vec<Arc<Vec<Option<f64>>>> = (0..bins.len())
-                        .map(|_| Arc::new(vec![None; row_trade_dates.len()]))
-                        .collect();
+                    let mut main_ratio_history: Vec<Arc<Vec<Option<f64>>>> = if needs_main_ratio_history {
+                        (0..bins.len()).map(|_| Arc::new(vec![None; row_trade_dates.len()])).collect()
+                    } else { Vec::new() };
                     if needs_main_ratio_history && output_start_index > 0 {
                         let history_start_date = row_trade_dates
                             .first()
@@ -584,348 +599,86 @@ pub fn compute_cyq_chen_stock_group_batch(
     Ok(batch)
 }
 
-pub(super) fn prepare_cyq_chen_batch_rows(
-    batch: CyqChenWriteBatch,
+pub(super) fn compute_prepared_cyq_chen_stock_group_batch(
+    worker_reader: &DataReader,
+    load_start_date: &str,
+    start_date: &str,
+    end_date: &str,
+    chip_config: &CompiledChipChangeConfig,
     config: ChenChipConfig,
+    st_list: &HashSet<String>,
+    total_share_map: &HashMap<String, f64>,
+    ts_group: &[String],
+    on_stock_done: Option<&dyn Fn(&str)>,
 ) -> Result<PreparedCyqChenWriteBatch, String> {
-    let stock_count = batch.stocks.len();
-    let replace_ts_codes = batch
-        .stocks
-        .iter()
-        .filter(|stock| stock.replace_history)
-        .map(|stock| stock.ts_code.clone())
-        .collect();
-    let snapshot_rows = batch
-        .stocks
-        .iter()
-        .map(|stock| stock.snapshots.len())
-        .sum::<usize>();
-    let bin_rows = batch
-        .stocks
-        .iter()
-        .flat_map(|stock| &stock.snapshots)
-        .map(|snapshot| snapshot.bins.len())
-        .sum::<usize>();
-    let rounded_bucket_pct = round_chen_chip_value(config.bucket_pct);
-
-    let mut snapshot_ts_code =
-        StringBuilder::with_capacity(snapshot_rows, snapshot_rows.saturating_mul(12));
-    let mut snapshot_trade_date =
-        StringBuilder::with_capacity(snapshot_rows, snapshot_rows.saturating_mul(8));
-    let mut snapshot_adj_type = StringBuilder::with_capacity(
-        snapshot_rows,
-        snapshot_rows.saturating_mul(DEFAULT_ADJ_TYPE.len()),
-    );
-    let mut snapshot_warmup_days = Vec::with_capacity(snapshot_rows);
-    let mut snapshot_bucket_pct = Vec::with_capacity(snapshot_rows);
-    let mut snapshot_close = Vec::with_capacity(snapshot_rows);
-    let mut snapshot_min_price = Vec::with_capacity(snapshot_rows);
-    let mut snapshot_max_price = Vec::with_capacity(snapshot_rows);
-    let mut snapshot_main_total = Vec::with_capacity(snapshot_rows);
-    let mut snapshot_retail_total = Vec::with_capacity(snapshot_rows);
-    let mut snapshot_total_chips = Vec::with_capacity(snapshot_rows);
-    let mut snapshot_total_profit_ratio = Vec::with_capacity(snapshot_rows);
-    let mut snapshot_total_trapped_ratio = Vec::with_capacity(snapshot_rows);
-    let mut snapshot_main_avg_cost = Vec::with_capacity(snapshot_rows);
-    let mut snapshot_chip_peak_price = Vec::with_capacity(snapshot_rows);
-    let mut snapshot_percent_70_price_low = Vec::with_capacity(snapshot_rows);
-    let mut snapshot_percent_70_price_high = Vec::with_capacity(snapshot_rows);
-    let mut snapshot_percent_70_concentration = Vec::with_capacity(snapshot_rows);
-    let mut snapshot_percent_90_price_low = Vec::with_capacity(snapshot_rows);
-    let mut snapshot_percent_90_price_high = Vec::with_capacity(snapshot_rows);
-    let mut snapshot_percent_90_concentration = Vec::with_capacity(snapshot_rows);
-    let mut snapshot_main_profit_ratio = Vec::with_capacity(snapshot_rows);
-    let mut snapshot_main_trapped_ratio = Vec::with_capacity(snapshot_rows);
-    let mut snapshot_unknown_trapped = Vec::with_capacity(snapshot_rows);
-    let mut snapshot_feature_days = Vec::with_capacity(snapshot_rows);
-    let mut snapshot_feature_version = Vec::with_capacity(snapshot_rows);
-    let mut snapshot_real_loss20 = Vec::with_capacity(snapshot_rows);
-    let mut snapshot_trap_coef = Vec::with_capacity(snapshot_rows);
-
-    let mut bin_ts_code = StringBuilder::with_capacity(bin_rows, bin_rows.saturating_mul(12));
-    let mut bin_trade_date = StringBuilder::with_capacity(bin_rows, bin_rows.saturating_mul(8));
-    let mut bin_adj_type =
-        StringBuilder::with_capacity(bin_rows, bin_rows.saturating_mul(DEFAULT_ADJ_TYPE.len()));
-    let mut bin_index = Vec::with_capacity(bin_rows);
-    let mut bin_price = Vec::with_capacity(bin_rows);
-    let mut bin_price_low = Vec::with_capacity(bin_rows);
-    let mut bin_price_high = Vec::with_capacity(bin_rows);
-    let mut bin_main_chip = Vec::with_capacity(bin_rows);
-    let mut bin_retail_chip = Vec::with_capacity(bin_rows);
-    let mut bin_total_chip = Vec::with_capacity(bin_rows);
-
-    let mut checkpoints = Vec::with_capacity(stock_count);
-    for stock in batch.stocks {
-        let ts_code = stock.ts_code;
-        if let Some(last) = stock.snapshots.last() {
-            let date = last
-                .trade_date
-                .as_deref()
-                .ok_or_else(|| format!("{ts_code} 的新筹码快照缺少交易日期"))?;
-            let state = stock
-                .feature_state
-                .as_ref()
-                .ok_or_else(|| format!("{ts_code} 的新筹码计算缺少特征续算状态"))?;
-            state
-                .validate(date, &last.bins)
-                .map_err(|e| format!("拒绝写入无效新筹码检查点, ts_code={ts_code}: {e}"))?;
-            checkpoints.push((
-                ts_code.clone(),
-                last.trade_date
-                    .clone()
-                    .ok_or_else(|| format!("{ts_code} 的新筹码快照缺少交易日期"))?,
-                serde_json::to_string(&last.bins).map_err(|e| e.to_string())?,
-                stock
-                    .feature_state
-                    .as_ref()
-                    .map(serde_json::to_string)
-                    .transpose()
-                    .map_err(|e| e.to_string())?,
-            ));
-        }
-        for mut snapshot in stock.snapshots {
-            let trade_date = snapshot
-                .trade_date
-                .take()
-                .ok_or_else(|| format!("{ts_code} 的新筹码快照缺少交易日期"))?;
-            round_chen_chip_snapshot(&mut snapshot);
-            snapshot_ts_code.append_value(&ts_code);
-            snapshot_trade_date.append_value(&trade_date);
-            snapshot_adj_type.append_value(DEFAULT_ADJ_TYPE);
-            snapshot_warmup_days.push(config.warmup_days as i32);
-            snapshot_bucket_pct.push(rounded_bucket_pct);
-            snapshot_close.push(snapshot.close);
-            snapshot_min_price.push(snapshot.min_price);
-            snapshot_max_price.push(snapshot.max_price);
-            snapshot_main_total.push(snapshot.main_total);
-            snapshot_retail_total.push(snapshot.retail_total);
-            snapshot_total_chips.push(snapshot.total_chips);
-            snapshot_total_profit_ratio.push(snapshot.total_profit_ratio);
-            snapshot_total_trapped_ratio.push(snapshot.total_trapped_ratio);
-            snapshot_main_avg_cost.push(snapshot.main_avg_cost);
-            snapshot_chip_peak_price.push(snapshot.chip_peak_price);
-            snapshot_percent_70_price_low.push(snapshot.percent_70.price_low);
-            snapshot_percent_70_price_high.push(snapshot.percent_70.price_high);
-            snapshot_percent_70_concentration.push(snapshot.percent_70.concentration);
-            snapshot_percent_90_price_low.push(snapshot.percent_90.price_low);
-            snapshot_percent_90_price_high.push(snapshot.percent_90.price_high);
-            snapshot_percent_90_concentration.push(snapshot.percent_90.concentration);
-            snapshot_main_profit_ratio.push(snapshot.main_profit_ratio);
-            snapshot_main_trapped_ratio.push(snapshot.main_trapped_ratio);
-            snapshot_unknown_trapped.push(snapshot.unknown_trapped);
-            snapshot_feature_days.push(snapshot.feature_days.map(|value| value as i32));
-            snapshot_feature_version.push(snapshot.feature_version.map(|value| value as i32));
-            snapshot_real_loss20.push(snapshot.real_loss20);
-            snapshot_trap_coef.push(snapshot.trap_coef);
-
-            for bin in snapshot.bins {
-                bin_ts_code.append_value(&ts_code);
-                bin_trade_date.append_value(&trade_date);
-                bin_adj_type.append_value(DEFAULT_ADJ_TYPE);
-                bin_index.push(bin.index as i32);
-                bin_price.push(bin.price);
-                bin_price_low.push(bin.price_low);
-                bin_price_high.push(bin.price_high);
-                bin_main_chip.push(bin.main_chip);
-                bin_retail_chip.push(bin.retail_chip);
-                bin_total_chip.push(bin.total_chip);
+    let lookback = config
+        .warmup_days
+        .max(estimate_chen_chip_expression_warmup(chip_config)?);
+    let mut rows = load_cyq_chen_group_rows(
+        worker_reader,
+        ts_group,
+        load_start_date,
+        start_date,
+        end_date,
+        lookback,
+    )?;
+    let snapshot_capacity = rows.values().map(|row| row.trade_dates.len()).sum();
+    let mut builder = CyqChenBatchBuilder::new(snapshot_capacity, 0, config);
+    for ts_code in ts_group {
+        let mut row = rows
+            .remove(ts_code)
+            .ok_or_else(|| format!("缺少已加载行情: {ts_code}"))?;
+        inject_stock_extra_fields(
+            &mut row,
+            ts_code,
+            st_list.contains(ts_code),
+            total_share_map.get(ts_code).copied(),
+        )?;
+        if let Some(last_missing) = row
+            .cols
+            .get("TOR")
+            .and_then(|series| series.iter().rposition(Option::is_none))
+        {
+            row.trade_dates.drain(..=last_missing);
+            for series in row.cols.values_mut() {
+                series.drain(..=last_missing);
             }
         }
+        if let Some(output_start) =
+            resolve_first_computable_output_date(&row, start_date, end_date, config.warmup_days)
+        {
+            let mut state = ChenChipFeatureState::default();
+            let mut last = None;
+            crate::data::cyq_chen::replay_chen_chip_snapshots(
+                std::borrow::Cow::Owned(row),
+                &output_start,
+                chip_config,
+                config,
+                &mut state,
+                false,
+                |snapshot| {
+                    if snapshot
+                        .trade_date
+                        .as_deref()
+                        .is_some_and(|date| date >= start_date && date <= end_date)
+                    {
+                        if let Some(previous) = last.replace(snapshot) {
+                            builder.append_snapshot(ts_code, previous)?;
+                        }
+                    }
+                    Ok(())
+                },
+            )
+            .map_err(|e| format!("ts_code={ts_code}: {e}"))?;
+            if let Some(last) = last {
+                builder.finish_stock(ts_code, last, Some(&state), false)?;
+            }
+        }
+        if let Some(done) = on_stock_done {
+            done(ts_code);
+        }
     }
-
-    let snapshot_batch = if snapshot_rows > 0 {
-        Some((|ts_code: StringArray,
-               trade_date: StringArray,
-               adj_type: StringArray,
-               warmup_days: Vec<i32>,
-               bucket_pct: Vec<f64>,
-               close: Vec<f64>,
-               min_price: Vec<f64>,
-               max_price: Vec<f64>,
-               main_total: Vec<f64>,
-               retail_total: Vec<f64>,
-               total_chips: Vec<f64>,
-               total_profit_ratio: Vec<f64>,
-               total_trapped_ratio: Vec<f64>,
-               main_avg_cost: Vec<f64>,
-               chip_peak_price: Vec<f64>,
-               percent_70_price_low: Vec<f64>,
-               percent_70_price_high: Vec<f64>,
-               percent_70_concentration: Vec<f64>,
-               percent_90_price_low: Vec<f64>,
-               percent_90_price_high: Vec<f64>,
-               percent_90_concentration: Vec<f64>,
-               main_profit_ratio: Vec<f64>,
-               main_trapped_ratio: Vec<f64>,
-               trap_coef: Vec<Option<f64>>,
-               real_loss20: Vec<Option<f64>>,
-               feature_version: Vec<Option<i32>>,
-               feature_days: Vec<Option<i32>>,
-               unknown_trapped: Vec<Option<f64>>|
-         -> Result<RecordBatch, String> {
-            let schema = Schema::new(vec![
-                Field::new("ts_code", DataType::Utf8, false),
-                Field::new("trade_date", DataType::Utf8, false),
-                Field::new("adj_type", DataType::Utf8, false),
-                Field::new("warmup_days", DataType::Int32, false),
-                Field::new("bucket_pct", DataType::Float64, false),
-                Field::new("close", DataType::Float64, false),
-                Field::new("min_price", DataType::Float64, false),
-                Field::new("max_price", DataType::Float64, false),
-                Field::new("main_total", DataType::Float64, false),
-                Field::new("retail_total", DataType::Float64, false),
-                Field::new("total_chips", DataType::Float64, false),
-                Field::new("total_profit_ratio", DataType::Float64, false),
-                Field::new("total_trapped_ratio", DataType::Float64, false),
-                Field::new("main_avg_cost", DataType::Float64, false),
-                Field::new("chip_peak_price", DataType::Float64, false),
-                Field::new("percent_70_price_low", DataType::Float64, false),
-                Field::new("percent_70_price_high", DataType::Float64, false),
-                Field::new("percent_70_concentration", DataType::Float64, false),
-                Field::new("percent_90_price_low", DataType::Float64, false),
-                Field::new("percent_90_price_high", DataType::Float64, false),
-                Field::new("percent_90_concentration", DataType::Float64, false),
-                Field::new("main_profit_ratio", DataType::Float64, false),
-                Field::new("main_trapped_ratio", DataType::Float64, false),
-                Field::new("trap_coef", DataType::Float64, true),
-                Field::new("real_loss20", DataType::Float64, true),
-                Field::new("feature_version", DataType::Int32, true),
-                Field::new("feature_days", DataType::Int32, true),
-                Field::new("unknown_trapped", DataType::Float64, true),
-            ]);
-            RecordBatch::try_new(
-                Arc::new(schema),
-                vec![
-                    string_array(ts_code),
-                    string_array(trade_date),
-                    string_array(adj_type),
-                    int32_array(warmup_days),
-                    float64_array(bucket_pct),
-                    float64_array(close),
-                    float64_array(min_price),
-                    float64_array(max_price),
-                    float64_array(main_total),
-                    float64_array(retail_total),
-                    float64_array(total_chips),
-                    float64_array(total_profit_ratio),
-                    float64_array(total_trapped_ratio),
-                    float64_array(main_avg_cost),
-                    float64_array(chip_peak_price),
-                    float64_array(percent_70_price_low),
-                    float64_array(percent_70_price_high),
-                    float64_array(percent_70_concentration),
-                    float64_array(percent_90_price_low),
-                    float64_array(percent_90_price_high),
-                    float64_array(percent_90_concentration),
-                    float64_array(main_profit_ratio),
-                    float64_array(main_trapped_ratio),
-                    Arc::new(Float64Array::from(trap_coef)),
-                    Arc::new(Float64Array::from(real_loss20)),
-                    Arc::new(Int32Array::from(feature_version)),
-                    Arc::new(Int32Array::from(feature_days)),
-                    Arc::new(Float64Array::from(unknown_trapped)),
-                ],
-            )
-            .map_err(|e| format!("创建cyq_chen_snapshot批次失败:{e}"))
-        })(
-            snapshot_ts_code.finish(),
-            snapshot_trade_date.finish(),
-            snapshot_adj_type.finish(),
-            snapshot_warmup_days,
-            snapshot_bucket_pct,
-            snapshot_close,
-            snapshot_min_price,
-            snapshot_max_price,
-            snapshot_main_total,
-            snapshot_retail_total,
-            snapshot_total_chips,
-            snapshot_total_profit_ratio,
-            snapshot_total_trapped_ratio,
-            snapshot_main_avg_cost,
-            snapshot_chip_peak_price,
-            snapshot_percent_70_price_low,
-            snapshot_percent_70_price_high,
-            snapshot_percent_70_concentration,
-            snapshot_percent_90_price_low,
-            snapshot_percent_90_price_high,
-            snapshot_percent_90_concentration,
-            snapshot_main_profit_ratio,
-            snapshot_main_trapped_ratio,
-            snapshot_trap_coef,
-            snapshot_real_loss20,
-            snapshot_feature_version,
-            snapshot_feature_days,
-            snapshot_unknown_trapped,
-        )?)
-    } else {
-        None
-    };
-
-    let bin_batch = if bin_rows > 0 {
-        Some((|ts_code: StringArray,
-               trade_date: StringArray,
-               adj_type: StringArray,
-               bin_index: Vec<i32>,
-               price: Vec<f64>,
-               price_low: Vec<f64>,
-               price_high: Vec<f64>,
-               main_chip: Vec<f64>,
-               retail_chip: Vec<f64>,
-               total_chip: Vec<f64>|
-         -> Result<RecordBatch, String> {
-            let schema = Schema::new(vec![
-                Field::new("ts_code", DataType::Utf8, false),
-                Field::new("trade_date", DataType::Utf8, false),
-                Field::new("adj_type", DataType::Utf8, false),
-                Field::new("bin_index", DataType::Int32, false),
-                Field::new("price", DataType::Float64, false),
-                Field::new("price_low", DataType::Float64, false),
-                Field::new("price_high", DataType::Float64, false),
-                Field::new("main_chip", DataType::Float64, false),
-                Field::new("retail_chip", DataType::Float64, false),
-                Field::new("total_chip", DataType::Float64, false),
-            ]);
-            RecordBatch::try_new(
-                Arc::new(schema),
-                vec![
-                    string_array(ts_code),
-                    string_array(trade_date),
-                    string_array(adj_type),
-                    int32_array(bin_index),
-                    float64_array(price),
-                    float64_array(price_low),
-                    float64_array(price_high),
-                    float64_array(main_chip),
-                    float64_array(retail_chip),
-                    float64_array(total_chip),
-                ],
-            )
-            .map_err(|e| format!("创建cyq_chen_bin批次失败:{e}"))
-        })(
-            bin_ts_code.finish(),
-            bin_trade_date.finish(),
-            bin_adj_type.finish(),
-            bin_index,
-            bin_price,
-            bin_price_low,
-            bin_price_high,
-            bin_main_chip,
-            bin_retail_chip,
-            bin_total_chip,
-        )?)
-    } else {
-        None
-    };
-
-    Ok(PreparedCyqChenWriteBatch {
-        stock_count,
-        replace_ts_codes,
-        snapshot_rows,
-        bin_rows,
-        checkpoints,
-        snapshot_batch,
-        bin_batch,
-    })
+    builder.finish()
 }
 
 pub(super) fn append_prepared_cyq_chen_batch_rows(
@@ -1013,18 +766,6 @@ pub(super) fn append_cyq_chen_batch_rows(
     )
 }
 
-pub(super) fn string_array(values: StringArray) -> ArrayRef {
-    Arc::new(values)
-}
-
-pub(super) fn int32_array(values: Vec<i32>) -> ArrayRef {
-    Arc::new(Int32Array::from(values))
-}
-
-pub(super) fn float64_array(values: Vec<f64>) -> ArrayRef {
-    Arc::new(Float64Array::from(values))
-}
-
 pub(super) fn finish_cyq_chen_write(
     compute_result: Result<(), String>,
     writer_result: Result<(usize, usize), String>,
@@ -1039,6 +780,7 @@ pub(super) fn write_cyq_chen_batches_from_channel(
     rx: Receiver<CyqChenWriteMessage>,
     config: ChenChipConfig,
     strategy_hash: String,
+    written_stocks: Option<Arc<AtomicUsize>>,
 ) -> Result<(usize, usize), String> {
     let mut conn = Connection::open(db_path).map_err(|e| format!("打开筹码库失败:{e}"))?;
     let occupied: bool = conn
@@ -1054,6 +796,7 @@ pub(super) fn write_cyq_chen_batches_from_channel(
     if occupied {
         return Err("新筹码分批重建只允许写入空临时库，禁止覆盖已有数据".to_string());
     }
+    let bulk = crate::data::bulk_write::BulkWriteSettings::apply(&conn)?;
     conn.execute_batch("SET memory_limit = '2GB'; SET threads = 4;")
         .map_err(|e| format!("设置新筹码写库资源上限失败:{e}"))?;
     drop_cyq_chen_db_indexes(&conn)?;
@@ -1068,7 +811,10 @@ pub(super) fn write_cyq_chen_batches_from_channel(
         .into_iter()
         .map(|writer_conn| {
             let worker_rx = Arc::clone(&shared_rx);
-            std::thread::spawn(move || write_cyq_chen_batch_groups(writer_conn, worker_rx, config))
+            let written_stocks = written_stocks.clone();
+            std::thread::spawn(move || {
+                write_cyq_chen_batch_groups(writer_conn, worker_rx, config, written_stocks)
+            })
         })
         .collect::<Vec<_>>();
     drop(shared_rx);
@@ -1097,25 +843,40 @@ pub(super) fn write_cyq_chen_batches_from_channel(
         .map_err(|e| format!("创建筹码元数据事务失败:{e}"))?;
     write_cyq_chen_meta(&tx, config, &strategy_hash)?;
     tx.commit().map_err(|e| format!("提交筹码元数据失败:{e}"))?;
+    let started = Instant::now();
     ensure_cyq_chen_db_indexes(&conn)?;
+    if std::env::var_os("LIANGHUA_CYQ_WRITE_PROFILE").is_some() {
+        eprintln!("新筹码建索引 index_ms={}", started.elapsed().as_millis());
+    }
+    let started = Instant::now();
     conn.execute_batch("CHECKPOINT")
         .map_err(|e| format!("检查点新筹码库失败:{e}"))?;
-    Ok((snapshot_rows, bin_rows))
+    if std::env::var_os("LIANGHUA_CYQ_WRITE_PROFILE").is_some() {
+        eprintln!(
+            "新筹码最终落盘 checkpoint_ms={}",
+            started.elapsed().as_millis()
+        );
+    }
+    bulk.finish(&conn, Ok((snapshot_rows, bin_rows)))
 }
 
 fn write_cyq_chen_batch_groups(
     mut conn: Connection,
     rx: Arc<Mutex<Receiver<CyqChenWriteMessage>>>,
     config: ChenChipConfig,
+    written_stocks: Option<Arc<AtomicUsize>>,
 ) -> Result<(usize, usize), String> {
     let mut snapshot_rows = 0usize;
     let mut bin_rows = 0usize;
     let mut drained = false;
+    let profile = std::env::var_os("LIANGHUA_CYQ_WRITE_PROFILE").is_some();
     while !drained {
         let tx = conn
             .transaction()
             .map_err(|e| format!("创建筹码批次事务失败:{e}"))?;
-        let (added_snapshot_rows, added_bin_rows) = {
+        let mut wait_time = Duration::ZERO;
+        let mut append_time = Duration::ZERO;
+        let (added_stocks, added_snapshot_rows, added_bin_rows, flush_time) = {
             let mut snapshot_app = tx
                 .appender(CYQ_CHEN_SNAPSHOT_TABLE)
                 .map_err(|e| format!("创建cyq_chen_snapshot写入器失败:{e}"))?;
@@ -1127,10 +888,12 @@ fn write_cyq_chen_batch_groups(
             let mut group_snapshot_rows = 0usize;
             let mut group_bin_rows = 0usize;
             while group_batches < 32 && group_stocks < 16 && group_bin_rows < 250_000 {
+                let started = Instant::now();
                 let message = rx
                     .lock()
                     .map_err(|_| "新筹码写库接收队列异常".to_string())?
                     .recv();
+                wait_time += started.elapsed();
                 let Ok(message) = message else {
                     drained = true;
                     break;
@@ -1148,25 +911,47 @@ fn write_cyq_chen_batch_groups(
                     }
                 };
                 group_stocks += batch.stock_count;
+                let started = Instant::now();
                 let (snapshots, bins) = append_prepared_cyq_chen_batch_rows(
                     &tx,
                     &mut snapshot_app,
                     &mut bin_app,
                     batch,
                 )?;
+                append_time += started.elapsed();
                 group_batches += 1;
                 group_snapshot_rows += snapshots;
                 group_bin_rows += bins;
             }
+            let started = Instant::now();
             snapshot_app
                 .flush()
                 .map_err(|e| format!("刷新cyq_chen_snapshot失败:{e}"))?;
             bin_app
                 .flush()
                 .map_err(|e| format!("刷新cyq_chen_bin失败:{e}"))?;
-            (group_snapshot_rows, group_bin_rows)
+            (
+                group_stocks,
+                group_snapshot_rows,
+                group_bin_rows,
+                started.elapsed(),
+            )
         };
+        let started = Instant::now();
         tx.commit().map_err(|e| format!("提交筹码批次失败:{e}"))?;
+        let commit_time = started.elapsed();
+        if let Some(written_stocks) = &written_stocks {
+            written_stocks.fetch_add(added_stocks, Ordering::Relaxed);
+        }
+        if profile && added_stocks > 0 {
+            eprintln!(
+                "新筹码写库 stocks={added_stocks} snapshots={added_snapshot_rows} bins={added_bin_rows} wait_ms={} append_ms={} flush_ms={} commit_ms={}",
+                wait_time.as_millis(),
+                append_time.as_millis(),
+                flush_time.as_millis(),
+                commit_time.as_millis(),
+            );
+        }
         snapshot_rows += added_snapshot_rows;
         bin_rows += added_bin_rows;
     }
@@ -1311,6 +1096,73 @@ mod tests {
     use std::sync::mpsc::sync_channel;
 
     #[test]
+    fn streamed_columns_match_collected_snapshots_with_posterior_checkpoint() {
+        let source_dir = unique_temp_source_dir();
+        prepare_source_db(&source_dir);
+        let source = source_dir.to_str().unwrap();
+        let reader = crate::data::DataReader::new(source).unwrap();
+        let mut chip = crate::data::cyq_chen::ChipChangeConfig::load(source).unwrap();
+        let mut confirmation = chip.strategy[0].clone();
+        confirmation.name = "later attribution".into();
+        confirmation.holder = crate::data::cyq_chen::ChipHolder::Retail;
+        confirmation.confirm_after = 2;
+        chip.strategy.push(confirmation);
+        let compiled = chip.compile().unwrap();
+        let config = ChenChipConfig {
+            warmup_days: 2,
+            bucket_pct: 5.0,
+        };
+        let codes = vec!["000001.SZ".to_string(), "000002.SZ".to_string()];
+        let mut reference = compiled.clone();
+        reference.sell_uses_main_ratio_history = true;
+        let collected = super::compute_cyq_chen_stock_group_batch(
+            &reader,
+            None,
+            "20260401",
+            "20260401",
+            "20260408",
+            &reference,
+            config,
+            &std::collections::HashSet::new(),
+            &std::collections::HashMap::new(),
+            &codes,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(
+            collected
+                .stocks
+                .iter()
+                .flat_map(|s| &s.snapshots)
+                .flat_map(|s| &s.bins)
+                .any(|b| !b.pending.is_empty())
+        );
+        let expected = super::prepare_cyq_chen_batch_rows(collected, config).unwrap();
+        let actual = super::compute_prepared_cyq_chen_stock_group_batch(
+            &reader,
+            "20260401",
+            "20260401",
+            "20260408",
+            &compiled,
+            config,
+            &std::collections::HashSet::new(),
+            &std::collections::HashMap::new(),
+            &codes,
+            None,
+        )
+        .unwrap();
+        assert_eq!(actual.snapshot_batch, expected.snapshot_batch);
+        assert_eq!(actual.bin_batch, expected.bin_batch);
+        assert_eq!(actual.checkpoints, expected.checkpoints);
+        assert_eq!(actual.snapshot_rows, expected.snapshot_rows);
+        assert_eq!(actual.bin_rows, expected.bin_rows);
+        assert_eq!(actual.stock_count, expected.stock_count);
+        drop(reader);
+        fs::remove_dir_all(source_dir).unwrap();
+    }
+
+    #[test]
     fn parallel_full_writer_persists_distinct_stocks() {
         let source_dir = unique_temp_source_dir();
         prepare_source_db(&source_dir);
@@ -1354,14 +1206,20 @@ mod tests {
             .unwrap();
         }
         drop(tx);
+        let written_stocks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let result = write_cyq_chen_batches_from_channel(
             stage.to_str().unwrap(),
             rx,
             config,
             "test".to_string(),
+            Some(std::sync::Arc::clone(&written_stocks)),
         )
         .unwrap();
         assert_eq!(result, (64, 64 * snapshot.bins.len()));
+        assert_eq!(
+            written_stocks.load(std::sync::atomic::Ordering::Relaxed),
+            64
+        );
         let conn = duckdb::Connection::open(&stage).unwrap();
         let stored: i64 = conn
             .query_row("SELECT COUNT(*) FROM cyq_chen_checkpoint", [], |row| {
@@ -1384,6 +1242,7 @@ mod tests {
             rx,
             ChenChipConfig::default(),
             String::new(),
+            None,
         );
         let compute_result = tx
             .send(CyqChenWriteMessage::Abort("unused".to_string()))

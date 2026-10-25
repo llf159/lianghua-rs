@@ -280,7 +280,7 @@ mod tests {
             state
                 .observe(&bar, &buckets, &[100.0], &[100.0], &[100.0])
                 .unwrap();
-            let mut snapshot = build_snapshot(&bar, &buckets).unwrap();
+            let mut snapshot = build_snapshot(&bar, &buckets, true).unwrap();
             state.fill_snapshot(&mut snapshot);
             if day == 19 {
                 assert!(snapshot.real_loss20.is_none());
@@ -309,7 +309,7 @@ mod tests {
             state
                 .observe(&bar, &buckets, &[100.0], &[100.0], &[100.0])
                 .unwrap();
-            let mut snapshot = build_snapshot(&bar, &buckets).unwrap();
+            let mut snapshot = build_snapshot(&bar, &buckets, true).unwrap();
             state.fill_snapshot(&mut snapshot);
             assert_close(snapshot.trap_coef.unwrap(), expected);
         }
@@ -318,7 +318,7 @@ mod tests {
         state
             .observe(&bar, &buckets, &[100.0], &[50.0], &[100.0])
             .unwrap();
-        let mut snapshot = build_snapshot(&bar, &buckets).unwrap();
+        let mut snapshot = build_snapshot(&bar, &buckets, true).unwrap();
         state.fill_snapshot(&mut snapshot);
         assert_close(
             snapshot.trap_coef.unwrap(),
@@ -383,7 +383,7 @@ mod tests {
         state.buckets[0].initial = 0.0;
         state.buckets[0].ages[29] = 60.0;
         state.buckets[1].loss_run = 120;
-        let mut snapshot = build_snapshot(&bar, &buckets).unwrap();
+        let mut snapshot = build_snapshot(&bar, &buckets, true).unwrap();
         state.fill_snapshot(&mut snapshot);
         assert_close(snapshot.trap_coef.unwrap(), 0.6 * 0.2 * 0.25 + 0.4 * 1.0);
         let mut scaled = state.clone();

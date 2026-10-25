@@ -234,6 +234,7 @@ pub(super) fn expand_buckets_for_bar(
         return Err("价格分桶为空，无法计算筹码快照".to_string());
     }
 
+    let track_main_ratio_history = !main_ratio_history.is_empty();
     let first_low = buckets.first().expect("bucket exists").price_low;
     let last_high = buckets.last().expect("bucket exists").price_high;
 
@@ -280,7 +281,11 @@ pub(super) fn expand_buckets_for_bar(
         new_boundaries.reverse();
 
         let mut new_buckets = Vec::with_capacity(low_expand_count);
-        let mut new_histories = Vec::with_capacity(low_expand_count);
+        let mut new_histories = Vec::with_capacity(if track_main_ratio_history {
+            low_expand_count
+        } else {
+            0
+        });
         for w in new_boundaries.windows(2) {
             let (pl, ph) = (w[0], w[1]);
             let rate_series =
@@ -297,7 +302,9 @@ pub(super) fn expand_buckets_for_bar(
                 ratel: rate_series.as_ref().map(|series| Arc::clone(&series.2)),
                 ratec: rate_series.map(|series| series.3),
             });
-            new_histories.push(Arc::new(vec![None; series_len]));
+            if track_main_ratio_history {
+                new_histories.push(Arc::new(vec![None; series_len]));
+            }
         }
 
         let insert_pos = 0;
@@ -308,7 +315,11 @@ pub(super) fn expand_buckets_for_bar(
     if high_expand_count > 0 {
         let mut boundary = last_high;
         let mut new_buckets = Vec::with_capacity(high_expand_count);
-        let mut new_histories = Vec::with_capacity(high_expand_count);
+        let mut new_histories = Vec::with_capacity(if track_main_ratio_history {
+            high_expand_count
+        } else {
+            0
+        });
         for _ in 0..high_expand_count {
             let new_high = boundary * step;
             let rate_series = needs_bucket_rate_series
@@ -325,7 +336,9 @@ pub(super) fn expand_buckets_for_bar(
                 ratel: rate_series.as_ref().map(|series| Arc::clone(&series.2)),
                 ratec: rate_series.map(|series| series.3),
             });
-            new_histories.push(Arc::new(vec![None; series_len]));
+            if track_main_ratio_history {
+                new_histories.push(Arc::new(vec![None; series_len]));
+            }
             boundary = new_high;
         }
         buckets.extend(new_buckets);

@@ -58,6 +58,9 @@ codegen-units = 1
 [profile.dev.package.lianghua-data]
 opt-level = 3
 
+[profile.dev.package.duckdb]
+opt-level = 3
+
 [profile.dev.package.lianghua-download]
 opt-level = 3
 
