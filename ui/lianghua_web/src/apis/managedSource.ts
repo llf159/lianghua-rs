@@ -795,6 +795,10 @@ export async function removeManagedSourceFile(
     await invoke('delete_managed_result_db', { sourceDir })
     return inspectManagedSourceStatus(sourceDir)
   }
+  if (fileId === 'cyq-chen-db') {
+    await removeManagedCyqChenStorage(true)
+    return inspectManagedSourceStatus(sourceDir)
+  }
 
   const targetRelativePath = getTargetRelativePath(targetFile, sourceDir)
   if (await exists(await resolveAbsoluteTargetPath(targetRelativePath))) {
@@ -802,6 +806,12 @@ export async function removeManagedSourceFile(
   }
 
   return inspectManagedSourceStatus(sourceDir)
+}
+
+export async function removeManagedCyqChenStorage(removeOfficial: boolean) {
+  const sourceDir = DEFAULT_MANAGED_SOURCE_DIR
+  await ensureManagedSourcePath(sourceDir)
+  return invoke('delete_managed_cyq_chen_storage', { sourceDir, removeOfficial })
 }
 
 export async function exportManagedSourceDirectory(_sourceDirInput?: string) {

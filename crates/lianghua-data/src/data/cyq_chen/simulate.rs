@@ -10,6 +10,7 @@ use crate::data::cyq_chen::{
 use crate::expr::eval::Runtime;
 use crate::expr::eval::Value;
 use crate::expr::parser::Stmts;
+use std::collections::HashMap;
 use std::sync::Arc;
 pub(super) fn apply_posterior_for_day(
     buckets: &mut [ChipBucket],
@@ -100,6 +101,7 @@ pub(super) fn apply_sell_for_day(
     bucket_runtime: &mut Runtime,
     chip_config: &CompiledChipChangeConfig,
     main_ratio_history: &[Arc<Vec<Option<f64>>>],
+    sell_bias_cache: &mut HashMap<(u64, u64), Arc<Vec<(f64, f64)>>>,
     day_index: usize,
     turnover_rate: f64,
 ) -> Result<(), String> {
@@ -152,26 +154,28 @@ pub(super) fn apply_sell_for_day(
                 }
             }
 
-            if let Some(history) = main_ratio_history {
-                set_num_series_arc_with_alias(
+            if chip_config.sell_uses_bucket_dynamic_state {
+                if let Some(history) = main_ratio_history {
+                    set_num_series_arc_with_alias(
+                        runtime,
+                        "MAIN_CHIP_RATIO",
+                        "main_chip_ratio",
+                        history,
+                    );
+                }
+                set_num_with_alias(
                     runtime,
-                    "MAIN_CHIP_RATIO",
-                    "main_chip_ratio",
-                    history,
+                    "MAIN_CHIP_TOTAL",
+                    "main_chip_total",
+                    main_chip_total,
+                );
+                set_num_with_alias(
+                    runtime,
+                    "RETAIL_CHIP_TOTAL",
+                    "retail_chip_total",
+                    retail_chip_total,
                 );
             }
-            set_num_with_alias(
-                runtime,
-                "MAIN_CHIP_TOTAL",
-                "main_chip_total",
-                main_chip_total,
-            );
-            set_num_with_alias(
-                runtime,
-                "RETAIL_CHIP_TOTAL",
-                "retail_chip_total",
-                retail_chip_total,
-            );
 
             Ok(())
         })(
@@ -183,13 +187,57 @@ pub(super) fn apply_sell_for_day(
             bars,
             chip_config.sell_uses_bucket_rate_series,
         )?;
-        let (main_bias, retail_bias) = strategy_biases_at(
-            bucket_runtime,
-            chip_config,
-            ChipDirection::Sell,
-            bars.len(),
-            day_index,
-        )?;
+        let (main_bias, retail_bias) = if chip_config.sell_uses_bucket_dynamic_state {
+            strategy_biases_at(
+                bucket_runtime,
+                chip_config,
+                ChipDirection::Sell,
+                bars.len(),
+                day_index,
+            )?
+        } else {
+            let cache_key = (
+                buckets[bucket_index].price_low.to_bits(),
+                buckets[bucket_index].price_high.to_bits(),
+            );
+            if !sell_bias_cache.contains_key(&cache_key) {
+                let mut main_biases = vec![0.0; bars.len()];
+                let mut retail_biases = vec![0.0; bars.len()];
+                for strategy in chip_config.strategies.iter().filter(|strategy| {
+                    strategy.direction == ChipDirection::Sell && strategy.confirm_after == 0
+                }) {
+                    let value = eval_program_scoped(
+                        bucket_runtime,
+                        &strategy.optimized_when_ast,
+                        &strategy.assigned_names,
+                    )
+                    .map_err(|error| {
+                        format!("策略 {} 表达式计算错误: {}", strategy.name, error.msg)
+                    })?;
+                    let triggers = Value::as_truth_series(&value, bars.len()).map_err(|error| {
+                        format!("策略 {} 表达式返回值非布尔: {}", strategy.name, error.msg)
+                    })?;
+                    for (index, triggered) in triggers.iter().enumerate() {
+                        if triggered.is_true() {
+                            match strategy.holder {
+                                ChipHolder::Main => main_biases[index] += strategy.bias,
+                                ChipHolder::Retail => retail_biases[index] += strategy.bias,
+                            }
+                        }
+                    }
+                }
+                sell_bias_cache.insert(
+                    cache_key,
+                    Arc::new(
+                        main_biases
+                            .into_iter()
+                            .zip(retail_biases)
+                            .collect::<Vec<_>>(),
+                    ),
+                );
+            }
+            sell_bias_cache[&cache_key][day_index]
+        };
         let main_effective = main_bias.max(0.0);
         let retail_effective = retail_bias.max(0.0);
 
@@ -671,6 +719,7 @@ bias = 1.0
             &mut runtime,
             &compiled,
             &history,
+            &mut HashMap::new(),
             0,
             10.0,
         )

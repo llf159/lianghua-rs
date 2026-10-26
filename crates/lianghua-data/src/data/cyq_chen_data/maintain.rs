@@ -7,7 +7,7 @@ use crate::data::cyq_chen_data::compute::{
 use crate::data::cyq_chen_data::store::replace_cyq_chen_db;
 use crate::data::cyq_chen_data::store::{
     current_chip_change_strategy_hash, init_cyq_chen_db, query_cyq_chen_meta_value,
-    query_latest_cyq_chen_metadata, remove_cyq_chen_db_artifacts,
+    query_latest_cyq_chen_metadata, remove_cyq_chen_db_artifacts, remove_cyq_chen_db_sidecars,
 };
 use crate::data::cyq_chen_data::{
     CYQ_CHEN_QUEUE_BOUND, CYQ_CHEN_SNAPSHOT_TABLE, CyqChenCheckpointRecovery,
@@ -100,6 +100,10 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
         .as_ref()
         .map(|(_, config)| *config)
         .unwrap_or_default();
+    if latest_metadata.is_none() {
+        return rebuild_cyq_chen_all_with_progress(source_dir, config, None, None, progress_cb)
+            .map(Some);
+    }
     let chip_config = load_compiled_chip_change_config(source_dir)?;
     let strategy_hash = current_chip_change_strategy_hash(source_dir)?;
     let strategy_changed = query_cyq_chen_meta_value(&cyq_chen_db, "strategy_hash")?.as_deref()
@@ -705,8 +709,11 @@ pub fn rebuild_cyq_chen_all_with_progress(
     let _rebuild_lock = crate::data::cyq_chen_temp::lock_rebuild_directory(Path::new(source_dir))?
         .ok_or_else(|| "该数据目录已有新筹码重建任务，请等待完成后再试".to_string())?;
     crate::data::cyq_chen_temp::remove_stale_rebuilds(Path::new(source_dir))?;
+    let rebuild_db = Path::new(source_dir).join(".cyq_chen.db.resume.tmp");
+    if !rebuild_db.exists() {
+        remove_cyq_chen_db_sidecars(&rebuild_db)?;
+    }
     let cyq_chen_db = cyq_chen_db_path(source_dir);
-    init_cyq_chen_db(&cyq_chen_db)?;
 
     let source_db = source_db_path(source_dir);
     if !source_db.exists() {
@@ -781,7 +788,6 @@ pub fn rebuild_cyq_chen_all_with_progress(
         crate::data::cyq_chen::CYQ_CHEN_FEATURE_VERSION,
     ))
     .map_err(|e| format!("序列化重建输入标识失败:{e}"))?;
-    let rebuild_db = Path::new(source_dir).join(".cyq_chen.db.resume.tmp");
     let mut completed = HashSet::<String>::new();
     if rebuild_db.exists() {
         // 打不开或 WAL 无法恢复时保留现场，不把 I/O 故障当成无进度而直接删库。
@@ -816,7 +822,7 @@ pub fn rebuild_cyq_chen_all_with_progress(
         } else {
             drop(conn);
             // 输入变化时丢弃整个旧代次，不能仅凭股票末日判断可复用。
-            remove_cyq_chen_db_artifacts(&rebuild_db);
+            remove_cyq_chen_db_artifacts(&rebuild_db)?;
             if rebuild_db.exists() || super::store::path_with_suffix(&rebuild_db, ".wal").exists() {
                 return Err("清理输入已变化的重建库失败，请检查磁盘后重试".into());
             }
@@ -992,7 +998,7 @@ pub fn rebuild_cyq_chen_all_with_progress(
                 errors[0].error
             ));
         }
-        remove_cyq_chen_db_artifacts(&rebuild_db);
+        remove_cyq_chen_db_artifacts(&rebuild_db)?;
         return Err("新筹码重建未生成任何快照，旧结果保持不变，请检查行情和预热区间".into());
     }
     if let Err(error) = replace_cyq_chen_db(&rebuild_db, &cyq_chen_db) {
@@ -2017,6 +2023,38 @@ bias = 0.5
         rebuild_cyq_chen_all(source, changed, None, None).unwrap();
         assert_eq!(snapshot_rows_for_compare(source), changed_snapshots);
         assert_eq!(bin_rows_for_compare(source), changed_bins);
+        fs::remove_dir_all(source_dir).unwrap();
+    }
+
+    #[test]
+    fn storage_cleanup_removes_resume_artifacts_and_optionally_official_db() {
+        let source_dir = unique_temp_source_dir();
+        prepare_source_db(&source_dir);
+        let source_path = source_dir.to_str().expect("utf8 path");
+        let official = cyq_chen_db_path(source_path);
+        let stage = source_dir.join(".cyq_chen.db.resume.tmp");
+        fs::write(&official, "official").unwrap();
+        fs::write(official.with_extension("db.wal"), "official wal").unwrap();
+        fs::write(&stage, "stage").unwrap();
+        fs::write(stage.with_extension("tmp.wal"), "stage wal").unwrap();
+        let stage_scratch = stage.with_extension("tmp.tmp");
+        fs::create_dir(&stage_scratch).unwrap();
+        fs::write(stage_scratch.join("block"), "scratch").unwrap();
+
+        super::super::remove_cyq_chen_storage(source_path, false).unwrap();
+        assert!(official.exists());
+        assert!(!stage.exists());
+        assert!(!stage.with_extension("tmp.wal").exists());
+        assert!(!stage_scratch.exists());
+
+        fs::write(&stage, "stage").unwrap();
+        fs::write(stage.with_extension("tmp.wal"), "stage wal").unwrap();
+        super::super::remove_cyq_chen_storage(source_path, true).unwrap();
+        assert!(!official.exists());
+        assert!(!official.with_extension("db.wal").exists());
+        assert!(!stage.exists());
+        assert!(!stage.with_extension("tmp.wal").exists());
+
         fs::remove_dir_all(source_dir).unwrap();
     }
 

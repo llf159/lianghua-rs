@@ -75,6 +75,7 @@ pub struct CompiledChipChangeConfig {
     pub strategies: Vec<CompiledChipChangeStrategy>,
     sell_uses_bucket_rate_series: bool,
     pub(in crate::data) sell_uses_main_ratio_history: bool,
+    pub(in crate::data) sell_uses_bucket_dynamic_state: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -422,6 +423,7 @@ pub(super) fn replay_chen_chip_snapshots(
     let mut before = Vec::new();
     let mut after_sell = Vec::new();
     let mut after_buy = Vec::new();
+    let mut sell_bias_cache = std::collections::HashMap::new();
     for day_index in process_start_index..len {
         let Some(bar) = bars[day_index].as_ref() else {
             if day_index < output_start_index {
@@ -452,6 +454,7 @@ pub(super) fn replay_chen_chip_snapshots(
             &mut base_runtime,
             chip_config,
             &main_ratio_history,
+            &mut sell_bias_cache,
             day_index,
             bar.turnover_rate,
         )?;
@@ -641,6 +644,7 @@ pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config_with_f
     let mut before = Vec::new();
     let mut after_sell = Vec::new();
     let mut after_buy = Vec::new();
+    let mut sell_bias_cache = std::collections::HashMap::new();
     for day_index in output_start_index..len {
         let Some(bar) = bars[day_index].as_ref() else {
             return Err(format!(
@@ -671,6 +675,7 @@ pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config_with_f
             &mut base_runtime,
             chip_config,
             &main_ratio_history,
+            &mut sell_bias_cache,
             day_index,
             bar.turnover_rate,
         )?;

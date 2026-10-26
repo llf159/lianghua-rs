@@ -354,6 +354,23 @@ pub fn delete_managed_result_db(app: tauri::AppHandle, source_dir: String) -> Re
     delete_managed_result_db_inner(&data_root, &source_dir)
 }
 
+#[tauri::command]
+pub fn delete_managed_cyq_chen_storage(
+    app: tauri::AppHandle,
+    source_dir: String,
+    remove_official: bool,
+) -> Result<(), String> {
+    let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
+    let data_root = crate::warehouse::warehouse_root(&app)?;
+    let source_root = resolve_source_root(&data_root, &source_dir)?;
+    let source_path = source_root
+        .to_str()
+        .ok_or_else(|| format!("数据目录不是有效UTF-8: {}", source_root.display()))?;
+    lianghua_data::data::cyq_chen_data::remove_cyq_chen_storage(source_path, remove_official)
+}
+
 fn managed_strategy_backup_dir(source_root: &Path, backup_id: &str) -> PathBuf {
     managed_strategy_backup_root(source_root).join(backup_id)
 }

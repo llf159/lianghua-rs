@@ -160,11 +160,25 @@ impl ChipChangeConfig {
                     .iter()
                     .any(|key| crate::data::expr_program_uses_runtime_key(&strategy.when_ast, key))
         });
+        let sell_uses_bucket_dynamic_state = strategies.iter().any(|strategy| {
+            strategy.direction == ChipDirection::Sell
+                && [
+                    "MAIN_CHIP_RATIO",
+                    "main_chip_ratio",
+                    "MAIN_CHIP_TOTAL",
+                    "main_chip_total",
+                    "RETAIL_CHIP_TOTAL",
+                    "retail_chip_total",
+                ]
+                .iter()
+                .any(|key| crate::data::expr_program_uses_runtime_key(&strategy.when_ast, key))
+        });
         Ok(CompiledChipChangeConfig {
             version: self.version,
             strategies,
             sell_uses_bucket_rate_series,
             sell_uses_main_ratio_history,
+            sell_uses_bucket_dynamic_state,
         })
     }
 

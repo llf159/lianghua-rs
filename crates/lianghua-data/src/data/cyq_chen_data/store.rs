@@ -187,10 +187,30 @@ pub(super) fn path_with_suffix(path: &Path, suffix: &str) -> std::path::PathBuf 
     value.into()
 }
 
-pub(super) fn remove_cyq_chen_db_artifacts(db_path: &Path) {
-    let _ = fs::remove_file(db_path);
-    let _ = fs::remove_file(path_with_suffix(db_path, ".wal"));
-    let _ = fs::remove_dir_all(path_with_suffix(db_path, ".tmp"));
+fn remove_path_if_exists(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("删除失败, path={}: {error}", path.display())),
+    }
+}
+
+pub(super) fn remove_cyq_chen_db_sidecars(db_path: &Path) -> Result<(), String> {
+    remove_path_if_exists(&path_with_suffix(db_path, ".wal"))?;
+    let scratch_path = path_with_suffix(db_path, ".tmp");
+    match fs::remove_dir_all(&scratch_path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "删除临时目录失败, path={}: {error}",
+            scratch_path.display()
+        )),
+    }
+}
+
+pub(super) fn remove_cyq_chen_db_artifacts(db_path: &Path) -> Result<(), String> {
+    remove_path_if_exists(db_path)?;
+    remove_cyq_chen_db_sidecars(db_path)
 }
 
 pub(super) fn checkpoint_cyq_chen_db_if_exists(db_path: &Path) -> Result<(), String> {
@@ -210,21 +230,23 @@ pub(super) fn checkpoint_cyq_chen_db_if_exists(db_path: &Path) -> Result<(), Str
 #[cfg(unix)]
 pub(super) fn replace_cyq_chen_db(temp_path: &Path, db_path: &Path) -> Result<(), String> {
     checkpoint_cyq_chen_db_if_exists(db_path)?;
-    let _ = fs::remove_file(path_with_suffix(db_path, ".wal"));
+    remove_cyq_chen_db_sidecars(db_path)?;
+    remove_cyq_chen_db_sidecars(temp_path)?;
     fs::rename(temp_path, db_path).map_err(|e| {
         format!(
             "替换新筹码库失败, temp={}, target={}: {e}",
             temp_path.display(),
             db_path.display()
         )
-    })
+    })?;
+    remove_cyq_chen_db_sidecars(temp_path)
 }
 
 #[cfg(not(unix))]
 pub(super) fn replace_cyq_chen_db(temp_path: &Path, db_path: &Path) -> Result<(), String> {
     checkpoint_cyq_chen_db_if_exists(db_path)?;
     let backup_path = path_with_suffix(db_path, ".replace-backup");
-    remove_cyq_chen_db_artifacts(&backup_path);
+    remove_cyq_chen_db_artifacts(&backup_path)?;
 
     if db_path.exists() {
         fs::rename(db_path, &backup_path).map_err(|e| {
@@ -238,8 +260,8 @@ pub(super) fn replace_cyq_chen_db(temp_path: &Path, db_path: &Path) -> Result<()
 
     match fs::rename(temp_path, db_path) {
         Ok(()) => {
-            remove_cyq_chen_db_artifacts(&backup_path);
-            Ok(())
+            remove_cyq_chen_db_artifacts(&backup_path)?;
+            remove_cyq_chen_db_sidecars(temp_path)
         }
         Err(error) => {
             if backup_path.exists() {

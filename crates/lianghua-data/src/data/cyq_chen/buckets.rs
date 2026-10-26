@@ -465,6 +465,7 @@ mod tests {
             &mut base_runtime,
             &chip_config,
             &main_ratio_history,
+            &mut std::collections::HashMap::new(),
             0,
             1.0,
         )

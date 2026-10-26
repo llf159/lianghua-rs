@@ -1,6 +1,10 @@
 import { forwardRef, useDeferredValue, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import type { UnlistenFn } from '@tauri-apps/api/event'
-import { inspectManagedSourceStatus, removeManagedSourceFile } from '../../apis/managedSource'
+import {
+  inspectManagedSourceStatus,
+  removeManagedCyqChenStorage,
+  removeManagedSourceFile,
+} from '../../apis/managedSource'
 import {
   getIndicatorManagePage,
   listenDataDownloadProgress,
@@ -65,6 +69,7 @@ type BusyAction =
   | 'cyq-computing'
   | 'cyq-chen-computing'
   | 'deleting-cyq-chen-db'
+  | 'discarding-cyq-chen-rebuild'
   | 'indicator-running'
 type IndicatorEditorMode = 'create' | 'edit'
 type FeedbackSlot = 'status' | 'rank' | 'similarityRank' | 'otherData' | 'cyq' | 'cyqChen' | 'indicatorTask'
@@ -74,6 +79,7 @@ type PendingConfirmState =
   | { kind: 'delete-stock-indicator-columns' }
   | { kind: 'recompute-result-db' }
   | { kind: 'delete-cyq-chen-db' }
+  | { kind: 'discard-cyq-chen-rebuild' }
   | {
       kind: 'run-ranking-with-strategy-change'
       startDate: string
@@ -1078,9 +1084,31 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
       const nextStatus = await getRankingComputeStatus(managedStatus.sourcePath)
       setStatus(nextStatus)
       setCyqChenStrategyDiff(null)
-      setFeedbackNotice('cyqChen', '新筹码库已删除。下次新筹码计算会重新生成 cyq_chen_snapshot / cyq_chen_bin。')
+      setFeedbackNotice('cyqChen', '新筹码库、WAL 和未完成续算现场已删除。下次新筹码计算会重新生成 cyq_chen_snapshot / cyq_chen_bin。')
     } catch (actionError) {
       setFeedbackError('cyqChen', `删除新筹码库失败: ${String(actionError)}`)
+    } finally {
+      setBusyAction('idle')
+    }
+  }
+
+  async function onDiscardCyqChenRebuild() {
+    if (!sourcePath) {
+      setFeedbackError('cyqChen', '当前数据目录为空，请先到数据管理页确认目录。')
+      return
+    }
+
+    setBusyAction('discarding-cyq-chen-rebuild')
+    clearFeedback('cyqChen')
+
+    try {
+      await removeManagedCyqChenStorage(false)
+      const managedStatus = await inspectManagedSourceStatus()
+      const nextStatus = await getRankingComputeStatus(managedStatus.sourcePath)
+      setStatus(nextStatus)
+      setFeedbackNotice('cyqChen', '已丢弃未完成的新筹码计算进度，正式筹码库保持不变。下次计算会从零开始。')
+    } catch (actionError) {
+      setFeedbackError('cyqChen', `丢弃未完成进度失败: ${String(actionError)}`)
     } finally {
       setBusyAction('idle')
     }
@@ -1470,6 +1498,11 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
 
     if (current.kind === 'delete-cyq-chen-db') {
       await onDeleteCyqChenDb()
+      return
+    }
+
+    if (current.kind === 'discard-cyq-chen-rebuild') {
+      await onDiscardCyqChenRebuild()
       return
     }
 
@@ -1954,6 +1987,16 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
             >
               {cyqChenStrategyDiffLoading ? '对比中...' : '显示筹码策略 diff'}
             </button>
+            {status?.cyqChenRebuild ? (
+              <button
+                className="ranking-compute-secondary-btn"
+                type="button"
+                onClick={() => setPendingConfirm({ kind: 'discard-cyq-chen-rebuild' })}
+                disabled={isBusy}
+              >
+                {busyAction === 'discarding-cyq-chen-rebuild' ? '清理中...' : '丢弃未完成进度'}
+              </button>
+            ) : null}
             <button
               className="ranking-compute-danger-btn"
               type="button"
@@ -2224,6 +2267,8 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
               ? '确认清空指标列'
               : pendingConfirm?.kind === 'delete-cyq-chen-db'
                 ? '确认删除新筹码库'
+                : pendingConfirm?.kind === 'discard-cyq-chen-rebuild'
+                  ? '确认丢弃未完成的新筹码计算'
                 : pendingConfirm?.kind === 'run-ranking-with-strategy-change'
                   ? '排名策略已变化'
                 : '确认一键重算结果库'
@@ -2234,7 +2279,9 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
             : pendingConfirm?.kind === 'delete-stock-indicator-columns'
               ? '确认清空 stock_data 中的所有非基础指标列吗？\n\n该操作会重建 stock_data 表，只保留基础行情列和已有基础行情数据；数据量较大时耗时会更久。'
               : pendingConfirm?.kind === 'delete-cyq-chen-db'
-                ? '确认删除当前新筹码库 cyq_chen.db 吗？将清空 cyq_chen_snapshot / cyq_chen_bin，删除后需要重新计算新筹码。'
+                ? '确认删除当前新筹码库 cyq_chen.db 吗？将同时清除正式库、WAL 和未完成续算现场，删除后需要重新计算新筹码。'
+                : pendingConfirm?.kind === 'discard-cyq-chen-rebuild'
+                  ? `确认丢弃当前未完成的新筹码计算进度（已完成 ${status?.cyqChenRebuild?.completedStocks ?? 0} / ${status?.cyqChenRebuild?.totalStocks ?? 0} 只）吗？\n\n正式筹码库保持不变，下次计算会从零开始。`
                 : pendingConfirm?.kind === 'run-ranking-with-strategy-change'
                   ? `检测到当前排名策略相对最近计算快照有 ${pendingConfirm.changedLineCount} 行变化。是否仍使用当前策略计算 ${formatTradeDate(pendingConfirm.startDate)} 至 ${formatTradeDate(pendingConfirm.endDate)}？`
                 : `确认先删除当前结果库 scoring_result.db，再按原始库日期范围 ${formatTradeDate(status?.sourceDb.minTradeDate)} 至 ${formatTradeDate(status?.sourceDb.maxTradeDate)} 重算排名吗？`

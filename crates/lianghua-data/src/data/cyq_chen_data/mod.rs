@@ -19,6 +19,7 @@ pub use store::{
 use crate::data::cyq_chen::ChenChipBin;
 use crate::data::cyq_chen::ChenChipSnapshot;
 use duckdb::arrow::record_batch::RecordBatch;
+use std::path::Path;
 use std::sync::Arc;
 pub(super) const CYQ_CHEN_SNAPSHOT_TABLE: &str = "cyq_chen_snapshot";
 pub(super) const CYQ_CHEN_BIN_TABLE: &str = "cyq_chen_bin";
@@ -63,6 +64,18 @@ pub struct CyqChenRebuildStatus {
 pub struct CyqChenRebuildError {
     pub ts_code: String,
     pub error: String,
+}
+
+pub fn remove_cyq_chen_storage(source_dir: &str, remove_official: bool) -> Result<(), String> {
+    let source_dir = Path::new(source_dir);
+    let _lock = crate::data::cyq_chen_temp::lock_rebuild_directory(source_dir)?
+        .ok_or_else(|| "新筹码计算正在运行，不能清理或删除筹码库。".to_string())?;
+    crate::data::cyq_chen_temp::remove_stale_rebuilds(source_dir)?;
+    store::remove_cyq_chen_db_artifacts(&source_dir.join(".cyq_chen.db.resume.tmp"))?;
+    if remove_official {
+        store::remove_cyq_chen_db_artifacts(&source_dir.join("cyq_chen.db"))?;
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
