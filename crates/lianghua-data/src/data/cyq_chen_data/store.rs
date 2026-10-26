@@ -1,5 +1,5 @@
 use crate::data::cyq_chen_data::{
-    CYQ_CHEN_META_TABLE, CYQ_CHEN_SCHEMA_VERSION, CYQ_CHEN_SNAPSHOT_TABLE,
+    CYQ_CHEN_META_TABLE, CYQ_CHEN_SCHEMA_VERSION, CYQ_CHEN_SNAPSHOT_TABLE, CyqChenRebuildError,
     CyqChenStrategyMaintenanceStatus,
 };
 
@@ -437,6 +437,42 @@ pub fn query_cyq_chen_rebuild_status(
         completed_stocks,
         total_stocks: ts_codes.len(),
     }))
+}
+
+pub fn query_cyq_chen_rebuild_errors(source_dir: &str) -> Result<Vec<CyqChenRebuildError>, String> {
+    let stage = Path::new(source_dir).join(".cyq_chen.db.resume.tmp");
+    let db_path = if stage.exists() {
+        stage
+    } else {
+        cyq_chen_db_path(source_dir)
+    };
+    if !db_path.exists() {
+        return Ok(Vec::new());
+    }
+    let conn = crate::data::open_db_readonly(&db_path)
+        .map_err(|e| format!("读取新筹码个股错误失败: {e}"))?;
+    let has_table: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name = 'cyq_chen_rebuild_error')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("检查新筹码个股错误表失败: {e}"))?;
+    if !has_table {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn
+        .prepare("SELECT ts_code, error FROM cyq_chen_rebuild_error ORDER BY ts_code")
+        .map_err(|e| format!("预编译新筹码个股错误查询失败: {e}"))?;
+    stmt.query_map([], |row| {
+        Ok(CyqChenRebuildError {
+            ts_code: row.get(0)?,
+            error: row.get(1)?,
+        })
+    })
+    .map_err(|e| format!("查询新筹码个股错误失败: {e}"))?
+    .collect::<Result<_, _>>()
+    .map_err(|e| format!("读取新筹码个股错误失败: {e}"))
 }
 
 pub fn query_cyq_chen_strategy_maintenance_status(

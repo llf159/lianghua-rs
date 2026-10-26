@@ -12,7 +12,8 @@ pub use maintain::{
     repair_cyq_chen_stocks_if_db_exists,
 };
 pub use store::{
-    init_cyq_chen_db, query_cyq_chen_rebuild_status, query_cyq_chen_strategy_maintenance_status,
+    init_cyq_chen_db, query_cyq_chen_rebuild_errors, query_cyq_chen_rebuild_status,
+    query_cyq_chen_strategy_maintenance_status,
 };
 
 use crate::data::cyq_chen::ChenChipBin;
@@ -23,7 +24,6 @@ pub(super) const CYQ_CHEN_SNAPSHOT_TABLE: &str = "cyq_chen_snapshot";
 pub(super) const CYQ_CHEN_BIN_TABLE: &str = "cyq_chen_bin";
 pub(super) const CYQ_CHEN_META_TABLE: &str = "cyq_chen_meta";
 pub(super) const DEFAULT_ADJ_TYPE: &str = "qfq";
-pub(super) const CYQ_CHEN_GROUP_SIZE: usize = 8;
 pub(super) const CYQ_CHEN_QUEUE_BOUND: usize = 2;
 pub(super) const CYQ_CHEN_FLUSH_BATCH_SIZE: usize = 32;
 pub(super) const CYQ_CHEN_SCHEMA_VERSION: &str = "5";
@@ -56,6 +56,13 @@ pub struct CyqChenRebuildStatus {
     pub bucket_pct: f64,
     pub completed_stocks: usize,
     pub total_stocks: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CyqChenRebuildError {
+    pub ts_code: String,
+    pub error: String,
 }
 
 #[derive(Debug)]
@@ -109,11 +116,31 @@ pub(super) struct PreparedCyqChenWriteBatch {
     stock_count: usize,
     completed_ts_codes: Vec<String>,
     replace_ts_codes: Vec<String>,
+    errors: Vec<CyqChenRebuildError>,
     snapshot_rows: usize,
     bin_rows: usize,
     checkpoints: Vec<(String, String, String, Option<String>)>,
     snapshot_batch: Option<RecordBatch>,
     bin_batch: Option<RecordBatch>,
+}
+
+impl PreparedCyqChenWriteBatch {
+    pub(super) fn with_error(ts_code: &str, error: String) -> Self {
+        Self {
+            stock_count: 0,
+            completed_ts_codes: Vec::new(),
+            replace_ts_codes: Vec::new(),
+            errors: vec![CyqChenRebuildError {
+                ts_code: ts_code.to_string(),
+                error,
+            }],
+            snapshot_rows: 0,
+            bin_rows: 0,
+            checkpoints: Vec::new(),
+            snapshot_batch: None,
+            bin_batch: None,
+        }
+    }
 }
 
 #[derive(Debug)]

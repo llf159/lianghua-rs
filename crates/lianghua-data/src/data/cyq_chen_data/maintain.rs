@@ -10,7 +10,7 @@ use crate::data::cyq_chen_data::store::{
     query_latest_cyq_chen_metadata, remove_cyq_chen_db_artifacts,
 };
 use crate::data::cyq_chen_data::{
-    CYQ_CHEN_GROUP_SIZE, CYQ_CHEN_QUEUE_BOUND, CYQ_CHEN_SNAPSHOT_TABLE, CyqChenCheckpointRecovery,
+    CYQ_CHEN_QUEUE_BOUND, CYQ_CHEN_SNAPSHOT_TABLE, CyqChenCheckpointRecovery,
     CyqChenRebuildSummary, CyqChenWriteMessage, DEFAULT_ADJ_TYPE,
 };
 
@@ -36,10 +36,8 @@ use std::path::Path;
 use std::sync::mpsc::sync_channel;
 use std::thread;
 
-fn cyq_chen_compute_group_size(thread_count: usize) -> usize {
-    (CYQ_CHEN_GROUP_SIZE * 4)
-        .div_ceil(thread_count.max(1))
-        .max(1)
+fn cyq_chen_streaming_stock_block_size() -> usize {
+    128
 }
 
 pub fn maintain_cyq_chen_incremental_if_db_exists(
@@ -242,7 +240,7 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
         });
 
         let finished_stock_count = std::sync::atomic::AtomicUsize::new(0);
-        let compute_group_size = cyq_chen_compute_group_size(rayon::current_num_threads());
+        let compute_group_size = 64usize.div_ceil(rayon::current_num_threads().max(1)).max(1);
         let compute_result = ts_codes.par_chunks(compute_group_size).try_for_each_init(
             || -> Result<(DataReader, Connection), String> {
                 let state_conn = state_db
@@ -593,7 +591,7 @@ pub fn repair_cyq_chen_stocks_if_db_exists(
     });
 
     let finished_stock_count = std::sync::atomic::AtomicUsize::new(0);
-    let compute_group_size = cyq_chen_compute_group_size(rayon::current_num_threads());
+    let compute_group_size = cyq_chen_streaming_stock_block_size();
     let compute_result = ts_codes.par_chunks(compute_group_size).try_for_each_init(
         || DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys),
         |worker_reader, ts_group| -> Result<(), String> {
@@ -614,7 +612,7 @@ pub fn repair_cyq_chen_stocks_if_db_exists(
                     });
                 }
             };
-            let batch = compute_prepared_cyq_chen_stock_group_batch(
+            compute_prepared_cyq_chen_stock_group_batch(
                 worker_reader,
                 &load_start_date,
                 &start_date,
@@ -625,9 +623,12 @@ pub fn repair_cyq_chen_stocks_if_db_exists(
                 &total_share_map,
                 ts_group,
                 Some(&progress_stock_done),
+                false,
+                &mut |batch| {
+                    tx.send(CyqChenWriteMessage::PreparedBatch(batch))
+                        .map_err(|e| format!("发送新筹码局部修复批次失败:{e}"))
+                },
             )?;
-            tx.send(CyqChenWriteMessage::PreparedBatch(batch))
-                .map_err(|e| format!("发送新筹码局部修复批次失败:{e}"))?;
             Ok(())
         },
     );
@@ -828,7 +829,7 @@ pub fn rebuild_cyq_chen_all_with_progress(
         let tx = conn
             .transaction()
             .map_err(|e| format!("创建重建标识事务失败:{e}"))?;
-        tx.execute_batch("CREATE TABLE IF NOT EXISTS cyq_chen_rebuild_input(signature VARCHAR); CREATE TABLE IF NOT EXISTS cyq_chen_rebuild_done(ts_code VARCHAR PRIMARY KEY);")
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS cyq_chen_rebuild_input(signature VARCHAR); CREATE TABLE IF NOT EXISTS cyq_chen_rebuild_done(ts_code VARCHAR PRIMARY KEY); CREATE TABLE IF NOT EXISTS cyq_chen_rebuild_error(ts_code VARCHAR PRIMARY KEY, error VARCHAR);")
             .map_err(|e| format!("创建重建进度表失败:{e}"))?;
         tx.execute("DELETE FROM cyq_chen_rebuild_input", [])
             .map_err(|e| e.to_string())?;
@@ -867,7 +868,7 @@ pub fn rebuild_cyq_chen_all_with_progress(
     let compute_threads = std::thread::available_parallelism()
         .map(|count| count.get())
         .unwrap_or(1);
-    let compute_group_size = cyq_chen_compute_group_size(compute_threads);
+    let compute_group_size = cyq_chen_streaming_stock_block_size();
     let compute_pool = rayon::ThreadPoolBuilder::new()
         .num_threads(compute_threads)
         .build()
@@ -912,7 +913,8 @@ pub fn rebuild_cyq_chen_all_with_progress(
                     }
                 };
                 let started = std::time::Instant::now();
-                let batch = compute_prepared_cyq_chen_stock_group_batch(
+                let mut send_wait_ms = 0u64;
+                let rows = compute_prepared_cyq_chen_stock_group_batch(
                     worker_reader,
                     &load_start_date,
                     &start_date,
@@ -923,14 +925,19 @@ pub fn rebuild_cyq_chen_all_with_progress(
                     &total_share_map,
                     ts_group,
                     Some(&progress_stock_done),
+                    true,
+                    &mut |batch| {
+                        let send_started = std::time::Instant::now();
+                        let result = tx
+                            .send(CyqChenWriteMessage::PreparedBatch(batch))
+                            .map_err(|e| format!("发送筹码批次失败:{e}"));
+                        send_wait_ms += send_started.elapsed().as_millis() as u64;
+                        result
+                    },
                 )?;
-                let compute_prepare_ms = started.elapsed().as_millis();
-                let rows = (batch.snapshot_rows, batch.bin_rows);
-                let started = std::time::Instant::now();
-                tx.send(CyqChenWriteMessage::PreparedBatch(batch))
-                    .map_err(|e| format!("发送筹码批次失败:{e}"))?;
+                let compute_and_send_ms = started.elapsed().as_millis();
                 if profile_writes {
-                    eprintln!("新筹码计算转列 stocks={} snapshots={} bins={} compute_prepare_ms={compute_prepare_ms} queue_wait_ms={}", ts_group.len(), rows.0, rows.1, started.elapsed().as_millis());
+                    eprintln!("新筹码计算转列 stocks={} snapshots={} bins={} compute_and_send_ms={compute_and_send_ms} send_wait_ms={send_wait_ms}", ts_group.len(), rows.0, rows.1);
                 }
                 Ok(())
             },
@@ -975,6 +982,16 @@ pub fn rebuild_cyq_chen_all_with_progress(
         }
     };
     if snapshot_rows == 0 {
+        let errors = super::store::query_cyq_chen_rebuild_errors(source_dir)?;
+        if !errors.is_empty() {
+            return Err(format!(
+                "新筹码重建未生成任何快照，{} 只股票计算失败；错误记录和续算进度保留在 {}。首个错误：{} {}",
+                errors.len(),
+                rebuild_db.display(),
+                errors[0].ts_code,
+                errors[0].error
+            ));
+        }
         remove_cyq_chen_db_artifacts(&rebuild_db);
         return Err("新筹码重建未生成任何快照，旧结果保持不变，请检查行情和预热区间".into());
     }
@@ -2044,6 +2061,48 @@ bias = 0.5
         assert_eq!(bin_rows_for_compare(source_path), bins_before);
         assert_eq!(meta_rows_for_compare(source_path), meta_before);
         assert_eq!(index_names_for_compare(source_path), indexes_before);
+
+        fs::remove_dir_all(source_dir).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn full_rebuild_continues_after_stock_error_and_persists_it() {
+        let source_dir = unique_temp_source_dir();
+        prepare_source_db(&source_dir);
+        let source_path = source_dir.to_str().expect("utf8 path");
+        let source_conn =
+            Connection::open(crate::data::source_db_path(source_path)).expect("open source db");
+        insert_stock_row(
+            &source_conn,
+            "000002.SZ",
+            "20260403",
+            20.3,
+            19.0,
+            20.5,
+            20.6,
+            3.0,
+        );
+        drop(source_conn);
+
+        let summary = rebuild_cyq_chen_all(
+            source_path,
+            ChenChipConfig {
+                warmup_days: 2,
+                bucket_pct: 5.0,
+            },
+            None,
+            None,
+        )
+        .expect("valid stocks should still publish");
+        assert!(summary.snapshot_rows > 0);
+        let snapshots = snapshot_rows_for_compare(source_path);
+        assert!(snapshots.iter().any(|row| row.0 == "000001.SZ"));
+        assert!(!snapshots.iter().any(|row| row.0 == "000002.SZ"));
+        let errors =
+            crate::data::cyq_chen_data::query_cyq_chen_rebuild_errors(source_path).unwrap();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].ts_code, "000002.SZ");
+        assert!(errors[0].error.contains("最高价小于最低价"));
 
         fs::remove_dir_all(source_dir).expect("cleanup temp dir");
     }

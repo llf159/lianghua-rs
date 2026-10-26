@@ -56,6 +56,7 @@ export type RankingComputeStatus = {
     completedStocks: number
     totalStocks: number
   } | null
+  cyqChenRebuildErrors: Array<{ tsCode: string; error: string }>
   suggestedStartDate: string | null
   suggestedEndDate: string | null
   pendingRankingRebuilds: Array<{ component: string; startDate: string; endDate: string }>

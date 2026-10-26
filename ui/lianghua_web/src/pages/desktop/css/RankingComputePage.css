@@ -149,6 +149,49 @@
   flex-wrap: nowrap;
 }
 
+.ranking-compute-cyq-errors {
+  border: 1px solid #f2c265;
+  border-radius: 8px;
+  background: #fffaf0;
+  padding: 10px 12px;
+  color: #713f12;
+}
+
+.ranking-compute-cyq-errors summary {
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.ranking-compute-cyq-errors p {
+  margin: 8px 0;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.ranking-compute-cyq-errors ul {
+  display: grid;
+  gap: 8px;
+  max-height: 360px;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.ranking-compute-cyq-errors li {
+  display: grid;
+  gap: 4px;
+  padding-top: 8px;
+  border-top: 1px solid #f6dfb2;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.ranking-compute-cyq-errors li span {
+  overflow-wrap: anywhere;
+}
+
 .ranking-compute-strategy-diff-headline span {
   color: #5a6677;
   font-size: 12px;

@@ -711,34 +711,7 @@ impl DataReader {
         if ts_codes.is_empty() {
             return Ok(HashMap::new());
         }
-
-        let mut select_cols = vec!["ts_code".to_string(), "trade_date".to_string()];
-        for (db_col, _) in &self.cols_table {
-            select_cols.push(format!(
-                "TRY_CAST(\"{}\" AS DOUBLE) AS \"{}\"",
-                db_col, db_col
-            ));
-        }
-
-        let escaped: Vec<String> = ts_codes
-            .iter()
-            .map(|c| format!("'{}'", c.replace('\'', "''")))
-            .collect();
-
-        let sql = format!(
-            r#"
-            SELECT
-                {}
-            FROM stock_data
-            WHERE ts_code IN ({})
-              AND adj_type = ?
-              AND trade_date >= ?
-              AND trade_date <= ?
-            ORDER BY ts_code, trade_date ASC
-            "#,
-            select_cols.join(",\n"),
-            escaped.join(", ")
-        );
+        let sql = self.batch_query_sql(ts_codes);
 
         let mut stmt = self
             .conn
@@ -831,6 +804,147 @@ impl DataReader {
         }
 
         Ok(result)
+    }
+
+    pub fn load_batch_streaming(
+        &self,
+        ts_codes: &[String],
+        adj_type: &str,
+        start_date: &str,
+        end_date: &str,
+        mut consume: impl FnMut(String, Result<RowData, String>) -> Result<(), String>,
+    ) -> Result<(), String> {
+        if ts_codes.is_empty() {
+            return Ok(());
+        }
+        let index_values_by_key = if self.runtime_index_cols.is_empty() {
+            None
+        } else {
+            Some(self.load_runtime_index_values(start_date, end_date)?)
+        };
+        let panel_values = if self.runtime_panel_fields.is_empty() {
+            None
+        } else {
+            Some(panel::load_values(
+                &self.conn,
+                &self.source_dir,
+                &self.runtime_panel_fields,
+                ts_codes,
+                start_date,
+                end_date,
+            )?)
+        };
+        let sql = self.batch_query_sql(ts_codes);
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .map_err(|e| format!("预编译流式批量查询SQL失败:{e}"))?;
+        let batches = stmt
+            .query_arrow(params![adj_type, start_date, end_date])
+            .map_err(|e| {
+                format!(
+                    "执行流式批量查询失败: 原始行情库={}, adj_type={adj_type}, 区间={start_date}-{end_date}, 股票={}: {e}",
+                    self.conn.path().map_or_else(|| "<内存>".to_string(), |path| path.display().to_string()),
+                    ts_codes.join(",")
+                )
+            })?;
+        let empty_row = || RowData {
+            trade_dates: Vec::new(),
+            cols: self
+                .cols_table
+                .iter()
+                .map(|(_, key)| (key.clone(), Vec::new()))
+                .collect(),
+        };
+        let finish_row = |ts_code: &str, mut row: RowData| -> Result<RowData, String> {
+            self.inject_estimated_market_cap(&mut row)?;
+            if let Some(values) = &index_values_by_key {
+                self.inject_runtime_index_series(&mut row, values);
+            }
+            if let Some(values) = &panel_values {
+                panel::inject_values(&mut row, ts_code, &self.runtime_panel_fields, values);
+            }
+            row.validate()?;
+            Ok(row)
+        };
+        let mut current_code: Option<String> = None;
+        let mut current_row = empty_row();
+        for batch in batches {
+            let codes = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or("流式批量查询ts_code不是字符串")?;
+            let dates = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or("流式批量查询trade_date不是字符串")?;
+            let numeric = (0..self.cols_table.len())
+                .map(|index| {
+                    batch
+                        .column(index + 2)
+                        .as_any()
+                        .downcast_ref::<Float64Array>()
+                        .ok_or("流式批量查询数值列不是DOUBLE")
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            for index in 0..batch.num_rows() {
+                if codes.is_null(index) || dates.is_null(index) {
+                    return Err("流式批量行情的股票代码或交易日为空".into());
+                }
+                let ts_code = codes.value(index);
+                if current_code.as_deref() != Some(ts_code) {
+                    if let Some(previous_code) = current_code.replace(ts_code.to_string()) {
+                        let previous_row = std::mem::replace(&mut current_row, empty_row());
+                        let previous_row = finish_row(&previous_code, previous_row);
+                        consume(previous_code, previous_row)?;
+                    }
+                }
+                current_row.trade_dates.push(dates.value(index).to_string());
+                for ((_, key), column) in self.cols_table.iter().zip(&numeric) {
+                    current_row
+                        .cols
+                        .get_mut(key)
+                        .expect("selected column")
+                        .push((!column.is_null(index)).then(|| column.value(index)));
+                }
+            }
+        }
+        drop(stmt);
+        if let Some(last_code) = current_code {
+            let last_row = finish_row(&last_code, current_row);
+            consume(last_code, last_row)?;
+        }
+        Ok(())
+    }
+
+    fn batch_query_sql(&self, ts_codes: &[String]) -> String {
+        let mut select_cols = vec!["ts_code".to_string(), "trade_date".to_string()];
+        for (db_col, _) in &self.cols_table {
+            select_cols.push(format!(
+                "TRY_CAST(\"{}\" AS DOUBLE) AS \"{}\"",
+                db_col, db_col
+            ));
+        }
+        let escaped = ts_codes
+            .iter()
+            .map(|code| format!("'{}'", code.replace('\'', "''")))
+            .collect::<Vec<_>>();
+        format!(
+            r#"
+            SELECT
+                {}
+            FROM stock_data
+            WHERE ts_code IN ({})
+              AND adj_type = ?
+              AND trade_date >= ?
+              AND trade_date <= ?
+            ORDER BY ts_code, trade_date ASC
+            "#,
+            select_cols.join(",\n"),
+            escaped.join(", ")
+        )
     }
 
     fn inject_panel(&self, ts_code: &str, row: &mut RowData) -> Result<(), String> {
@@ -2109,6 +2223,24 @@ when = "C > O"
             .expect("load batch");
         assert_eq!(
             batch["000001.SZ"].cols["I300_MA5"],
+            row_data.cols["I300_MA5"]
+        );
+        let mut streamed = None;
+        reader
+            .load_batch_streaming(
+                &["000001.SZ".to_string()],
+                "qfq",
+                "20240102",
+                "20240103",
+                |ts_code, row| {
+                    assert_eq!(ts_code, "000001.SZ");
+                    streamed = Some(row?);
+                    Ok(())
+                },
+            )
+            .expect("stream batch");
+        assert_eq!(
+            streamed.expect("streamed row").cols["I300_MA5"],
             row_data.cols["I300_MA5"]
         );
 

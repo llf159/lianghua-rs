@@ -99,6 +99,7 @@ pub struct RankComputeStatus {
     pub cyq_chen_warmup_days: Option<u64>,
     pub cyq_chen_bucket_pct: Option<f64>,
     pub cyq_chen_rebuild: Option<crate::data::cyq_chen_data::CyqChenRebuildStatus>,
+    pub cyq_chen_rebuild_errors: Vec<crate::data::cyq_chen_data::CyqChenRebuildError>,
     pub suggested_start_date: Option<String>,
     pub suggested_end_date: Option<String>,
     pub pending_ranking_rebuilds: Vec<crate::data::download_state::PendingDerivedRebuild>,
@@ -618,6 +619,9 @@ fn get_rank_compute_status_inner(
         cyq_chen_warmup_days,
         cyq_chen_bucket_pct,
         cyq_chen_rebuild: crate::data::cyq_chen_data::query_cyq_chen_rebuild_status(source_path)?,
+        cyq_chen_rebuild_errors: crate::data::cyq_chen_data::query_cyq_chen_rebuild_errors(
+            source_path,
+        )?,
         suggested_start_date,
         suggested_end_date,
         pending_ranking_rebuilds,

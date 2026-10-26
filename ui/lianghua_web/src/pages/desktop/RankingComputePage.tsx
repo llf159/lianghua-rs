@@ -1431,11 +1431,19 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
         result.startDate && result.endDate
           ? `，区间 ${formatTradeDate(result.startDate)} 至 ${formatTradeDate(result.endDate)}`
           : ''
+      const errorText = nextStatus.cyqChenRebuildErrors.length > 0
+        ? `，${nextStatus.cyqChenRebuildErrors.length} 只股票失败，错误已保存供查看`
+        : ''
       setFeedbackNotice(
         'cyqChen',
-        `新筹码计算完成，预热 ${result.warmupDays} 天，分桶 ${result.bucketPct}%${rangeText}，写入 ${result.snapshotRows} 条摘要和 ${result.binRows} 条分桶，用时 ${formatElapsedMs(result.elapsedMs)}。`,
+        `新筹码计算完成，预热 ${result.warmupDays} 天，分桶 ${result.bucketPct}%${rangeText}，写入 ${result.snapshotRows} 条摘要和 ${result.binRows} 条分桶${errorText}，用时 ${formatElapsedMs(result.elapsedMs)}。`,
       )
     } catch (actionError) {
+      try {
+        setStatus(await getRankingComputeStatus(sourcePath))
+      } catch {
+        // 保留原始计算错误，状态刷新失败时仍让用户看到计算失败原因。
+      }
       setFeedbackError('cyqChen', `新筹码计算失败: ${String(actionError)}`)
     } finally {
       stopProgressListener()
@@ -1956,6 +1964,23 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
             </button>
           </div>
         </div>
+
+        {status && status.cyqChenRebuildErrors.length > 0 ? (
+          <details className="ranking-compute-cyq-errors">
+            <summary>
+              最近一次新筹码全量计算有 {status.cyqChenRebuildErrors.length} 只股票失败，错误已保存
+            </summary>
+            <p>失败股票未写入筹码结果，其他已处理股票不受影响；重新成功计算会覆盖这些错误记录。</p>
+            <ul>
+              {status.cyqChenRebuildErrors.map((item) => (
+                <li key={item.tsCode}>
+                  <strong>{item.tsCode}</strong>
+                  <span>{item.error}</span>
+                </li>
+              ))}
+            </ul>
+          </details>
+        ) : null}
 
         {busyAction === 'cyq-chen-computing'
           ? renderProgressCard('新筹码计算已经启动，正在等待后端返回当前股票进度。', true)

@@ -610,77 +610,136 @@ pub(super) fn compute_prepared_cyq_chen_stock_group_batch(
     total_share_map: &HashMap<String, f64>,
     ts_group: &[String],
     on_stock_done: Option<&dyn Fn(&str)>,
-) -> Result<PreparedCyqChenWriteBatch, String> {
+    continue_on_stock_error: bool,
+    on_batch: &mut dyn FnMut(PreparedCyqChenWriteBatch) -> Result<(), String>,
+) -> Result<(usize, usize), String> {
     let lookback = config
         .warmup_days
         .max(estimate_chen_chip_expression_warmup(chip_config)?);
-    let mut rows = load_cyq_chen_group_rows(
-        worker_reader,
-        ts_group,
-        load_start_date,
-        start_date,
-        end_date,
-        lookback,
-    )?;
-    let snapshot_capacity = rows.values().map(|row| row.trade_dates.len()).sum();
-    let mut builder = CyqChenBatchBuilder::new(snapshot_capacity, 0, config);
-    for ts_code in ts_group {
-        let mut row = rows
-            .remove(ts_code)
-            .ok_or_else(|| format!("缺少已加载行情: {ts_code}"))?;
-        inject_stock_extra_fields(
-            &mut row,
-            ts_code,
-            st_list.contains(ts_code),
-            total_share_map.get(ts_code).copied(),
-        )?;
-        if let Some(last_missing) = row
-            .cols
-            .get("TOR")
-            .and_then(|series| series.iter().rposition(Option::is_none))
-        {
-            row.trade_dates.drain(..=last_missing);
-            for series in row.cols.values_mut() {
-                series.drain(..=last_missing);
+    let compute_stock =
+        |ts_code: &str, mut row: RowData| -> Result<PreparedCyqChenWriteBatch, String> {
+            inject_stock_extra_fields(
+                &mut row,
+                ts_code,
+                st_list.contains(ts_code),
+                total_share_map.get(ts_code).copied(),
+            )?;
+            if let Some(last_missing) = row
+                .cols
+                .get("TOR")
+                .and_then(|series| series.iter().rposition(Option::is_none))
+            {
+                row.trade_dates.drain(..=last_missing);
+                for series in row.cols.values_mut() {
+                    series.drain(..=last_missing);
+                }
             }
-        }
-        if let Some(output_start) =
-            resolve_first_computable_output_date(&row, start_date, end_date, config.warmup_days)
-        {
-            let mut state = ChenChipFeatureState::default();
-            let mut last = None;
-            crate::data::cyq_chen::replay_chen_chip_snapshots(
-                std::borrow::Cow::Owned(row),
-                &output_start,
-                chip_config,
-                config,
-                &mut state,
-                false,
-                |snapshot| {
-                    if snapshot
-                        .trade_date
-                        .as_deref()
-                        .is_some_and(|date| date >= start_date && date <= end_date)
-                    {
-                        if let Some(previous) = last.replace(snapshot) {
-                            builder.append_snapshot(ts_code, previous)?;
+
+            let mut builder = CyqChenBatchBuilder::new(row.trade_dates.len(), 0, config);
+            if let Some(output_start) =
+                resolve_first_computable_output_date(&row, start_date, end_date, config.warmup_days)
+            {
+                let mut state = ChenChipFeatureState::default();
+                let mut last = None;
+                crate::data::cyq_chen::replay_chen_chip_snapshots(
+                    std::borrow::Cow::Owned(row),
+                    &output_start,
+                    chip_config,
+                    config,
+                    &mut state,
+                    false,
+                    |snapshot| {
+                        if snapshot
+                            .trade_date
+                            .as_deref()
+                            .is_some_and(|date| date >= start_date && date <= end_date)
+                        {
+                            if let Some(previous) = last.replace(snapshot) {
+                                builder.append_snapshot(ts_code, previous)?;
+                            }
                         }
-                    }
-                    Ok(())
-                },
-            )
-            .map_err(|e| format!("ts_code={ts_code}: {e}"))?;
-            if let Some(last) = last {
-                builder.finish_stock(ts_code, last, Some(&state), false)?;
+                        Ok(())
+                    },
+                )?;
+                if let Some(last) = last {
+                    builder.finish_stock(ts_code, last, Some(&state), false)?;
+                }
             }
+            let mut batch = builder.finish()?;
+            batch.completed_ts_codes = vec![ts_code.to_string()];
+            Ok(batch)
+        };
+    let mut seen = HashSet::with_capacity(ts_group.len());
+    let mut deferred = Vec::new();
+    let mut snapshot_rows = 0usize;
+    let mut bin_rows = 0usize;
+    let fatal_error = std::cell::Cell::new(None::<String>);
+    let mut handle_row = |ts_code: &str,
+                          row: Result<RowData, String>,
+                          allow_defer: bool,
+                          seen: &mut HashSet<String>,
+                          deferred: &mut Vec<String>|
+     -> Result<(), String> {
+        seen.insert(ts_code.to_string());
+        let stock_result = match row {
+            Ok(row) if allow_defer && row.trade_dates.len() < lookback => {
+                deferred.push(ts_code.to_string());
+                None
+            }
+            Ok(row) => Some(compute_stock(ts_code, row)),
+            Err(error) => Some(Err(error)),
+        };
+        match stock_result {
+            Some(Ok(batch)) => {
+                snapshot_rows += batch.snapshot_rows;
+                bin_rows += batch.bin_rows;
+                if let Err(error) = on_batch(batch) {
+                    fatal_error.set(Some(error.clone()));
+                    return Err(error);
+                }
+            }
+            Some(Err(error)) if continue_on_stock_error => {
+                if let Err(error) = on_batch(PreparedCyqChenWriteBatch::with_error(ts_code, error))
+                {
+                    fatal_error.set(Some(error.clone()));
+                    return Err(error);
+                }
+            }
+            Some(Err(error)) => return Err(format!("ts_code={ts_code}: {error}")),
+            None => return Ok(()),
         }
         if let Some(done) = on_stock_done {
             done(ts_code);
         }
+        Ok(())
+    };
+    let query_result = worker_reader.load_batch_streaming(
+        ts_group,
+        DEFAULT_ADJ_TYPE,
+        load_start_date,
+        end_date,
+        |ts_code, row| handle_row(&ts_code, row, true, &mut seen, &mut deferred),
+    );
+    if let Some(error) = fatal_error.take() {
+        return Err(error);
     }
-    let mut batch = builder.finish()?;
-    batch.completed_ts_codes = ts_group.to_vec();
-    Ok(batch)
+    if let Err(error) = query_result {
+        if !continue_on_stock_error {
+            return Err(error);
+        }
+        for ts_code in ts_group {
+            if !seen.contains(ts_code) {
+                deferred.push(ts_code.clone());
+            }
+        }
+    }
+    while let Some(ts_code) = deferred.pop() {
+        let row = worker_reader
+            .load_one_tail_rows(&ts_code, DEFAULT_ADJ_TYPE, end_date, lookback.max(1) * 2)
+            .map_err(|error| format!("ts_code={ts_code}: {error}"));
+        handle_row(&ts_code, row, false, &mut seen, &mut deferred)?;
+    }
+    Ok((snapshot_rows, bin_rows))
 }
 
 pub(super) fn append_prepared_cyq_chen_batch_rows(
@@ -799,6 +858,12 @@ pub(super) fn write_cyq_chen_batches_from_channel(
         == Some(".cyq_chen.db.resume.tmp")
         && conn.query_row("SELECT count(*) FROM information_schema.tables WHERE table_name = 'cyq_chen_rebuild_done'", [], |row| row.get::<_, usize>(0))
             .map_err(|e| format!("检查重建进度表失败:{e}"))? == 1;
+    if resumable {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS cyq_chen_rebuild_error(ts_code VARCHAR PRIMARY KEY, error VARCHAR)",
+        )
+        .map_err(|e| format!("创建新筹码重建错误表失败:{e}"))?;
+    }
     if occupied && !resumable {
         return Err("新筹码分批重建只允许写入空临时库，禁止覆盖已有数据".to_string());
     }
@@ -935,8 +1000,27 @@ fn write_cyq_chen_batch_groups(
                         return Err("临时库写入不接受增量提交标记".into());
                     }
                 };
+                if !batch.errors.is_empty() {
+                    if !resumable {
+                        return Err("新筹码个股错误只能保存在重建临时库".to_string());
+                    }
+                    for error in &batch.errors {
+                        tx.execute(
+                            "INSERT OR REPLACE INTO cyq_chen_rebuild_error VALUES (?, ?)",
+                            params![&error.ts_code, &error.error],
+                        )
+                        .map_err(|e| {
+                            format!("保存新筹码个股错误失败, ts_code={}: {e}", error.ts_code)
+                        })?;
+                    }
+                }
                 if resumable {
                     for ts_code in &batch.completed_ts_codes {
+                        tx.execute(
+                            "DELETE FROM cyq_chen_rebuild_error WHERE ts_code = ?",
+                            [ts_code],
+                        )
+                        .map_err(|e| format!("清理已修复的新筹码个股错误失败:{e}"))?;
                         tx.execute("INSERT INTO cyq_chen_rebuild_done VALUES (?)", [ts_code])
                             .map_err(|e| format!("保存重建股票进度失败:{e}"))?;
                     }
@@ -1177,8 +1261,8 @@ mod tests {
                 .flat_map(|s| &s.bins)
                 .any(|b| !b.pending.is_empty())
         );
-        let expected = super::prepare_cyq_chen_batch_rows(collected, config).unwrap();
-        let actual = super::compute_prepared_cyq_chen_stock_group_batch(
+        let mut actual = Vec::new();
+        super::compute_prepared_cyq_chen_stock_group_batch(
             &reader,
             "20260401",
             "20260401",
@@ -1189,14 +1273,46 @@ mod tests {
             &std::collections::HashMap::new(),
             &codes,
             None,
+            false,
+            &mut |batch| {
+                actual.push(batch);
+                Ok(())
+            },
         )
         .unwrap();
-        assert_eq!(actual.snapshot_batch, expected.snapshot_batch);
-        assert_eq!(actual.bin_batch, expected.bin_batch);
-        assert_eq!(actual.checkpoints, expected.checkpoints);
-        assert_eq!(actual.snapshot_rows, expected.snapshot_rows);
-        assert_eq!(actual.bin_rows, expected.bin_rows);
-        assert_eq!(actual.stock_count, expected.stock_count);
+        assert_eq!(actual.len(), codes.len());
+        for ts_code in &codes {
+            let one = vec![ts_code.clone()];
+            let expected = super::prepare_cyq_chen_batch_rows(
+                super::compute_cyq_chen_stock_group_batch(
+                    &reader,
+                    None,
+                    "20260401",
+                    "20260401",
+                    "20260408",
+                    &reference,
+                    config,
+                    &std::collections::HashSet::new(),
+                    &std::collections::HashMap::new(),
+                    &one,
+                    None,
+                    None,
+                )
+                .unwrap(),
+                config,
+            )
+            .unwrap();
+            let actual = actual
+                .iter()
+                .find(|batch| batch.completed_ts_codes == one)
+                .unwrap();
+            assert_eq!(actual.snapshot_batch, expected.snapshot_batch);
+            assert_eq!(actual.bin_batch, expected.bin_batch);
+            assert_eq!(actual.checkpoints, expected.checkpoints);
+            assert_eq!(actual.snapshot_rows, expected.snapshot_rows);
+            assert_eq!(actual.bin_rows, expected.bin_rows);
+            assert_eq!(actual.stock_count, expected.stock_count);
+        }
         drop(reader);
         fs::remove_dir_all(source_dir).unwrap();
     }

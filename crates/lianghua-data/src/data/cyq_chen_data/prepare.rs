@@ -336,6 +336,7 @@ impl CyqChenBatchBuilder {
             completed_ts_codes: self.checkpoints.iter().map(|row| row.0.clone()).collect(),
             stock_count: self.stock_count,
             replace_ts_codes: self.replace_ts_codes,
+            errors: Vec::new(),
             snapshot_rows,
             bin_rows,
             checkpoints: self.checkpoints,
