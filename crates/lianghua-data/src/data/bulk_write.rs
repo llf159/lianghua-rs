@@ -1,12 +1,23 @@
 use duckdb::Connection;
 
 /// Scope the checkpoint threshold without changing transaction or durability settings.
-pub(super) struct BulkWriteSettings {
+pub struct BulkWriteSettings {
     checkpoint_threshold: String,
 }
 
 impl BulkWriteSettings {
-    pub(super) fn apply(conn: &Connection) -> Result<Self, String> {
+    /// Run a multi-transaction write scope, checkpoint on success, and restore settings
+    /// on both success and error. The action must close its transactions and appenders.
+    pub fn run<T>(
+        conn: &Connection,
+        action: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let settings = Self::apply(conn)?;
+        let result = action();
+        settings.checkpoint_and_finish(conn, result)
+    }
+
+    pub fn apply(conn: &Connection) -> Result<Self, String> {
         let checkpoint_threshold = conn
             .query_row(
                 "SELECT current_setting('checkpoint_threshold')",
@@ -21,7 +32,7 @@ impl BulkWriteSettings {
         })
     }
 
-    pub(super) fn checkpoint_and_finish<T>(
+    pub fn checkpoint_and_finish<T>(
         self,
         conn: &Connection,
         result: Result<T, String>,
@@ -35,11 +46,7 @@ impl BulkWriteSettings {
         self.finish(conn, result)
     }
 
-    pub(super) fn finish<T>(
-        self,
-        conn: &Connection,
-        result: Result<T, String>,
-    ) -> Result<T, String> {
+    pub fn finish<T>(self, conn: &Connection, result: Result<T, String>) -> Result<T, String> {
         let restored = conn
             .execute("SET checkpoint_threshold = ?", [self.checkpoint_threshold])
             .map_err(|e| format!("恢复批量写入检查点阈值失败: {e}"));
@@ -66,14 +73,16 @@ mod tests {
             .unwrap();
         for result in [Ok(7), Err("interrupted".to_string())] {
             let expected = result.clone();
-            let settings = super::BulkWriteSettings::apply(&conn).unwrap();
-            let current: String = conn
-                .query_row("SELECT current_setting('checkpoint_threshold')", [], |r| {
-                    r.get(0)
-                })
-                .unwrap();
-            assert_ne!(current, previous);
-            assert_eq!(settings.checkpoint_and_finish(&conn, result), expected);
+            let actual = super::BulkWriteSettings::run(&conn, || {
+                let current: String = conn
+                    .query_row("SELECT current_setting('checkpoint_threshold')", [], |r| {
+                        r.get(0)
+                    })
+                    .unwrap();
+                assert_ne!(current, previous);
+                result
+            });
+            assert_eq!(actual, expected);
             let restored: String = conn
                 .query_row("SELECT current_setting('checkpoint_threshold')", [], |r| {
                     r.get(0)

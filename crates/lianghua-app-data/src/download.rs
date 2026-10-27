@@ -2134,87 +2134,90 @@ pub fn run_prepared_stock_data_indicator_columns_rebuild(
     let mut updated_rows = 0_u64;
     let mut committed_rows = 0_u64;
     let mut finished_groups = 0_usize;
-    let write_result = (|| -> Result<(), String> {
-        with_transaction(&conn, |tx| {
-            ensure_indicator_columns(tx, &indicator_names)?;
-            if let Some(start) = work_items.iter().map(|item| item.start_date.as_str()).min() {
-                crate::data::panel::invalidate(tx, start)?;
-            }
-            Ok(())
-        })?;
-
-        loop {
-            reset_stock_data_indicator_stage_table(&conn, &indicator_names)?;
-            let mut stage_appender =
-                create_stock_data_indicator_stage_appender_for_columns(&conn, &indicator_names)?;
-            let mut batch_rows = 0_u64;
-            let mut compute_done = false;
+    let write_result =
+        crate::data::bulk_write::BulkWriteSettings::run(&conn, || -> Result<(), String> {
+            with_transaction(&conn, |tx| {
+                ensure_indicator_columns(tx, &indicator_names)?;
+                if let Some(start) = work_items.iter().map(|item| item.start_date.as_str()).min() {
+                    crate::data::panel::invalidate(tx, start)?;
+                }
+                Ok(())
+            })?;
 
             loop {
-                match rx.recv() {
-                    Ok(StockDataIndicatorRebuildMessage::Batch(batch)) => {
-                        append_stock_data_indicator_stage_rows_with_appender(
-                            &mut stage_appender,
-                            &indicator_names,
-                            batch.ts_code.as_str(),
-                            batch.adj_type,
-                            &batch.trade_dates,
-                            &batch.indicators,
-                        )?;
-                        batch_rows += batch.row_count;
-                        updated_rows += batch.row_count;
-                        finished_groups += 1;
+                reset_stock_data_indicator_stage_table(&conn, &indicator_names)?;
+                let mut stage_appender = create_stock_data_indicator_stage_appender_for_columns(
+                    &conn,
+                    &indicator_names,
+                )?;
+                let mut batch_rows = 0_u64;
+                let mut compute_done = false;
 
-                        if let Some(cb) = progress_cb {
-                            cb(lianghua_download::download::runner::DownloadProgress {
-                                phase: "rebuild_stock_data_indicator_columns".to_string(),
-                                finished: finished_groups,
-                                total: work_items.len(),
-                                current_label: Some(format!(
-                                    "{} / {}",
-                                    batch.ts_code, batch.adj_type_label
-                                )),
-                                message: format!(
-                                    "已补算 {}/{} 组，当前 {} / {}，本组 {} 行。",
-                                    finished_groups,
-                                    work_items.len(),
-                                    batch.ts_code,
-                                    batch.adj_type_label,
-                                    batch.row_count
-                                ),
-                            });
+                loop {
+                    match rx.recv() {
+                        Ok(StockDataIndicatorRebuildMessage::Batch(batch)) => {
+                            append_stock_data_indicator_stage_rows_with_appender(
+                                &mut stage_appender,
+                                &indicator_names,
+                                batch.ts_code.as_str(),
+                                batch.adj_type,
+                                &batch.trade_dates,
+                                &batch.indicators,
+                            )?;
+                            batch_rows += batch.row_count;
+                            updated_rows += batch.row_count;
+                            finished_groups += 1;
+
+                            if let Some(cb) = progress_cb {
+                                cb(lianghua_download::download::runner::DownloadProgress {
+                                    phase: "rebuild_stock_data_indicator_columns".to_string(),
+                                    finished: finished_groups,
+                                    total: work_items.len(),
+                                    current_label: Some(format!(
+                                        "{} / {}",
+                                        batch.ts_code, batch.adj_type_label
+                                    )),
+                                    message: format!(
+                                        "已补算 {}/{} 组，当前 {} / {}，本组 {} 行。",
+                                        finished_groups,
+                                        work_items.len(),
+                                        batch.ts_code,
+                                        batch.adj_type_label,
+                                        batch.row_count
+                                    ),
+                                });
+                            }
+
+                            if batch_rows >= 131_072 {
+                                break;
+                            }
                         }
-
-                        if batch_rows >= 131_072 {
+                        Ok(StockDataIndicatorRebuildMessage::Abort(err)) => return Err(err),
+                        Ok(StockDataIndicatorRebuildMessage::Done) => {
+                            compute_done = true;
                             break;
                         }
-                    }
-                    Ok(StockDataIndicatorRebuildMessage::Abort(err)) => return Err(err),
-                    Ok(StockDataIndicatorRebuildMessage::Done) => {
-                        compute_done = true;
-                        break;
-                    }
-                    Err(_) => {
-                        return Err("指标补算计算线程未正常完成。".to_string());
+                        Err(_) => {
+                            return Err("指标补算计算线程未正常完成。".to_string());
+                        }
                     }
                 }
-            }
 
-            stage_appender
-                .flush()
-                .map_err(|e| format!("刷新指标临时表 Appender 失败: {e}"))?;
-            drop(stage_appender);
-            with_transaction(&conn, |tx| {
-                flush_stock_data_indicator_stage_table(tx, &indicator_names)
-            })?;
-            committed_rows += batch_rows;
+                stage_appender
+                    .flush()
+                    .map_err(|e| format!("刷新指标临时表 Appender 失败: {e}"))?;
+                drop(stage_appender);
+                with_transaction(&conn, |tx| {
+                    flush_stock_data_indicator_stage_table(tx, &indicator_names)
+                })?;
+                committed_rows += batch_rows;
 
-            if compute_done {
-                break;
+                if compute_done {
+                    break;
+                }
             }
-        }
-        Ok(())
-    })();
+            Ok(())
+        });
 
     drop(rx);
     let compute_result = match compute_handle.join() {

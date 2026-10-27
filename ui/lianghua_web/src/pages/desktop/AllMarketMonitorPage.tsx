@@ -175,7 +175,7 @@ type HitPanelMode =
 type SpeedPeriod = (typeof SPEED_PERIOD_OPTIONS)[number];
 type BoardFilter = (typeof STOCK_PICK_BOARD_OPTIONS)[number] | "自选";
 type SortKey =
-  | "best_rank_3d"
+  | "best_rank_5d"
   | "similarity_rank"
   | "other_sort_value"
   | "realtime_change_pct"
@@ -1225,7 +1225,7 @@ export default function AllMarketMonitorPage() {
                 : row.realtime_change_open_pct) >= conditions.volumeBodyMin)) &&
           (!conditions.volumeAboveAverage || isAboveAvgPrice(row)) &&
           (conditions.volumeRankMax === 0 ||
-            isRankHighlight(row.best_rank_3d, conditions.volumeRankMax) ||
+            isRankHighlight(row.best_rank_5d, conditions.volumeRankMax) ||
             isRankHighlight(row.similarity_rank, conditions.volumeRankMax)) &&
           openingReady &&
           isFiniteNumber(current) &&
@@ -1600,7 +1600,7 @@ export default function AllMarketMonitorPage() {
       }));
 
     const sortDefinitions = {
-      best_rank_3d: { value: (row: DisplayRow) => row.best_rank_3d },
+      best_rank_5d: { value: (row: DisplayRow) => row.best_rank_5d },
       similarity_rank: { value: (row: DisplayRow) => row.similarity_rank },
       other_sort_value: { value: (row: DisplayRow) => row.other_sort_value },
       realtime_change_pct: {
@@ -1866,15 +1866,15 @@ export default function AllMarketMonitorPage() {
 
   function renderHitMeta(row: DisplayRow) {
     const rankParts = [
-      isFiniteNumber(row.best_rank_3d)
-        ? `3:${formatNumber(row.best_rank_3d, 0)}`
+      isFiniteNumber(row.best_rank_5d)
+        ? `5:${formatNumber(row.best_rank_5d, 0)}`
         : null,
       isFiniteNumber(row.similarity_rank)
         ? `相似:${formatNumber(row.similarity_rank, 0)}`
         : null,
     ].filter((item): item is string => item !== null);
     const rankHighlighted =
-      isRankHighlight(row.best_rank_3d, rankHighlightThreshold) ||
+      isRankHighlight(row.best_rank_5d, rankHighlightThreshold) ||
       isRankHighlight(row.similarity_rank, rankHighlightThreshold);
     const hasAvgPrice =
       isFiniteNumber(row.realtime_price) &&
@@ -1901,7 +1901,7 @@ export default function AllMarketMonitorPage() {
                 ? "all-market-hit-tag is-rank-highlight"
                 : "all-market-hit-tag"
             }
-            title="3日优 / 策略触发相似榜排名"
+            title="5日优 / 策略触发相似榜排名"
           >
             排 {rankParts.map((item) => item.split(":")[1] ?? item).join("/")}
           </span>
@@ -2314,11 +2314,11 @@ export default function AllMarketMonitorPage() {
                     <th
                       className="all-market-basic-col"
                       aria-sort={getAriaSort(
-                        sortKey === "best_rank_3d",
+                        sortKey === "best_rank_5d",
                         sortDirection,
                       )}
                     >
-                      {renderSortHeader("3日优", "best_rank_3d")}
+                      {renderSortHeader("5日优", "best_rank_5d")}
                     </th>
                     <th
                       className="all-market-basic-col"
@@ -2429,8 +2429,8 @@ export default function AllMarketMonitorPage() {
                       row.concept ?? "",
                       excludedConcepts,
                     );
-                    const rank3dHighlighted = isRankHighlight(
-                      row.best_rank_3d,
+                    const rank5dHighlighted = isRankHighlight(
+                      row.best_rank_5d,
                       rankHighlightThreshold,
                     );
                     const rankSimHighlighted = isRankHighlight(
@@ -2471,12 +2471,12 @@ export default function AllMarketMonitorPage() {
                           <div className="all-market-compact-primary-list">
                             <span
                               className={
-                                rank3dHighlighted
+                                rank5dHighlighted
                                   ? "all-market-compact-item is-highlight"
                                   : "all-market-compact-item"
                               }
                             >
-                              3日 {formatNumber(row.best_rank_3d, 0)}
+                              5日 {formatNumber(row.best_rank_5d, 0)}
                             </span>
                             <span
                               className={
@@ -2552,12 +2552,12 @@ export default function AllMarketMonitorPage() {
                         </td>
                         <td
                           className={
-                            rank3dHighlighted
+                            rank5dHighlighted
                               ? "all-market-rank-cell all-market-basic-col is-highlight"
                               : "all-market-rank-cell all-market-basic-col"
                           }
                         >
-                          {formatNumber(row.best_rank_3d, 0)}
+                          {formatNumber(row.best_rank_5d, 0)}
                         </td>
                         <td
                           className={
@@ -3061,8 +3061,8 @@ export default function AllMarketMonitorPage() {
                 </div>
                 <dl className="all-market-hit-detail-grid">
                   <div>
-                    <dt>3日优</dt>
-                    <dd>{formatNumber(openHitRecord.best_rank_3d, 0)}</dd>
+                    <dt>5日优</dt>
+                    <dd>{formatNumber(openHitRecord.best_rank_5d, 0)}</dd>
                   </div>
                   <div>
                     <dt>相似榜</dt>
@@ -3313,7 +3313,7 @@ export default function AllMarketMonitorPage() {
                     }}
                     onBlur={() => setVolumeRankMaxText(String(volumeRankMax))}
                   />
-                  <small title="缺失排名不通过">3日优 / 相似榜任一满足；0 不限</small>
+                  <small title="缺失排名不通过">5日优 / 相似榜任一满足；0 不限</small>
                 </label>
                 <label className="settings-field">
                   <span>排序 / 高亮阈值</span>

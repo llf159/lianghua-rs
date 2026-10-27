@@ -1097,23 +1097,17 @@ fn compute_strategy_trigger_similarity_ranking(
         )
         .map_err(|e| format!("清理旧相似排行汇总失败: {e}"))?;
         {
-            let mut insert = tx
-                .prepare(
-                    r#"
-                INSERT INTO strategy_trigger_similarity_rank VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-                )
-                "#,
-                )
-                .map_err(|e| format!("预编译相似排行写入失败: {e}"))?;
+            let mut appender = tx
+                .appender("strategy_trigger_similarity_rank")
+                .map_err(|e| format!("创建相似排行写入器失败: {e}"))?;
             for row in rows {
                 let top_matches_json = serde_json::to_string(&RankingEvidence {
                     matches: row.top_matches.clone(),
                     diagnostics: row.diagnostics.clone(),
                 })
                 .map_err(|e| format!("序列化相似事件失败: {e}"))?;
-                insert
-                    .execute(params![
+                appender
+                    .append_row(params![
                         trade_date,
                         config_key,
                         row.rank.map(|value| value as i64),
@@ -1141,6 +1135,10 @@ fn compute_strategy_trigger_similarity_ranking(
                     ])
                     .map_err(|e| format!("写入相似排行失败 {}: {e}", row.ts_code))?;
             }
+            // Flush before deriving the summary in the same transaction.
+            appender
+                .flush()
+                .map_err(|e| format!("刷新相似排行失败: {e}"))?;
         }
         tx.execute(
             "INSERT INTO strategy_trigger_similarity_summary (trade_date, ts_code, rank)

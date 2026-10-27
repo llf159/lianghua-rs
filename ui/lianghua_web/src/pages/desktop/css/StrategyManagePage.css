@@ -506,11 +506,16 @@
 
 .strategy-manage-chip-group-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 560px), 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
 }
 
+.strategy-manage-chip-group .strategy-manage-rule-card-head {
+  flex-wrap: wrap;
+}
+
 .strategy-manage-chip-group {
+  min-width: 0;
   border: 1px solid #d7dfe8;
   border-radius: 10px;
   background: #f8fafc;
@@ -1436,10 +1441,6 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .strategy-manage-chip-group-grid {
-    grid-template-columns: 1fr;
-  }
-
   .strategy-manage-bulk-kpi {
     grid-template-columns: 1fr;
   }
@@ -1695,5 +1696,11 @@
 
   .strategy-rule-editor-footer button {
     padding-inline: 6px;
+  }
+}
+
+@media (max-width: 900px) {
+  .strategy-manage-chip-group-grid {
+    grid-template-columns: 1fr;
   }
 }

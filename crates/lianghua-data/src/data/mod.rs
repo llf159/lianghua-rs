@@ -1,4 +1,4 @@
-mod bulk_write;
+pub mod bulk_write;
 pub mod concept_performance_data;
 pub mod cyq;
 pub mod cyq_chen;

@@ -362,6 +362,8 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
   const [strategyDiffLoading, setStrategyDiffLoading] = useState(false)
   const [cyqChenStrategyDiff, setCyqChenStrategyDiff] = useState<CyqChenStrategyBackupDiff | null>(null)
   const [cyqChenStrategyDiffLoading, setCyqChenStrategyDiffLoading] = useState(false)
+  const strategyDiffRequestRef = useRef(0)
+  const cyqChenStrategyDiffRequestRef = useRef(0)
 
   const [indicatorModalOpen, setIndicatorModalOpen] = useState(false)
   const [indicatorItems, setIndicatorItems] = useState<IndicatorManageItem[]>([])
@@ -830,6 +832,10 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
     const preserveNotice = options?.preserveNotice === true
     const syncSuggestedInputs = options?.syncSuggestedInputs === true
     setBusyAction('loading')
+    strategyDiffRequestRef.current += 1
+    cyqChenStrategyDiffRequestRef.current += 1
+    setStrategyDiff(null)
+    setCyqChenStrategyDiff(null)
     clearFeedback('status')
 
     try {
@@ -1042,15 +1048,16 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
       return
     }
 
-    const startDate = status?.sourceDb.minTradeDate ?? ''
-    const endDate = status?.sourceDb.maxTradeDate ?? ''
+    const startDate = status?.resultDb.minTradeDate ?? ''
+    const endDate = status?.resultDb.maxTradeDate ?? ''
     if (!startDate || !endDate) {
-      setFeedbackError('rank', '当前原始库没有可用日期范围，无法一键重算。')
+      setFeedbackError('rank', '当前结果库没有可用日期范围，无法一键重算。')
       return
     }
 
     setBusyAction('recomputing-result-db')
     clearFeedback('rank')
+    strategyDiffRequestRef.current += 1
     setStrategyDiff(null)
 
     try {
@@ -1077,6 +1084,8 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
 
     setBusyAction('deleting-cyq-chen-db')
     clearFeedback('cyqChen')
+    cyqChenStrategyDiffRequestRef.current += 1
+    setCyqChenStrategyDiff(null)
 
     try {
       await removeManagedSourceFile('cyq-chen-db')
@@ -1142,6 +1151,7 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
 
     setBusyAction('computing')
     clearFeedback('rank')
+    strategyDiffRequestRef.current += 1
     setStrategyDiff(null)
     try {
       const assetsStatus = await getManagedStrategyAssetsStatus()
@@ -1238,6 +1248,8 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
       }
 
       setBusyAction('computing')
+      strategyDiffRequestRef.current += 1
+      setStrategyDiff(null)
       try {
         clearFeedback('rank')
         clearFeedback('similarityRank')
@@ -1315,10 +1327,13 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
   }))
 
   async function onViewStrategyDiff() {
+    const requestId = ++strategyDiffRequestRef.current
     setStrategyDiffLoading(true)
+    setStrategyDiff(null)
     clearFeedback('rank')
     try {
       const assetsStatus = await getManagedStrategyAssetsStatus()
+      if (requestId !== strategyDiffRequestRef.current) return
       const latestComputeSnapshot = assetsStatus.backups.find((item) => item.sourceKind === 'rank_compute')
       if (!latestComputeSnapshot) {
         setStrategyDiff(null)
@@ -1326,8 +1341,10 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
         return
       }
       const diff = await getManagedStrategyBackupDiff(latestComputeSnapshot.backupId)
+      if (requestId !== strategyDiffRequestRef.current) return
       setStrategyDiff(diff)
     } catch (actionError) {
+      if (requestId !== strategyDiffRequestRef.current) return
       setStrategyDiff(null)
       setFeedbackError('rank', `查看策略 diff 失败: ${String(actionError)}`)
     } finally {
@@ -1341,10 +1358,13 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
       return
     }
 
+    const requestId = ++cyqChenStrategyDiffRequestRef.current
     setCyqChenStrategyDiffLoading(true)
+    setCyqChenStrategyDiff(null)
     clearFeedback('cyqChen')
     try {
       const page = await getCyqChenStrategyPage(sourcePath)
+      if (requestId !== cyqChenStrategyDiffRequestRef.current) return
       const latestBackup = page.backups[0]
       if (!latestBackup) {
         setCyqChenStrategyDiff(null)
@@ -1352,8 +1372,10 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
         return
       }
       const diff = await getCyqChenStrategyBackupDiff(sourcePath, latestBackup.backupId)
+      if (requestId !== cyqChenStrategyDiffRequestRef.current) return
       setCyqChenStrategyDiff(diff)
     } catch (actionError) {
+      if (requestId !== cyqChenStrategyDiffRequestRef.current) return
       setCyqChenStrategyDiff(null)
       setFeedbackError('cyqChen', `查看筹码策略 diff 失败: ${String(actionError)}`)
     } finally {
@@ -1440,6 +1462,7 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
     setCyqChenBucketPctInput(String(bucketPct))
     setBusyAction('cyq-chen-computing')
     clearFeedback('cyqChen')
+    cyqChenStrategyDiffRequestRef.current += 1
     setCyqChenStrategyDiff(null)
     setProgress(null)
 
@@ -1674,7 +1697,7 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
               className="ranking-compute-secondary-btn"
               type="button"
               onClick={() => void onViewStrategyDiff()}
-              disabled={strategyDiffLoading || sourcePath === ''}
+              disabled={isBusy || strategyDiffLoading || sourcePath === ''}
             >
               {strategyDiffLoading ? '对比中...' : '显示计算快照 diff'}
             </button>
@@ -1685,13 +1708,13 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
               disabled={
                 isBusy ||
                 sourcePath === '' ||
-                !status?.sourceDb.minTradeDate ||
-                !status.sourceDb.maxTradeDate
+                !status?.resultDb.minTradeDate ||
+                !status.resultDb.maxTradeDate
               }
               title={
-                status?.sourceDb.minTradeDate && status.sourceDb.maxTradeDate
-                  ? `按原始库区间 ${formatTradeDate(status.sourceDb.minTradeDate)} 至 ${formatTradeDate(status.sourceDb.maxTradeDate)} 重算`
-                  : '当前原始库没有可用日期范围'
+                status?.resultDb.minTradeDate && status.resultDb.maxTradeDate
+                  ? `按原结果库区间 ${formatTradeDate(status.resultDb.minTradeDate)} 至 ${formatTradeDate(status.resultDb.maxTradeDate)} 重算`
+                  : '当前结果库没有可用日期范围'
               }
             >
               {busyAction === 'recomputing-result-db' ? '重算中...' : '一键重算'}
@@ -1716,7 +1739,7 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
               <button
                 className="ranking-compute-secondary-btn"
                 type="button"
-                onClick={() => setStrategyDiff(null)}
+                onClick={() => { strategyDiffRequestRef.current += 1; setStrategyDiff(null) }}
               >
                 关闭 diff
               </button>
@@ -1983,7 +2006,7 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
               className="ranking-compute-secondary-btn"
               type="button"
               onClick={() => void onViewCyqChenStrategyDiff()}
-              disabled={cyqChenStrategyDiffLoading || sourcePath === ''}
+              disabled={isBusy || cyqChenStrategyDiffLoading || sourcePath === ''}
             >
               {cyqChenStrategyDiffLoading ? '对比中...' : '显示筹码策略 diff'}
             </button>
@@ -2046,7 +2069,7 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
               <button
                 className="ranking-compute-secondary-btn"
                 type="button"
-                onClick={() => setCyqChenStrategyDiff(null)}
+                onClick={() => { cyqChenStrategyDiffRequestRef.current += 1; setCyqChenStrategyDiff(null) }}
               >
                 关闭 diff
               </button>
@@ -2284,7 +2307,7 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
                   ? `确认丢弃当前未完成的新筹码计算进度（已完成 ${status?.cyqChenRebuild?.completedStocks ?? 0} / ${status?.cyqChenRebuild?.totalStocks ?? 0} 只）吗？\n\n正式筹码库保持不变，下次计算会从零开始。`
                 : pendingConfirm?.kind === 'run-ranking-with-strategy-change'
                   ? `检测到当前排名策略相对最近计算快照有 ${pendingConfirm.changedLineCount} 行变化。是否仍使用当前策略计算 ${formatTradeDate(pendingConfirm.startDate)} 至 ${formatTradeDate(pendingConfirm.endDate)}？`
-                : `确认先删除当前结果库 scoring_result.db，再按原始库日期范围 ${formatTradeDate(status?.sourceDb.minTradeDate)} 至 ${formatTradeDate(status?.sourceDb.maxTradeDate)} 重算排名吗？`
+                : `确认先删除当前结果库 scoring_result.db，再按原结果库日期范围 ${formatTradeDate(status?.resultDb.minTradeDate)} 至 ${formatTradeDate(status?.resultDb.maxTradeDate)} 重算排名吗？`
         }
         confirmText={
           pendingConfirm?.kind === 'run-ranking-with-strategy-change' ? '仍然继续计算' : '确认'

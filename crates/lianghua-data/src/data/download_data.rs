@@ -1,6 +1,13 @@
-use std::{collections::HashMap, fs::create_dir_all, path::Path};
+use std::{collections::HashMap, fs::create_dir_all, path::Path, sync::Arc};
 
-use duckdb::{Appender, Connection, ToSql, params, params_from_iter};
+use duckdb::{
+    Appender, Connection, ToSql,
+    arrow::{
+        array::{ArrayRef, Float64Array, StringArray},
+        record_batch::RecordBatch,
+    },
+    params, params_from_iter,
+};
 use lianghua_model::{AdjType, ProBarRow, StockListRow, TradeCalRow};
 
 use crate::{
@@ -168,16 +175,13 @@ fn append_rows_to_table(
         .map_err(|e| format!("创建 {table_name} Appender失败: {e}"))?;
 
     for (row_idx, row) in rows.iter().enumerate() {
-        let runtime_values = STOCK_DATA_RUNTIME_FIELDS
-            .iter()
-            .map(|field| {
-                let value = (field.value_from_row)(row);
-                match field.persisted_scale {
-                    Some(scale) => value.map(|value| round_f64_to_scale(value, scale)),
-                    None => value,
-                }
-            })
-            .collect::<Vec<_>>();
+        let runtime_values = STOCK_DATA_RUNTIME_FIELDS.map(|field| {
+            let value = (field.value_from_row)(row);
+            match field.persisted_scale {
+                Some(scale) => value.map(|value| round_f64_to_scale(value, scale)),
+                None => value,
+            }
+        });
 
         let mut params: Vec<&dyn ToSql> = Vec::with_capacity(
             STOCK_DATA_KEY_COLUMN_DEFS.len()
@@ -420,22 +424,46 @@ pub fn append_stock_data_indicator_stage_rows_with_appender(
         }
     }
 
-    for (row_idx, trade_date) in trade_dates.iter().enumerate() {
-        let mut values: Vec<&dyn ToSql> = Vec::with_capacity(indicator_names.len() + 3);
-        values.push(&ts_code);
-        values.push(trade_date);
-        values.push(&adj_type);
+    // Bound the extra column buffers independently of the stock's history length.
+    for (chunk_idx, dates) in trade_dates.chunks(8192).enumerate() {
+        let start = chunk_idx * 8192;
+        let mut columns = vec![
+            (
+                "ts_code",
+                Arc::new(StringArray::from_iter_values(std::iter::repeat_n(
+                    ts_code,
+                    dates.len(),
+                ))) as ArrayRef,
+            ),
+            (
+                "trade_date",
+                Arc::new(StringArray::from_iter_values(
+                    dates.iter().map(String::as_str),
+                )) as ArrayRef,
+            ),
+            (
+                "adj_type",
+                Arc::new(StringArray::from_iter_values(std::iter::repeat_n(
+                    adj_type,
+                    dates.len(),
+                ))) as ArrayRef,
+            ),
+        ];
         for name in indicator_names {
-            let series = indicators
-                .get(name)
-                .ok_or_else(|| format!("缺少指标{name}的数据"))?;
-            values.push(&series[row_idx]);
+            let series = &indicators[name];
+            columns.push((
+                name.as_str(),
+                Arc::new(Float64Array::from_iter(
+                    series[start..start + dates.len()].iter().copied(),
+                )) as ArrayRef,
+            ));
         }
-
-        appender.append_row(values.as_slice()).map_err(|e| {
+        let batch = RecordBatch::try_from_iter(columns)
+            .map_err(|e| format!("构造指标临时表 Arrow 批次失败: {e}"))?;
+        appender.append_record_batch(batch).map_err(|e| {
             format!(
-                "Appender写入指标临时表失败, ts_code={}, trade_date={}: {e}",
-                ts_code, trade_date
+                "Arrow 写入指标临时表失败, ts_code={ts_code}, trade_date={}: {e}",
+                dates[0]
             )
         })?;
     }
@@ -967,6 +995,64 @@ mod tests {
             .expect("system time")
             .as_nanos();
         std::env::temp_dir().join(format!("lianghua-rs-{prefix}-{nanos}"))
+    }
+
+    #[test]
+    fn indicator_arrow_chunks_preserve_nulls_column_order_and_rollback() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Deliberately use another physical order and mixed-case indicator names.
+        conn.execute_batch("CREATE TEMP TABLE stock_data_indicator_stage(MA5 DOUBLE, adj_type VARCHAR, trade_date VARCHAR, ts_code VARCHAR, signal DOUBLE)").unwrap();
+        let names = vec!["signal".to_string(), "ma5".to_string()];
+        let dates = (0..8193).map(|i| format!("{i:08}")).collect::<Vec<_>>();
+        let indicators = HashMap::from([
+            (
+                "signal".to_string(),
+                (0..8193)
+                    .map(|i| (i % 3 != 0).then_some(i as f64))
+                    .collect(),
+            ),
+            ("ma5".to_string(), vec![Some(1.0000000000000002); 8193]),
+        ]);
+        conn.execute_batch("BEGIN").unwrap();
+        {
+            let mut app =
+                create_stock_data_indicator_stage_appender_for_columns(&conn, &names).unwrap();
+            append_stock_data_indicator_stage_rows_with_appender(
+                &mut app,
+                &names,
+                "000001.SZ",
+                AdjType::Qfq,
+                &dates,
+                &indicators,
+            )
+            .unwrap();
+            app.flush().unwrap();
+        }
+        let counts: (i64, i64) = conn
+            .query_row(
+                "SELECT count(*), count(signal) FROM stock_data_indicator_stage",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(counts, (8193, 5462));
+        let tail: (String, String, f64, f64) = conn.query_row(
+            "SELECT ts_code, adj_type, MA5, signal FROM stock_data_indicator_stage WHERE trade_date='00008192'", [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        ).unwrap();
+        assert_eq!(
+            tail,
+            ("000001.SZ".into(), "qfq".into(), 1.0000000000000002, 8192.0)
+        );
+        conn.execute_batch("ROLLBACK").unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM stock_data_indicator_stage",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
     }
 
     #[test]

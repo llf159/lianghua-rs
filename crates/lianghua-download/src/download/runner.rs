@@ -1590,113 +1590,130 @@ fn download_selected_stocks_with_context(
         return Ok(DownloadSummary::default());
     }
 
-    let mut total = DownloadSummary::default();
-    let mut tasks = build_download_task_from_stock_list_dates(
-        source_dir,
-        ts_codes,
-        start_date,
-        end_date,
-        adj_type,
-        with_factors,
-    )?;
-    let pending_repairs = load_pending_stock_repairs(conn)?;
-    for task in &mut tasks {
-        if let Some(pending) = pending_repairs
-            .iter()
-            .find(|item| item.ts_code == task.ts_code)
-        {
-            task.start_date = pending.start_date.clone();
-            task.end_date = pending.end_date.clone();
+    let bulk = crate::data::bulk_write::BulkWriteSettings::apply(conn)?;
+    let result = (|| {
+        let mut total = DownloadSummary::default();
+        let mut tasks = build_download_task_from_stock_list_dates(
+            source_dir,
+            ts_codes,
+            start_date,
+            end_date,
+            adj_type,
+            with_factors,
+        )?;
+        let pending_repairs = load_pending_stock_repairs(conn)?;
+        for task in &mut tasks {
+            if let Some(pending) = pending_repairs
+                .iter()
+                .find(|item| item.ts_code == task.ts_code)
+            {
+                task.start_date = pending.start_date.clone();
+                task.end_date = pending.end_date.clone();
+            }
         }
-    }
-    let total_tasks = tasks.len();
-    if tasks.is_empty() {
+        let total_tasks = tasks.len();
+        if tasks.is_empty() {
+            emit_progress(
+                progress_cb,
+                "download_bars",
+                0,
+                0,
+                Some(effective_trade_date.to_string()),
+                "没有需要处理的股票。",
+            );
+            return Ok(DownloadSummary::default());
+        }
+
+        let mut committed_tasks = 0usize;
         emit_progress(
             progress_cb,
             "download_bars",
             0,
-            0,
-            Some(effective_trade_date.to_string()),
-            "没有需要处理的股票。",
-        );
-        return Ok(DownloadSummary::default());
-    }
-
-    let mut committed_tasks = 0usize;
-    emit_progress(
-        progress_cb,
-        "download_bars",
-        0,
-        total_tasks,
-        None,
-        format!("{start_message}，共 {total_tasks} 只股票待处理。"),
-    );
-
-    for (batch_idx, batch) in tasks.chunks(pool.current_num_threads().max(1)).enumerate() {
-        let prepared_batch = pool.install(|| client.prepare_stock_downloads(source_dir, batch));
-        let batch_summary = prepared_batch.summary();
-        emit_progress(
-            progress_cb,
-            "write_db",
-            committed_tasks,
             total_tasks,
-            Some(format!("第 {} 批", batch_idx + 1)),
-            format!(
-                "第 {} 批下载完成，正在写入数据库，本批 {} 只。",
-                batch_idx + 1,
-                batch.len()
-            ),
+            None,
+            format!("{start_message}，共 {total_tasks} 只股票待处理。"),
         );
-        write_prepared_stock_batch(conn, &prepared_batch.prepared_items, false)?;
-        committed_tasks += batch_summary.success_count;
-        merge_summary(&mut total, batch_summary);
-        emit_progress(
-            progress_cb,
-            "download_bars",
-            committed_tasks,
-            total_tasks,
-            Some(format!("第 {} 批", batch_idx + 1)),
-            format!("已成功提交 {} / {} 只股票。", committed_tasks, total_tasks),
-        );
-    }
 
-    if !total.failed_items.is_empty() && retry_times > 0 {
-        let failed_tasks = keep_failed_tasks(tasks, &total.failed_items);
-        let retry_task_count = failed_tasks.len();
-        emit_progress(
-            progress_cb,
-            "retry_failed",
-            committed_tasks,
-            total_tasks,
-            Some(format!("待重试 {} 只", retry_task_count)),
-            format!("共有 {} 只股票失败，准备进入重试阶段。", retry_task_count),
-        );
-        let retry_batch = (|client: &TushareClient,
-                            source_dir: &str,
-                            tasks: Vec<DownloadTask>,
-                            retry_times: usize,
-                            pool: &ThreadPool,
-                            committed_tasks: usize,
-                            total_tasks: usize,
-                            progress_cb: Option<&DownloadProgressCallback<'_>>|
-         -> PreparedDownloadBatch {
-            let mut merged_batch = PreparedDownloadBatch::default();
-            let mut pending_tasks = tasks;
+        for (batch_idx, batch) in tasks.chunks(pool.current_num_threads().max(1)).enumerate() {
+            let prepared_batch = pool.install(|| client.prepare_stock_downloads(source_dir, batch));
+            let batch_summary = prepared_batch.summary();
+            emit_progress(
+                progress_cb,
+                "write_db",
+                committed_tasks,
+                total_tasks,
+                Some(format!("第 {} 批", batch_idx + 1)),
+                format!(
+                    "第 {} 批下载完成，正在写入数据库，本批 {} 只。",
+                    batch_idx + 1,
+                    batch.len()
+                ),
+            );
+            write_prepared_stock_batch(conn, &prepared_batch.prepared_items, false)?;
+            committed_tasks += batch_summary.success_count;
+            merge_summary(&mut total, batch_summary);
+            emit_progress(
+                progress_cb,
+                "download_bars",
+                committed_tasks,
+                total_tasks,
+                Some(format!("第 {} 批", batch_idx + 1)),
+                format!("已成功提交 {} / {} 只股票。", committed_tasks, total_tasks),
+            );
+        }
 
-            for attempt_idx in 0..retry_times {
-                if pending_tasks.is_empty() {
-                    break;
-                }
+        if !total.failed_items.is_empty() && retry_times > 0 {
+            let failed_tasks = keep_failed_tasks(tasks, &total.failed_items);
+            let retry_task_count = failed_tasks.len();
+            emit_progress(
+                progress_cb,
+                "retry_failed",
+                committed_tasks,
+                total_tasks,
+                Some(format!("待重试 {} 只", retry_task_count)),
+                format!("共有 {} 只股票失败，准备进入重试阶段。", retry_task_count),
+            );
+            let retry_batch = (|client: &TushareClient,
+                                source_dir: &str,
+                                tasks: Vec<DownloadTask>,
+                                retry_times: usize,
+                                pool: &ThreadPool,
+                                committed_tasks: usize,
+                                total_tasks: usize,
+                                progress_cb: Option<&DownloadProgressCallback<'_>>|
+             -> PreparedDownloadBatch {
+                let mut merged_batch = PreparedDownloadBatch::default();
+                let mut pending_tasks = tasks;
 
-                let retry_batch =
-                    pool.install(|| client.prepare_stock_downloads(source_dir, &pending_tasks));
-                let retry_summary = retry_batch.summary();
+                for attempt_idx in 0..retry_times {
+                    if pending_tasks.is_empty() {
+                        break;
+                    }
 
-                merged_batch
-                    .prepared_items
-                    .extend(retry_batch.prepared_items.into_iter());
+                    let retry_batch =
+                        pool.install(|| client.prepare_stock_downloads(source_dir, &pending_tasks));
+                    let retry_summary = retry_batch.summary();
 
-                if retry_summary.failed_items.is_empty() {
+                    merged_batch
+                        .prepared_items
+                        .extend(retry_batch.prepared_items.into_iter());
+
+                    if retry_summary.failed_items.is_empty() {
+                        emit_progress(
+                            progress_cb,
+                            "retry_failed",
+                            committed_tasks,
+                            total_tasks,
+                            Some(format!("第 {} 轮重试", attempt_idx + 1)),
+                            format!(
+                                "第 {} 轮重试已拉取全部失败项，等待写入提交。",
+                                attempt_idx + 1
+                            ),
+                        );
+                        return merged_batch;
+                    }
+
+                    pending_tasks = keep_failed_tasks(pending_tasks, &retry_summary.failed_items);
                     emit_progress(
                         progress_cb,
                         "retry_failed",
@@ -1704,100 +1721,87 @@ fn download_selected_stocks_with_context(
                         total_tasks,
                         Some(format!("第 {} 轮重试", attempt_idx + 1)),
                         format!(
-                            "第 {} 轮重试已拉取全部失败项，等待写入提交。",
-                            attempt_idx + 1
+                            "失败补救进行中，第 {} 轮后仍有 {} 只股票待重试。",
+                            attempt_idx + 1,
+                            pending_tasks.len()
                         ),
                     );
-                    return merged_batch;
+
+                    if attempt_idx + 1 == retry_times {
+                        merged_batch.failed_items = retry_summary.failed_items;
+                    }
                 }
 
-                pending_tasks = keep_failed_tasks(pending_tasks, &retry_summary.failed_items);
-                emit_progress(
-                    progress_cb,
-                    "retry_failed",
-                    committed_tasks,
-                    total_tasks,
-                    Some(format!("第 {} 轮重试", attempt_idx + 1)),
-                    format!(
-                        "失败补救进行中，第 {} 轮后仍有 {} 只股票待重试。",
-                        attempt_idx + 1,
-                        pending_tasks.len()
-                    ),
-                );
+                merged_batch
+            })(
+                client,
+                source_dir,
+                failed_tasks,
+                retry_times,
+                pool,
+                committed_tasks,
+                total_tasks,
+                progress_cb,
+            );
+            let retry_summary = retry_batch.summary();
+            emit_progress(
+                progress_cb,
+                "write_db",
+                committed_tasks,
+                total_tasks,
+                Some("重试结果".to_string()),
+                format!(
+                    "重试阶段完成，正在写入 {} 只重试成功股票。",
+                    retry_batch.prepared_items.len()
+                ),
+            );
+            write_prepared_stock_batch(conn, &retry_batch.prepared_items, false)?;
+            committed_tasks += retry_summary.success_count;
+            emit_progress(
+                progress_cb,
+                "retry_failed",
+                committed_tasks,
+                total_tasks,
+                Some("重试结果".to_string()),
+                format!("重试结果已提交，已成功提交 {committed_tasks} / {total_tasks} 只股票。"),
+            );
 
-                if attempt_idx + 1 == retry_times {
-                    merged_batch.failed_items = retry_summary.failed_items;
-                }
-            }
+            total.success_count += retry_summary.success_count;
+            total.saved_rows += retry_summary.saved_rows;
+            total.failed_count = retry_summary.failed_count;
+            total.failed_items = retry_summary.failed_items;
+        }
 
-            merged_batch
-        })(
-            client,
-            source_dir,
-            failed_tasks,
-            retry_times,
-            pool,
-            committed_tasks,
-            total_tasks,
-            progress_cb,
-        );
-        let retry_summary = retry_batch.summary();
+        checkpoint_stock_data(conn)?;
+        if total.failed_count > 0 {
+            return Err(format!(
+                "行情下载仍有 {} 只股票失败，已停止后续计算；成功写入的数据已保留，请先执行缺失股票补全。失败原因：{}",
+                total.failed_count,
+                total
+                    .failed_items
+                    .iter()
+                    .take(3)
+                    .map(|(code, error)| format!("{code}: {error}"))
+                    .collect::<Vec<_>>()
+                    .join("；")
+            ));
+        }
+
         emit_progress(
             progress_cb,
-            "write_db",
-            committed_tasks,
+            "download_bars",
             total_tasks,
-            Some("重试结果".to_string()),
+            total_tasks,
+            Some(effective_trade_date.to_string()),
             format!(
-                "重试阶段完成，正在写入 {} 只重试成功股票。",
-                retry_batch.prepared_items.len()
+                "{done_message}，成功 {} 只，失败 {} 只。",
+                total.success_count, total.failed_count
             ),
         );
-        write_prepared_stock_batch(conn, &retry_batch.prepared_items, false)?;
-        committed_tasks += retry_summary.success_count;
-        emit_progress(
-            progress_cb,
-            "retry_failed",
-            committed_tasks,
-            total_tasks,
-            Some("重试结果".to_string()),
-            format!("重试结果已提交，已成功提交 {committed_tasks} / {total_tasks} 只股票。"),
-        );
 
-        total.success_count += retry_summary.success_count;
-        total.saved_rows += retry_summary.saved_rows;
-        total.failed_count = retry_summary.failed_count;
-        total.failed_items = retry_summary.failed_items;
-    }
-
-    checkpoint_stock_data(conn)?;
-    if total.failed_count > 0 {
-        return Err(format!(
-            "行情下载仍有 {} 只股票失败，已停止后续计算；成功写入的数据已保留，请先执行缺失股票补全。失败原因：{}",
-            total.failed_count,
-            total
-                .failed_items
-                .iter()
-                .take(3)
-                .map(|(code, error)| format!("{code}: {error}"))
-                .collect::<Vec<_>>()
-                .join("；")
-        ));
-    }
-
-    emit_progress(
-        progress_cb,
-        "download_bars",
-        total_tasks,
-        total_tasks,
-        Some(effective_trade_date.to_string()),
-        format!(
-            "{done_message}，成功 {} 只，失败 {} 只。",
-            total.success_count, total.failed_count
-        ),
-    );
-
-    Ok(total)
+        Ok(total)
+    })();
+    bulk.finish(conn, result)
 }
 
 pub fn download_selected_stocks(
@@ -2012,92 +2016,101 @@ pub fn download_selected_indices(
         return Ok(DownloadSummary::default());
     }
 
-    let client = TushareClient::new(config.token.clone(), config.limit_calls_per_min)?;
-    let pool = build_download_pool(config.threads)?;
     let total_tasks = ts_codes.len();
-    let mut committed_tasks = 0usize;
-    let mut total = DownloadSummary::default();
-    emit_progress(
-        progress_cb,
-        "download_index_bars",
-        0,
-        total_tasks,
-        None,
-        format!("指数下载开始，共 {total_tasks} 只指数待处理。"),
-    );
-
-    for (batch_idx, batch) in ts_codes
-        .chunks(pool.current_num_threads().max(1))
-        .enumerate()
-    {
-        let mut prepared_batch = pool
-            .install(|| client.prepare_index_downloads(source_dir, batch, start_date, end_date));
-        (|source_dir: &str, prepared_items: &mut [PreparedStockDownload]| -> Result<(), String> {
-            if prepared_items.is_empty() {
-                return Ok(());
-            }
-
-            let inds_cache = cache_ind_build(source_dir)?;
-            if inds_cache.is_empty() {
-                for item in prepared_items {
-                    item.indicators.clear();
-                }
-                return Ok(());
-            }
-
-            let warmup_need = warmup_ind_estimate(source_dir)?;
-            let history_anchor_date = prepared_items
-                .iter()
-                .map(|item| item.start_date.as_str())
-                .min()
-                .ok_or_else(|| "缺少指数增量起始日期".to_string())?;
-            let latest_map_before =
-                load_latest_close_map_before(source_dir, "ind", history_anchor_date)?;
-            let history_end_dates = latest_map_before
-                .iter()
-                .map(|(ts_code, latest)| (ts_code.clone(), latest.trade_date.clone()))
-                .collect::<HashMap<_, _>>();
-            let dr = DataReader::new(source_dir)?;
-            let history_rows_by_stock =
-                load_many_tail_rows_with_warmup_need(&dr, "ind", &history_end_dates, warmup_need)?;
-
-            for item in prepared_items {
-                item.indicators = calc_increment_inds_from_history(
-                    &inds_cache,
-                    history_rows_by_stock.get(&item.ts_code).cloned(),
-                    &item.rows,
-                )?;
-            }
-
-            Ok(())
-        })(source_dir, prepared_batch.prepared_items.as_mut_slice())?;
-        let batch_summary = prepared_batch.summary();
-        emit_progress(
-            progress_cb,
-            "write_db",
-            committed_tasks,
-            total_tasks,
-            Some(format!("指数第 {} 批", batch_idx + 1)),
-            format!(
-                "指数第 {} 批下载完成，正在写入数据库，本批 {} 只。",
-                batch_idx + 1,
-                batch.len()
-            ),
-        );
-        write_prepared_stock_batch(&conn, &prepared_batch.prepared_items, false)?;
-        committed_tasks += batch_summary.success_count;
-        merge_summary(&mut total, batch_summary);
+    let total = crate::data::bulk_write::BulkWriteSettings::run(&conn, || {
+        let client = TushareClient::new(config.token.clone(), config.limit_calls_per_min)?;
+        let pool = build_download_pool(config.threads)?;
+        let mut committed_tasks = 0usize;
+        let mut total = DownloadSummary::default();
         emit_progress(
             progress_cb,
             "download_index_bars",
-            committed_tasks,
+            0,
             total_tasks,
-            Some(format!("指数第 {} 批", batch_idx + 1)),
-            format!("已成功提交 {} / {} 只指数。", committed_tasks, total_tasks),
+            None,
+            format!("指数下载开始，共 {total_tasks} 只指数待处理。"),
         );
-    }
 
-    checkpoint_stock_data(&conn)?;
+        for (batch_idx, batch) in ts_codes
+            .chunks(pool.current_num_threads().max(1))
+            .enumerate()
+        {
+            let mut prepared_batch = pool.install(|| {
+                client.prepare_index_downloads(source_dir, batch, start_date, end_date)
+            });
+            (|source_dir: &str,
+              prepared_items: &mut [PreparedStockDownload]|
+             -> Result<(), String> {
+                if prepared_items.is_empty() {
+                    return Ok(());
+                }
+
+                let inds_cache = cache_ind_build(source_dir)?;
+                if inds_cache.is_empty() {
+                    for item in prepared_items {
+                        item.indicators.clear();
+                    }
+                    return Ok(());
+                }
+
+                let warmup_need = warmup_ind_estimate(source_dir)?;
+                let history_anchor_date = prepared_items
+                    .iter()
+                    .map(|item| item.start_date.as_str())
+                    .min()
+                    .ok_or_else(|| "缺少指数增量起始日期".to_string())?;
+                let latest_map_before =
+                    load_latest_close_map_before(source_dir, "ind", history_anchor_date)?;
+                let history_end_dates = latest_map_before
+                    .iter()
+                    .map(|(ts_code, latest)| (ts_code.clone(), latest.trade_date.clone()))
+                    .collect::<HashMap<_, _>>();
+                let dr = DataReader::new(source_dir)?;
+                let history_rows_by_stock = load_many_tail_rows_with_warmup_need(
+                    &dr,
+                    "ind",
+                    &history_end_dates,
+                    warmup_need,
+                )?;
+
+                for item in prepared_items {
+                    item.indicators = calc_increment_inds_from_history(
+                        &inds_cache,
+                        history_rows_by_stock.get(&item.ts_code).cloned(),
+                        &item.rows,
+                    )?;
+                }
+
+                Ok(())
+            })(source_dir, prepared_batch.prepared_items.as_mut_slice())?;
+            let batch_summary = prepared_batch.summary();
+            emit_progress(
+                progress_cb,
+                "write_db",
+                committed_tasks,
+                total_tasks,
+                Some(format!("指数第 {} 批", batch_idx + 1)),
+                format!(
+                    "指数第 {} 批下载完成，正在写入数据库，本批 {} 只。",
+                    batch_idx + 1,
+                    batch.len()
+                ),
+            );
+            write_prepared_stock_batch(&conn, &prepared_batch.prepared_items, false)?;
+            committed_tasks += batch_summary.success_count;
+            merge_summary(&mut total, batch_summary);
+            emit_progress(
+                progress_cb,
+                "download_index_bars",
+                committed_tasks,
+                total_tasks,
+                Some(format!("指数第 {} 批", batch_idx + 1)),
+                format!("已成功提交 {} / {} 只指数。", committed_tasks, total_tasks),
+            );
+        }
+
+        Ok(total)
+    })?;
     emit_progress(
         progress_cb,
         "done",
@@ -2714,113 +2727,115 @@ fn download_pending_all_market_after_basic_data(
                 failed_items.len()
             ),
         );
-        let recovered = (|client: &TushareClient,
-                          source_dir: &str,
-                          failed_items: &[(String, String)],
-                          start_date: &str,
-                          trade_date: &str,
-                          adj_type: AdjType,
-                          with_factors: bool,
-                          pool: &ThreadPool,
-                          conn: &Connection,
-                          progress_cb: Option<&DownloadProgressCallback<'_>>|
-         -> Result<DownloadSummary, String> {
-            if failed_items.is_empty() {
-                return Ok(DownloadSummary::default());
-            }
-
-            let failed_ts_codes = failed_items
-                .iter()
-                .map(|(ts_code, _)| ts_code.clone())
-                .collect::<Vec<_>>();
-            let mut tasks = build_download_task_from_stock_list_dates(
-                source_dir,
-                &failed_ts_codes,
-                start_date,
-                trade_date,
-                adj_type,
-                with_factors,
-            )?;
-            let pending_repairs = load_pending_stock_repairs(conn)?;
-            for task in &mut tasks {
-                if let Some(pending) = pending_repairs
-                    .iter()
-                    .find(|pending| pending.ts_code == task.ts_code)
-                {
-                    task.start_date = pending.start_date.clone();
-                    task.end_date = pending.end_date.clone();
+        let recovered = crate::data::bulk_write::BulkWriteSettings::run(&conn, || {
+            (|client: &TushareClient,
+              source_dir: &str,
+              failed_items: &[(String, String)],
+              start_date: &str,
+              trade_date: &str,
+              adj_type: AdjType,
+              with_factors: bool,
+              pool: &ThreadPool,
+              conn: &Connection,
+              progress_cb: Option<&DownloadProgressCallback<'_>>|
+             -> Result<DownloadSummary, String> {
+                if failed_items.is_empty() {
+                    return Ok(DownloadSummary::default());
                 }
-            }
-            let total_tasks = tasks.len();
-            let mut total = DownloadSummary::default();
 
-            for task in &tasks {
-                emit_progress(
-                    progress_cb,
-                    "recover_failed_stocks",
-                    total.recovered_stock_count,
-                    total_tasks,
-                    Some(task.ts_code.clone()),
-                    format!(
-                        "正在整段补救重下 {}，进度 {}/{}。",
-                        task.ts_code, total.recovered_stock_count, total_tasks
-                    ),
-                );
-                let one_batch = pool.install(|| {
-                    client.prepare_stock_downloads(source_dir, std::slice::from_ref(task))
-                });
-                let one_summary = one_batch.summary();
-                let one_success_count = one_summary.success_count;
-                let one_failed_count = one_summary.failed_count;
-                if !one_batch.prepared_items.is_empty() {
+                let failed_ts_codes = failed_items
+                    .iter()
+                    .map(|(ts_code, _)| ts_code.clone())
+                    .collect::<Vec<_>>();
+                let mut tasks = build_download_task_from_stock_list_dates(
+                    source_dir,
+                    &failed_ts_codes,
+                    start_date,
+                    trade_date,
+                    adj_type,
+                    with_factors,
+                )?;
+                let pending_repairs = load_pending_stock_repairs(conn)?;
+                for task in &mut tasks {
+                    if let Some(pending) = pending_repairs
+                        .iter()
+                        .find(|pending| pending.ts_code == task.ts_code)
+                    {
+                        task.start_date = pending.start_date.clone();
+                        task.end_date = pending.end_date.clone();
+                    }
+                }
+                let total_tasks = tasks.len();
+                let mut total = DownloadSummary::default();
+
+                for task in &tasks {
                     emit_progress(
                         progress_cb,
                         "recover_failed_stocks",
                         total.recovered_stock_count,
                         total_tasks,
                         Some(task.ts_code.clone()),
-                        format!("{} 整段行情已拉取，正在提交补救事务。", task.ts_code),
+                        format!(
+                            "正在整段补救重下 {}，进度 {}/{}。",
+                            task.ts_code, total.recovered_stock_count, total_tasks
+                        ),
                     );
-                    write_prepared_stock_batch(conn, &one_batch.prepared_items, true)?;
-                    total.recovered_stock_count += one_batch.prepared_items.len();
-                    total.recovered_stock_codes.extend(
-                        one_batch
-                            .prepared_items
-                            .iter()
-                            .map(|item| item.ts_code.clone()),
+                    let one_batch = pool.install(|| {
+                        client.prepare_stock_downloads(source_dir, std::slice::from_ref(task))
+                    });
+                    let one_summary = one_batch.summary();
+                    let one_success_count = one_summary.success_count;
+                    let one_failed_count = one_summary.failed_count;
+                    if !one_batch.prepared_items.is_empty() {
+                        emit_progress(
+                            progress_cb,
+                            "recover_failed_stocks",
+                            total.recovered_stock_count,
+                            total_tasks,
+                            Some(task.ts_code.clone()),
+                            format!("{} 整段行情已拉取，正在提交补救事务。", task.ts_code),
+                        );
+                        write_prepared_stock_batch(conn, &one_batch.prepared_items, true)?;
+                        total.recovered_stock_count += one_batch.prepared_items.len();
+                        total.recovered_stock_codes.extend(
+                            one_batch
+                                .prepared_items
+                                .iter()
+                                .map(|item| item.ts_code.clone()),
+                        );
+                    }
+                    merge_summary(&mut total, one_summary);
+                    emit_progress(
+                        progress_cb,
+                        "recover_failed_stocks",
+                        total.recovered_stock_count,
+                        total_tasks,
+                        Some(task.ts_code.clone()),
+                        format!(
+                            "整段补救重下 {} 已处理，成功 {}，失败 {}，已提交 {}/{}。",
+                            task.ts_code,
+                            one_success_count,
+                            one_failed_count,
+                            total.recovered_stock_count,
+                            total_tasks
+                        ),
                     );
                 }
-                merge_summary(&mut total, one_summary);
-                emit_progress(
-                    progress_cb,
-                    "recover_failed_stocks",
-                    total.recovered_stock_count,
-                    total_tasks,
-                    Some(task.ts_code.clone()),
-                    format!(
-                        "整段补救重下 {} 已处理，成功 {}，失败 {}，已提交 {}/{}。",
-                        task.ts_code,
-                        one_success_count,
-                        one_failed_count,
-                        total.recovered_stock_count,
-                        total_tasks
-                    ),
-                );
-            }
 
-            Ok(total)
-        })(
-            &client,
-            source_dir,
-            &failed_items,
-            start_date,
-            effective_trade_date,
-            adj_type,
-            with_factors,
-            &pool,
-            &conn,
-            progress_cb,
-        )?;
+                Ok(total)
+            })(
+                &client,
+                source_dir,
+                &failed_items,
+                start_date,
+                effective_trade_date,
+                adj_type,
+                with_factors,
+                &pool,
+                &conn,
+                progress_cb,
+            )
+        })?;
         total.saved_rows += recovered.saved_rows;
         total.failed_count += recovered.failed_count;
         total.failed_items.extend(recovered.failed_items);

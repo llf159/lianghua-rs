@@ -17,6 +17,7 @@ struct CachedSample {
 // 缓存独立于云端单日快照；不保存参考日相关的市场匹配和 IDF。
 pub(super) struct FingerprintCache {
     conn: Connection,
+    bulk: crate::data::bulk_write::BulkWriteSettings,
 }
 
 pub(super) fn input_signature(
@@ -78,6 +79,7 @@ impl FingerprintCache {
     ) -> Result<Self, String> {
         let mut conn = Connection::open(Path::new(source).join("strategy_similarity_cache.db"))
             .map_err(|e| format!("打开历史指纹缓存失败: {e}"))?;
+        let bulk = crate::data::bulk_write::BulkWriteSettings::apply(&conn)?;
         conn.execute_batch("CREATE TABLE IF NOT EXISTS cache_meta(config_key VARCHAR, through_date VARCHAR, signature VARCHAR, ready BOOLEAN);
             CREATE TABLE IF NOT EXISTS fingerprints(ts_code VARCHAR, start_date VARCHAR, end_date VARCHAR, payload VARCHAR, PRIMARY KEY(ts_code, start_date, end_date));
             CREATE TABLE IF NOT EXISTS cache_stock_stamps(ts_code VARCHAR PRIMARY KEY, signature VARCHAR);
@@ -200,7 +202,7 @@ impl FingerprintCache {
             .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
         // 每批提交以限制内存；中断时 ready=false，下一轮放弃未认证缓存。
-        Ok(Self { conn })
+        Ok(Self { conn, bulk })
     }
 
     pub fn load(
@@ -342,10 +344,12 @@ impl FingerprintCache {
     }
 
     pub fn finish(self) -> Result<(), String> {
-        self.conn
+        let result = self
+            .conn
             .execute("UPDATE cache_meta SET ready=true", [])
-            .map_err(|e| e.to_string())?;
-        Ok(())
+            .map(|_| ())
+            .map_err(|e| e.to_string());
+        self.bulk.checkpoint_and_finish(&self.conn, result)
     }
 }
 

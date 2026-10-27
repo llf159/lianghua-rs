@@ -71,7 +71,7 @@ pub(super) struct SourceMetaCacheEntry {
 #[derive(Debug, Clone)]
 struct RankContext {
     rank: Option<i64>,
-    best_rank_3d: Option<i64>,
+    best_rank_5d: Option<i64>,
     similarity_rank: Option<i64>,
     total_score: Option<f64>,
 }
@@ -104,7 +104,7 @@ pub struct AllMarketMonitorRow {
     pub industry: String,
     pub concept: String,
     pub rank: Option<i64>,
-    pub best_rank_3d: Option<i64>,
+    pub best_rank_5d: Option<i64>,
     pub similarity_rank: Option<i64>,
     pub total_score: Option<f64>,
     pub realtime_trade_date: Option<String>,
@@ -308,20 +308,20 @@ fn load_rank_context(conn: &Connection) -> Result<RankCacheEntry, String> {
         r#"
         WITH recent_dates AS (
             SELECT DISTINCT trade_date FROM score_summary
-            ORDER BY trade_date DESC LIMIT 3
+            ORDER BY trade_date DESC LIMIT 5
         ), latest AS (
             SELECT MAX(trade_date) AS rd FROM recent_dates
         ), agg AS (
             SELECT s.ts_code,
                 MAX(CASE WHEN s.trade_date = latest.rd THEN s.rank END) AS current_rank,
-                MIN(s.rank) AS best_rank_3d,
+                MIN(s.rank) AS best_rank_5d,
                 MAX(CASE WHEN s.trade_date = latest.rd THEN s.total_score END) AS current_total_score
             FROM score_summary s
             INNER JOIN recent_dates d ON s.trade_date = d.trade_date
             CROSS JOIN latest
             GROUP BY s.ts_code
         ){latest_sim_cte}
-        SELECT latest.rd, {ts_code_column}, agg.current_rank, agg.best_rank_3d,
+        SELECT latest.rd, {ts_code_column}, agg.current_rank, agg.best_rank_5d,
             agg.current_total_score, {sim_column},
             CAST(NULL AS VARCHAR), CAST(NULL AS VARCHAR), CAST(NULL AS BIGINT)
         FROM agg {sim_join} CROSS JOIN latest
@@ -377,9 +377,9 @@ fn load_rank_context(conn: &Connection) -> Result<RankCacheEntry, String> {
                 ts_code,
                 RankContext {
                     rank: row.get(2).map_err(|e| format!("读取排名失败: {e}"))?,
-                    best_rank_3d: row
+                    best_rank_5d: row
                         .get(3)
-                        .map_err(|e| format!("读取三日最优排名失败: {e}"))?,
+                        .map_err(|e| format!("读取五日最优排名失败: {e}"))?,
                     total_score: row.get(4).map_err(|e| format!("读取总分失败: {e}"))?,
                     similarity_rank: row.get(5).map_err(|e| format!("读取相似排名失败: {e}"))?,
                 },
@@ -974,7 +974,7 @@ fn build_rows(
                 industry: stock.industry.clone(),
                 concept: stock.concept.clone(),
                 rank: rank.and_then(|item| item.rank),
-                best_rank_3d: rank.and_then(|item| item.best_rank_3d),
+                best_rank_5d: rank.and_then(|item| item.best_rank_5d),
                 similarity_rank: rank.and_then(|item| item.similarity_rank),
                 total_score: rank.and_then(|item| item.total_score),
                 realtime_trade_date: quote.and_then(|item| normalize_quote_trade_date(&item.date)),
@@ -1636,9 +1636,10 @@ mod tests {
             CREATE TABLE scene_details(trade_date VARCHAR, ts_code VARCHAR, scene_name VARCHAR,
                 stage VARCHAR, scene_rank BIGINT);
             INSERT INTO score_summary VALUES
-                ('20261009','a',1,999), ('20261010','a',10,100),
+                ('20261007','a',1,999), ('20261008','a',5,150),
+                ('20261009','a',7,200), ('20261010','a',10,100),
                 ('20261011','a',30,110), ('20261012','a',50,120),
-                ('20261009','old',2,200), ('20261011','previous',8,80);
+                ('20261007','old',2,200), ('20261011','previous',8,80);
             INSERT INTO scene_details VALUES
                 ('20261012','a',' observe ','observe',2),
                 ('20261012','a','confirmed','confirm',9),
@@ -1663,7 +1664,7 @@ mod tests {
             let context = load_rank_context(&conn).unwrap();
             assert_eq!(context.rank_date, "20261012");
             assert_eq!(context.ranks["a"].rank, Some(50));
-            assert_eq!(context.ranks["a"].best_rank_3d, Some(10));
+            assert_eq!(context.ranks["a"].best_rank_5d, Some(5));
             if similarity_board {
                 conn.execute("UPDATE similarity_db.strategy_trigger_similarity_active_config SET algorithm_version='old'", []).unwrap();
                 assert_eq!(
@@ -1678,7 +1679,7 @@ mod tests {
                 similarity_board.then_some(7)
             );
             assert_eq!(context.ranks["previous"].rank, None);
-            assert_eq!(context.ranks["previous"].best_rank_3d, Some(8));
+            assert_eq!(context.ranks["previous"].best_rank_5d, Some(8));
             assert!(!context.ranks.contains_key("old"));
             assert!(!context.ranks.contains_key("scene_only"));
             assert_eq!(context.scene_candidates["a"].len(), 2);
@@ -1896,7 +1897,7 @@ mod tests {
             "000001.SZ".to_string(),
             RankContext {
                 rank: Some(12),
-                best_rank_3d: Some(5),
+                best_rank_5d: Some(5),
                 similarity_rank: Some(3),
                 total_score: Some(88.5),
             },
@@ -1965,7 +1966,7 @@ mod tests {
 
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].rank, Some(12));
-        assert_eq!(rows[0].best_rank_3d, Some(5));
+        assert_eq!(rows[0].best_rank_5d, Some(5));
         assert_eq!(rows[0].similarity_rank, Some(3));
         assert_eq!(rows[0].total_score, Some(88.5));
         assert_eq!(rows[0].concept, "银行;互联金融");
