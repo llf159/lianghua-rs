@@ -9,7 +9,9 @@ pub mod download_state;
 pub mod dragon_tiger_data;
 pub mod extras;
 pub mod panel;
+mod read_retry;
 pub mod runtime;
+pub use read_retry::read_with_retry;
 pub mod scoring_store;
 pub mod similarity_data;
 pub use similarity_data::{
@@ -39,8 +41,13 @@ use crate::expr::{
 
 // 查询入口显式只读，避免独立打开同文件的实例在关闭时 checkpoint 覆盖写入实例。
 pub fn open_db_readonly(path: impl AsRef<Path>) -> Result<Connection, duckdb::Error> {
-    let config = duckdb::Config::default().access_mode(duckdb::AccessMode::ReadOnly)?;
-    Connection::open_with_flags(path, config)
+    read_with_retry(
+        &format!("打开只读数据库 {}", path.as_ref().display()),
+        || {
+            let config = duckdb::Config::default().access_mode(duckdb::AccessMode::ReadOnly)?;
+            Connection::open_with_flags(path.as_ref(), config)
+        },
+    )
 }
 
 pub fn source_db_path(source_dir: &str) -> PathBuf {
@@ -427,18 +434,21 @@ impl DataReader {
             None => download_state::open_source_db_readonly(source_dir)?,
         };
 
-        let mut sql_to_colsname = conn
-            .prepare("DESCRIBE stock_data")
-            .map_err(|e| format!("预编译SQL失败:{e}"))?;
-        let mut all_cols = sql_to_colsname
-            .query([])
-            .map_err(|e| format!("执行查询失败:{e}"))?;
+        let all_cols_name = read_with_retry("读取行情表结构", || -> Result<_, String> {
+            let mut sql_to_colsname = conn
+                .prepare("DESCRIBE stock_data")
+                .map_err(|e| format!("预编译SQL失败:{e}"))?;
+            let mut all_cols = sql_to_colsname
+                .query([])
+                .map_err(|e| format!("执行查询失败:{e}"))?;
 
-        let mut all_cols_name: Vec<String> = Vec::with_capacity(128);
-        while let Some(col) = all_cols.next().map_err(|e| format!("读取表名失败:{e}"))? {
-            let name: String = col.get(0).map_err(|e| format!("读取列名失败:{e}"))?;
-            all_cols_name.push(name);
-        }
+            let mut all_cols_name: Vec<String> = Vec::with_capacity(128);
+            while let Some(col) = all_cols.next().map_err(|e| format!("读取表名失败:{e}"))? {
+                let name: String = col.get(0).map_err(|e| format!("读取列名失败:{e}"))?;
+                all_cols_name.push(name);
+            }
+            Ok(all_cols_name)
+        })?;
 
         let mut db_cols_table: Vec<(String, String)> = Vec::new();
         if required_runtime_keys.is_none() {
@@ -615,34 +625,36 @@ impl DataReader {
         start_date: &str,
         end_date: &str,
     ) -> Result<RowData, String> {
-        let mut stmt = self
-            .conn
-            .prepare_cached(&self.query_sql)
-            .map_err(|e| format!("预编译SQL失败:{e}"))?;
-        let mut rows = stmt
-            .query(params![ts_code, adj_type, start_date, end_date])
-            .map_err(|e| format!("执行查询失败:{e}"))?;
+        let mut out = read_with_retry("读取单股行情", || -> Result<_, String> {
+            let mut stmt = self
+                .conn
+                .prepare_cached(&self.query_sql)
+                .map_err(|e| format!("预编译SQL失败:{e}"))?;
+            let mut rows = stmt
+                .query(params![ts_code, adj_type, start_date, end_date])
+                .map_err(|e| format!("执行查询失败:{e}"))?;
 
-        let mut trade_dates = Vec::new();
-        let mut cols: HashMap<String, Vec<Option<f64>>> = HashMap::new();
-        for (_, key) in &self.cols_table {
-            cols.entry(key.clone()).or_default();
-        }
+            let mut trade_dates = Vec::new();
+            let mut cols: HashMap<String, Vec<Option<f64>>> = HashMap::new();
+            for (_, key) in &self.cols_table {
+                cols.entry(key.clone()).or_default();
+            }
 
-        while let Some(row) = rows.next().map_err(|e| format!("读取数据行失败:{e}"))? {
-            let trade_date: String = row.get(0).map_err(|e| format!("读取trade_date失败:{e}"))?;
-            trade_dates.push(trade_date);
+            while let Some(row) = rows.next().map_err(|e| format!("读取数据行失败:{e}"))? {
+                let trade_date: String =
+                    row.get(0).map_err(|e| format!("读取trade_date失败:{e}"))?;
+                trade_dates.push(trade_date);
 
-            for (i, (_, key)) in self.cols_table.iter().enumerate() {
-                let value: Option<f64> =
-                    row.get(i + 1).map_err(|e| format!("读取{}失败:{e}", key))?;
-                if let Some(series) = cols.get_mut(key) {
-                    series.push(value);
+                for (i, (_, key)) in self.cols_table.iter().enumerate() {
+                    let value: Option<f64> =
+                        row.get(i + 1).map_err(|e| format!("读取{}失败:{e}", key))?;
+                    if let Some(series) = cols.get_mut(key) {
+                        series.push(value);
+                    }
                 }
             }
-        }
-
-        let mut out = RowData { trade_dates, cols };
+            Ok(RowData { trade_dates, cols })
+        })?;
         self.inject_estimated_market_cap(&mut out)?;
         self.inject_runtime_index(&mut out)?;
         self.inject_panel(ts_code, &mut out)?;
@@ -661,39 +673,41 @@ impl DataReader {
             return Err("need_rows不能为0".to_string());
         }
 
-        let mut stmt = self
-            .conn
-            .prepare_cached(&self.query_tail_rows_sql)
-            .map_err(|e| format!("预编译SQL失败:{e}"))?;
-        let mut rows = stmt
-            .query(params![ts_code, adj_type, end_date, need_rows as i64])
-            .map_err(|e| format!("执行查询失败:{e}"))?;
+        let mut out = read_with_retry("读取单股尾部行情", || -> Result<_, String> {
+            let mut stmt = self
+                .conn
+                .prepare_cached(&self.query_tail_rows_sql)
+                .map_err(|e| format!("预编译SQL失败:{e}"))?;
+            let mut rows = stmt
+                .query(params![ts_code, adj_type, end_date, need_rows as i64])
+                .map_err(|e| format!("执行查询失败:{e}"))?;
 
-        let mut trade_dates = Vec::new();
-        let mut cols: HashMap<String, Vec<Option<f64>>> = HashMap::new();
-        for (_, key) in &self.cols_table {
-            cols.entry(key.clone()).or_default();
-        }
+            let mut trade_dates = Vec::new();
+            let mut cols: HashMap<String, Vec<Option<f64>>> = HashMap::new();
+            for (_, key) in &self.cols_table {
+                cols.entry(key.clone()).or_default();
+            }
 
-        while let Some(row) = rows.next().map_err(|e| format!("读取数据行失败:{e}"))? {
-            let trade_date: String = row.get(0).map_err(|e| format!("读取trade_date失败:{e}"))?;
-            trade_dates.push(trade_date);
+            while let Some(row) = rows.next().map_err(|e| format!("读取数据行失败:{e}"))? {
+                let trade_date: String =
+                    row.get(0).map_err(|e| format!("读取trade_date失败:{e}"))?;
+                trade_dates.push(trade_date);
 
-            for (i, (_, key)) in self.cols_table.iter().enumerate() {
-                let value: Option<f64> =
-                    row.get(i + 1).map_err(|e| format!("读取{}失败:{e}", key))?;
-                if let Some(series) = cols.get_mut(key) {
-                    series.push(value);
+                for (i, (_, key)) in self.cols_table.iter().enumerate() {
+                    let value: Option<f64> =
+                        row.get(i + 1).map_err(|e| format!("读取{}失败:{e}", key))?;
+                    if let Some(series) = cols.get_mut(key) {
+                        series.push(value);
+                    }
                 }
             }
-        }
 
-        trade_dates.reverse();
-        for series in cols.values_mut() {
-            series.reverse();
-        }
-
-        let mut out = RowData { trade_dates, cols };
+            trade_dates.reverse();
+            for series in cols.values_mut() {
+                series.reverse();
+            }
+            Ok(RowData { trade_dates, cols })
+        })?;
         self.inject_estimated_market_cap(&mut out)?;
         self.inject_runtime_index(&mut out)?;
         self.inject_panel(ts_code, &mut out)?;
@@ -713,12 +727,13 @@ impl DataReader {
         }
         let sql = self.batch_query_sql(ts_codes);
 
-        let mut stmt = self
-            .conn
-            .prepare(&sql)
-            .map_err(|e| format!("预编译批量查询SQL失败:{e}"))?;
-        let batches = stmt
-            .query_arrow(params![adj_type, start_date, end_date])
+        let mut result = read_with_retry("读取批量行情", || -> Result<_, String> {
+            let mut stmt = self
+                .conn
+                .prepare(&sql)
+                .map_err(|e| format!("预编译批量查询SQL失败:{e}"))?;
+            stmt
+            .execute(params![adj_type, start_date, end_date])
             .map_err(|e| {
                 format!(
                     "执行批量查询失败: 原始行情库={}, adj_type={adj_type}, 区间={start_date}-{end_date}, 股票={}: {e}",
@@ -727,54 +742,60 @@ impl DataReader {
                 )
             })?;
 
-        let mut result: HashMap<String, RowData> = HashMap::new();
-        // SQL above fixes numeric columns to DOUBLE; decode each Arrow column
-        // once per batch rather than redispatching types for every cell.
-        for batch in batches {
-            let codes = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or("批量查询ts_code不是字符串")?;
-            let dates = batch
-                .column(1)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or("批量查询trade_date不是字符串")?;
-            let numeric = (0..self.cols_table.len())
-                .map(|index| {
-                    batch
-                        .column(index + 2)
-                        .as_any()
-                        .downcast_ref::<Float64Array>()
-                        .ok_or("批量查询数值列不是DOUBLE")
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            for index in 0..batch.num_rows() {
-                if codes.is_null(index) || dates.is_null(index) {
-                    return Err("批量行情的股票代码或交易日为空".into());
-                }
-                let entry = result
-                    .entry(codes.value(index).to_string())
-                    .or_insert_with(|| RowData {
-                        trade_dates: Vec::new(),
-                        cols: self
-                            .cols_table
-                            .iter()
-                            .map(|(_, key)| (key.clone(), Vec::new()))
-                            .collect(),
-                    });
-                entry.trade_dates.push(dates.value(index).to_string());
-                for ((_, key), column) in self.cols_table.iter().zip(&numeric) {
-                    entry
-                        .cols
-                        .get_mut(key)
-                        .expect("selected column")
-                        .push((!column.is_null(index)).then(|| column.value(index)));
+            let mut result: HashMap<String, RowData> = HashMap::new();
+            // SQL above fixes numeric columns to DOUBLE; decode each Arrow column
+            // once per batch rather than redispatching types for every cell.
+            while let Some(array) = stmt
+                .step()
+                .map_err(|e| format!("读取批量行情数据块失败:{e}"))?
+            {
+                let batch = duckdb::arrow::record_batch::RecordBatch::from(&array);
+                let codes = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or("批量查询ts_code不是字符串")?;
+                let dates = batch
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or("批量查询trade_date不是字符串")?;
+                let numeric = (0..self.cols_table.len())
+                    .map(|index| {
+                        batch
+                            .column(index + 2)
+                            .as_any()
+                            .downcast_ref::<Float64Array>()
+                            .ok_or("批量查询数值列不是DOUBLE")
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                for index in 0..batch.num_rows() {
+                    if codes.is_null(index) || dates.is_null(index) {
+                        return Err("批量行情的股票代码或交易日为空".into());
+                    }
+                    let entry = result
+                        .entry(codes.value(index).to_string())
+                        .or_insert_with(|| RowData {
+                            trade_dates: Vec::new(),
+                            cols: self
+                                .cols_table
+                                .iter()
+                                .map(|(_, key)| (key.clone(), Vec::new()))
+                                .collect(),
+                        });
+                    entry.trade_dates.push(dates.value(index).to_string());
+                    for ((_, key), column) in self.cols_table.iter().zip(&numeric) {
+                        entry
+                            .cols
+                            .get_mut(key)
+                            .expect("selected column")
+                            .push((!column.is_null(index)).then(|| column.value(index)));
+                    }
                 }
             }
-        }
-        drop(stmt);
+            drop(stmt);
+            Ok(result)
+        })?;
 
         for row_data in result.values_mut() {
             self.inject_estimated_market_cap(row_data)?;
@@ -834,20 +855,6 @@ impl DataReader {
                 end_date,
             )?)
         };
-        let sql = self.batch_query_sql(ts_codes);
-        let mut stmt = self
-            .conn
-            .prepare(&sql)
-            .map_err(|e| format!("预编译流式批量查询SQL失败:{e}"))?;
-        let batches = stmt
-            .query_arrow(params![adj_type, start_date, end_date])
-            .map_err(|e| {
-                format!(
-                    "执行流式批量查询失败: 原始行情库={}, adj_type={adj_type}, 区间={start_date}-{end_date}, 股票={}: {e}",
-                    self.conn.path().map_or_else(|| "<内存>".to_string(), |path| path.display().to_string()),
-                    ts_codes.join(",")
-                )
-            })?;
         let empty_row = || RowData {
             trade_dates: Vec::new(),
             cols: self
@@ -867,56 +874,101 @@ impl DataReader {
             row.validate()?;
             Ok(row)
         };
-        let mut current_code: Option<String> = None;
-        let mut current_row = empty_row();
-        for batch in batches {
-            let codes = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or("流式批量查询ts_code不是字符串")?;
-            let dates = batch
-                .column(1)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or("流式批量查询trade_date不是字符串")?;
-            let numeric = (0..self.cols_table.len())
-                .map(|index| {
-                    batch
-                        .column(index + 2)
-                        .as_any()
-                        .downcast_ref::<Float64Array>()
-                        .ok_or("流式批量查询数值列不是DOUBLE")
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            for index in 0..batch.num_rows() {
-                if codes.is_null(index) || dates.is_null(index) {
-                    return Err("流式批量行情的股票代码或交易日为空".into());
-                }
-                let ts_code = codes.value(index);
-                if current_code.as_deref() != Some(ts_code) {
-                    if let Some(previous_code) = current_code.replace(ts_code.to_string()) {
-                        let previous_row = std::mem::replace(&mut current_row, empty_row());
-                        let previous_row = finish_row(&previous_code, previous_row);
-                        consume(previous_code, previous_row)?;
+        let mut delivered = HashSet::new();
+        let mut consumer_error = None;
+        let result = read_with_retry("读取流式批量行情", || -> Result<(), String> {
+            let remaining = ts_codes
+                .iter()
+                .filter(|code| !delivered.contains(code.as_str()))
+                .cloned()
+                .collect::<Vec<_>>();
+            if remaining.is_empty() {
+                return Ok(());
+            }
+            let sql = self.batch_query_sql(&remaining);
+            let mut stmt = self
+                .conn
+                .prepare(&sql)
+                .map_err(|e| format!("预编译流式批量查询SQL失败:{e}"))?;
+            stmt.execute(params![adj_type, start_date, end_date]).map_err(|e| format!(
+                "执行流式批量查询失败: 原始行情库={}, adj_type={adj_type}, 区间={start_date}-{end_date}, 股票={}: {e}",
+                self.conn.path().map_or_else(|| "<内存>".to_string(), |path| path.display().to_string()), remaining.join(",")
+            ))?;
+            let mut deliver = |code: String, row: RowData| {
+                let row = finish_row(&code, row);
+                match consume(code.clone(), row) {
+                    Ok(()) => {
+                        delivered.insert(code);
+                        true
+                    }
+                    Err(error) => {
+                        // 回调可能已经计算或写入，不能因其错误中包含 I/O 文本就重放。
+                        consumer_error = Some(error);
+                        false
                     }
                 }
-                current_row.trade_dates.push(dates.value(index).to_string());
-                for ((_, key), column) in self.cols_table.iter().zip(&numeric) {
-                    current_row
-                        .cols
-                        .get_mut(key)
-                        .expect("selected column")
-                        .push((!column.is_null(index)).then(|| column.value(index)));
+            };
+            let mut current_code: Option<String> = None;
+            let mut current_row = empty_row();
+            while let Some(array) = stmt
+                .step()
+                .map_err(|e| format!("读取流式行情数据块失败:{e}"))?
+            {
+                let batch = duckdb::arrow::record_batch::RecordBatch::from(&array);
+                let codes = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or("流式批量查询ts_code不是字符串")?;
+                let dates = batch
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or("流式批量查询trade_date不是字符串")?;
+                let numeric = (0..self.cols_table.len())
+                    .map(|index| {
+                        batch
+                            .column(index + 2)
+                            .as_any()
+                            .downcast_ref::<Float64Array>()
+                            .ok_or("流式批量查询数值列不是DOUBLE")
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                for index in 0..batch.num_rows() {
+                    if codes.is_null(index) || dates.is_null(index) {
+                        return Err("流式批量行情的股票代码或交易日为空".into());
+                    }
+                    let ts_code = codes.value(index);
+                    if current_code.as_deref() != Some(ts_code) {
+                        if let Some(previous_code) = current_code.replace(ts_code.to_string()) {
+                            let previous_row = std::mem::replace(&mut current_row, empty_row());
+                            if !deliver(previous_code, previous_row) {
+                                return Ok(());
+                            }
+                        }
+                    }
+                    current_row.trade_dates.push(dates.value(index).to_string());
+                    for ((_, key), column) in self.cols_table.iter().zip(&numeric) {
+                        current_row
+                            .cols
+                            .get_mut(key)
+                            .expect("selected column")
+                            .push((!column.is_null(index)).then(|| column.value(index)));
+                    }
                 }
             }
+            drop(stmt);
+            if let Some(last_code) = current_code {
+                if !deliver(last_code, current_row) {
+                    return Ok(());
+                }
+            }
+            Ok(())
+        });
+        match consumer_error {
+            Some(error) => Err(error),
+            None => result,
         }
-        drop(stmt);
-        if let Some(last_code) = current_code {
-            let last_row = finish_row(&last_code, current_row);
-            consume(last_code, last_row)?;
-        }
-        Ok(())
     }
 
     fn batch_query_sql(&self, ts_codes: &[String]) -> String {
@@ -985,21 +1037,23 @@ impl DataReader {
             ORDER BY ts_code ASC
         "#;
 
-        let mut list = Vec::with_capacity(512);
-        let mut stmt = self
-            .conn
-            .prepare(sql)
-            .map_err(|e| format!("sql预编译失败:{e}"))?;
-        let mut rows = stmt
-            .query(params![adj_type, start_date, end_date])
-            .map_err(|e| format!("数据库查询失败:{e}"))?;
+        read_with_retry("读取行情股票列表", || -> Result<_, String> {
+            let mut list = Vec::with_capacity(512);
+            let mut stmt = self
+                .conn
+                .prepare(sql)
+                .map_err(|e| format!("sql预编译失败:{e}"))?;
+            let mut rows = stmt
+                .query(params![adj_type, start_date, end_date])
+                .map_err(|e| format!("数据库查询失败:{e}"))?;
 
-        while let Some(row) = rows.next().map_err(|e| format!("{e}"))? {
-            let ts_code: String = row.get(0).map_err(|e| format!("{e}"))?;
-            list.push(ts_code);
-        }
+            while let Some(row) = rows.next().map_err(|e| format!("{e}"))? {
+                let ts_code: String = row.get(0).map_err(|e| format!("{e}"))?;
+                list.push(ts_code);
+            }
 
-        Ok(list)
+            Ok(list)
+        })
     }
 
     fn inject_runtime_index(&self, row_data: &mut RowData) -> Result<(), String> {
@@ -1058,40 +1112,42 @@ impl DataReader {
                 ORDER BY ts_code ASC, trade_date ASC
                 "#
         );
-        let mut stmt = self
-            .conn
-            .prepare(&sql)
-            .map_err(|e| format!("预编译指数运行时列SQL失败:{e}"))?;
-        let mut rows = stmt
-            .query(params!["ind", start_date, end_date])
-            .map_err(|e| format!("查询指数运行时列失败:{e}"))?;
+        read_with_retry("读取指数行情", || -> Result<_, String> {
+            let mut stmt = self
+                .conn
+                .prepare(&sql)
+                .map_err(|e| format!("预编译指数运行时列SQL失败:{e}"))?;
+            let mut rows = stmt
+                .query(params!["ind", start_date, end_date])
+                .map_err(|e| format!("查询指数运行时列失败:{e}"))?;
 
-        let mut out = self
-            .runtime_index_cols
-            .iter()
-            .map(|item| (item.runtime_key.clone(), HashMap::new()))
-            .collect::<HashMap<_, _>>();
-        while let Some(row) = rows
-            .next()
-            .map_err(|e| format!("读取指数运行时列失败:{e}"))?
-        {
-            let ts_code: String = row.get(0).map_err(|e| format!("读取指数ts_code失败:{e}"))?;
-            let trade_date: String = row
-                .get(1)
-                .map_err(|e| format!("读取指数trade_date失败:{e}"))?;
-            for (i, index_col) in self.runtime_index_cols.iter().enumerate() {
-                if ts_code == index_col.ts_code {
-                    let value: Option<f64> = row
-                        .get(i + 2)
-                        .map_err(|e| format!("读取指数{}失败:{e}", index_col.runtime_key))?;
-                    if let Some(values_by_date) = out.get_mut(&index_col.runtime_key) {
-                        values_by_date.insert(trade_date.clone(), value);
+            let mut out = self
+                .runtime_index_cols
+                .iter()
+                .map(|item| (item.runtime_key.clone(), HashMap::new()))
+                .collect::<HashMap<_, _>>();
+            while let Some(row) = rows
+                .next()
+                .map_err(|e| format!("读取指数运行时列失败:{e}"))?
+            {
+                let ts_code: String = row.get(0).map_err(|e| format!("读取指数ts_code失败:{e}"))?;
+                let trade_date: String = row
+                    .get(1)
+                    .map_err(|e| format!("读取指数trade_date失败:{e}"))?;
+                for (i, index_col) in self.runtime_index_cols.iter().enumerate() {
+                    if ts_code == index_col.ts_code {
+                        let value: Option<f64> = row
+                            .get(i + 2)
+                            .map_err(|e| format!("读取指数{}失败:{e}", index_col.runtime_key))?;
+                        if let Some(values_by_date) = out.get_mut(&index_col.runtime_key) {
+                            values_by_date.insert(trade_date.clone(), value);
+                        }
                     }
                 }
             }
-        }
 
-        Ok(out)
+            Ok(out)
+        })
     }
 
     fn inject_runtime_index_series(
@@ -2243,6 +2299,22 @@ when = "C > O"
             streamed.expect("streamed row").cols["I300_MA5"],
             row_data.cols["I300_MA5"]
         );
+
+        let mut callback_calls = 0;
+        let error = reader
+            .load_batch_streaming(
+                &["000001.SZ".to_string()],
+                "qfq",
+                "20240102",
+                "20240103",
+                |_, _| {
+                    callback_calls += 1;
+                    Err("IO Error: downstream write failed".to_string())
+                },
+            )
+            .unwrap_err();
+        assert_eq!(callback_calls, 1);
+        assert_eq!(error, "IO Error: downstream write failed");
 
         let _ = remove_dir_all(source_dir);
     }

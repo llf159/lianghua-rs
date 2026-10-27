@@ -300,26 +300,28 @@ pub(super) fn query_cyq_chen_meta_value(
 ) -> Result<Option<String>, String> {
     let conn =
         crate::data::open_db_readonly(db_path).map_err(|e| format!("打开新筹码库失败:{e}"))?;
-    let table_exists = conn
-        .query_row(
-            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
-            [CYQ_CHEN_META_TABLE],
-            |row| row.get::<_, i64>(0),
+    crate::data::read_with_retry("读取新筹码元信息", || -> Result<_, String> {
+        let table_exists = conn
+            .query_row(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
+                [CYQ_CHEN_META_TABLE],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|e| format!("检查新筹码元信息表失败:{e}"))?;
+        if table_exists == 0 {
+            return Ok(None);
+        }
+        conn.query_row(
+            &format!("SELECT value FROM {CYQ_CHEN_META_TABLE} WHERE key = ?"),
+            params![key],
+            |row| row.get::<_, Option<String>>(0),
         )
-        .map_err(|e| format!("检查新筹码元信息表失败:{e}"))?;
-    if table_exists == 0 {
-        return Ok(None);
-    }
-    conn.query_row(
-        &format!("SELECT value FROM {CYQ_CHEN_META_TABLE} WHERE key = ?"),
-        params![key],
-        |row| row.get::<_, Option<String>>(0),
-    )
-    .or_else(|e| match e {
-        duckdb::Error::QueryReturnedNoRows => Ok(None),
-        other => Err(other),
+        .or_else(|e| match e {
+            duckdb::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(other),
+        })
+        .map_err(|e| format!("读取新筹码元信息失败:{e}"))
     })
-    .map_err(|e| format!("读取新筹码元信息失败:{e}"))
 }
 
 pub(super) fn write_cyq_chen_meta(
@@ -356,55 +358,57 @@ pub(super) fn query_latest_cyq_chen_metadata(
 ) -> Result<Option<(String, ChenChipConfig)>, String> {
     let conn =
         crate::data::open_db_readonly(db_path).map_err(|e| format!("打开新筹码库失败:{e}"))?;
-    let table_exists = conn
-        .query_row(
-            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
-            [CYQ_CHEN_SNAPSHOT_TABLE],
-            |row| row.get::<_, i64>(0),
-        )
-        .map_err(|e| format!("检查新筹码库表结构失败:{e}"))?;
-    if table_exists <= 0 {
-        return Ok(None);
-    }
+    crate::data::read_with_retry("读取新筹码最新状态", || -> Result<_, String> {
+        let table_exists = conn
+            .query_row(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
+                [CYQ_CHEN_SNAPSHOT_TABLE],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|e| format!("检查新筹码库表结构失败:{e}"))?;
+        if table_exists <= 0 {
+            return Ok(None);
+        }
 
-    let mut stmt = conn
-        .prepare(
-            r#"
+        let mut stmt = conn
+            .prepare(
+                r#"
             SELECT trade_date, warmup_days, bucket_pct
             FROM cyq_chen_snapshot
             WHERE trade_date = (SELECT MAX(trade_date) FROM cyq_chen_snapshot)
             LIMIT 1
             "#,
-        )
-        .map_err(|e| format!("预编译最新新筹码元数据查询失败:{e}"))?;
-    let mut rows = stmt
-        .query([])
-        .map_err(|e| format!("查询最新新筹码元数据失败:{e}"))?;
-    let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取最新新筹码元数据失败:{e}"))?
-    else {
-        return Ok(None);
-    };
+            )
+            .map_err(|e| format!("预编译最新新筹码元数据查询失败:{e}"))?;
+        let mut rows = stmt
+            .query([])
+            .map_err(|e| format!("查询最新新筹码元数据失败:{e}"))?;
+        let Some(row) = rows
+            .next()
+            .map_err(|e| format!("读取最新新筹码元数据失败:{e}"))?
+        else {
+            return Ok(None);
+        };
 
-    let trade_date: String = row.get(0).map_err(|e| format!("读取新筹码日期失败:{e}"))?;
-    let warmup_days: Option<i64> = row
-        .get(1)
-        .map_err(|e| format!("读取新筹码 warmup_days 失败:{e}"))?;
-    let bucket_pct: Option<f64> = row
-        .get(2)
-        .map_err(|e| format!("读取新筹码 bucket_pct 失败:{e}"))?;
-    let default_config = ChenChipConfig::default();
-    let config = ChenChipConfig {
-        warmup_days: warmup_days
-            .and_then(|value| usize::try_from(value).ok())
-            .unwrap_or(default_config.warmup_days),
-        bucket_pct: bucket_pct
-            .filter(|value| value.is_finite() && *value > 0.0)
-            .unwrap_or(default_config.bucket_pct),
-    };
+        let trade_date: String = row.get(0).map_err(|e| format!("读取新筹码日期失败:{e}"))?;
+        let warmup_days: Option<i64> = row
+            .get(1)
+            .map_err(|e| format!("读取新筹码 warmup_days 失败:{e}"))?;
+        let bucket_pct: Option<f64> = row
+            .get(2)
+            .map_err(|e| format!("读取新筹码 bucket_pct 失败:{e}"))?;
+        let default_config = ChenChipConfig::default();
+        let config = ChenChipConfig {
+            warmup_days: warmup_days
+                .and_then(|value| usize::try_from(value).ok())
+                .unwrap_or(default_config.warmup_days),
+            bucket_pct: bucket_pct
+                .filter(|value| value.is_finite() && *value > 0.0)
+                .unwrap_or(default_config.bucket_pct),
+        };
 
-    Ok(Some((trade_date, config)))
+        Ok(Some((trade_date, config)))
+    })
 }
 
 pub fn query_cyq_chen_rebuild_status(

@@ -38,38 +38,44 @@ pub(super) fn bucket_history_key(price_low: f64, price_high: f64) -> (u64, u64) 
 }
 
 pub(super) fn source_stock_data_exists(conn: &Connection) -> Result<bool, String> {
-    let table_exists = conn
-        .query_row(
-            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'stock_data'",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .map_err(|e| format!("检查stock_data表失败:{e}"))?;
-    Ok(table_exists > 0)
+    crate::data::read_with_retry("读取行情表状态", || -> Result<_, String> {
+        let table_exists = conn
+            .query_row(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'stock_data'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|e| format!("检查stock_data表失败:{e}"))?;
+        Ok(table_exists > 0)
+    })
 }
 
 pub(super) fn query_source_trade_date_range(
     conn: &Connection,
 ) -> Result<Option<(String, String)>, String> {
-    let mut stmt = conn
-        .prepare("SELECT MIN(trade_date), MAX(trade_date) FROM stock_data WHERE adj_type = ?")
-        .map_err(|e| format!("预编译筹码计算日期范围失败:{e}"))?;
-    let mut rows = stmt
-        .query(params![DEFAULT_ADJ_TYPE])
-        .map_err(|e| format!("查询筹码计算日期范围失败:{e}"))?;
-    let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取筹码计算日期范围失败:{e}"))?
-    else {
-        return Ok(None);
-    };
+    crate::data::read_with_retry("读取行情日期范围", || -> Result<_, String> {
+        let mut stmt = conn
+            .prepare("SELECT MIN(trade_date), MAX(trade_date) FROM stock_data WHERE adj_type = ?")
+            .map_err(|e| format!("预编译筹码计算日期范围失败:{e}"))?;
+        let mut rows = stmt
+            .query(params![DEFAULT_ADJ_TYPE])
+            .map_err(|e| format!("查询筹码计算日期范围失败:{e}"))?;
+        let Some(row) = rows
+            .next()
+            .map_err(|e| format!("读取筹码计算日期范围失败:{e}"))?
+        else {
+            return Ok(None);
+        };
 
-    let min_trade_date: Option<String> = row.get(0).map_err(|e| format!("读取最早日期失败:{e}"))?;
-    let max_trade_date: Option<String> = row.get(1).map_err(|e| format!("读取最晚日期失败:{e}"))?;
+        let min_trade_date: Option<String> =
+            row.get(0).map_err(|e| format!("读取最早日期失败:{e}"))?;
+        let max_trade_date: Option<String> =
+            row.get(1).map_err(|e| format!("读取最晚日期失败:{e}"))?;
 
-    Ok(match (min_trade_date, max_trade_date) {
-        (Some(min_trade_date), Some(max_trade_date)) => Some((min_trade_date, max_trade_date)),
-        _ => None,
+        Ok(match (min_trade_date, max_trade_date) {
+            (Some(min_trade_date), Some(max_trade_date)) => Some((min_trade_date, max_trade_date)),
+            _ => None,
+        })
     })
 }
 
@@ -317,12 +323,9 @@ pub fn compute_cyq_chen_stock_group_batch(
                 .position(|trade_date| trade_date == &output_start_date)
                 .ok_or_else(|| format!("缺少新筹码输出起始日期: {output_start_date}"))?;
             let initial_state = match state_conn {
-                Some(conn) => (|conn: &Connection,
-                                ts_code: &str,
-                                output_start_date: &str,
-                                row_trade_dates: &[String],
-                                output_start_index: usize|
-                 -> Result<Option<CyqChenInitialState>, String> {
+                Some(conn) => crate::data::read_with_retry("读取新筹码续算状态", || -> Result<Option<CyqChenInitialState>, String> {
+                    let output_start_date = output_start_date.as_str();
+                    let row_trade_dates = &row_data.trade_dates;
                     let checkpoint_state_date = conn
                         .query_row(
                             "SELECT trade_date FROM cyq_chen_checkpoint WHERE ts_code = ? AND adj_type = ?",
@@ -464,13 +467,7 @@ pub fn compute_cyq_chen_stock_group_batch(
                         bins,
                         main_ratio_history,
                     }))
-                })(
-                    conn,
-                    ts_code,
-                    &output_start_date,
-                    &row_data.trade_dates,
-                    output_start_index,
-                ),
+                }),
                 None => Ok(None),
             };
             let initial_state = match initial_state {
@@ -481,10 +478,10 @@ pub fn compute_cyq_chen_stock_group_batch(
                     };
                     (recovery.report)(ts_code, &error);
                     let conn = state_conn.ok_or_else(|| error.clone())?;
-                    let first_date = recovery.first_date.get_or_init(|| conn.query_row(
+                    let first_date = recovery.first_date.get_or_init(|| crate::data::read_with_retry("读取筹码重放起点", || conn.query_row(
                         "SELECT MIN(trade_date) FROM cyq_chen_snapshot WHERE adj_type = ?",
                         [DEFAULT_ADJ_TYPE], |row| row.get(0),
-                    ).map_err(|e| format!("读取筹码重放起点失败: {e}"))).clone()?;
+                    ).map_err(|e| format!("读取筹码重放起点失败: {e}")))).clone()?;
                     let replay_load_start = resolve_cyq_chen_load_start_date(
                         recovery.source_dir, &first_date, end_date, lookback,
                     )?.ok_or_else(|| format!("缺少筹码重放交易日历，保留旧结果: {error}"))?;

@@ -147,103 +147,113 @@ fn clear_cyq_tables(db_path: &Path) -> Result<(), String> {
 }
 
 fn source_stock_data_exists(conn: &Connection) -> Result<bool, String> {
-    let table_exists = conn
-        .query_row(
-            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'stock_data'",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .map_err(|e| format!("检查stock_data表失败:{e}"))?;
-    Ok(table_exists > 0)
+    crate::data::read_with_retry("读取行情表状态", || -> Result<_, String> {
+        let table_exists = conn
+            .query_row(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'stock_data'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|e| format!("检查stock_data表失败:{e}"))?;
+        Ok(table_exists > 0)
+    })
 }
 
 fn cyq_table_exists(conn: &Connection, table_name: &str) -> Result<bool, String> {
-    let table_exists = conn
-        .query_row(
-            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
-            [table_name],
-            |row| row.get::<_, i64>(0),
-        )
-        .map_err(|e| format!("检查筹码库表结构失败:{e}"))?;
-    Ok(table_exists > 0)
+    crate::data::read_with_retry("读取筹码表状态", || -> Result<_, String> {
+        let table_exists = conn
+            .query_row(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
+                [table_name],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|e| format!("检查筹码库表结构失败:{e}"))?;
+        Ok(table_exists > 0)
+    })
 }
 
 fn query_latest_cyq_metadata(db_path: &Path) -> Result<Option<(String, CyqConfig)>, String> {
-    let conn = Connection::open(db_path).map_err(|e| format!("打开筹码库失败:{e}"))?;
+    let conn = crate::data::open_db_readonly(db_path).map_err(|e| format!("打开筹码库失败:{e}"))?;
     if !cyq_table_exists(&conn, CYQ_SNAPSHOT_TABLE)? {
         return Ok(None);
     }
 
-    let mut stmt = conn
-        .prepare(
-            r#"
+    crate::data::read_with_retry("读取旧筹码最新状态", || -> Result<_, String> {
+        let mut stmt = conn
+            .prepare(
+                r#"
             SELECT trade_date, range, factor, min_accuracy
             FROM cyq_snapshot
             WHERE adj_type = ?
             ORDER BY trade_date DESC
             LIMIT 1
             "#,
-        )
-        .map_err(|e| format!("预编译最新筹码元数据查询失败:{e}"))?;
-    let mut rows = stmt
-        .query(params![DEFAULT_ADJ_TYPE])
-        .map_err(|e| format!("查询最新筹码元数据失败:{e}"))?;
+            )
+            .map_err(|e| format!("预编译最新筹码元数据查询失败:{e}"))?;
+        let mut rows = stmt
+            .query(params![DEFAULT_ADJ_TYPE])
+            .map_err(|e| format!("查询最新筹码元数据失败:{e}"))?;
 
-    let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取最新筹码元数据失败:{e}"))?
-    else {
-        return Ok(None);
-    };
+        let Some(row) = rows
+            .next()
+            .map_err(|e| format!("读取最新筹码元数据失败:{e}"))?
+        else {
+            return Ok(None);
+        };
 
-    let trade_date: String = row
-        .get(0)
-        .map_err(|e| format!("读取最新筹码日期失败:{e}"))?;
-    let range: Option<i64> = row.get(1).map_err(|e| format!("读取筹码 range 失败:{e}"))?;
-    let factor: Option<i64> = row
-        .get(2)
-        .map_err(|e| format!("读取筹码 factor 失败:{e}"))?;
-    let min_accuracy: Option<f64> = row
-        .get(3)
-        .map_err(|e| format!("读取筹码 min_accuracy 失败:{e}"))?;
-    let default_config = CyqConfig::default();
-    let config = CyqConfig {
-        range: range
-            .filter(|value| *value > 0)
-            .map(|value| value as usize)
-            .unwrap_or(default_config.range),
-        factor: factor
-            .filter(|value| *value >= 2)
-            .map(|value| value as usize)
-            .unwrap_or(default_config.factor),
-        min_accuracy: min_accuracy
-            .filter(|value| value.is_finite() && *value > 0.0)
-            .unwrap_or(default_config.min_accuracy),
-    };
+        let trade_date: String = row
+            .get(0)
+            .map_err(|e| format!("读取最新筹码日期失败:{e}"))?;
+        let range: Option<i64> = row.get(1).map_err(|e| format!("读取筹码 range 失败:{e}"))?;
+        let factor: Option<i64> = row
+            .get(2)
+            .map_err(|e| format!("读取筹码 factor 失败:{e}"))?;
+        let min_accuracy: Option<f64> = row
+            .get(3)
+            .map_err(|e| format!("读取筹码 min_accuracy 失败:{e}"))?;
+        let default_config = CyqConfig::default();
+        let config = CyqConfig {
+            range: range
+                .filter(|value| *value > 0)
+                .map(|value| value as usize)
+                .unwrap_or(default_config.range),
+            factor: factor
+                .filter(|value| *value >= 2)
+                .map(|value| value as usize)
+                .unwrap_or(default_config.factor),
+            min_accuracy: min_accuracy
+                .filter(|value| value.is_finite() && *value > 0.0)
+                .unwrap_or(default_config.min_accuracy),
+        };
 
-    Ok(Some((trade_date, config)))
+        Ok(Some((trade_date, config)))
+    })
 }
 
 fn query_source_trade_date_range(conn: &Connection) -> Result<Option<(String, String)>, String> {
-    let mut stmt = conn
-        .prepare("SELECT MIN(trade_date), MAX(trade_date) FROM stock_data WHERE adj_type = ?")
-        .map_err(|e| format!("预编译筹码计算日期范围失败:{e}"))?;
-    let mut rows = stmt
-        .query(params![DEFAULT_ADJ_TYPE])
-        .map_err(|e| format!("查询筹码计算日期范围失败:{e}"))?;
-    let Some(row) = rows
-        .next()
-        .map_err(|e| format!("读取筹码计算日期范围失败:{e}"))?
-    else {
-        return Ok(None);
-    };
+    crate::data::read_with_retry("读取行情日期范围", || -> Result<_, String> {
+        let mut stmt = conn
+            .prepare("SELECT MIN(trade_date), MAX(trade_date) FROM stock_data WHERE adj_type = ?")
+            .map_err(|e| format!("预编译筹码计算日期范围失败:{e}"))?;
+        let mut rows = stmt
+            .query(params![DEFAULT_ADJ_TYPE])
+            .map_err(|e| format!("查询筹码计算日期范围失败:{e}"))?;
+        let Some(row) = rows
+            .next()
+            .map_err(|e| format!("读取筹码计算日期范围失败:{e}"))?
+        else {
+            return Ok(None);
+        };
 
-    let min_trade_date: Option<String> = row.get(0).map_err(|e| format!("读取最早日期失败:{e}"))?;
-    let max_trade_date: Option<String> = row.get(1).map_err(|e| format!("读取最晚日期失败:{e}"))?;
+        let min_trade_date: Option<String> =
+            row.get(0).map_err(|e| format!("读取最早日期失败:{e}"))?;
+        let max_trade_date: Option<String> =
+            row.get(1).map_err(|e| format!("读取最晚日期失败:{e}"))?;
 
-    Ok(match (min_trade_date, max_trade_date) {
-        (Some(min_trade_date), Some(max_trade_date)) => Some((min_trade_date, max_trade_date)),
-        _ => None,
+        Ok(match (min_trade_date, max_trade_date) {
+            (Some(min_trade_date), Some(max_trade_date)) => Some((min_trade_date, max_trade_date)),
+            _ => None,
+        })
     })
 }
 

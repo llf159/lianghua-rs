@@ -11,29 +11,33 @@ pub struct PendingStockRepair {
 }
 
 pub fn load_pending_stock_repairs(conn: &Connection) -> Result<Vec<PendingStockRepair>, String> {
-    let exists: bool = conn
+    super::read_with_retry("读取待补救行情清单", || -> Result<_, String> {
+        let exists: bool = conn
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name = 'pending_stock_repair')",
             [],
             |row| row.get(0),
         )
         .map_err(|e| format!("检查行情待补救记录失败: {e}"))?;
-    if !exists {
-        return Ok(Vec::new());
-    }
-    let mut stmt = conn
-        .prepare("SELECT ts_code, start_date, end_date FROM pending_stock_repair ORDER BY ts_code")
-        .map_err(|e| format!("准备行情待补救查询失败: {e}"))?;
-    stmt.query_map([], |row| {
-        Ok(PendingStockRepair {
-            ts_code: row.get(0)?,
-            start_date: row.get(1)?,
-            end_date: row.get(2)?,
+        if !exists {
+            return Ok(Vec::new());
+        }
+        let mut stmt = conn
+            .prepare(
+                "SELECT ts_code, start_date, end_date FROM pending_stock_repair ORDER BY ts_code",
+            )
+            .map_err(|e| format!("准备行情待补救查询失败: {e}"))?;
+        stmt.query_map([], |row| {
+            Ok(PendingStockRepair {
+                ts_code: row.get(0)?,
+                start_date: row.get(1)?,
+                end_date: row.get(2)?,
+            })
         })
+        .map_err(|e| format!("查询行情待补救记录失败: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("读取行情待补救记录失败: {e}"))
     })
-    .map_err(|e| format!("查询行情待补救记录失败: {e}"))?
-    .collect::<Result<Vec<_>, _>>()
-    .map_err(|e| format!("读取行情待补救记录失败: {e}"))
 }
 
 pub fn load_missing_stock_codes(
@@ -74,10 +78,7 @@ pub fn load_missing_stock_codes(
 }
 
 pub fn open_source_db_readonly(source_dir: &str) -> Result<Connection, String> {
-    let config = Config::default()
-        .access_mode(AccessMode::ReadOnly)
-        .map_err(|e| format!("配置行情检查只读连接失败: {e}"))?;
-    Connection::open_with_flags(source_db_path(source_dir), config)
+    super::open_db_readonly(source_db_path(source_dir))
         .map_err(|e| format!("打开行情库检查下载状态失败: {e}"))
 }
 
@@ -144,13 +145,14 @@ pub fn ensure_stock_data_ready_for_derived(source_dir: &str) -> Result<(), Strin
                 .join("、")
         ));
     }
-    let has_rows: bool = conn
-        .query_row(
+    let has_rows: bool = super::read_with_retry("读取行情可用状态", || {
+        conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM stock_data WHERE adj_type='qfq')",
             [],
             |row| row.get(0),
         )
-        .map_err(|e| format!("读取行情状态失败: {e}"))?;
+    })
+    .map_err(|e| format!("读取行情状态失败: {e}"))?;
     if !has_rows {
         return Err("原始行情库没有前复权数据，请先下载行情。".to_string());
     }
@@ -513,21 +515,23 @@ pub fn load_pending_chip_repairs_for_model(
     conn: &Connection,
     model: &str,
 ) -> Result<Vec<String>, String> {
-    let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name='pending_chip_repair')", [], |row| row.get(0)).map_err(|e| e.to_string())?;
-    if !exists {
-        return Ok(Vec::new());
-    }
-    let completed_exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name='completed_chip_repair')", [], |row| row.get(0)).map_err(|e| e.to_string())?;
-    let sql = if completed_exists {
-        "SELECT ts_code FROM pending_chip_repair WHERE NOT EXISTS(SELECT 1 FROM completed_chip_repair done WHERE done.ts_code=pending_chip_repair.ts_code AND done.model=?) ORDER BY ts_code"
-    } else {
-        "SELECT ts_code FROM pending_chip_repair WHERE ? IS NOT NULL ORDER BY ts_code"
-    };
-    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
-    stmt.query_map([model], |row| row.get(0))
-        .map_err(|e| e.to_string())?
-        .collect::<Result<_, _>>()
-        .map_err(|e| e.to_string())
+    super::read_with_retry("读取筹码待修复清单", || -> Result<_, String> {
+        let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name='pending_chip_repair')", [], |row| row.get(0)).map_err(|e| e.to_string())?;
+        if !exists {
+            return Ok(Vec::new());
+        }
+        let completed_exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name='completed_chip_repair')", [], |row| row.get(0)).map_err(|e| e.to_string())?;
+        let sql = if completed_exists {
+            "SELECT ts_code FROM pending_chip_repair WHERE NOT EXISTS(SELECT 1 FROM completed_chip_repair done WHERE done.ts_code=pending_chip_repair.ts_code AND done.model=?) ORDER BY ts_code"
+        } else {
+            "SELECT ts_code FROM pending_chip_repair WHERE ? IS NOT NULL ORDER BY ts_code"
+        };
+        let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+        stmt.query_map([model], |row| row.get(0))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())
+    })
 }
 
 // 仅完整覆盖原始行情的重建可以确认历史修复完成；局部区间不能消除历史欠账。

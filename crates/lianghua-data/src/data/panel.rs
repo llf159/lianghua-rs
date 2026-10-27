@@ -146,7 +146,9 @@ pub fn configured_fields(source: &str) -> Result<Vec<(String, IndicatorScope)>, 
 }
 
 pub fn has_values(conn: &Connection) -> Result<bool, String> {
-    conn.query_row("SELECT count(*)>0 FROM information_schema.tables WHERE table_name='indicator_panel_values'",[],|r|r.get(0)).map_err(|e|e.to_string())
+    super::read_with_retry("读取跨股票指标表状态", || {
+        conn.query_row("SELECT count(*)>0 FROM information_schema.tables WHERE table_name='indicator_panel_values'",[],|r|r.get(0)).map_err(|e|e.to_string())
+    })
 }
 
 pub fn invalidate(conn: &Connection, start: &str) -> Result<(), String> {
@@ -183,50 +185,55 @@ pub fn load_values(
         .map(|s| format!("'{}'", s.replace('\'', "''")))
         .collect::<Vec<_>>()
         .join(",");
-    let mut stmt=conn.prepare(&format!("SELECT v.name,v.ts_code,v.trade_date,v.value FROM indicator_panel_values v JOIN indicator_panel_state s ON s.id=1 AND s.version=1 AND s.signature=? WHERE v.name IN({names}) AND v.ts_code IN({codes}) AND v.trade_date BETWEEN ? AND ? AND (s.dirty_from IS NULL OR v.trade_date<s.dirty_from)")).map_err(|e|e.to_string())?;
-    let batches = stmt
-        .query_arrow(params![signature, start, end])
-        .map_err(|e| e.to_string())?;
-    let mut out = PanelValues::new();
-    for batch in batches {
-        let strings = (0..3)
-            .map(|i| {
-                batch
-                    .column(i)
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .ok_or("指标结果标识列不是字符串")
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let values = batch
-            .column(3)
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .ok_or("指标结果数值列不是DOUBLE")?;
-        for row in 0..batch.num_rows() {
-            if strings.iter().any(|column| column.is_null(row)) {
-                return Err("指标结果的名称、股票代码或日期为空".into());
+    super::read_with_retry("读取跨股票指标", || -> Result<_, String> {
+        let mut stmt=conn.prepare(&format!("SELECT v.name,v.ts_code,v.trade_date,v.value FROM indicator_panel_values v JOIN indicator_panel_state s ON s.id=1 AND s.version=1 AND s.signature=? WHERE v.name IN({names}) AND v.ts_code IN({codes}) AND v.trade_date BETWEEN ? AND ? AND (s.dirty_from IS NULL OR v.trade_date<s.dirty_from)")).map_err(|e|e.to_string())?;
+        stmt.execute(params![signature, start, end])
+            .map_err(|e| e.to_string())?;
+        let mut out = PanelValues::new();
+        while let Some(array) = stmt
+            .step()
+            .map_err(|e| format!("读取跨股票指标数据块失败:{e}"))?
+        {
+            let batch = RecordBatch::from(&array);
+            let strings = (0..3)
+                .map(|i| {
+                    batch
+                        .column(i)
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .ok_or("指标结果标识列不是字符串")
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let values = batch
+                .column(3)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .ok_or("指标结果数值列不是DOUBLE")?;
+            for row in 0..batch.num_rows() {
+                if strings.iter().any(|column| column.is_null(row)) {
+                    return Err("指标结果的名称、股票代码或日期为空".into());
+                }
+                let name = strings[0].value(row);
+                let stock = strings[1].value(row);
+                // Borrow repeated identifiers from Arrow; allocate map keys only
+                // on their first occurrence, rather than twice for every value.
+                if !out.contains_key(name) {
+                    out.insert(name.to_owned(), HashMap::new());
+                }
+                let stocks = out.get_mut(name).expect("inserted field");
+                if !stocks.contains_key(stock) {
+                    stocks.insert(stock.to_owned(), HashMap::new());
+                }
+                stocks.get_mut(stock).expect("inserted stock").insert(
+                    strings[2].value(row).to_owned(),
+                    (!values.is_null(row))
+                        .then(|| values.value(row))
+                        .filter(|v| v.is_finite()),
+                );
             }
-            let name = strings[0].value(row);
-            let stock = strings[1].value(row);
-            // Borrow repeated identifiers from Arrow; allocate map keys only
-            // on their first occurrence, rather than twice for every value.
-            if !out.contains_key(name) {
-                out.insert(name.to_owned(), HashMap::new());
-            }
-            let stocks = out.get_mut(name).expect("inserted field");
-            if !stocks.contains_key(stock) {
-                stocks.insert(stock.to_owned(), HashMap::new());
-            }
-            stocks.get_mut(stock).expect("inserted stock").insert(
-                strings[2].value(row).to_owned(),
-                (!values.is_null(row))
-                    .then(|| values.value(row))
-                    .filter(|v| v.is_finite()),
-            );
         }
-    }
-    Ok(out)
+        Ok(out)
+    })
 }
 
 pub fn inject_values(row: &mut RowData, stock: &str, fields: &[String], values: &PanelValues) {
@@ -592,43 +599,58 @@ pub fn refresh_with_progress(
         .enumerate()
         .map(|(i, d)| (d.clone(), i))
         .collect::<HashMap<_, _>>();
-    let mut stmt=conn.prepare("SELECT DISTINCT ts_code FROM stock_data WHERE adj_type='qfq' AND trade_date BETWEEN ? AND ? ORDER BY ts_code").map_err(|e|e.to_string())?;
-    let stocks = stmt
-        .query_map(params![dates[0], last], |r| r.get::<_, String>(0))
-        .map_err(|e| e.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
+    let stocks = super::read_with_retry(
+        "读取跨股票指标股票列表",
+        || -> Result<_, String> {
+            let mut stmt=conn.prepare("SELECT DISTINCT ts_code FROM stock_data WHERE adj_type='qfq' AND trade_date BETWEEN ? AND ? ORDER BY ts_code").map_err(|e|e.to_string())?;
+            let stocks = stmt
+                .query_map(params![dates[0], last], |r| r.get::<_, String>(0))
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            Ok(stocks)
+        },
+    )?;
     let stock_lookup = stocks
         .iter()
         .enumerate()
         .map(|(i, s)| (s.clone(), i))
         .collect::<HashMap<_, _>>();
-    let mut presence = vec![vec![false; dates.len()]; stocks.len()];
-    let mut stmt=conn.prepare("SELECT ts_code,trade_date FROM stock_data WHERE adj_type='qfq' AND trade_date BETWEEN ? AND ?").map_err(|e|e.to_string())?;
-    let batches = stmt
-        .query_arrow(params![dates[0], last])
-        .map_err(|e| e.to_string())?;
-    for batch in batches {
-        let codes = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or("行情股票代码不是字符串")?;
-        let dates = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or("行情交易日不是字符串")?;
-        for row in 0..batch.num_rows() {
-            if codes.is_null(row) || dates.is_null(row) {
-                return Err("行情的股票代码或交易日为空".into());
+    let presence = super::read_with_retry(
+        "读取跨股票指标行情日期",
+        || -> Result<_, String> {
+            let mut presence = vec![vec![false; dates.len()]; stocks.len()];
+            let mut stmt=conn.prepare("SELECT ts_code,trade_date FROM stock_data WHERE adj_type='qfq' AND trade_date BETWEEN ? AND ?").map_err(|e|e.to_string())?;
+            stmt.execute(params![dates[0], last])
+                .map_err(|e| e.to_string())?;
+            while let Some(array) = stmt
+                .step()
+                .map_err(|e| format!("读取跨股票指标行情日期数据块失败:{e}"))?
+            {
+                let batch = RecordBatch::from(&array);
+                let codes = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or("行情股票代码不是字符串")?;
+                let dates = batch
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or("行情交易日不是字符串")?;
+                for row in 0..batch.num_rows() {
+                    if codes.is_null(row) || dates.is_null(row) {
+                        return Err("行情的股票代码或交易日为空".into());
+                    }
+                    if let Some(&day) = day_lookup.get(dates.value(row)) {
+                        presence[stock_lookup[codes.value(row)]][day] = true;
+                    }
+                }
             }
-            if let Some(&day) = day_lookup.get(dates.value(row)) {
-                presence[stock_lookup[codes.value(row)]][day] = true;
-            }
-        }
-    }
-    drop(stmt);
+            drop(stmt);
+            Ok(presence)
+        },
+    )?;
     let source_data = Source {
         input_columns: reader.cols_table.clone(),
         index_columns: reader.runtime_index_cols.clone(),
