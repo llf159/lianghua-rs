@@ -10,7 +10,7 @@ lianghua-provider = { path = "../lianghua-provider" }
 lianghua-model = { path = "../lianghua-model" }
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.9"
-duckdb = { version = "1.4.4", features = ["appender-arrow"] }
+duckdb = { version = "~1.20000.0", features = ["appender-arrow"] }
 rayon = "1.11.0"
 csv = "1.4.0"
 chrono = "0.4.44"

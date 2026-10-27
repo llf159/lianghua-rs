@@ -1534,6 +1534,21 @@ pub fn run_prepared_data_download(
                                 Some(&repair_progress_cb),
                             )?
                         };
+                    // 历史修复已经独立发布；先记下完成，避免后续增量失败后重放同一批历史，
+                    // 从而改变增量续算输入并使已保存的维护进度失效。
+                    if repair_summary.is_some()
+                        && pending_table_exists
+                        && !recovered_stock_codes.is_empty()
+                    {
+                        let source_conn = Connection::open(source_db_path(source_path))
+                            .map_err(|e| format!("打开原始库清除筹码修复记录失败: {e}"))?;
+                        crate::data::download_state::clear_completed_chip_repairs(
+                            &source_conn,
+                            source_path,
+                            chip_model,
+                            recovered_stock_codes,
+                        )?;
+                    }
                     let incremental_progress_cb = |progress: DownloadProgress| {
                         emit_chip_maintenance_progress(
                             progress_cb,
@@ -1582,7 +1597,10 @@ pub fn run_prepared_data_download(
                                 .as_ref()
                                 .and_then(|summary| summary.end_date.as_deref())
                         });
-                    if pending_table_exists && !recovered_stock_codes.is_empty() {
+                    if history_rebuild_required
+                        && pending_table_exists
+                        && !recovered_stock_codes.is_empty()
+                    {
                         let source_conn = Connection::open(source_db_path(source_path))
                             .map_err(|e| format!("打开原始库清除筹码修复记录失败: {e}"))?;
                         crate::data::download_state::clear_completed_chip_repairs(

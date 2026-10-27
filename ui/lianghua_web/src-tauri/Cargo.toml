@@ -40,14 +40,14 @@ tokio = { version = "1.0", features = ["process", "macros", "time"] }
 zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-duckdb = { version = "1.4.4", features = ["appender-arrow"] }
+duckdb = { version = "~1.20000.0", features = ["appender-arrow"] }
 libc = "0.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-duckdb = { version = "1.4.4", features = ["bundled", "appender-arrow", "parquet"] }
+duckdb = { version = "~1.20000.0", features = ["bundled", "appender-arrow", "parquet"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
-duckdb = { version = "1.4.4", features = ["bundled", "appender-arrow", "parquet"] }
+duckdb = { version = "~1.20000.0", features = ["bundled", "appender-arrow", "parquet"] }
 libc = "0.2"
 jni = "0.21.1"
 rustls-platform-verifier = "0.6.2"

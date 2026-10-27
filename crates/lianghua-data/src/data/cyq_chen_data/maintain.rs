@@ -1,8 +1,11 @@
+use super::maintenance_stage::{
+    prepare_maintenance_stage, write_cyq_chen_maintenance_batches_from_channel,
+};
 use crate::data::cyq_chen_data::compute::{
     compute_cyq_chen_stock_group_batch, compute_prepared_cyq_chen_stock_group_batch,
     finish_cyq_chen_write, query_source_trade_date_range, resolve_cyq_chen_load_start_date,
     resolve_cyq_chen_rebuild_trade_date_range, source_stock_data_exists,
-    write_cyq_chen_batches_from_channel, write_cyq_chen_maintenance_batches_from_channel,
+    write_cyq_chen_batches_from_channel,
 };
 use crate::data::cyq_chen_data::store::replace_cyq_chen_db;
 use crate::data::cyq_chen_data::store::{
@@ -199,6 +202,25 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
     let total_share_map = load_total_share_map(source_dir).unwrap_or_default();
     let reader = DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
     let ts_codes = reader.list_ts_code(DEFAULT_ADJ_TYPE, &load_start_date, &end_date)?;
+    let _maintenance_lock =
+        crate::data::cyq_chen_temp::lock_rebuild_directory(Path::new(source_dir))?
+            .ok_or_else(|| "该数据目录已有新筹码计算任务，请等待完成后再试".to_string())?;
+    let (stage_path, completed) = prepare_maintenance_stage(
+        source_dir,
+        config,
+        &strategy_hash,
+        &start_date,
+        &end_date,
+        &load_start_date,
+        &ts_codes,
+        false,
+    )?;
+    let total_stocks = ts_codes.len();
+    let resumed_stocks = completed.len();
+    let ts_codes = ts_codes
+        .into_iter()
+        .filter(|code| !completed.contains(code))
+        .collect::<Vec<_>>();
     let state_db = std::sync::Mutex::new(
         Connection::open(&cyq_chen_db).map_err(|e| format!("打开新筹码库失败:{e}"))?,
     );
@@ -210,20 +232,18 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
     if let Some(progress_cb) = progress_cb {
         progress_cb(DownloadProgress {
             phase: "compute_cyq_chen".to_string(),
-            finished: 0,
-            total: ts_codes.len(),
+            finished: resumed_stocks,
+            total: total_stocks,
             current_label: None,
             message: format!(
-                "新筹码增量维护已开始，区间 {} 至 {}，共 {} 只股票。",
-                start_date,
-                end_date,
-                ts_codes.len()
+                "新筹码增量维护已开始，区间 {} 至 {}，共 {} 只股票，已恢复 {resumed_stocks} 只已提交进度。",
+                start_date, end_date, total_stocks
             ),
         });
     }
 
     // 独立只读实例也不参与写实例的块管理；续算状态必须与写线程共享实例。
-    // scope 保证异常退出也先结束写线程，再释放 try_clone 借用的主数据库句柄。
+    // scope 统一等待计算与写线程结束，再释放主连接。
     let replay_first_date = std::sync::OnceLock::new();
     let (compute_result, writer_result) = thread::scope(|scope| {
         let (tx, rx) = sync_channel(CYQ_CHEN_QUEUE_BOUND);
@@ -234,6 +254,7 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
         let writer_handle = scope.spawn(move || {
             write_cyq_chen_maintenance_batches_from_channel(
                 writer_conn,
+                &stage_path,
                 rx,
                 config,
                 &write_start_date,
@@ -243,7 +264,7 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
             )
         });
 
-        let finished_stock_count = std::sync::atomic::AtomicUsize::new(0);
+        let finished_stock_count = std::sync::atomic::AtomicUsize::new(resumed_stocks);
         let compute_group_size = 64usize.div_ceil(rayon::current_num_threads().max(1)).max(1);
         let compute_result = ts_codes.par_chunks(compute_group_size).try_for_each_init(
             || -> Result<(DataReader, Connection), String> {
@@ -266,11 +287,11 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
                         progress_cb(DownloadProgress {
                             phase: "compute_cyq_chen".to_string(),
                             finished,
-                            total: ts_codes.len(),
+                            total: total_stocks,
                             current_label: Some(ts_code.to_string()),
                             message: format!(
                                 "新筹码增量计算中，已计算 {finished} / {} 只股票。",
-                                ts_codes.len()
+                                total_stocks
                             ),
                         });
                     }
@@ -280,7 +301,7 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
                         progress_cb(DownloadProgress {
                             phase: "compute_cyq_chen".into(),
                             finished: finished_stock_count.load(std::sync::atomic::Ordering::Relaxed),
-                            total: ts_codes.len(),
+                            total: total_stocks,
                             current_label: Some(ts_code.to_string()),
                             message: format!("{ts_code} 续算状态不可用，正在从行情重放该股；完成后与本轮增量一起提交。原因: {reason}"),
                         });
@@ -304,7 +325,10 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
                         report: &checkpoint_recovery,
                     }),
                 )?;
-                tx.send(CyqChenWriteMessage::Batch(batch))
+                let mut batch = super::compute::prepare_cyq_chen_batch_rows(batch, config)?;
+                // 无输出股票也必须持久标记，避免下次重复计算。
+                batch.completed_ts_codes = ts_group.to_vec();
+                tx.send(CyqChenWriteMessage::PreparedBatch(batch))
                     .map_err(|e| format!("发送新筹码增量批次失败:{e}"))?;
                 Ok(())
             },
@@ -325,8 +349,8 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
             if let Some(progress_cb) = progress_cb {
                 progress_cb(DownloadProgress {
                     phase: "compute_cyq_chen".to_string(),
-                    finished: ts_codes.len(),
-                    total: ts_codes.len(),
+                    finished: total_stocks,
+                    total: total_stocks,
                     current_label: None,
                     message: "筹码计算已结束，正在等待写入、事务提交及结果库收尾。".to_string(),
                 });
@@ -555,6 +579,27 @@ pub fn repair_cyq_chen_stocks_if_db_exists(
     let required_runtime_keys = collect_chen_chip_runtime_keys(&chip_config);
     let st_list = load_st_list(source_dir).unwrap_or_default();
     let total_share_map = load_total_share_map(source_dir).unwrap_or_default();
+    drop(source_conn);
+    let _maintenance_lock =
+        crate::data::cyq_chen_temp::lock_rebuild_directory(Path::new(source_dir))?
+            .ok_or_else(|| "该数据目录已有新筹码计算任务，请等待完成后再试".to_string())?;
+    let (stage_path, completed) = prepare_maintenance_stage(
+        source_dir,
+        config,
+        &strategy_hash,
+        &start_date,
+        &end_date,
+        &load_start_date,
+        &ts_codes,
+        true,
+    )?;
+    let writer_ts_codes = ts_codes.clone();
+    let total_stocks = ts_codes.len();
+    let resumed_stocks = completed.len();
+    let ts_codes = ts_codes
+        .into_iter()
+        .filter(|code| !completed.contains(code))
+        .collect::<Vec<_>>();
     let cyq_chen_db_str = cyq_chen_db
         .to_str()
         .ok_or_else(|| "筹码库路径不是有效UTF-8".to_string())?
@@ -562,21 +607,18 @@ pub fn repair_cyq_chen_stocks_if_db_exists(
     if let Some(progress_cb) = progress_cb {
         progress_cb(DownloadProgress {
             phase: "compute_cyq_chen".to_string(),
-            finished: 0,
-            total: ts_codes.len(),
+            finished: resumed_stocks,
+            total: total_stocks,
             current_label: None,
             message: format!(
-                "新筹码局部修复已开始，区间 {} 至 {}，共 {} 只股票。",
-                start_date,
-                end_date,
-                ts_codes.len()
+                "新筹码局部修复已开始，区间 {} 至 {}，共 {} 只股票，已恢复 {resumed_stocks} 只已提交进度。",
+                start_date, end_date, total_stocks
             ),
         });
     }
 
     let (tx, rx) = sync_channel(CYQ_CHEN_QUEUE_BOUND);
     let abort_tx = tx.clone();
-    let writer_ts_codes = ts_codes.clone();
     let write_start_date = start_date.clone();
     let write_end_date = end_date.clone();
     let writer_strategy_hash = strategy_hash.clone();
@@ -585,6 +627,7 @@ pub fn repair_cyq_chen_stocks_if_db_exists(
             Connection::open(&cyq_chen_db_str).map_err(|e| format!("打开新筹码库失败:{e}"))?;
         write_cyq_chen_maintenance_batches_from_channel(
             conn,
+            &stage_path,
             rx,
             config,
             &write_start_date,
@@ -594,7 +637,7 @@ pub fn repair_cyq_chen_stocks_if_db_exists(
         )
     });
 
-    let finished_stock_count = std::sync::atomic::AtomicUsize::new(0);
+    let finished_stock_count = std::sync::atomic::AtomicUsize::new(resumed_stocks);
     let compute_group_size = cyq_chen_streaming_stock_block_size();
     let compute_result = ts_codes.par_chunks(compute_group_size).try_for_each_init(
         || DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys),
@@ -607,11 +650,11 @@ pub fn repair_cyq_chen_stocks_if_db_exists(
                     progress_cb(DownloadProgress {
                         phase: "compute_cyq_chen".to_string(),
                         finished,
-                        total: ts_codes.len(),
+                        total: total_stocks,
                         current_label: Some(ts_code.to_string()),
                         message: format!(
                             "新筹码局部修复计算中，已计算 {finished} / {} 只股票。",
-                            ts_codes.len()
+                            total_stocks
                         ),
                     });
                 }
@@ -652,8 +695,8 @@ pub fn repair_cyq_chen_stocks_if_db_exists(
         if let Some(progress_cb) = progress_cb {
             progress_cb(DownloadProgress {
                 phase: "compute_cyq_chen".to_string(),
-                finished: ts_codes.len(),
-                total: ts_codes.len(),
+                finished: total_stocks,
+                total: total_stocks,
                 current_label: None,
                 message: "筹码计算已结束，正在等待写入、事务提交及结果库收尾。".to_string(),
             });
@@ -669,8 +712,8 @@ pub fn repair_cyq_chen_stocks_if_db_exists(
     if let Some(progress_cb) = progress_cb {
         progress_cb(DownloadProgress {
             phase: "done".to_string(),
-            finished: ts_codes.len(),
-            total: ts_codes.len(),
+            finished: total_stocks,
+            total: total_stocks,
             current_label: None,
             message: format!(
                 "新筹码局部修复完成，写入 {snapshot_rows} 条摘要和 {bin_rows} 条分桶。"
@@ -1039,10 +1082,10 @@ mod tests {
     use crate::data::cyq_chen_data::CYQ_CHEN_SNAPSHOT_TABLE;
     use crate::data::cyq_chen_data::CyqChenWriteMessage;
     use crate::data::cyq_chen_data::compute::write_cyq_chen_batches_from_channel;
-    use crate::data::cyq_chen_data::compute::write_cyq_chen_maintenance_batches_from_channel;
     use crate::data::cyq_chen_data::maintain::maintain_cyq_chen_incremental_if_db_exists;
     use crate::data::cyq_chen_data::maintain::rebuild_cyq_chen_all;
     use crate::data::cyq_chen_data::maintain::repair_cyq_chen_stocks_if_db_exists;
+    use crate::data::cyq_chen_data::maintenance_stage::write_cyq_chen_maintenance_batches_from_channel;
     use crate::data::cyq_chen_data::store::query_cyq_chen_strategy_maintenance_status;
     use crate::data::cyq_chen_data::test_support::*;
     use crate::data::cyq_chen_db_path;
@@ -1743,6 +1786,17 @@ bias = 0.5
         let codes = vec!["000001.SZ".to_string()];
         for repair in [None, Some(codes.as_slice())] {
             for failure in ["abort", "disconnect", "invalid_state"] {
+                let (stage_path, _) = super::prepare_maintenance_stage(
+                    source_path,
+                    config,
+                    "changed-strategy-hash",
+                    "20260407",
+                    "20260408",
+                    "20260401",
+                    &codes,
+                    repair.is_some(),
+                )
+                .unwrap();
                 let (tx, rx) = sync_channel(3);
                 tx.send(CyqChenWriteMessage::Batch(
                     crate::data::cyq_chen_data::CyqChenWriteBatch {
@@ -1780,6 +1834,7 @@ bias = 0.5
                 drop(tx);
                 let error = write_cyq_chen_maintenance_batches_from_channel(
                     Connection::open(&cyq_chen_db).unwrap(),
+                    &stage_path,
                     rx,
                     config,
                     "20260407",
@@ -1791,12 +1846,27 @@ bias = 0.5
                 if failure == "invalid_state" {
                     assert!(error.contains("拒绝写入无效新筹码检查点"), "{error}");
                 } else {
-                    assert!(error.contains("结果库已回滚"), "{error}");
+                    assert!(error.contains("已提交进度保留"), "{error}");
                 }
                 assert_eq!(snapshot_rows_for_compare(source_path), snapshots_before);
                 assert_eq!(bin_rows_for_compare(source_path), bins_before);
                 assert_eq!(meta_rows_for_compare(source_path), meta_before);
                 assert_eq!(checkpoint_rows(source_path), checkpoint_before);
+                let (_, completed) = super::prepare_maintenance_stage(
+                    source_path,
+                    config,
+                    "changed-strategy-hash",
+                    "20260407",
+                    "20260408",
+                    "20260401",
+                    &codes,
+                    repair.is_some(),
+                )
+                .unwrap();
+                if failure != "invalid_state" {
+                    assert!(completed.contains("000001.SZ"));
+                }
+                super::remove_cyq_chen_db_artifacts(&stage_path).unwrap();
             }
         }
         // 回滚之后重新执行正常维护，结果仍须与完整重放一致。

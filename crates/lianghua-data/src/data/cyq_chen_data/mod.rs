@@ -1,6 +1,7 @@
 mod compute;
 pub use compute::{compute_cyq_chen_stock_group_batch, resolve_cyq_chen_load_start_date};
 mod maintain;
+mod maintenance_stage;
 mod prepare;
 mod store;
 #[cfg(test)]
@@ -26,7 +27,6 @@ pub(super) const CYQ_CHEN_BIN_TABLE: &str = "cyq_chen_bin";
 pub(super) const CYQ_CHEN_META_TABLE: &str = "cyq_chen_meta";
 pub(super) const DEFAULT_ADJ_TYPE: &str = "qfq";
 pub(super) const CYQ_CHEN_QUEUE_BOUND: usize = 2;
-pub(super) const CYQ_CHEN_FLUSH_BATCH_SIZE: usize = 32;
 pub(super) const CYQ_CHEN_SCHEMA_VERSION: &str = "5";
 
 #[derive(Debug, Clone, PartialEq)]
@@ -72,6 +72,7 @@ pub fn remove_cyq_chen_storage(source_dir: &str, remove_official: bool) -> Resul
         .ok_or_else(|| "新筹码计算正在运行，不能清理或删除筹码库。".to_string())?;
     crate::data::cyq_chen_temp::remove_stale_rebuilds(source_dir)?;
     store::remove_cyq_chen_db_artifacts(&source_dir.join(".cyq_chen.db.resume.tmp"))?;
+    store::remove_cyq_chen_db_artifacts(&source_dir.join(".cyq_chen.db.maintenance.tmp"))?;
     if remove_official {
         store::remove_cyq_chen_db_artifacts(&source_dir.join("cyq_chen.db"))?;
     }

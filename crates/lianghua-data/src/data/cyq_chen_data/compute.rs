@@ -4,9 +4,9 @@ use crate::data::cyq_chen_data::store::{
     drop_cyq_chen_db_indexes, ensure_cyq_chen_db_indexes, write_cyq_chen_meta,
 };
 use crate::data::cyq_chen_data::{
-    CYQ_CHEN_BIN_TABLE, CYQ_CHEN_FLUSH_BATCH_SIZE, CYQ_CHEN_SNAPSHOT_TABLE, ComputedCyqChenStock,
-    CyqChenCheckpointRecovery, CyqChenInitialState, CyqChenWriteBatch, CyqChenWriteMessage,
-    DEFAULT_ADJ_TYPE, PreparedCyqChenWriteBatch, decode_cyq_chen_checkpoint,
+    CYQ_CHEN_BIN_TABLE, CYQ_CHEN_SNAPSHOT_TABLE, ComputedCyqChenStock, CyqChenCheckpointRecovery,
+    CyqChenInitialState, CyqChenWriteBatch, CyqChenWriteMessage, DEFAULT_ADJ_TYPE,
+    PreparedCyqChenWriteBatch, decode_cyq_chen_checkpoint,
 };
 
 use crate::data::DataReader;
@@ -812,21 +812,6 @@ pub(super) fn append_prepared_cyq_chen_batch_rows(
     Ok((batch.snapshot_rows, batch.bin_rows))
 }
 
-pub(super) fn append_cyq_chen_batch_rows(
-    conn: &Connection,
-    snapshot_app: &mut Appender<'_>,
-    bin_app: &mut Appender<'_>,
-    batch: CyqChenWriteBatch,
-    config: ChenChipConfig,
-) -> Result<(usize, usize), String> {
-    append_prepared_cyq_chen_batch_rows(
-        conn,
-        snapshot_app,
-        bin_app,
-        prepare_cyq_chen_batch_rows(batch, config)?,
-    )
-}
-
 pub(super) fn finish_cyq_chen_write(
     compute_result: Result<(), String>,
     writer_result: Result<(usize, usize), String>,
@@ -1075,135 +1060,6 @@ fn write_cyq_chen_batch_groups(
         bin_rows += added_bin_rows;
     }
     Ok((snapshot_rows, bin_rows))
-}
-
-pub(super) fn write_cyq_chen_maintenance_batches_from_channel(
-    mut conn: Connection,
-    rx: Receiver<CyqChenWriteMessage>,
-    config: ChenChipConfig,
-    start_date: &str,
-    end_date: &str,
-    strategy_hash: String,
-    repair_ts_codes: Option<&[String]>,
-) -> Result<(usize, usize), String> {
-    let tx = conn
-        .transaction()
-        .map_err(|e| format!("创建新筹码维护事务失败:{e}"))?;
-    let write_result = (|| -> Result<(usize, usize), String> {
-        if let Some(ts_codes) = repair_ts_codes {
-            for ts_code in ts_codes {
-                // 局部修复是整股重放，连同源行情已删掉的旧日期一起替换。
-                for table in [
-                    "cyq_chen_checkpoint",
-                    CYQ_CHEN_BIN_TABLE,
-                    CYQ_CHEN_SNAPSHOT_TABLE,
-                ] {
-                    tx.execute(
-                        &format!("DELETE FROM {table} WHERE ts_code = ? AND adj_type = ?"),
-                        params![ts_code, DEFAULT_ADJ_TYPE],
-                    )
-                    .map_err(|e| format!("清理股票新筹码失败, ts_code={ts_code}: {e}"))?;
-                }
-            }
-        } else {
-            tx.execute(
-            "DELETE FROM cyq_chen_bin WHERE adj_type = ? AND trade_date >= ? AND trade_date <= ?",
-            params![DEFAULT_ADJ_TYPE, start_date, end_date],
-        )
-        .map_err(|e| format!("清理增量区间cyq_chen_bin失败:{e}"))?;
-            tx.execute(
-            "DELETE FROM cyq_chen_snapshot WHERE adj_type = ? AND trade_date >= ? AND trade_date <= ?",
-            params![DEFAULT_ADJ_TYPE, start_date, end_date],
-        )
-        .map_err(|e| format!("清理增量区间cyq_chen_snapshot失败:{e}"))?;
-        }
-
-        let mut snapshot_rows = 0usize;
-        let mut bin_rows = 0usize;
-        let mut batch_count = 0usize;
-        let mut abort_reason = None;
-        let mut finished = false;
-        {
-            let mut snapshot_app = tx
-                .appender(CYQ_CHEN_SNAPSHOT_TABLE)
-                .map_err(|e| format!("创建cyq_chen_snapshot写入器失败:{e}"))?;
-            let mut bin_app = tx
-                .appender(CYQ_CHEN_BIN_TABLE)
-                .map_err(|e| format!("创建cyq_chen_bin写入器失败:{e}"))?;
-
-            for message in rx {
-                let (added_snapshot_rows, added_bin_rows) = match message {
-                    CyqChenWriteMessage::Batch(batch) => append_cyq_chen_batch_rows(
-                        &tx,
-                        &mut snapshot_app,
-                        &mut bin_app,
-                        batch,
-                        config,
-                    )?,
-                    CyqChenWriteMessage::PreparedBatch(batch) => {
-                        append_prepared_cyq_chen_batch_rows(
-                            &tx,
-                            &mut snapshot_app,
-                            &mut bin_app,
-                            batch,
-                        )?
-                    }
-                    CyqChenWriteMessage::Abort(reason) => {
-                        abort_reason = Some(reason);
-                        break;
-                    }
-                    CyqChenWriteMessage::Finish => {
-                        finished = true;
-                        break;
-                    }
-                };
-
-                snapshot_rows += added_snapshot_rows;
-                bin_rows += added_bin_rows;
-                batch_count += 1;
-
-                if batch_count % CYQ_CHEN_FLUSH_BATCH_SIZE == 0 {
-                    snapshot_app
-                        .flush()
-                        .map_err(|e| format!("刷新cyq_chen_snapshot写入器失败:{e}"))?;
-                    bin_app
-                        .flush()
-                        .map_err(|e| format!("刷新cyq_chen_bin写入器失败:{e}"))?;
-                }
-            }
-
-            if finished && abort_reason.is_none() {
-                snapshot_app
-                    .flush()
-                    .map_err(|e| format!("刷新cyq_chen_snapshot写入器失败:{e}"))?;
-                bin_app
-                    .flush()
-                    .map_err(|e| format!("刷新cyq_chen_bin写入器失败:{e}"))?;
-            }
-        }
-
-        if !finished {
-            let reason =
-                abort_reason.unwrap_or_else(|| "计算通道提前关闭，未收到全部成功标记".into());
-            return Err(format!("新筹码维护计算中断:{reason}"));
-        }
-
-        write_cyq_chen_meta(&tx, config, &strategy_hash)?;
-        Ok((snapshot_rows, bin_rows))
-    })();
-
-    match write_result {
-        Ok(rows) => {
-            tx.commit()
-                .map_err(|e| format!("提交新筹码维护事务失败:{e}"))?;
-            Ok(rows)
-        }
-        Err(error) => {
-            tx.rollback()
-                .map_err(|e| format!("新筹码维护失败且结果库回滚失败:{error}; {e}"))?;
-            Err(format!("新筹码维护失败，结果库已回滚:{error}"))
-        }
-    }
 }
 
 #[cfg(test)]
