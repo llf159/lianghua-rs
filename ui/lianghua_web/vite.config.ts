@@ -28,7 +28,7 @@ export default defineConfig({
   },
   server: {
     watch: {
-      ignored: ["**/src-tauri/target/**", "**/target/**"],
+      ignored: ["**/src-tauri/gen/**", "**/src-tauri/target/**", "**/target/**"],
     },
   },
 });

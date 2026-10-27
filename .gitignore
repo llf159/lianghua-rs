@@ -23,6 +23,8 @@ market*
 !crates/lianghua-app-strategy/src/statistics/market_activity.rs
 !crates/lianghua-app-strategy/src/statistics/market_activity_model.json
 !crates/lianghua-app-strategy/src/statistics/market_environment.rs
+!crates/lianghua-app-strategy/src/statistics/market_reversal.rs
+!crates/lianghua-app-strategy/src/statistics/market_reversal_model.json
 # 本地研究脚本、报告和实验结果
 /src/bin/
 /research/

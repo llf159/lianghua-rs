@@ -596,6 +596,24 @@ export type MarketEnvironmentFeedback = {
   description: string
 }
 
+export type MarketReversalEstimate = {
+  status: 'estimated' | 'not_applicable' | 'unavailable'
+  method: 'evidence' | 'price' | 'historical_rate' | null
+  direction: 'up' | 'down' | null
+  probability: number | null
+  horizon_sessions: number
+  reason: string
+  version: string
+  training_days: number
+  training_successes: number
+  training_last_date: string | null
+  training_labels_through: string | null
+  review_after: string | null
+  evaluation_days: number
+  evaluation_successes: number
+  evidence: { label: string; contribution: number }[]
+}
+
 export type MarketEnvironmentData = {
   reference_trade_date: string | null
   analysis_trade_date: string | null
@@ -606,6 +624,7 @@ export type MarketEnvironmentData = {
   return_10d_pct: number | null
   breadth_10d_pct: number | null
   feedback: MarketEnvironmentFeedback[]
+  reversal: MarketReversalEstimate | null
   phase: string | null
   headline: string
   summary: string

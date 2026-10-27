@@ -1,0 +1,1670 @@
+{
+  "version": "reversal-5d-v2",
+  "horizon_sessions": 5,
+  "features": [
+    "direction",
+    "recent",
+    "today",
+    "breadth",
+    "attack_rate",
+    "defense_rate",
+    "kept_rate",
+    "repair_rate"
+  ],
+  "models": [
+    {
+      "valid_from": "20220104",
+      "review_after": "20220331",
+      "side": 1,
+      "history_days": 5,
+      "history_successes": 0,
+      "history_last_date": "20211102",
+      "history_labels_through": "20211109",
+      "base_probability": 0.08333333333333333,
+      "price": null,
+      "evaluation_days": 0,
+      "evaluation_successes": 0,
+      "evidence": null
+    },
+    {
+      "valid_from": "20220104",
+      "review_after": "20220331",
+      "side": -1,
+      "history_days": 23,
+      "history_successes": 0,
+      "history_last_date": "20211223",
+      "history_labels_through": "20211230",
+      "base_probability": 0.020833333333333332,
+      "price": null,
+      "evaluation_days": 0,
+      "evaluation_successes": 0,
+      "evidence": null
+    },
+    {
+      "valid_from": "20220401",
+      "review_after": "20220630",
+      "side": 1,
+      "history_days": 28,
+      "history_successes": 2,
+      "history_last_date": "20220318",
+      "history_labels_through": "20220325",
+      "base_probability": 0.08620689655172414,
+      "price": null,
+      "evaluation_days": 0,
+      "evaluation_successes": 0,
+      "evidence": null
+    },
+    {
+      "valid_from": "20220401",
+      "review_after": "20220630",
+      "side": -1,
+      "history_days": 35,
+      "history_successes": 3,
+      "history_last_date": "20220303",
+      "history_labels_through": "20220310",
+      "base_probability": 0.09722222222222222,
+      "price": null,
+      "evaluation_days": 0,
+      "evaluation_successes": 0,
+      "evidence": null
+    },
+    {
+      "valid_from": "20220701",
+      "review_after": "20220930",
+      "side": 1,
+      "history_days": 48,
+      "history_successes": 4,
+      "history_last_date": "20220509",
+      "history_labels_through": "20220516",
+      "base_probability": 0.09183673469387756,
+      "price": null,
+      "evaluation_days": 0,
+      "evaluation_successes": 0,
+      "evidence": null
+    },
+    {
+      "valid_from": "20220701",
+      "review_after": "20220930",
+      "side": -1,
+      "history_days": 65,
+      "history_successes": 4,
+      "history_last_date": "20220623",
+      "history_labels_through": "20220630",
+      "base_probability": 0.06818181818181818,
+      "price": {
+        "features": [
+          "direction",
+          "recent",
+          "today"
+        ],
+        "mean": [
+          0.4701894856931326,
+          1.4790113262245745,
+          0.4013646088188863
+        ],
+        "scale": [
+          0.19249599576966145,
+          1.390917057630974,
+          0.7046562029560041
+        ],
+        "coefficients": [
+          -2.7932304553578473,
+          -0.5215705354658055,
+          -0.3271137178946405,
+          0.059020122108062796
+        ],
+        "training_days": 65,
+        "training_successes": 4,
+        "training_last_date": "20220623",
+        "training_labels_through": "20220630"
+      },
+      "evaluation_days": 0,
+      "evaluation_successes": 0,
+      "evidence": null
+    },
+    {
+      "valid_from": "20221010",
+      "review_after": "20221231",
+      "side": 1,
+      "history_days": 66,
+      "history_successes": 4,
+      "history_last_date": "20220923",
+      "history_labels_through": "20220930",
+      "base_probability": 0.06716417910447761,
+      "price": {
+        "features": [
+          "direction",
+          "recent",
+          "today"
+        ],
+        "mean": [
+          -0.42336356911516326,
+          -2.2056230713834464,
+          -0.4214686147198504
+        ],
+        "scale": [
+          0.1456996665492422,
+          2.1031091387946073,
+          1.2372931651569643
+        ],
+        "coefficients": [
+          -2.9379969597828315,
+          0.3440463607190468,
+          0.7771049217797897,
+          -0.10379960178325659
+        ],
+        "training_days": 61,
+        "training_successes": 4,
+        "training_last_date": "20220923",
+        "training_labels_through": "20220930"
+      },
+      "evaluation_days": 0,
+      "evaluation_successes": 0,
+      "evidence": null
+    },
+    {
+      "valid_from": "20221010",
+      "review_after": "20221231",
+      "side": -1,
+      "history_days": 87,
+      "history_successes": 7,
+      "history_last_date": "20220823",
+      "history_labels_through": "20220830",
+      "base_probability": 0.08522727272727272,
+      "price": {
+        "features": [
+          "direction",
+          "recent",
+          "today"
+        ],
+        "mean": [
+          0.467209479153088,
+          1.4374626456112924,
+          0.37620020535678905
+        ],
+        "scale": [
+          0.19216760488438064,
+          1.363134273109572,
+          0.7281404869138267
+        ],
+        "coefficients": [
+          -2.540482253228607,
+          -0.3467548832017471,
+          -0.4371808401800352,
+          -0.052057440064820486
+        ],
+        "training_days": 87,
+        "training_successes": 7,
+        "training_last_date": "20220823",
+        "training_labels_through": "20220830"
+      },
+      "evaluation_days": 0,
+      "evaluation_successes": 0,
+      "evidence": null
+    },
+    {
+      "valid_from": "20230103",
+      "review_after": "20230331",
+      "side": 1,
+      "history_days": 83,
+      "history_successes": 6,
+      "history_last_date": "20221223",
+      "history_labels_through": "20221230",
+      "base_probability": 0.07738095238095238,
+      "price": {
+        "features": [
+          "direction",
+          "recent",
+          "today"
+        ],
+        "mean": [
+          -0.44874134754773165,
+          -2.339752899844138,
+          -0.4563840658132173
+        ],
+        "scale": [
+          0.17728434116320305,
+          2.0808961640033097,
+          1.2367685804670516
+        ],
+        "coefficients": [
+          -2.9570004332257493,
+          0.46909438362634087,
+          0.8574653964137726,
+          0.025725721225739732
+        ],
+        "training_days": 78,
+        "training_successes": 6,
+        "training_last_date": "20221223",
+        "training_labels_through": "20221230"
+      },
+      "evaluation_days": 0,
+      "evaluation_successes": 0,
+      "evidence": null
+    },
+    {
+      "valid_from": "20230103",
+      "review_after": "20230331",
+      "side": -1,
+      "history_days": 113,
+      "history_successes": 10,
+      "history_last_date": "20221213",
+      "history_labels_through": "20221220",
+      "base_probability": 0.09210526315789473,
+      "price": {
+        "features": [
+          "direction",
+          "recent",
+          "today"
+        ],
+        "mean": [
+          0.4665634243862198,
+          1.3994545090330137,
+          0.30371149099608347
+        ],
+        "scale": [
+          0.1911480340162197,
+          1.4597380789800878,
+          0.7069159238790408
+        ],
+        "coefficients": [
+          -2.607242729682387,
+          -0.2814816504201373,
+          -0.768796205036121,
+          -0.15287488146778033
+        ],
+        "training_days": 113,
+        "training_successes": 10,
+        "training_last_date": "20221213",
+        "training_labels_through": "20221220"
+      },
+      "evaluation_days": 0,
+      "evaluation_successes": 0,
+      "evidence": null
+    },
+    {
+      "valid_from": "20230403",
+      "review_after": "20230630",
+      "side": 1,
+      "history_days": 96,
+      "history_successes": 8,
+      "history_last_date": "20230320",
+      "history_labels_through": "20230327",
+      "base_probability": 0.08762886597938144,
+      "price": {
+        "features": [
+          "direction",
+          "recent",
+          "today"
+        ],
+        "mean": [
+          -0.44110069083799736,
+          -2.1520879816071683,
+          -0.44301038047153435
+        ],
+        "scale": [
+          0.16921965699603164,
+          2.0277238844528784,
+          1.2263766916721521
+        ],
+        "coefficients": [
+          -2.8356663611300035,
+          0.2437290773987851,
+          1.0623441523410766,
+          0.057649653976250895
+        ],
+        "training_days": 91,
+        "training_successes": 8,
+        "training_last_date": "20230320",
+        "training_labels_through": "20230327"
+      },
+      "evaluation_days": 8,
+      "evaluation_successes": 0,
+      "evidence": null
+    },
+    {
+      "valid_from": "20230403",
+      "review_after": "20230630",
+      "side": -1,
+      "history_days": 141,
+      "history_successes": 10,
+      "history_last_date": "20230303",
+      "history_labels_through": "20230310",
+      "base_probability": 0.07394366197183098,
+      "price": {
+        "features": [
+          "direction",
+          "recent",
+          "today"
+        ],
+        "mean": [
+          0.4974590452230564,
+          1.6365798154797897,
+          0.33188832052654615
+        ],
+        "scale": [
+          0.20756486903702812,
+          1.661311293411617,
+          0.7193430274731041
+        ],
+        "coefficients": [
+          -2.904082134172762,
+          -0.3132823500428251,
+          -0.7899142425330958,
+          -0.1590774789146286
+        ],
+        "training_days": 141,
+        "training_successes": 10,
+        "training_last_date": "20230303",
+        "training_labels_through": "20230310"
+      },
+      "evaluation_days": 28,
+      "evaluation_successes": 0,
+      "evidence": null
+    },
+    {
+      "valid_from": "20230703",
+      "review_after": "20230930",
+      "side": 1,
+      "history_days": 106,
+      "history_successes": 8,
+      "history_last_date": "20230509",
+      "history_labels_through": "20230516",
+      "base_probability": 0.0794392523364486,
+      "price": {
+        "features": [
+          "direction",
+          "recent",
+          "today"
+        ],
+        "mean": [
+          -0.4425032977242827,
+          -2.1110393678525963,
+          -0.4386459605259801
+        ],
+        "scale": [
+          0.16820183734891728,
+          2.188717744306207,
+          1.2463188601577213
+        ],
+        "coefficients": [
+          -2.879291604962789,
+          0.24128867282946115,
+          0.9308616105627368,
+          0.07868891497889748
+        ],
+        "training_days": 101,
+        "training_successes": 8,
+        "training_last_date": "20230509",
+        "training_labels_through": "20230516"
+      },
+      "evaluation_days": 18,
+      "evaluation_successes": 0,
+      "evidence": null
+    },
+    {
+      "valid_from": "20230703",
+      "review_after": "20230930",
+      "side": -1,
+      "history_days": 154,
+      "history_successes": 10,
+      "history_last_date": "20230620",
+      "history_labels_through": "20230629",
+      "base_probability": 0.06774193548387097,
+      "price": {
+        "features": [
+          "direction",
+          "recent",
+          "today"
+        ],
+        "mean": [
+          0.48130668085198636,
+          1.545336011639158,
+          0.3330311754493104
+        ],
+        "scale": [
+          0.20825254875223145,
+          1.6653798869892373,
+          0.716538275408977
+        ],
+        "coefficients": [
+          -2.951312937320722,
+          -0.238883179462818,
+          -0.7364179462914651,
+          -0.1905072045673883
+        ],
+        "training_days": 154,
+        "training_successes": 10,
+        "training_last_date": "20230620",
+        "training_labels_through": "20230629"
+      },
+      "evaluation_days": 41,
+      "evaluation_successes": 0,
+      "evidence": null
+    },
+    {
+      "valid_from": "20231009",
+      "review_after": "20231231",
+      "side": 1,
+      "history_days": 127,
+      "history_successes": 8,
+      "history_last_date": "20230921",
+      "history_labels_through": "20230928",
+      "base_probability": 0.06640625,
+      "price": {
+        "features": [
+          "direction",
+          "recent",
+          "today"
+        ],
+        "mean": [
+          -0.4423467425124025,
+          -2.154745079629855,
+          -0.46916669925565146
+        ],
+        "scale": [
+          0.16625391263253034,
+          2.05262367520422,
+          1.2137574517660736
+        ],
+        "coefficients": [
+          -3.1430306150868548,
+          0.2153662958425538,
+          0.9835024547044366,
+          0.1014983944724284
+        ],
+        "training_days": 122,
+        "training_successes": 8,
+        "training_last_date": "20230921",
+        "training_labels_through": "20230928"
+      },
+      "evaluation_days": 39,
+      "evaluation_successes": 0,
+      "evidence": null
+    },
+    {
+      "valid_from": "20231009",
+      "review_after": "20231231",
+      "side": -1,
+      "history_days": 167,
+      "history_successes": 11,
+      "history_last_date": "20230911",
+      "history_labels_through": "20230918",
+      "base_probability": 0.06845238095238096,
+      "price": {
+        "features": [
+          "direction",
+          "recent",
+          "today"
+        ],
+        "mean": [
+          0.47091013643867896,
+          1.449106952557447,
+          0.31136586169354463
+        ],
+        "scale": [
+          0.20582304389356534,
+          1.6773106051106552,
+          0.728276809751161
+        ],
+        "coefficients": [
+          -2.9818765339038453,
+          -0.265387456974495,
+          -0.7702226401662532,
+          -0.21548316056545133
+        ],
+        "training_days": 167,
+        "training_successes": 11,
+        "training_last_date": "20230911",
+        "training_labels_through": "20230918"
+      },
+      "evaluation_days": 54,
+      "evaluation_successes": 1,
+      "evidence": null
+    },
+    {
+      "valid_from": "20240102",
+      "review_after": "20240331",
+      "side": 1,
+      "history_days": 146,
+      "history_successes": 8,
+      "history_last_date": "20231222",
+      "history_labels_through": "20231229",
+      "base_probability": 0.05782312925170068,
+      "price": {
+        "features": [
+          "direction",
+          "recent",
+          "today"
+        ],
+        "mean": [
+          -0.4308963556008711,
+          -2.161624466547911,
+          -0.476767580243924
+        ],
+        "scale": [
+          0.1683650001535851,
+          2.0609744324959056,
+          1.2164512041100992
+        ],
+        "coefficients": [
+          -3.281957128784759,
+          0.1388859812590637,
+          1.0043599800011693,
+          0.0925201701577537
+        ],
+        "training_days": 141,
+        "training_successes": 8,
+        "training_last_date": "20231222",
+        "training_labels_through": "20231229"
+      },
+      "evaluation_days": 58,
+      "evaluation_successes": 0,
+      "evidence": null
+    },
+    {
+      "valid_from": "20240102",
+      "review_after": "20240331",
+      "side": -1,
+      "history_days": 187,
+      "history_successes": 13,
+      "history_last_date": "20231128",
+      "history_labels_through": "20231205",
+      "base_probability": 0.07180851063829788,
+      "price": {
+        "features": [
+          "direction",
+          "recent",
+          "today"
+        ],
+        "mean": [
+          0.47393591779215205,
+          1.4527774472271249,
+          0.31476087518428597
+        ],
+        "scale": [
+          0.19969487936570976,
+          1.6108520143402547,
+          0.725983789686867
+        ],
+        "coefficients": [
+          -2.988607097700649,
+          -0.3653592430067215,
+          -0.7916081698503078,
+          -0.21607696653899225
+        ],
+        "training_days": 187,
+        "training_successes": 13,
+        "training_last_date": "20231128",
+        "training_labels_through": "20231205"
+      },
+      "evaluation_days": 74,
+      "evaluation_successes": 3,
+      "evidence": null
+    },
+    {
+      "valid_from": "20240401",
+      "review_after": "20240630",
+      "side": 1,
+      "history_days": 172,
+      "history_successes": 9,
+      "history_last_date": "20240220",
+      "history_labels_through": "20240227",
+      "base_probability": 0.05491329479768786,
+      "price": {
+        "features": [
+          "direction",
+          "recent",
+          "today"
+        ],
+        "mean": [
+          -0.447876257268159,
+          -2.225793250192564,
+          -0.46848536756486125
+        ],
+        "scale": [
+          0.17119222712606566,
+          2.160482634824155,
+          1.258800004522017
+        ],
+        "coefficients": [
+          -3.490359076515479,
+          0.22050477737724786,
+          1.1177137338285923,
+          0.06920298795676708
+        ],
+        "training_days": 167,
+        "training_successes": 9,
+        "training_last_date": "20240220",
+        "training_labels_through": "20240227"
+      },
+      "evaluation_days": 84,
+      "evaluation_successes": 1,
+      "evidence": null
+    },
+    {
+      "valid_from": "20240401",
+      "review_after": "20240630",
+      "side": -1,
+      "history_days": 205,
+      "history_successes": 13,
+      "history_last_date": "20240322",
+      "history_labels_through": "20240329",
+      "base_probability": 0.06553398058252427,
+      "price": {
+        "features": [
+          "direction",
+          "recent",
+          "today"
+        ],
+        "mean": [
+          0.4757714599321592,
+          1.4707109272054346,
+          0.29697223676719026
+        ],
+        "scale": [
+          0.19863118814379238,
+          1.576024907474633,
+          0.7202810580017431
+        ],
+        "coefficients": [
+          -3.106619103914883,
+          -0.3848771919156538,
+          -0.818089640355236,
+          -0.1912398329349829
+        ],
+        "training_days": 205,
+        "training_successes": 13,
+        "training_last_date": "20240322",
+        "training_labels_through": "20240329"
+      },
+      "evaluation_days": 92,
+      "evaluation_successes": 3,
+      "evidence": null
+    },
+    {
+      "valid_from": "20240701",
+      "review_after": "20240930",
+      "side": 1,
+      "history_days": 196,
+      "history_successes": 10,
+      "history_last_date": "20240617",
+      "history_labels_through": "20240624",
+      "base_probability": 0.0532994923857868,
+      "price": {
+        "features": [
+          "direction",
+          "recent",
+          "today"
+        ],
+        "mean": [
+          -0.44175265971690475,
+          -2.166679250462445,
+          -0.48186381973517883
+        ],
+        "scale": [
+          0.16804573404171802,
+          2.1569107123908524,
+          1.2593744079395852
+        ],
+        "coefficients": [
+          -3.5840095541828063,
+          0.18872668460875758,
+          1.1838815645349492,
+          0.10416093588114382
+        ],
+        "training_days": 191,
+        "training_successes": 10,
+        "training_last_date": "20240617",
+        "training_labels_through": "20240624"
+      },
+      "evaluation_days": 108,
+      "evaluation_successes": 2,
+      "evidence": null
+    },
+    {
+      "valid_from": "20240701",
+      "review_after": "20240930",
+      "side": -1,
+      "history_days": 215,
+      "history_successes": 14,
+      "history_last_date": "20240621",
+      "history_labels_through": "20240628",
+      "base_probability": 0.06712962962962964,
+      "price": {
+        "features": [
+          "direction",
+          "recent",
+          "today"
+        ],
+        "mean": [
+          0.4776316113380822,
+          1.4531607814758596,
+          0.2890631429691642
+        ],
+        "scale": [
+          0.19877149218736087,
+          1.5739522850824605,
+          0.7145434829805828
+        ],
+        "coefficients": [
+          -3.1379991472140034,
+          -0.43637117533999276,
+          -0.8698860041198354,
+          -0.17108092160570867
+        ],
+        "training_days": 215,
+        "training_successes": 14,
+        "training_last_date": "20240621",
+        "training_labels_through": "20240628"
+      },
+      "evaluation_days": 102,
+      "evaluation_successes": 4,
+      "evidence": null
+    },
+    {
+      "valid_from": "20241008",
+      "review_after": "20241231",
+      "side": 1,
+      "history_days": 222,
+      "history_successes": 13,
+      "history_last_date": "20240923",
+      "history_labels_through": "20240930",
+      "base_probability": 0.06053811659192825,
+      "price": {
+        "features": [
+          "direction",
+          "recent",
+          "today"
+        ],
+        "mean": [
+          -0.43512994286091716,
+          -2.091177361821953,
+          -0.4531738233998873
+        ],
+        "scale": [
+          0.16310124471833642,
+          2.0778748895766053,
+          1.2312502227751958
+        ],
+        "coefficients": [
+          -3.3140138143222613,
+          0.10754738588948266,
+          1.1151250580423184,
+          0.094590164269468
+        ],
+        "training_days": 217,
+        "training_successes": 13,
+        "training_last_date": "20240923",
+        "training_labels_through": "20240930"
+      },
+      "evaluation_days": 134,
+      "evaluation_successes": 5,
+      "evidence": null
+    },
+    {
+      "valid_from": "20241008",
+      "review_after": "20241231",
+      "side": -1,
+      "history_days": 221,
+      "history_successes": 15,
+      "history_last_date": "20240905",
+      "history_labels_through": "20240912",
+      "base_probability": 0.06981981981981981,
+      "price": {
+        "features": [
+          "direction",
+          "recent",
+          "today"
+        ],
+        "mean": [
+          0.4729026372658752,
+          1.4427674625247022,
+          0.29479276268226645
+        ],
+        "scale": [
+          0.19818643227288305,
+          1.593118380743559,
+          0.7162357008260698
+        ],
+        "coefficients": [
+          -3.1441727682184726,
+          -0.44081576088832847,
+          -0.9326601549731519,
+          -0.17887412572087844
+        ],
+        "training_days": 221,
+        "training_successes": 15,
+        "training_last_date": "20240905",
+        "training_labels_through": "20240912"
+      },
+      "evaluation_days": 108,
+      "evaluation_successes": 5,
+      "evidence": null
+    },
+    {
+      "valid_from": "20250102",
+      "review_after": "20250331",
+      "side": 1,
+      "history_days": 227,
+      "history_successes": 14,
+      "history_last_date": "20241224",
+      "history_labels_through": "20241231",
+      "base_probability": 0.06359649122807018,
+      "price": {
+        "features": [
+          "direction",
+          "recent",
+          "today"
+        ],
+        "mean": [
+          -0.43188066341084685,
+          -2.060107438995238,
+          -0.45794998829500605
+        ],
+        "scale": [
+          0.16286910365017931,
+          2.0779036834669666,
+          1.231082609779071
+        ],
+        "coefficients": [
+          -3.2497967003732913,
+          0.1422807618028038,
+          1.1029862675211237,
+          0.06329727110936557
+        ],
+        "training_days": 222,
+        "training_successes": 14,
+        "training_last_date": "20241224",
+        "training_labels_through": "20241231"
+      },
+      "evaluation_days": 139,
+      "evaluation_successes": 6,
+      "evidence": null
+    },
+    {
+      "valid_from": "20250102",
+      "review_after": "20250331",
+      "side": -1,
+      "history_days": 261,
+      "history_successes": 15,
+      "history_last_date": "20241213",
+      "history_labels_through": "20241220",
+      "base_probability": 0.05916030534351145,
+      "price": {
+        "features": [
+          "direction",
+          "recent",
+          "today"
+        ],
+        "mean": [
+          0.47767279780853844,
+          1.5619928833534509,
+          0.3167437012926203
+        ],
+        "scale": [
+          0.19540860279171246,
+          1.815990486733986,
+          0.8027887405666129
+        ],
+        "coefficients": [
+          -3.307127275255327,
+          -0.47918987922067025,
+          -0.9089610854423534,
+          -0.15909900460218443
+        ],
+        "training_days": 261,
+        "training_successes": 15,
+        "training_last_date": "20241213",
+        "training_labels_through": "20241220"
+      },
+      "evaluation_days": 148,
+      "evaluation_successes": 5,
+      "evidence": null
+    },
+    {
+      "valid_from": "20250401",
+      "review_after": "20250630",
+      "side": 1,
+      "history_days": 240,
+      "history_successes": 15,
+      "history_last_date": "20250113",
+      "history_labels_through": "20250120",
+      "base_probability": 0.06431535269709543,
+      "price": {
+        "features": [
+          "direction",
+          "recent",
+          "today"
+        ],
+        "mean": [
+          -0.4350531258929369,
+          -2.0578891219761295,
+          -0.4563560795941226
+        ],
+        "scale": [
+          0.16078544240273998,
+          2.049344294634479,
+          1.2163482766929075
+        ],
+        "coefficients": [
+          -3.216085859051975,
+          -0.013213219335942872,
+          1.1605078576955166,
+          0.08595901574421162
+        ],
+        "training_days": 235,
+        "training_successes": 15,
+        "training_last_date": "20250113",
+        "training_labels_through": "20250120"
+      },
+      "evaluation_days": 152,
+      "evaluation_successes": 7,
+      "evidence": null
+    },
+    {
+      "valid_from": "20250401",
+      "review_after": "20250630",
+      "side": -1,
+      "history_days": 294,
+      "history_successes": 15,
+      "history_last_date": "20250320",
+      "history_labels_through": "20250327",
+      "base_probability": 0.05254237288135593,
+      "price": {
+        "features": [
+          "direction",
+          "recent",
+          "today"
+        ],
+        "mean": [
+          0.4730994028055523,
+          1.580899906327667,
+          0.32269267096209425
+        ],
+        "scale": [
+          0.19007154244478425,
+          1.7651729045938562,
+          0.7932473040038517
+        ],
+        "coefficients": [
+          -3.4574086209556145,
+          -0.4723989346249048,
+          -0.9391525237844257,
+          -0.15635724313834584
+        ],
+        "training_days": 294,
+        "training_successes": 15,
+        "training_last_date": "20250320",
+        "training_labels_through": "20250327"
+      },
+      "evaluation_days": 181,
+      "evaluation_successes": 5,
+      "evidence": null
+    },
+    {
+      "valid_from": "20250701",
+      "review_after": "20250930",
+      "side": 1,
+      "history_days": 255,
+      "history_successes": 18,
+      "history_last_date": "20250623",
+      "history_labels_through": "20250630",
+      "base_probability": 0.072265625,
+      "price": {
+        "features": [
+          "direction",
+          "recent",
+          "today"
+        ],
+        "mean": [
+          -0.434932172129261,
+          -2.0509801681698776,
+          -0.4412446521578712
+        ],
+        "scale": [
+          0.16228277248007986,
+          2.0197461777375896,
+          1.2266817193981352
+        ],
+        "coefficients": [
+          -3.189148985548988,
+          0.19017312381816134,
+          1.1490469198543931,
+          0.13896901305390344
+        ],
+        "training_days": 250,
+        "training_successes": 18,
+        "training_last_date": "20250623",
+        "training_labels_through": "20250630"
+      },
+      "evaluation_days": 167,
+      "evaluation_successes": 10,
+      "evidence": null
+    },
+    {
+      "valid_from": "20250701",
+      "review_after": "20250930",
+      "side": -1,
+      "history_days": 320,
+      "history_successes": 16,
+      "history_last_date": "20250617",
+      "history_labels_through": "20250624",
+      "base_probability": 0.0514018691588785,
+      "price": {
+        "features": [
+          "direction",
+          "recent",
+          "today"
+        ],
+        "mean": [
+          0.47422646993522194,
+          1.5695821567213863,
+          0.32366333482346665
+        ],
+        "scale": [
+          0.186095425688674,
+          1.740997329265222,
+          0.7823009743761026
+        ],
+        "coefficients": [
+          -3.5139215132887167,
+          -0.4925117330520947,
+          -1.0179095019950273,
+          -0.08018012971915575
+        ],
+        "training_days": 320,
+        "training_successes": 16,
+        "training_last_date": "20250617",
+        "training_labels_through": "20250624"
+      },
+      "evaluation_days": 207,
+      "evaluation_successes": 6,
+      "evidence": null
+    },
+    {
+      "valid_from": "20251009",
+      "review_after": "20251231",
+      "side": 1,
+      "history_days": 257,
+      "history_successes": 18,
+      "history_last_date": "20250904",
+      "history_labels_through": "20250911",
+      "base_probability": 0.07170542635658915,
+      "price": {
+        "features": [
+          "direction",
+          "recent",
+          "today"
+        ],
+        "mean": [
+          -0.4338194924017033,
+          -2.0519148067686994,
+          -0.4464306433709421
+        ],
+        "scale": [
+          0.1621216721676996,
+          2.012348494028985,
+          1.2239210870773871
+        ],
+        "coefficients": [
+          -3.2001913116107557,
+          0.18436620548260327,
+          1.1522884802363207,
+          0.14407063689877764
+        ],
+        "training_days": 252,
+        "training_successes": 18,
+        "training_last_date": "20250904",
+        "training_labels_through": "20250911"
+      },
+      "evaluation_days": 169,
+      "evaluation_successes": 10,
+      "evidence": null
+    },
+    {
+      "valid_from": "20251009",
+      "review_after": "20251231",
+      "side": -1,
+      "history_days": 369,
+      "history_successes": 17,
+      "history_last_date": "20250918",
+      "history_labels_through": "20250925",
+      "base_probability": 0.0472972972972973,
+      "price": {
+        "features": [
+          "direction",
+          "recent",
+          "today"
+        ],
+        "mean": [
+          0.4773819225951977,
+          1.665797699036972,
+          0.34174772365348266
+        ],
+        "scale": [
+          0.179856919040226,
+          1.7463777574774786,
+          0.8009743920043403
+        ],
+        "coefficients": [
+          -3.62411127931234,
+          -0.4554265553477395,
+          -1.0621383591879807,
+          -0.032234294931288376
+        ],
+        "training_days": 369,
+        "training_successes": 17,
+        "training_last_date": "20250918",
+        "training_labels_through": "20250925"
+      },
+      "evaluation_days": 256,
+      "evaluation_successes": 7,
+      "evidence": null
+    },
+    {
+      "valid_from": "20260105",
+      "review_after": "20260331",
+      "side": 1,
+      "history_days": 268,
+      "history_successes": 18,
+      "history_last_date": "20251216",
+      "history_labels_through": "20251223",
+      "base_probability": 0.0687732342007435,
+      "price": {
+        "features": [
+          "direction",
+          "recent",
+          "today"
+        ],
+        "mean": [
+          -0.4293742961869767,
+          -2.059399983991229,
+          -0.44824731038895993
+        ],
+        "scale": [
+          0.1613632135292926,
+          2.0263329082258568,
+          1.230415616601271
+        ],
+        "coefficients": [
+          -3.2130081885558592,
+          0.16095486703270503,
+          1.123455009795761,
+          0.13063952986813393
+        ],
+        "training_days": 263,
+        "training_successes": 18,
+        "training_last_date": "20251216",
+        "training_labels_through": "20251223"
+      },
+      "evaluation_days": 180,
+      "evaluation_successes": 10,
+      "evidence": null
+    },
+    {
+      "valid_from": "20260105",
+      "review_after": "20260331",
+      "side": -1,
+      "history_days": 386,
+      "history_successes": 20,
+      "history_last_date": "20251210",
+      "history_labels_through": "20251217",
+      "base_probability": 0.05297157622739018,
+      "price": {
+        "features": [
+          "direction",
+          "recent",
+          "today"
+        ],
+        "mean": [
+          0.47316126553826793,
+          1.6306804959824532,
+          0.3410847320252822
+        ],
+        "scale": [
+          0.17897879626057292,
+          1.722931400365026,
+          0.8004079402761762
+        ],
+        "coefficients": [
+          -3.5117568982278935,
+          -0.5166518532659683,
+          -0.9692479694334958,
+          -0.16822456354003085
+        ],
+        "training_days": 386,
+        "training_successes": 20,
+        "training_last_date": "20251210",
+        "training_labels_through": "20251217"
+      },
+      "evaluation_days": 273,
+      "evaluation_successes": 10,
+      "evidence": {
+        "mean": [
+          0.462640537474942,
+          1.6629725000116333,
+          0.3742718891769246,
+          71.03749722420555,
+          49.21148375809303,
+          59.406115644328644,
+          70.82833208798755,
+          39.954762403679666
+        ],
+        "scale": [
+          0.17046701734804737,
+          1.7071329902494004,
+          0.8083524161848313,
+          10.570710231157996,
+          6.034562035732926,
+          10.913748742032269,
+          6.7560567099778295,
+          12.040609691565402
+        ],
+        "coefficients": [
+          -4.031301862566977,
+          0.13913337000338832,
+          -0.9498983215147356,
+          -0.07478060671315986,
+          -0.9647943411100948,
+          -0.3899603153892381,
+          -0.5076197247488135,
+          -0.03159282474512993,
+          0.17106158620410983
+        ],
+        "training_days": 331,
+        "training_successes": 20,
+        "training_last_date": "20251210",
+        "training_labels_through": "20251217",
+        "features": [
+          "direction",
+          "recent",
+          "today",
+          "breadth",
+          "attack_rate",
+          "defense_rate",
+          "kept_rate",
+          "repair_rate"
+        ]
+      }
+    },
+    {
+      "valid_from": "20260401",
+      "review_after": "20260630",
+      "side": 1,
+      "history_days": 277,
+      "history_successes": 18,
+      "history_last_date": "20260324",
+      "history_labels_through": "20260331",
+      "base_probability": 0.06654676258992806,
+      "price": {
+        "features": [
+          "direction",
+          "recent",
+          "today"
+        ],
+        "mean": [
+          -0.4276416554315438,
+          -2.0839402087583148,
+          -0.47007429401094614
+        ],
+        "scale": [
+          0.16095635680503548,
+          2.017257919140588,
+          1.2409715001864219
+        ],
+        "coefficients": [
+          -3.262219744710678,
+          0.1512145785701942,
+          1.1339201447063338,
+          0.13978455493341965
+        ],
+        "training_days": 272,
+        "training_successes": 18,
+        "training_last_date": "20260324",
+        "training_labels_through": "20260331"
+      },
+      "evaluation_days": 189,
+      "evaluation_successes": 10,
+      "evidence": null
+    },
+    {
+      "valid_from": "20260401",
+      "review_after": "20260630",
+      "side": -1,
+      "history_days": 412,
+      "history_successes": 21,
+      "history_last_date": "20260302",
+      "history_labels_through": "20260309",
+      "base_probability": 0.05205811138014528,
+      "price": {
+        "features": [
+          "direction",
+          "recent",
+          "today"
+        ],
+        "mean": [
+          0.4812706208579488,
+          1.6940290370331634,
+          0.3538754382266632
+        ],
+        "scale": [
+          0.18040834050781232,
+          1.7442572299405348,
+          0.8116134428363009
+        ],
+        "coefficients": [
+          -3.5199222165874047,
+          -0.5184417173888316,
+          -0.9745002084464279,
+          -0.12063423529914545
+        ],
+        "training_days": 412,
+        "training_successes": 21,
+        "training_last_date": "20260302",
+        "training_labels_through": "20260309"
+      },
+      "evaluation_days": 299,
+      "evaluation_successes": 11,
+      "evidence": {
+        "mean": [
+          0.4727654487392418,
+          1.7337288216030446,
+          0.3866161605187347,
+          71.23668661089897,
+          49.46729137963074,
+          58.73101939551631,
+          70.94773207098956,
+          39.64822291159788
+        ],
+        "scale": [
+          0.17334041292192565,
+          1.7316353207403938,
+          0.8200524928054195,
+          10.413533390070187,
+          5.989449440876425,
+          11.017729864925343,
+          6.609426221211353,
+          11.896650805058982
+        ],
+        "coefficients": [
+          -4.0626993297803455,
+          0.11959466019639976,
+          -0.916420779184173,
+          0.005399537280957486,
+          -0.9419886405708275,
+          -0.43098884314948516,
+          -0.6151223314123605,
+          -0.060334683570290766,
+          0.2356671321899636
+        ],
+        "training_days": 357,
+        "training_successes": 21,
+        "training_last_date": "20260302",
+        "training_labels_through": "20260309",
+        "features": [
+          "direction",
+          "recent",
+          "today",
+          "breadth",
+          "attack_rate",
+          "defense_rate",
+          "kept_rate",
+          "repair_rate"
+        ]
+      }
+    },
+    {
+      "valid_from": "20260701",
+      "review_after": "20260930",
+      "side": 1,
+      "history_days": 301,
+      "history_successes": 18,
+      "history_last_date": "20260615",
+      "history_labels_through": "20260623",
+      "base_probability": 0.061258278145695365,
+      "price": {
+        "features": [
+          "direction",
+          "recent",
+          "today"
+        ],
+        "mean": [
+          -0.423498194683851,
+          -2.035181384995217,
+          -0.44839990167495514
+        ],
+        "scale": [
+          0.15863769934146194,
+          1.9898489589237394,
+          1.230388976517466
+        ],
+        "coefficients": [
+          -3.3237900309552586,
+          0.10956280858627554,
+          1.1204734193585038,
+          0.11294018428162968
+        ],
+        "training_days": 296,
+        "training_successes": 18,
+        "training_last_date": "20260615",
+        "training_labels_through": "20260623"
+      },
+      "evaluation_days": 213,
+      "evaluation_successes": 10,
+      "evidence": null
+    },
+    {
+      "valid_from": "20260701",
+      "review_after": "20260930",
+      "side": -1,
+      "history_days": 436,
+      "history_successes": 25,
+      "history_last_date": "20260623",
+      "history_labels_through": "20260630",
+      "base_probability": 0.05835240274599542,
+      "price": {
+        "features": [
+          "direction",
+          "recent",
+          "today"
+        ],
+        "mean": [
+          0.47505580536850955,
+          1.6641707958704552,
+          0.35049994391703965
+        ],
+        "scale": [
+          0.18030333366866788,
+          1.762315047623185,
+          0.8118820676243149
+        ],
+        "coefficients": [
+          -3.497141839278059,
+          -0.5273865180181541,
+          -1.1185326701132676,
+          -0.0840469636304903
+        ],
+        "training_days": 436,
+        "training_successes": 25,
+        "training_last_date": "20260623",
+        "training_labels_through": "20260630"
+      },
+      "evaluation_days": 323,
+      "evaluation_successes": 15,
+      "evidence": {
+        "mean": [
+          0.46618924028111436,
+          1.6970595618218953,
+          0.380690982424232,
+          70.7605156475856,
+          49.58676187174003,
+          58.25246098593885,
+          71.10232556713339,
+          38.982760917976954
+        ],
+        "scale": [
+          0.17333662001393838,
+          1.75393106910181,
+          0.820009859676645,
+          10.539458910276954,
+          5.876967574069482,
+          11.082659743595588,
+          6.6061601005883475,
+          11.939292122927656
+        ],
+        "coefficients": [
+          -4.078332502365712,
+          0.24726791034000556,
+          -1.0911241967962548,
+          0.06019709489498547,
+          -1.125759722669363,
+          -0.3431220412047487,
+          -0.5939932469849738,
+          -0.009702032110552112,
+          0.1555438383052601
+        ],
+        "training_days": 381,
+        "training_successes": 25,
+        "training_last_date": "20260623",
+        "training_labels_through": "20260630",
+        "features": [
+          "direction",
+          "recent",
+          "today",
+          "breadth",
+          "attack_rate",
+          "defense_rate",
+          "kept_rate",
+          "repair_rate"
+        ]
+      }
+    },
+    {
+      "valid_from": "20261008",
+      "review_after": "20261231",
+      "side": 1,
+      "history_days": 328,
+      "history_successes": 21,
+      "history_last_date": "20260917",
+      "history_labels_through": "20260924",
+      "base_probability": 0.06534954407294832,
+      "price": {
+        "features": [
+          "direction",
+          "recent",
+          "today"
+        ],
+        "mean": [
+          -0.41724626763620537,
+          -2.023067897540499,
+          -0.43896413078084767
+        ],
+        "scale": [
+          0.15754350559318417,
+          1.9611931367485655,
+          1.2203945272438192
+        ],
+        "coefficients": [
+          -3.2908301301425684,
+          0.15232813764094255,
+          1.1591619950755325,
+          0.07753301393310297
+        ],
+        "training_days": 323,
+        "training_successes": 21,
+        "training_last_date": "20260917",
+        "training_labels_through": "20260924"
+      },
+      "evaluation_days": 240,
+      "evaluation_successes": 13,
+      "evidence": null
+    },
+    {
+      "valid_from": "20261008",
+      "review_after": "20261231",
+      "side": -1,
+      "history_days": 454,
+      "history_successes": 28,
+      "history_last_date": "20260909",
+      "history_labels_through": "20260916",
+      "base_probability": 0.06263736263736264,
+      "price": {
+        "features": [
+          "direction",
+          "recent",
+          "today"
+        ],
+        "mean": [
+          0.4774201613514452,
+          1.657632163289991,
+          0.346658278524676
+        ],
+        "scale": [
+          0.1801011298564602,
+          1.7422157945540333,
+          0.8023736960958714
+        ],
+        "coefficients": [
+          -3.37265427966894,
+          -0.3988263551632663,
+          -1.1770258772883677,
+          -0.04619771465752811
+        ],
+        "training_days": 454,
+        "training_successes": 28,
+        "training_last_date": "20260909",
+        "training_labels_through": "20260916"
+      },
+      "evaluation_days": 341,
+      "evaluation_successes": 18,
+      "evidence": {
+        "mean": [
+          0.4668567113837037,
+          1.6905107169074165,
+          0.3788989199245836,
+          70.90800395642715,
+          49.510552167410864,
+          57.9992910003401,
+          70.99465370816863,
+          39.39797309185333
+        ],
+        "scale": [
+          0.17269874971333943,
+          1.739055410413252,
+          0.8111254768240546,
+          10.561900939092482,
+          5.850093546736278,
+          11.269337863482882,
+          6.560818863475923,
+          12.391274208534211
+        ],
+        "coefficients": [
+          -4.037889414402562,
+          0.5849102100506336,
+          -1.2640930541945572,
+          0.09071533877086078,
+          -1.355010600754867,
+          -0.5254299424199015,
+          -0.6820495639255247,
+          0.03918165749863739,
+          0.4965949078677863
+        ],
+        "training_days": 395,
+        "training_successes": 28,
+        "training_last_date": "20260909",
+        "training_labels_through": "20260916",
+        "features": [
+          "direction",
+          "recent",
+          "today",
+          "breadth",
+          "attack_rate",
+          "defense_rate",
+          "kept_rate",
+          "repair_rate"
+        ]
+      }
+    }
+  ]
+}

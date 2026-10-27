@@ -177,6 +177,7 @@ export default function MarketEnvironmentPanel({
 
   const visibleData = loadedKey === requestKey ? data : null;
   const coverage = visibleData?.coverage;
+  const reversal = visibleData?.reversal;
   const grouped = GROUP_ORDER.map((group) => ({
     group,
     label: GROUP_LABELS[group],
@@ -236,6 +237,21 @@ export default function MarketEnvironmentPanel({
                 <p key={index}>{paragraph}</p>
               ))}
             </div>
+            {reversal ? (
+              <div className="market-env-reversal">
+                <div className="market-env-reading-head">
+                  <span>{reversal.direction === "up" ? "向上" : reversal.direction === "down" ? "向下" : "方向"}反转概率 · 未来{reversal.horizon_sessions}个交易日</span>
+                  <strong>
+                    {reversal.status === "not_applicable" ? "不适用"
+                      : reversal.probability === null ? "数据不足"
+                        : reversal.probability < 0.001 ? "<0.1%"
+                          : reversal.probability > 0.999 ? ">99.9%"
+                            : formatPercent(reversal.probability, 1)}
+                  </strong>
+                </div>
+                <p>{reversal.reason}</p>
+              </div>
+            ) : null}
           </div>
 
           <details className="market-env-evidence" key={loadedKey}>
@@ -245,6 +261,30 @@ export default function MarketEnvironmentPanel({
               <span>库中最新行情 {formatDate(visibleData.latest_trade_date)}</span>
               {visibleData.phase ? <span>{visibleData.phase}</span> : null}
             </div>
+            {reversal ? (
+              <details className="market-env-other">
+                <summary>反转概率的定义与依据</summary>
+                <p>沿用当前10日整体方向。未来第4、5个交易日均转为相反方向，且两日收盘均越过本分析日的固定等权市场参考位，才算形成并站住反转；最后一天刚翻向、短暂反弹或回撤均不算。震荡时此事件不适用。</p>
+                {reversal.method ? (
+                  <>
+                    <p>本次使用{reversal.method === "evidence" ? "完整证据模型" : reversal.method === "price" ? "价格模型（10日方向、5日及当日价格运动）" : "同方向历史发生率"}。完整证据模型支持不足时采用收缩价格模型；价格条件仍不足时使用有真实样本支持的平滑历史频率。</p>
+                    <p>截至 {formatDate(visibleData.analysis_trade_date)} · {reversal.version} · 建议复核日 {formatDate(reversal.review_after)}</p>
+                    <p>本次估计使用 {reversal.training_days} 个历史日，其中反转 {reversal.training_successes} 日；最后训练参考日 {formatDate(reversal.training_last_date)}，标签已知截至 {formatDate(reversal.training_labels_through)}。该方向此前向前评价 {reversal.evaluation_days} 日，其中反转 {reversal.evaluation_successes} 日。</p>
+                    <p>市场日期为样本，连续日期的结果会重叠。模型按季度冻结；选取分析日之前最近可用版本，超过建议复核日会提示更新，刷新不会自动增加训练样本。</p>
+                  </>
+                ) : null}
+                {reversal.evidence.length > 0 ? (
+                  <>
+                    <p>以下为相对训练均值的模型贡献：正值提高所示方向反转估计，负值降低；单位为对数几率，不是百分点，也不是独立因果证据。</p>
+                    <div className="market-env-reading-meta">
+                      {reversal.evidence.map((item) => (
+                        <span key={item.label}>{item.label} {item.contribution > 0 ? "+" : ""}{item.contribution.toFixed(2)}</span>
+                      ))}
+                    </div>
+                  </>
+                ) : null}
+              </details>
+            ) : null}
             {coverage ? (
               <p className="market-env-coverage">
                 应有样本 {coverage.expected_stocks.toLocaleString("zh-CN")} 只 · 报价{" "}

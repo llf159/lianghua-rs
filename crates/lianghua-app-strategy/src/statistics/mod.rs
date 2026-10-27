@@ -4,6 +4,7 @@ mod detail_cache;
 mod market;
 mod market_activity;
 mod market_environment;
+mod market_reversal;
 mod page;
 mod structure_cycle;
 #[cfg(test)]

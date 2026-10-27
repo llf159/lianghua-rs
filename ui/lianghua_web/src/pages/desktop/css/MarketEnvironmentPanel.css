@@ -245,3 +245,22 @@
     flex-wrap: wrap;
   }
 }
+
+.market-env-reversal {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.market-env-reversal .market-env-reading-head {
+  flex-wrap: wrap;
+  gap: 8px 16px;
+}
+
+.market-env-reversal p,
+.market-env-evidence > .market-env-other p {
+  color: #64748b;
+  font-size: 0.85rem;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}

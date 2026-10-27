@@ -1,3 +1,4 @@
+use super::market_reversal::{MarketReversalEstimate, estimate_reversal};
 use crate::data::{load_trade_date_list, source_db_path, stock_list_path};
 use duckdb::{AccessMode, Config, Connection, params};
 use serde::Serialize;
@@ -145,6 +146,7 @@ pub struct MarketEnvironmentData {
     pub return_10d_pct: Option<f64>,
     pub breadth_10d_pct: Option<f64>,
     pub feedback: Vec<MarketEnvironmentFeedback>,
+    pub reversal: Option<MarketReversalEstimate>,
     pub phase: Option<String>,
     pub headline: String,
     pub summary: String,
@@ -423,6 +425,7 @@ fn analyze_window(
             return_10d_pct: None,
             breadth_10d_pct: None,
             feedback: Vec::new(),
+            reversal: None,
             phase: None,
             headline: "数据不足，暂不能判断全局".to_string(),
             summary: format!(
@@ -681,6 +684,45 @@ fn analyze_window(
     let feedback = feedback_readings(&daily, analysis_index);
     let breadth_10d_pct = daily[analysis_index].breadth_10d_pct;
     let (headline, summary) = summarize(&dimensions, &feedback, market_return5, breadth_10d_pct);
+    let volatility = analysis_index.checked_sub(19).and_then(|start| {
+        let values = returns[start..=analysis_index]
+            .iter()
+            .copied()
+            .collect::<Option<Vec<_>>>()?;
+        sample_variance(&values)
+            .map(f64::sqrt)
+            .filter(|value| *value > 0.0)
+    });
+    let reversal = estimate_reversal(
+        &window_dates[analysis_index],
+        [
+            dimensions
+                .iter()
+                .find(|item| item.key == "direction")
+                .and_then(|item| item.value),
+            market_return5.zip(volatility).map(|(ret, vol)| ret / vol),
+            returns[analysis_index]
+                .zip(volatility)
+                .map(|(ret, vol)| ret / vol),
+            breadth_10d_pct,
+            feedback
+                .iter()
+                .find(|item| item.key == "attack")
+                .and_then(|item| item.rate_pct),
+            feedback
+                .iter()
+                .find(|item| item.key == "defense")
+                .and_then(|item| item.rate_pct),
+            feedback
+                .iter()
+                .find(|item| item.key == "kept")
+                .and_then(|item| item.rate_pct),
+            feedback
+                .iter()
+                .find(|item| item.key == "repair")
+                .and_then(|item| item.rate_pct),
+        ],
+    );
     let fallback_reason = (analysis_index != last).then(|| {
         format!(
             "{} 的全市场覆盖不足，已回退到最近覆盖充分的交易日 {}。",
@@ -697,6 +739,7 @@ fn analyze_window(
         return_10d_pct: market_return10,
         breadth_10d_pct,
         feedback,
+        reversal: Some(reversal),
         phase,
         headline,
         summary,
@@ -1511,6 +1554,7 @@ fn insufficient_data(
         return_10d_pct: None,
         breadth_10d_pct: None,
         feedback: Vec::new(),
+        reversal: None,
         phase: None,
         headline: "数据不足，暂不能判断全局".to_string(),
         summary,
