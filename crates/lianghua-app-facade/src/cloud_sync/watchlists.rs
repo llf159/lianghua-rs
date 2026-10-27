@@ -275,6 +275,7 @@ pub(super) fn transfer_bundle(
     }
     let hash = digest(&bytes);
     let mut result = SyncResult::default();
+    let synced_version;
     if mode != TransferMode::Download {
         progress(&format!("正在上传{label}…"));
         let version = if bundle_heads.len() == 1 && bundle_heads[0].hash == hash {
@@ -302,21 +303,9 @@ pub(super) fn transfer_bundle(
             version
         };
         last_modified = Some(version.created_at.clone());
-        state.base.insert(
-            bundle.into(),
-            Base {
-                id: version.id,
-                hash,
-            },
-        );
-    } else if let Some(version) = bundle_heads.first() {
-        state.base.insert(
-            bundle.into(),
-            Base {
-                id: version.id.clone(),
-                hash: version.hash.clone(),
-            },
-        );
+        synced_version = Some(version);
+    } else {
+        synced_version = bundle_heads.first().cloned();
     }
     if mode != TransferMode::Upload {
         // 替换前保存完整本地包；自选使用页面传入的实际条目。
@@ -342,9 +331,38 @@ pub(super) fn transfer_bundle(
             )?;
         }
         progress(&format!("正在更新本地{label}…"));
+        state.receiving.insert(bundle.into());
+        atomic_write(
+            &state_path,
+            &serde_json::to_vec(&state).map_err(|e| e.to_string())?,
+        )?;
         super::apply(app_data, source, bundle, &bytes, &mut result)?;
         result.downloaded = 1;
     }
+    if let Some(version) = synced_version {
+        if mode == TransferMode::Upload {
+            state.base.insert(
+                bundle.into(),
+                Base {
+                    id: version.id,
+                    hash: version.hash,
+                    local_hash: None,
+                    pending_hash: None,
+                },
+            );
+        } else {
+            super::record_applied(
+                &mut state,
+                app_data,
+                source,
+                bundle,
+                &version,
+                &settings,
+                &result.settings,
+            )?;
+        }
+    }
+    state.receiving.remove(bundle);
     atomic_write(
         &state_path,
         &serde_json::to_vec(&state).map_err(|e| e.to_string())?,

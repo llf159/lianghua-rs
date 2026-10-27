@@ -45,6 +45,7 @@ fn two_devices_keep_conflicts_deduplicate_and_recover() {
                 path.starts_with("/dav/lianghua-rs/")
                     || path.starts_with("/dav/watch-transfer/")
                     || path.starts_with("/dav/strategy-transfer/")
+                    || path.starts_with("/dav/settings-transfer/")
             );
             let mut headers = BTreeMap::new();
             loop {
@@ -179,8 +180,9 @@ fn two_devices_keep_conflicts_deduplicate_and_recover() {
         |_| {},
     )
     .unwrap();
-    // 本地新增的自动备份属于策略包；再次接收可以核对包，但不得上传它。
+    // 自动备份计入接收后的本地基线；未编辑时既不重传，也不重复接收。
     assert_eq!(repeated.uploaded, 0);
+    assert_eq!(repeated.downloaded, 0);
     assert_eq!(*mutations.lock().unwrap(), mutations_before);
     // 损坏的下载不落盘，恢复云端对象后可以重试。
     let first_snapshot = local_snapshots(&app_a, &source_a, &BTreeMap::new()).unwrap();
@@ -206,6 +208,21 @@ fn two_devices_keep_conflicts_deduplicate_and_recover() {
     fs::write(source_a.join("score_rule.toml"), "version = 2\n").unwrap();
     fs::write(source_b.join("score_rule.toml"), "version = 3\n").unwrap();
     sync(&app_a, &source_a, BTreeMap::new(), false, |_| {}).unwrap();
+    let cloud_only = sync(
+        &app_download,
+        &source_download,
+        BTreeMap::new(),
+        false,
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(cloud_only.uploaded, 0);
+    assert_eq!(cloud_only.downloaded, 1);
+    assert!(cloud_only.conflicts.is_empty());
+    assert_eq!(
+        fs::read(source_download.join("score_rule.toml")).unwrap(),
+        b"version = 2\n"
+    );
     let conflict = sync(&app_b, &source_b, BTreeMap::new(), false, |_| {}).unwrap();
     assert_eq!(conflict.conflicts, ["bundles/strategies.zip"]);
     let mutations_before = *mutations.lock().unwrap();
@@ -221,7 +238,7 @@ fn two_devices_keep_conflicts_deduplicate_and_recover() {
     assert_eq!(conflicted_download.downloaded, 0);
     assert_eq!(
         fs::read_to_string(source_download.join("score_rule.toml")).unwrap(),
-        "version = 1\n"
+        "version = 2\n"
     );
     assert_eq!(*mutations.lock().unwrap(), mutations_before);
     assert_eq!(
@@ -275,7 +292,7 @@ fn two_devices_keep_conflicts_deduplicate_and_recover() {
             .count(),
         1
     );
-    // 恢复产生的本地自动备份也确认到策略包后，再检查云端删除不重传。
+    // 恢复后的自动备份已计入本地基线，再检查云端删除不重传。
     sync(&app_b, &source_b, BTreeMap::new(), false, |_| {}).unwrap();
     // 锁住云端时另一个客户端拒绝修改；过时 ETag 无法覆盖目录。
     let mut lock = dav::Dav::new(&config).unwrap();
@@ -609,6 +626,171 @@ fn two_devices_keep_conflicts_deduplicate_and_recover() {
     )
     .unwrap();
     assert_eq!(unchanged.result.skipped, 1);
+    // 预览只读云端；预览后发生本地/远端编辑都拒绝旧选择，最终可分别选两份当前策略。
+    fs::write(strategy_a.join("chip_change_rule.toml"), "chip = 1").unwrap();
+    transfer_strategies(
+        &transfer_a,
+        &strategy_a,
+        WatchlistTransferMode::Upload,
+        |_| {},
+    )
+    .unwrap();
+    fs::write(strategy_b.join("chip_change_rule.toml"), "chip = 2").unwrap();
+    let before = *mutations.lock().unwrap();
+    let reviewed = preview(
+        &transfer_b,
+        &strategy_b,
+        "bundles/strategies.zip",
+        None,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    assert_eq!(*mutations.lock().unwrap(), before);
+    let reviewed = serde_json::to_value(reviewed).unwrap();
+    let heads: Vec<String> = serde_json::from_value(reviewed["heads"].clone()).unwrap();
+    let choices = BTreeMap::from([
+        ("source/score_rule.toml".into(), "local".into()),
+        ("source/chip_change_rule.toml".into(), heads[0].clone()),
+    ]);
+    fs::write(strategy_b.join("score_rule.toml"), "rules = [4]").unwrap();
+    assert!(
+        resolve_strategies(
+            &transfer_b,
+            &strategy_b,
+            StrategyResolution {
+                local_hash: serde_json::from_value(reviewed["localHash"].clone()).unwrap(),
+                heads: heads.clone(),
+                choices: choices.clone(),
+            },
+            |_| {}
+        )
+        .err()
+        .unwrap()
+        .contains("本地策略")
+    );
+    fs::write(strategy_b.join("score_rule.toml"), "rules = [3]").unwrap();
+    fs::write(strategy_a.join("chip_change_rule.toml"), "chip = 3").unwrap();
+    transfer_strategies(
+        &transfer_a,
+        &strategy_a,
+        WatchlistTransferMode::Upload,
+        |_| {},
+    )
+    .unwrap();
+    assert!(
+        resolve_strategies(
+            &transfer_b,
+            &strategy_b,
+            StrategyResolution {
+                local_hash: serde_json::from_value(reviewed["localHash"].clone()).unwrap(),
+                heads,
+                choices,
+            },
+            |_| {}
+        )
+        .err()
+        .unwrap()
+        .contains("云端策略")
+    );
+    let reviewed = serde_json::to_value(
+        preview(
+            &transfer_b,
+            &strategy_b,
+            "bundles/strategies.zip",
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let heads: Vec<String> = serde_json::from_value(reviewed["heads"].clone()).unwrap();
+    resolve_strategies(
+        &transfer_b,
+        &strategy_b,
+        StrategyResolution {
+            local_hash: serde_json::from_value(reviewed["localHash"].clone()).unwrap(),
+            heads: heads.clone(),
+            choices: BTreeMap::from([
+                ("source/score_rule.toml".into(), "local".into()),
+                ("source/chip_change_rule.toml".into(), heads[0].clone()),
+            ]),
+        },
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read(strategy_b.join("score_rule.toml")).unwrap(),
+        b"rules = [3]"
+    );
+    assert_eq!(
+        fs::read(strategy_b.join("chip_change_rule.toml")).unwrap(),
+        b"chip = 3"
+    );
+    let files = local_files(&transfer_b, &strategy_b, &BTreeMap::new()).unwrap();
+    assert!(files.values().any(|bytes| bytes.as_slice() == b"chip = 2"));
+
+    // 模拟前端设置写入失败：旧值不能上传成新版本，部分写入也必须等待人工处理。
+    let settings_a = temp.path().join("settings-a");
+    let settings_b = temp.path().join("settings-b");
+    fs::create_dir_all(&settings_a).unwrap();
+    fs::create_dir_all(&settings_b).unwrap();
+    let mut settings_config = config.clone();
+    settings_config.folder = "settings-transfer".into();
+    save_config(&transfer_a, settings_config.clone()).unwrap();
+    save_config(&transfer_b, settings_config).unwrap();
+    let new_settings = BTreeMap::from([("am_refresh_seconds".into(), "1".into())]);
+    let old_settings = BTreeMap::from([("am_refresh_seconds".into(), "7".into())]);
+    sync_scoped(
+        &transfer_a,
+        &settings_a,
+        new_settings.clone(),
+        false,
+        SyncScope::Management,
+        |_| {},
+    )
+    .unwrap();
+    sync_scoped(
+        &transfer_b,
+        &settings_b,
+        old_settings.clone(),
+        true,
+        SyncScope::Management,
+        |_| {},
+    )
+    .unwrap();
+    let retried = sync_scoped(
+        &transfer_b,
+        &settings_b,
+        old_settings,
+        false,
+        SyncScope::Management,
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(retried.uploaded, 0);
+    assert_eq!(retried.settings, new_settings);
+    let partial = sync_scoped(
+        &transfer_b,
+        &settings_b,
+        BTreeMap::from([("am_refresh_seconds".into(), "9".into())]),
+        false,
+        SyncScope::Management,
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(partial.uploaded, 0);
+    assert_eq!(partial.conflicts, ["bundles/browser_settings.zip"]);
+    let confirmed = sync_scoped(
+        &transfer_b,
+        &settings_b,
+        new_settings,
+        false,
+        SyncScope::Management,
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(confirmed.uploaded, 0);
+    assert_eq!(confirmed.downloaded, 0);
     stopped.store(true, Ordering::Relaxed);
     let _ = TcpStream::connect(address);
     worker.join().unwrap();
@@ -750,10 +932,10 @@ fn rejects_unsafe_paths_credentials_and_corrupt_payloads() {
         assert!(validate_path(path).is_err());
     }
     let files = BTreeMap::from([
-        ("source/score_rule.toml".into(), b"version = 9\n".to_vec()),
+        ("source/score_rule.toml".into(), b"[invalid".to_vec()),
         (
             "source/strategy_backups/broken.toml".into(),
-            b"[invalid".to_vec(),
+            b"version = 9\n".to_vec(),
         ),
     ]);
     let bundle = bundles::snapshots(&files).unwrap();
@@ -782,6 +964,27 @@ fn rejects_unsafe_paths_credentials_and_corrupt_payloads() {
         )
         .is_err()
     );
+    fs::write(source.join("chip_change_rule.toml"), "[invalid").unwrap();
+    apply(
+        temp.path(),
+        &source,
+        "source/chip_change_rule.toml",
+        b"version = 1",
+        &mut SyncResult::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read(source.join("chip_change_rule.toml")).unwrap(),
+        b"version = 1"
+    );
+    let snapshots =
+        bundles::snapshots(&local_files(temp.path(), &source, &BTreeMap::new()).unwrap()).unwrap();
+    let files = bundles::unpack(
+        "bundles/strategies.zip",
+        &snapshots["bundles/strategies.zip"],
+    )
+    .unwrap();
+    assert!(files.values().any(|bytes| bytes.as_slice() == b"[invalid"));
     assert!(decode(b"corrupt", 10).is_err());
     assert!(decode(&encode(b"too large").unwrap(), 2).is_err());
     let config = WebDavConfig {

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
   cloudPathLabel,
@@ -10,6 +10,7 @@ import {
   type UploadEstimate,
 } from "../../../apis/cloudSync";
 import "../css/CloudSync.css";
+import CloudDataReview from "./CloudDataReview";
 
 function bytes(value: number) {
   if (value < 1024) return `${value} B`;
@@ -36,9 +37,17 @@ export default function CloudSyncPanel({
   const [items, setItems] = useState<CloudItem[]>([]);
   const [filter, setFilter] = useState("");
   const [showHistory, setShowHistory] = useState(false);
+  const [reviewItem, setReviewItem] = useState<CloudItem | null>(null);
   const [selected, setSelected] = useState<CloudItem | null>(null);
   const [action, setAction] = useState<"restore" | "resolve" | "delete" | null>(
     null,
+  );
+  const onReviewBusy = useCallback(
+    (value: boolean) => {
+      setBusy(value);
+      onBusyChange(value);
+    },
+    [onBusyChange],
   );
   useEffect(() => {
     let cancelled = false;
@@ -393,6 +402,20 @@ export default function CloudSyncPanel({
                     </div>
                     <span>{group.versions.length} 个分支</span>
                   </div>
+                  {!group.path.startsWith("ranking/") &&
+                    !group.path.startsWith("similarity/") && (
+                      <button
+                        type="button"
+                        className="settings-primary-btn"
+                        disabled={busy || disabled}
+                        onClick={() => setReviewItem(group.versions[0])}
+                      >
+                        查看内容差异
+                        {group.path === "bundles/strategies.zip"
+                          ? "并逐项合并"
+                          : ""}
+                      </button>
+                    )}
                   <div className="cloud-conflict-branches">
                     {group.versions.map((item, index) => (
                       <article
@@ -496,6 +519,17 @@ export default function CloudSyncPanel({
                     </div>
                   </div>
                   <div className="cloud-item-actions">
+                    {!item.path.startsWith("ranking/") &&
+                      !item.path.startsWith("similarity/") && (
+                        <button
+                          type="button"
+                          className="settings-secondary-btn"
+                          disabled={busy || disabled}
+                          onClick={() => setReviewItem(item)}
+                        >
+                          查看内容差异
+                        </button>
+                      )}
                     <button
                       className="settings-secondary-btn"
                       type="button"
@@ -523,6 +557,45 @@ export default function CloudSyncPanel({
               ))}
             </div>
           ) : null}
+        </div>
+      )}
+      {reviewItem && (
+        <div className="settings-modal-backdrop cloud-modal-overlay">
+          <section
+            className="settings-modal cloud-review-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-label="云端内容差异"
+          >
+            <div className="cloud-config-head">
+              <h3>{cloudPathLabel(reviewItem.path)}</h3>
+              <button
+                type="button"
+                className="cloud-config-close"
+                disabled={busy}
+                aria-label="关闭差异"
+                onClick={() => setReviewItem(null)}
+              >
+                ×
+              </button>
+            </div>
+            <CloudDataReview
+              path={reviewItem.path}
+              versionId={reviewItem.version.id}
+              disabled={disabled}
+              onBusyChange={onReviewBusy}
+              onResolved={() => {
+                setReviewItem(null);
+                setConflicts((paths) =>
+                  paths.filter((path) => path !== "bundles/strategies.zip"),
+                );
+                onSynced();
+                void listCloudData()
+                  .then(setItems)
+                  .catch((reason) => setError(String(reason)));
+              }}
+            />
+          </section>
         </div>
       )}
       {selected && action && (

@@ -1,7 +1,9 @@
 mod bundles;
 mod database;
 mod dav;
+mod review;
 mod strategies;
+pub use review::{CloudPreview, StrategyResolution, preview, resolve_strategies};
 mod watchlists;
 pub use strategies::transfer as transfer_strategies;
 
@@ -267,10 +269,19 @@ impl Manifest {
 struct Base {
     id: String,
     hash: String,
+    // 云端包与应用后的本地包可能不同：自动备份和保留的本地历史也参与同步。
+    #[serde(default)]
+    local_hash: Option<String>,
+    // 前端设置尚未确认落盘时，保留接收前和预期接收后的两种状态。
+    #[serde(default)]
+    pending_hash: Option<String>,
 }
 #[derive(Default, Deserialize, Serialize)]
 struct SyncState {
     base: BTreeMap<String, Base>,
+    // 接收中断或应用失败后，只允许重试接收，不能把部分写入当成本地编辑上传。
+    #[serde(default)]
+    receiving: BTreeSet<String>,
 }
 
 #[derive(Serialize)]
@@ -615,6 +626,10 @@ pub fn sync_scoped(
             result.skipped += 1;
             continue;
         }
+        if state.receiving.contains(path) {
+            result.skipped += 1;
+            continue;
+        }
         let hash = digest(bytes);
         let heads = dav.manifest.heads(path);
         if let Some(version) = heads.iter().find(|v| v.hash == hash) {
@@ -623,12 +638,28 @@ pub fn sync_scoped(
                 Base {
                     id: version.id.clone(),
                     hash,
+                    local_hash: None,
+                    pending_hash: None,
                 },
             );
             result.skipped += 1;
             continue;
         }
-        if state.base.get(path).is_some_and(|base| base.hash == hash) {
+        if let Some(base) = state.base.get_mut(path) {
+            if base.pending_hash.as_ref() == Some(&hash) {
+                base.local_hash = base.pending_hash.take();
+            }
+            if base.pending_hash.is_some() {
+                // 未完成的接收不能被解释成一次新的本地修改，更不能上传覆盖云端。
+                result.skipped += 1;
+                continue;
+            }
+        }
+        if state
+            .base
+            .get(path)
+            .is_some_and(|base| base.local_hash.as_ref().unwrap_or(&base.hash) == &hash)
+        {
             // 未改动的本地副本不能把已删除或已更新的云端版本重新上传。
             result.skipped += 1;
             continue;
@@ -644,6 +675,9 @@ pub fn sync_scoped(
             })
             .map(|b| vec![b.id.clone()])
             .unwrap_or_default();
+        if path.starts_with("bundles/") {
+            bundles::unpack(path, bytes)?;
+        }
         let compressed = encode(bytes)?;
         if !dav.manifest.hashes().contains(&hash) && !dav.manifest.packs.contains_key(&hash) {
             dav.upload(&hash, &compressed)?;
@@ -667,6 +701,8 @@ pub fn sync_scoped(
             Base {
                 id: version.id,
                 hash,
+                local_hash: None,
+                pending_hash: None,
             },
         );
         result.uploaded += 1;
@@ -679,6 +715,10 @@ pub fn sync_scoped(
         progress("正在提交云端目录");
         dav.persist()?;
     }
+    atomic_write(
+        &state_path,
+        &serde_json::to_vec(&state).map_err(|e| e.to_string())?,
+    )?;
     for path in dav
         .manifest
         .entries
@@ -698,10 +738,40 @@ pub fn sync_scoped(
         let Some(version) = heads.first() else {
             continue;
         };
-        if snapshots
-            .get(&path)
-            .is_some_and(|bytes| digest(bytes) == version.hash)
+        let snapshot_hash = snapshots.get(&path).map(|bytes| digest(bytes));
+        if snapshot_hash.as_ref() == Some(&version.hash)
+            || state.base.get(&path).is_some_and(|base| {
+                base.id == version.id
+                    && base.pending_hash.is_none()
+                    && snapshot_hash.as_ref() == base.local_hash.as_ref()
+                    && base.local_hash.is_some()
+            })
         {
+            state.receiving.remove(&path);
+            state.base.insert(
+                path.clone(),
+                Base {
+                    id: version.id.clone(),
+                    hash: version.hash.clone(),
+                    local_hash: snapshot_hash,
+                    pending_hash: None,
+                },
+            );
+            continue;
+        }
+        if state.receiving.contains(&path) && !download_only {
+            // 无法区分上次中断的部分写入与中断后用户的新编辑，必须显式选择接收。
+            continue;
+        }
+        if state.base.get(&path).is_some_and(|base| {
+            base.pending_hash.is_some()
+                && snapshot_hash != base.local_hash
+                && snapshot_hash != base.pending_hash
+        }) {
+            result.conflicts.push(path.clone());
+            result.warnings.push(format!(
+                "上次接收未完成且本地设置已变化，请核对差异后选择恢复：{path}"
+            ));
             continue;
         }
         progress(&format!("下载并校验：{path}"));
@@ -720,28 +790,40 @@ pub fn sync_scoped(
                 .push(format!("同步期间本地已变化，保留当前内容：{path}"));
             continue;
         }
+        state.receiving.insert(path.clone());
+        atomic_write(
+            &state_path,
+            &serde_json::to_vec(&state).map_err(|e| e.to_string())?,
+        )?;
         apply(app_data, source, &path, &bytes, &mut result)?;
-        // 界面设置由前端实际落盘后，在下一轮相同内容校验时确认基线。
-        if !path.starts_with("settings/")
-            && !matches!(
-                path.as_str(),
-                "bundles/browser_settings.zip" | "bundles/watchlists.zip"
-            )
-        {
-            state.base.insert(
-                path,
-                Base {
-                    id: version.id.clone(),
-                    hash: version.hash.clone(),
-                },
-            );
-        }
+        record_applied(
+            &mut state,
+            app_data,
+            source,
+            &path,
+            version,
+            &settings,
+            &result.settings,
+        )?;
+        state.receiving.remove(&path);
+        atomic_write(
+            &state_path,
+            &serde_json::to_vec(&state).map_err(|e| e.to_string())?,
+        )?;
         result.downloaded += 1;
     }
     atomic_write(
         &state_path,
         &serde_json::to_vec(&state).map_err(|e| e.to_string())?,
     )?;
+    for path in state.receiving.iter().filter(|path| scope.includes(path)) {
+        if !result.conflicts.contains(path) {
+            result.conflicts.push(path.clone());
+        }
+        result.warnings.push(format!(
+            "上次接收尚未完成，已禁止自动上传，请刷新云端版本后重新下载或恢复：{path}"
+        ));
+    }
     if !download_only {
         if !matches!(scope, SyncScope::Watchlists) {
             progress("正在清理过期榜单");
@@ -820,27 +902,28 @@ pub fn restore(
         version.compressed_size,
     );
     dav.persist()?;
-    apply(app_data, source, path, &bytes, &mut result)?;
     let state_path = local.join("state.json");
     let mut state: SyncState = if state_path.exists() {
         read_json(&state_path)?
     } else {
         SyncState::default()
     };
-    if !path.starts_with("settings/")
-        && !matches!(
-            path,
-            "bundles/browser_settings.zip" | "bundles/watchlists.zip"
-        )
-    {
-        state.base.insert(
-            path.into(),
-            Base {
-                id: resolved.id,
-                hash: resolved.hash,
-            },
-        );
-    }
+    state.receiving.insert(path.into());
+    atomic_write(
+        &state_path,
+        &serde_json::to_vec(&state).map_err(|e| e.to_string())?,
+    )?;
+    apply(app_data, source, path, &bytes, &mut result)?;
+    record_applied(
+        &mut state,
+        app_data,
+        source,
+        path,
+        &resolved,
+        &settings,
+        &result.settings,
+    )?;
+    state.receiving.remove(path);
     atomic_write(
         &state_path,
         &serde_json::to_vec(&state).map_err(|e| e.to_string())?,
@@ -895,6 +978,46 @@ fn current_bytes(
     }
 }
 
+fn record_applied(
+    state: &mut SyncState,
+    app_data: &Path,
+    source: &Path,
+    path: &str,
+    version: &CloudVersion,
+    settings: &BTreeMap<String, String>,
+    received_settings: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    let local_hash = if let Some(key) = path.strip_prefix("settings/") {
+        settings.get(key).map(|value| digest(value.as_bytes()))
+    } else {
+        current_bytes(app_data, source, path, settings)?.map(|bytes| digest(&bytes))
+    };
+    let mut applied_settings = settings.clone();
+    applied_settings.extend(received_settings.clone());
+    let expected_hash = if let Some(key) = path.strip_prefix("settings/") {
+        applied_settings
+            .get(key)
+            .map(|value| digest(value.as_bytes()))
+    } else if received_settings.is_empty() {
+        local_hash.clone()
+    } else {
+        current_bytes(app_data, source, path, &applied_settings)?.map(|bytes| digest(&bytes))
+    };
+    let pending_hash = (expected_hash != local_hash)
+        .then_some(expected_hash)
+        .flatten();
+    state.base.insert(
+        path.into(),
+        Base {
+            id: version.id.clone(),
+            hash: version.hash.clone(),
+            local_hash,
+            pending_hash,
+        },
+    );
+    Ok(())
+}
+
 fn apply(
     app_data: &Path,
     source: &Path,
@@ -921,7 +1044,13 @@ fn apply(
     if path.starts_with("ranking/") || path.starts_with("similarity/") {
         return database::import(source, path, bytes);
     }
-    if path.ends_with(".toml") {
+    if matches!(
+        path,
+        "source/score_rule.toml"
+            | "source/chip_change_rule.toml"
+            | "source/ind.toml"
+            | "source/chart_indicators.toml"
+    ) {
         toml::from_str::<toml::Value>(
             std::str::from_utf8(bytes).map_err(|_| "云端配置不是 UTF-8")?,
         )
@@ -949,11 +1078,10 @@ fn apply(
                 atomic_write(&backup.join("meta.json"), &serde_json::to_vec(&serde_json::json!({"version":1,"createdAt":Utc::now().to_rfc3339(),"sourceKind":"cloud_sync","sourceFileName":"score_rule.toml","description":"云端同步或恢复前自动备份"})).map_err(|e| e.to_string())?)?;
             }
             "source/chip_change_rule.toml" => {
-                super::cyq_chen::backup_cyq_chen_strategy_file_with_meta(
-                    &source.to_string_lossy(),
-                    "cloud_sync",
-                    "云端同步或恢复前自动备份",
-                )?;
+                // 同步只备份原文；旧策略无法解析时也必须能够接收有效的云端版本。
+                let backup = source.join("chip_change_rule_backups");
+                atomic_write(&backup.join(format!("{stamp}.toml")), &old)?;
+                atomic_write(&backup.join(format!("{stamp}.toml.meta.json")), &serde_json::to_vec(&serde_json::json!({"version":1,"createdAt":Utc::now().to_rfc3339(),"sourceKind":"cloud_sync","sourceFileName":"chip_change_rule.toml","description":"云端同步或恢复前自动备份"})).map_err(|e| e.to_string())?)?;
             }
             _ => {
                 atomic_write(

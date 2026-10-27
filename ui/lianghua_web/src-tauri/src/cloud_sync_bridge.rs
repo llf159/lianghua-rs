@@ -195,3 +195,46 @@ pub async fn transfer_strategy_cloud(
     .await
     .map_err(|e| e.to_string())?
 }
+
+#[tauri::command]
+pub async fn preview_cloud_sync_data(
+    app: tauri::AppHandle,
+    path: String,
+    version_id: Option<String>,
+    settings: BTreeMap<String, String>,
+) -> Result<cloud_sync::CloudPreview, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = CLOUD_TASK.try_lock().map_err(|_| "云端操作正在进行")?;
+        let source = crate::warehouse::warehouse_root(&app)?.join("source");
+        cloud_sync::preview(
+            &app.path().app_data_dir().map_err(|e| e.to_string())?,
+            &source,
+            &path,
+            version_id.as_deref(),
+            &settings,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn resolve_cloud_strategy_conflicts(
+    app: tauri::AppHandle,
+    resolution: cloud_sync::StrategyResolution,
+) -> Result<SyncResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = CLOUD_TASK.try_lock().map_err(|_| "云端操作正在进行")?;
+        let source = crate::warehouse::warehouse_root(&app)?.join("source");
+        cloud_sync::resolve_strategies(
+            &app.path().app_data_dir().map_err(|e| e.to_string())?,
+            &source,
+            resolution,
+            |message| {
+                let _ = app.emit("cloud-sync-progress", message);
+            },
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}

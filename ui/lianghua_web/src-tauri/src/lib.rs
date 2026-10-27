@@ -3127,6 +3127,8 @@ pub fn run() {
             cloud_sync_bridge::transfer_strategy_cloud,
             cloud_sync_bridge::estimate_cloud_sync_upload,
             cloud_sync_bridge::list_cloud_sync_data,
+            cloud_sync_bridge::preview_cloud_sync_data,
+            cloud_sync_bridge::resolve_cloud_strategy_conflicts,
             cloud_sync_bridge::restore_cloud_sync_version,
             cloud_sync_bridge::delete_cloud_sync_version,
             warehouse::get_warehouse_root,

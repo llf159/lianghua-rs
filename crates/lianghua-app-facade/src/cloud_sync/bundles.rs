@@ -60,6 +60,14 @@ pub(super) fn snapshots(
 }
 
 pub(super) fn unpack(group: &str, bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, String> {
+    read(group, bytes, true)
+}
+
+pub(super) fn read(
+    group: &str,
+    bytes: &[u8],
+    validate_content: bool,
+) -> Result<BTreeMap<String, Vec<u8>>, String> {
     let mut archive = ZipArchive::new(Cursor::new(bytes)).map_err(|e| e.to_string())?;
     let mut files = BTreeMap::new();
     let mut total = 0u64;
@@ -82,12 +90,21 @@ pub(super) fn unpack(group: &str, bytes: &[u8]) -> Result<BTreeMap<String, Vec<u
         if raw.len() as u64 > 512 * 1024 * 1024 {
             return Err("配置包成员超过大小限制".into());
         }
-        if path.ends_with(".toml") {
+        // 历史策略保留原文，即使旧内容已无法解析；只有会直接启用的配置需要语法验证。
+        if validate_content
+            && matches!(
+                path.as_str(),
+                "source/score_rule.toml"
+                    | "source/chip_change_rule.toml"
+                    | "source/ind.toml"
+                    | "source/chart_indicators.toml"
+            )
+        {
             toml::from_str::<toml::Value>(
                 std::str::from_utf8(&raw).map_err(|_| "配置包 TOML 不是有效文本")?,
             )
             .map_err(|e| format!("配置包 TOML 无效：{e}"))?;
-        } else if path.ends_with(".json") {
+        } else if validate_content && path.ends_with(".json") {
             serde_json::from_slice::<serde_json::Value>(&raw)
                 .map_err(|e| format!("配置包 JSON 无效：{e}"))?;
         } else {

@@ -188,3 +188,40 @@ export function cloudPathLabel(path: string) {
 export function transferStrategyCloud(mode: WatchlistTransferMode) {
   return invoke<CloudSyncResult>("transfer_strategy_cloud", { mode });
 }
+
+export type CloudPreviewFile = { path: string; hash: string; text: string };
+export type CloudPreviewSide = {
+  id: string;
+  createdAt: string | null;
+  files: CloudPreviewFile[];
+};
+export type CloudPreview = {
+  path: string;
+  localHash: string | null;
+  heads: string[];
+  baseAvailable: boolean;
+  sides: CloudPreviewSide[];
+};
+
+export async function previewCloudData(path: string, versionId?: string) {
+  const keys = await invoke<string[]>("get_cloud_sync_setting_keys");
+  const settings: Record<string, string> = {};
+  for (const key of keys) {
+    const value = localStorage.getItem(key);
+    if (value !== null) settings[key] = value;
+  }
+  return invoke<CloudPreview>("preview_cloud_sync_data", {
+    path,
+    versionId,
+    settings,
+  });
+}
+
+export function resolveCloudStrategies(
+  preview: CloudPreview,
+  choices: Record<string, string>,
+) {
+  return invoke<CloudSyncResult>("resolve_cloud_strategy_conflicts", {
+    resolution: { localHash: preview.localHash, heads: preview.heads, choices },
+  });
+}

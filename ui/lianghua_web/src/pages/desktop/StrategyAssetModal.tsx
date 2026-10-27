@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
-import { listCloudData, transferStrategyCloud, type WatchlistTransferMode } from '../../apis/cloudSync'
+import { transferStrategyCloud, type WatchlistTransferMode, type CloudPreview } from '../../apis/cloudSync'
 import {
   activateCyqChenStrategyBackup,
   backupCyqChenStrategyFile,
@@ -33,6 +33,7 @@ import {
   type ManagedStrategyBackupItem,
 } from '../../apis/strategyAssets'
 import ConfirmDialog from '../../shared/ConfirmDialog'
+import CloudDataReview from './components/CloudDataReview'
 import './css/CloudSync.css'
 import './css/StrategyAssetModal.css'
 
@@ -154,32 +155,28 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
   const [diffData, setDiffData] = useState<StrategyBackupDiffData | null>(null)
 
   const [cloudOpen, setCloudOpen] = useState(false)
+  const [cloudReviewBusy, setCloudReviewBusy] = useState(false)
+  const [cloudReviewRevision, setCloudReviewRevision] = useState(0)
+  const [pendingCloudTransfer, setPendingCloudTransfer] = useState<WatchlistTransferMode | null>(null)
   const [cloudMode, setCloudMode] = useState<WatchlistTransferMode | null>(null)
   const [cloudModified, setCloudModified] = useState<string | null>(null)
-  const [cloudLoading, setCloudLoading] = useState(false)
   const [cloudProgress, setCloudProgress] = useState('')
   const [cloudFeedback, setCloudFeedback] = useState('')
-  const isBusy = busyAction !== 'idle' || cloudMode !== null
+  const isBusy = busyAction !== 'idle' || cloudMode !== null || cloudReviewBusy
 
   useEffect(() => {
     if (!open || !cloudOpen) return
     let cancelled = false
-    setCloudLoading(true)
-    setCloudFeedback('')
-    void listCloudData().then((items) => {
-      if (cancelled) return
-      const dates = items.filter((item) => item.isHead && (item.path === 'bundles/strategies.zip' || item.path.startsWith('source/') && !item.path.endsWith('/ind.toml') && !item.path.endsWith('/chart_indicators.toml'))).map((item) => item.version.createdAt).sort()
-      setCloudModified(dates.at(-1) ?? null)
-    }).catch((loadError) => {
-      if (!cancelled) setCloudFeedback(`读取云端失败：${String(loadError)}`)
-    }).finally(() => {
-      if (!cancelled) setCloudLoading(false)
-    })
     const unlisten = listen<string>('cloud-sync-progress', (event) => {
       if (!cancelled) setCloudProgress(event.payload)
     })
     return () => { cancelled = true; void unlisten.then((stop) => stop()) }
   }, [open, cloudOpen])
+
+  const onCloudPreview = useCallback((preview: CloudPreview) => {
+    const dates = preview.sides.filter((side) => preview.heads.includes(side.id)).map((side) => side.createdAt).filter((value): value is string => value !== null).sort()
+    setCloudModified(dates.at(-1) ?? null)
+  }, [])
 
   async function onCloudTransfer(mode: WatchlistTransferMode, label: string) {
     setBusyAction('cloud')
@@ -189,6 +186,7 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
     try {
       const result = await transferStrategyCloud(mode)
       setCloudModified(result.lastModified ?? null)
+      setCloudReviewRevision((value) => value + 1)
       setCloudFeedback(`${label}完成${result.warnings.length ? `；${result.warnings.join('；')}` : ''}`)
       if (mode !== 'upload') {
         await loadStatus()
@@ -756,22 +754,24 @@ export default function StrategyAssetModal(props: StrategyAssetModalProps) {
 
         {cloudOpen ? (
           <div className="strategy-asset-cloud-overlay" onClick={(event) => { if (event.target === event.currentTarget && !isBusy) setCloudOpen(false) }}>
-            <section className="settings-modal cloud-watch-modal" role="dialog" aria-modal="true" aria-label="策略资产同步">
+            <section className="settings-modal cloud-watch-modal cloud-review-dialog" role="dialog" aria-modal="true" aria-label="策略资产同步">
               <div className="cloud-config-head">
                 <div><h3>策略资产同步</h3><p>排名策略、筹码策略与历史备份</p></div>
                 <button className="cloud-config-close" type="button" aria-label="关闭策略同步" disabled={isBusy} onClick={() => setCloudOpen(false)}>×</button>
               </div>
-              <div className="cloud-watch-modified"><span>云端最后修改</span><time dateTime={cloudModified ?? undefined}>{cloudLoading ? '读取中…' : cloudModified ? new Date(cloudModified).toLocaleString('zh-CN', { hour12: false }) : '暂无云端策略'}</time></div>
+              <div className="cloud-watch-modified"><span>云端最后修改</span><time dateTime={cloudModified ?? undefined}>{cloudReviewBusy ? '读取中…' : cloudModified ? new Date(cloudModified).toLocaleString('zh-CN', { hour12: false }) : '暂无云端策略'}</time></div>
               <div className="cloud-watch-actions">
-                {([['upload', '上传', '本地资产替换云端'], ['download', '下载', '接收云端，替换当前策略'], ['merge', '合并', '保留两端资产，本地当前策略优先']] as const).map(([mode, label, description]) => (
-                  <button key={mode} type="button" className={mode === 'merge' ? 'is-primary' : ''} disabled={isBusy || cloudLoading} onClick={() => void onCloudTransfer(mode, label)}>
+                {([['upload', '整包上传', '本地资产替换云端'], ['download', '整包下载', '接收云端，替换当前策略']] as const).map(([mode, label, description]) => (
+                  <button key={mode} type="button" disabled={isBusy} onClick={() => setPendingCloudTransfer(mode)}>
                     <strong>{cloudMode === mode ? `${label}中…` : label}</strong><span>{description}</span>
                   </button>
                 ))}
               </div>
-              <p className="cloud-watch-hint">合并将不同的云端当前策略存为备份，不拼接规则；下载前自动备份本地当前策略，已有历史备份继续保留。</p>
+              <CloudDataReview key={cloudReviewRevision} path="bundles/strategies.zip" disabled={busyAction !== 'idle' || cloudMode !== null} onBusyChange={setCloudReviewBusy} onLoaded={onCloudPreview} onResolved={() => { void loadStatus(); onActivated?.() }} />
+              <p className="cloud-watch-hint">两端都有改动时，先核对差异并分别选择策略来源。整包下载前自动备份本地当前策略，已有历史备份继续保留。</p>
               {cloudMode && cloudProgress ? <p className="cloud-notice cloud-progress" role="status">{cloudProgress}</p> : null}
               {cloudFeedback ? <p className="cloud-notice" role="status">{cloudFeedback}</p> : null}
+              <ConfirmDialog open={pendingCloudTransfer !== null} title={pendingCloudTransfer === 'upload' ? '确认整包上传策略' : '确认整包下载策略'} message={pendingCloudTransfer === 'upload' ? '本地整个策略包将成为云端当前版本，云端其他分支转入历史。若两端都有需要的改动，请取消并使用分别选择来源的合并。' : '接收云端整包并替换当前打分和筹码策略；替换前自动备份本地。若希望保留某份本地当前策略，请取消并使用分别选择来源的合并。'} busy={isBusy} onCancel={() => setPendingCloudTransfer(null)} onConfirm={() => { const mode = pendingCloudTransfer; setPendingCloudTransfer(null); if (mode) void onCloudTransfer(mode, mode === 'upload' ? '上传' : '下载') }} />
             </section>
           </div>
         ) : null}

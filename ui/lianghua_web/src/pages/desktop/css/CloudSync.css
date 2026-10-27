@@ -1252,3 +1252,39 @@
   background: #fffbeb;
   color: #92400e;
 }
+
+.settings-modal.cloud-review-dialog {
+  width: min(1060px, calc(100vw - 24px));
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  min-width: 0;
+}
+.cloud-data-review { margin-top: 14px; min-width: 0; }
+.cloud-review-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.cloud-review-toolbar button, .cloud-review-files button { padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; background: #fff; color: #334155; }
+.cloud-review-source, .cloud-strategy-resolution label { display: grid; gap: 6px; margin: 12px 0; font-size: 13px; color: #334155; }
+.cloud-data-review select { width: 100%; min-width: 0; padding: 9px; border: 1px solid #cbd5e1; border-radius: 6px; background: #fff; color: #334155; }
+.cloud-review-filter { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+.cloud-review-files { display: grid; gap: 6px; max-height: 220px; overflow: auto; margin: 10px 0; overscroll-behavior: contain; }
+.cloud-review-files button { display: flex; justify-content: space-between; gap: 12px; text-align: left; }
+.cloud-review-files code { overflow-wrap: anywhere; }
+.cloud-review-files span { flex-shrink: 0; font-size: 12px; }
+.cloud-review-files button.is-selected { border-color: #3b82f6; background: #eff6ff; }
+.cloud-review-content > strong { display: block; overflow-wrap: anywhere; font-size: 12px; }
+.cloud-text-diff { margin: 8px 0 12px; border: 1px solid #e2e8f0; border-radius: 6px; overflow: hidden; }
+.cloud-text-diff-legend { padding: 8px 10px; background: #f8fafc; color: #475569; font-size: 12px; }
+.cloud-text-diff-lines { max-height: 360px; overflow: auto; overscroll-behavior: contain; background: #fff; font: 12px/1.7 monospace; }
+.cloud-diff-line { display: flex; min-width: max-content; }
+.cloud-diff-line > span { flex: 0 0 36px; text-align: right; padding-right: 8px; color: #64748b; user-select: none; }
+.cloud-diff-line code { white-space: pre; padding-right: 12px; color: #1f2937; }
+.cloud-diff-line.is-added { background: #dcfce7; }
+.cloud-diff-line.is-removed { background: #fee2e2; }
+.cloud-review-content summary { cursor: pointer; font-size: 13px; }
+.cloud-strategy-resolution { margin-top: 16px; border-top: 1px solid #e2e8f0; padding-top: 14px; }
+.cloud-strategy-resolution p { color: #64748b; font-size: 13px; line-height: 1.6; }
+.cloud-data-review button:disabled { opacity: .55; cursor: default; }
+@media (max-width: 900px) {
+  .cloud-review-files button { flex-direction: column; gap: 4px; }
+  .cloud-review-dialog .cloud-watch-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
