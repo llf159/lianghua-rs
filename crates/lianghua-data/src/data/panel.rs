@@ -45,6 +45,7 @@ pub fn validate_definitions(defs: &[IndData]) -> Result<(), String> {
         .map(|d| (d.name.clone(), d.scope))
         .collect::<HashMap<_, _>>();
     let mut available = HashSet::new();
+    let mut scales = HashMap::new();
     for def in defs {
         let program = parse_expression_program(&def.expr)
             .map_err(|e| format!("指标{}解析失败:{}", def.name, e.msg))?;
@@ -94,6 +95,11 @@ pub fn validate_definitions(defs: &[IndData]) -> Result<(), String> {
                 }
             }
         }
+        let scale = super::panel_scale::program_scale(&program, &scales);
+        if def.scope != IndicatorScope::Stock && scale != Some([0.; 8]) {
+            return Err(format!("市场/横截面指标{}未消除或无法确认价格尺度；请在截面聚合前使用C/O、(C-O)/O等相对表达式", def.name));
+        }
+        scales.insert(def.name.clone(), scale);
         available.insert(def.name.clone());
     }
     Ok(())
@@ -154,6 +160,22 @@ pub fn has_values(conn: &Connection) -> Result<bool, String> {
 pub fn invalidate(conn: &Connection, start: &str) -> Result<(), String> {
     if has_values(conn)? {
         conn.execute("UPDATE indicator_panel_state SET dirty_from=least(coalesce(dirty_from,?),?) WHERE id=1",params![start,start]).map_err(|e|e.to_string())?;
+    }
+    Ok(())
+}
+
+// A quote replacement is not a historical panel repair. Daily maintenance only
+// owes sessions beyond the last published date; explicit deletion still uses
+// invalidate(), and deliberate historical corrections use the rebuild entry.
+pub fn invalidate_new_dates(conn: &Connection, start: &str) -> Result<(), String> {
+    if has_values(conn)? {
+        let first: Option<String> = conn.query_row(
+            "SELECT min(trade_date) FROM stock_data WHERE adj_type='qfq' AND trade_date>=? AND trade_date>coalesce((SELECT max(trade_date) FROM indicator_panel_sessions),'')",
+            [start], |r| r.get(0),
+        ).map_err(|e| format!("读取跨股票指标新增日期失败:{e}"))?;
+        if let Some(first) = first {
+            invalidate(conn, &first)?;
+        }
     }
     Ok(())
 }
@@ -283,6 +305,44 @@ struct Source {
     stocks: Vec<String>,
     presence: Vec<Vec<bool>>,
     listed: BTreeMap<String, usize>,
+    cached_inputs: HashMap<String, PanelValue>,
+}
+
+impl Source {
+    fn cache_inputs(&mut self, inputs: &HashSet<String>) -> Result<(), String> {
+        let indexes = self.reader.load_runtime_index_values(&self.dates[0], self.dates.last().expect("dates"))?;
+        for (key, by_date) in indexes {
+            let values = self.dates.iter().map(|date| by_date.get(date).copied().flatten()
+                .filter(|v| v.is_finite()).unwrap_or(f64::NAN)).collect();
+            self.cached_inputs.insert(key, PanelValue::Market(Arc::new(values)));
+        }
+        self.reader.runtime_index_cols.clear();
+        let inputs = inputs.iter().filter(|key| !self.cached_inputs.contains_key(*key)).collect::<Vec<_>>();
+        // Bound the extra raw-input matrices, not the complete runtime. A full
+        // history can exceed this budget and must continue to stream instead.
+        let bytes = self.stocks.len().saturating_mul(self.dates.len())
+            .saturating_mul(inputs.len()).saturating_mul(std::mem::size_of::<f64>());
+        if inputs.is_empty() || bytes > 64 * 1024 * 1024 {
+            return Ok(());
+        }
+        let mut columns = inputs.iter().map(|key| ((*key).clone(), vec![vec![f64::NAN; self.dates.len()]; self.stocks.len()]))
+            .collect::<HashMap<_, _>>();
+        let lookup = self.stocks.iter().enumerate().map(|(i, code)| (code.as_str(), i)).collect::<HashMap<_, _>>();
+        self.reader.load_batch_streaming(&self.stocks, "qfq", &self.dates[0], self.dates.last().expect("dates"), |code, row| {
+            let row = row?;
+            let stock = lookup[code.as_str()];
+            for (key, matrix) in &mut columns {
+                if let Some(values) = row.cols.get(key) {
+                    for (date, value) in row.trade_dates.iter().zip(values) {
+                        matrix[stock][self.day_lookup[date]] = value.filter(|v| v.is_finite()).unwrap_or(f64::NAN);
+                    }
+                }
+            }
+            Ok(())
+        })?;
+        self.cached_inputs.extend(columns.into_iter().map(|(key, values)| (key, PanelValue::Stocks(Arc::new(values)))));
+        Ok(())
+    }
 }
 
 impl PanelSource for Source {
@@ -304,9 +364,22 @@ impl PanelSource for Source {
             item: vec![Stmt::Expr(expr.clone())],
         };
         let identifiers = expression_input_identifiers(&program);
+        if let Expr::Ident(name) = expr {
+            if let Some(value) = vars.get(name) {
+                return Ok(value.clone());
+            }
+            if let Some(value) = self.cached_inputs.get(name) {
+                return Ok(match value {
+                    PanelValue::Market(series) => PanelValue::Stocks(Arc::new(self.presence.iter().map(|present| {
+                        present.iter().zip(series.iter()).map(|(&present, &value)| if present { value } else { f64::NAN }).collect()
+                    }).collect())),
+                    _ => value.clone(),
+                });
+            }
+        }
         let required = identifiers
             .iter()
-            .filter(|k| !vars.contains_key(*k) && !matches!(k.as_str(), "SESSION" | "LISTED_DAYS"))
+            .filter(|k| !vars.contains_key(*k) && !self.cached_inputs.contains_key(*k) && !matches!(k.as_str(), "SESSION" | "LISTED_DAYS"))
             .cloned()
             .collect::<HashSet<_>>();
         self.reader.cols_table = self
@@ -323,79 +396,93 @@ impl PanelSource for Source {
             .collect();
         let all_days = (0..self.dates.len()).collect::<Vec<_>>();
         let mut out = vec![vec![f64::NAN; self.dates.len()]; self.stocks.len()];
-        for (batch_index, codes) in self.stocks.chunks(64).enumerate() {
-            let mut batch = if !required.is_empty() {
-                self.reader.load_batch(
-                    codes,
-                    "qfq",
-                    &self.dates[0],
-                    self.dates.last().expect("dates"),
-                )?
-            } else {
-                HashMap::new()
-            };
-            for (offset, code) in codes.iter().enumerate() {
-                let stock = batch_index * 64 + offset;
-                let mut rt = crate::expr::eval::Runtime::default();
-                if let Some(mut row) = batch.remove(code) {
-                    let days = row
-                        .trade_dates
-                        .iter()
-                        .map(|date| self.day_lookup[date])
-                        .collect::<Vec<_>>();
-                    if let Expr::Ident(name) = expr
-                        && let Some(column) = row.cols.remove(name)
-                    {
-                        for (&day, value) in days.iter().zip(column) {
-                            out[stock][day] = value.filter(|v| v.is_finite()).unwrap_or(f64::NAN);
-                        }
-                        continue;
-                    }
-                    for (name, column) in row.cols {
-                        let mut full = vec![None; self.dates.len()];
-                        for (&day, value) in days.iter().zip(column) {
-                            full[day] = value;
-                        }
-                        rt.vars.insert(name, Value::NumSeries(full));
-                    }
-                }
-                if identifiers.contains("SESSION") {
-                    rt.vars.insert(
-                        "SESSION".into(),
-                        Value::NumSeries(
-                            self.sessions.iter().map(|&day| Some(day as f64)).collect(),
-                        ),
-                    );
-                }
-                if identifiers.contains("LISTED_DAYS") {
-                    let listed = self.listed.get(code).copied().unwrap_or(0);
-                    rt.vars.insert(
-                        "LISTED_DAYS".into(),
-                        Value::NumSeries(
-                            self.sessions
-                                .iter()
-                                .map(|&day| Some(day as f64 - listed as f64 + 1.))
-                                .collect(),
-                        ),
-                    );
-                }
-                for key in &identifiers {
-                    if let Some(value) = vars.get(key) {
-                        rt.vars
-                            .insert(key.clone(), value.runtime_value(stock, &all_days));
-                    }
-                }
-                let values = rt
-                    .eval_program(&program)
-                    .map_err(|e| e.msg)?
-                    .into_num_series(self.dates.len())
-                    .map_err(|e| e.msg)?;
-                for (day, value) in values.into_iter().enumerate() {
-                    if self.presence[stock][day] {
+        let lookup = self.stocks.iter().enumerate().map(|(i, code)| (code.as_str(), i)).collect::<HashMap<_, _>>();
+        let mut evaluate = |code: &str, row: Option<RowData>| -> Result<(), String> {
+            let stock = lookup[code];
+            let mut rt = crate::expr::eval::Runtime::default();
+            if let Some(mut row) = row {
+                let days = row
+                    .trade_dates
+                    .iter()
+                    .map(|date| self.day_lookup[date])
+                    .collect::<Vec<_>>();
+                if let Expr::Ident(name) = expr
+                    && let Some(column) = row.cols.remove(name)
+                {
+                    for (&day, value) in days.iter().zip(column) {
                         out[stock][day] = value.filter(|v| v.is_finite()).unwrap_or(f64::NAN);
                     }
+                    return Ok(());
+                }
+                for (name, column) in row.cols {
+                    let mut full = vec![None; self.dates.len()];
+                    for (&day, value) in days.iter().zip(column) {
+                        full[day] = value;
+                    }
+                    rt.vars.insert(name, Value::NumSeries(full));
                 }
             }
+            if identifiers.contains("SESSION") {
+                rt.vars.insert(
+                    "SESSION".into(),
+                    Value::NumSeries(
+                        self.sessions.iter().map(|&day| Some(day as f64)).collect(),
+                    ),
+                );
+            }
+            if identifiers.contains("LISTED_DAYS") {
+                let listed = self.listed.get(code).copied().unwrap_or(0);
+                rt.vars.insert(
+                    "LISTED_DAYS".into(),
+                    Value::NumSeries(
+                        self.sessions
+                            .iter()
+                            .map(|&day| Some(day as f64 - listed as f64 + 1.))
+                            .collect(),
+                    ),
+                );
+            }
+            for key in &identifiers {
+                if let Some(value) = vars.get(key) {
+                    rt.vars
+                        .insert(key.clone(), value.runtime_value(stock, &all_days));
+                } else if let Some(value) = self.cached_inputs.get(key) {
+                    let mut series = value.runtime_value(stock, &all_days);
+                    // Raw index inputs used to be injected only on this
+                    // stock's quote dates. Keep that padding semantics even
+                    // though their stored cache is shared across stocks.
+                    if matches!(value, PanelValue::Market(_))
+                        && let Value::NumSeries(series) = &mut series
+                    {
+                        for (day, item) in series.iter_mut().enumerate() {
+                            if !self.presence[stock][day] { *item = None; }
+                        }
+                    }
+                    rt.vars.insert(key.clone(), series);
+                }
+            }
+            let values = rt
+                .eval_program(&program)
+                .map_err(|e| e.msg)?
+                .into_num_series(self.dates.len())
+                .map_err(|e| e.msg)?;
+            for (day, value) in values.into_iter().enumerate() {
+                if self.presence[stock][day] {
+                    out[stock][day] = value.filter(|v| v.is_finite()).unwrap_or(f64::NAN);
+                }
+            }
+            Ok(())
+        };
+        if required.is_empty() {
+            for code in &self.stocks {
+                evaluate(code, None)?;
+            }
+        } else {
+            // One streaming query for all stocks and one shared index query,
+            // even when a full-history input is too large to cache.
+            self.reader.load_batch_streaming(&self.stocks, "qfq", &self.dates[0], self.dates.last().expect("dates"), |code, row| {
+                evaluate(&code, Some(row?))
+            })?;
         }
         Ok(PanelValue::Stocks(Arc::new(out)))
     }
@@ -409,6 +496,24 @@ pub fn refresh_with_progress(
     conn: &Connection,
     source: &str,
     rebuild: bool,
+    progress: Option<&dyn Fn(usize, usize, &str)>,
+) -> Result<usize, String> {
+    refresh_inner(conn, source, rebuild, false, progress)
+}
+
+pub fn refresh_new_dates_with_progress(
+    conn: &Connection,
+    source: &str,
+    progress: Option<&dyn Fn(usize, usize, &str)>,
+) -> Result<usize, String> {
+    refresh_inner(conn, source, false, true, progress)
+}
+
+fn refresh_inner(
+    conn: &Connection,
+    source: &str,
+    rebuild: bool,
+    new_dates_only: bool,
     progress: Option<&dyn Fn(usize, usize, &str)>,
 ) -> Result<usize, String> {
     let defs = definitions(source)?;
@@ -497,6 +602,9 @@ pub fn refresh_with_progress(
     let Some(start) = start else {
         return Ok(0);
     };
+    if new_dates_only && saved_last.is_some_and(|end| &start <= end) {
+        return Err(format!("跨股票指标需要从{start}修复历史；日常增量不会自动回退重算，请在数据管理中手动执行指标列补算"));
+    }
     let end_index = calendar.partition_point(|d| d <= &last);
     let output_index = calendar.partition_point(|d| d < &start).min(end_index);
     // Resolve all external inputs before any large history calculation.
@@ -602,7 +710,7 @@ pub fn refresh_with_progress(
     let stocks = super::read_with_retry(
         "读取跨股票指标股票列表",
         || -> Result<_, String> {
-            let mut stmt=conn.prepare("SELECT DISTINCT ts_code FROM stock_data WHERE adj_type='qfq' AND trade_date BETWEEN ? AND ? ORDER BY ts_code").map_err(|e|e.to_string())?;
+            let mut stmt=reader.conn.prepare("SELECT DISTINCT ts_code FROM stock_data WHERE adj_type='qfq' AND trade_date BETWEEN ? AND ? ORDER BY ts_code").map_err(|e|e.to_string())?;
             let stocks = stmt
                 .query_map(params![dates[0], last], |r| r.get::<_, String>(0))
                 .map_err(|e| e.to_string())?
@@ -620,7 +728,7 @@ pub fn refresh_with_progress(
         "读取跨股票指标行情日期",
         || -> Result<_, String> {
             let mut presence = vec![vec![false; dates.len()]; stocks.len()];
-            let mut stmt=conn.prepare("SELECT ts_code,trade_date FROM stock_data WHERE adj_type='qfq' AND trade_date BETWEEN ? AND ?").map_err(|e|e.to_string())?;
+            let mut stmt=reader.conn.prepare("SELECT ts_code,trade_date FROM stock_data WHERE adj_type='qfq' AND trade_date BETWEEN ? AND ?").map_err(|e|e.to_string())?;
             stmt.execute(params![dates[0], last])
                 .map_err(|e| e.to_string())?;
             while let Some(array) = stmt
@@ -651,7 +759,7 @@ pub fn refresh_with_progress(
             Ok(presence)
         },
     )?;
-    let source_data = Source {
+    let mut source_data = Source {
         input_columns: reader.cols_table.clone(),
         index_columns: reader.runtime_index_cols.clone(),
         reader,
@@ -660,6 +768,7 @@ pub fn refresh_with_progress(
         sessions: (warm_index..end_index).collect(),
         stocks,
         presence,
+        cached_inputs: HashMap::new(),
         listed: listing
             .iter()
             .map(|(k, v)| {
@@ -674,6 +783,14 @@ pub fn refresh_with_progress(
             })
             .collect(),
     };
+    if let Some(cb) = progress {
+        cb(0, panel_defs.len() + 1, "准备共享行情输入");
+    }
+    let input_started = std::time::Instant::now();
+    source_data.cache_inputs(&raw_inputs)?;
+    if let Some(cb) = progress {
+        cb(0, panel_defs.len() + 1, &format!("输入准备{:.3}秒；共享缓存{}个字段", input_started.elapsed().as_secs_f64(), source_data.cached_inputs.len()));
+    }
     let mut rt = PanelRuntime::new(source_data);
     // Hide the output range before the first short write. Partial writes remain
     // invisible until the final metadata publication; retries replace the range.
@@ -900,7 +1017,7 @@ prec=12
 [[ind]]
 name="MY_INDEX"
 scope="market"
-expr="CS_MEAN(PCT_CHG+I_CLOSE)"
+expr="CS_MEAN(PCT_CHG+I_PCT_CHG)"
 prec=12
 [[ind]]
 name="MY_ZERO"
@@ -928,7 +1045,7 @@ prec=12
         let conn = Connection::open(super::super::source_db_path(source)).unwrap();
         for (day, date) in dates.iter().enumerate().skip(80) {
             conn.execute(
-                "INSERT INTO stock_data(ts_code,trade_date,adj_type,close) VALUES('000001.SH',?,'ind',?)",
+                "INSERT INTO stock_data(ts_code,trade_date,adj_type,pct_chg) VALUES('000001.SH',?,'ind',?)",
                 params![date, 100. + (day - 80) as f64],
             ).unwrap();
             for (stock, code) in ["A", "B", "C", "D"].iter().enumerate() {
@@ -939,6 +1056,29 @@ prec=12
             }
         }
         assert_eq!(refresh(&conn, source, false).unwrap(), 20);
+        // Shared raw fields and indexes remain usable without querying quotes
+        // again, including reuse between the value and filter expressions.
+        {
+            let inputs = HashSet::from(["PCT_CHG".to_string(), "I_PCT_CHG".to_string()]);
+            let reader = DataReader::new_inner(source, Some(&inputs), Some(conn.try_clone().unwrap())).unwrap();
+            let mut cached = Source {
+                input_columns: reader.cols_table.clone(),
+                index_columns: reader.runtime_index_cols.clone(),
+                reader,
+                dates: dates[80..].to_vec(),
+                day_lookup: dates[80..].iter().enumerate().map(|(i, d)| (d.clone(), i)).collect(),
+                sessions: (80..100).collect(),
+                stocks: vec!["A".into()],
+                presence: vec![vec![true; 20]],
+                listed: BTreeMap::new(),
+                cached_inputs: HashMap::new(),
+            };
+            cached.cache_inputs(&inputs).unwrap();
+            cached.reader.conn.execute_batch("CREATE TEMP TABLE stock_data AS SELECT * FROM stock_data LIMIT 0").unwrap();
+            let mut runtime = PanelRuntime::new(cached);
+            let expression = parse_expression_program("CS_MEAN(PCT_CHG+I_PCT_CHG,PCT_CHG>0)").unwrap();
+            assert_eq!(runtime.eval_program(&expression).unwrap().at(0,0), Some(101.));
+        }
         // A repair can precede the remaining quotes' first date (for example,
         // after removing an early quote); full replay still starts at first.
         invalidate(&conn, &dates[0]).unwrap();
@@ -1143,3 +1283,4 @@ prec=12
         std::fs::remove_dir_all(path).unwrap();
     }
 }
+

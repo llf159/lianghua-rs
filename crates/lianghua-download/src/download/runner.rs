@@ -22,8 +22,8 @@ use crate::{
         DataReader,
         concept_performance_data::rebuild_concept_performance_range,
         download_data::{
-            append_stage_pro_bar_rows, checkpoint_stock_data, delete_one_stock_range,
-            delete_trade_date_rows, ensure_indicator_columns, flush_stock_data_stage_table,
+            append_stage_pro_bar_rows, checkpoint_stock_data,
+            ensure_indicator_columns, flush_stock_data_stage_table,
             init_stock_data_db, load_latest_close_map_before, load_latest_trade_date,
             reset_stock_data_stage_table, write_stock_list_csv, write_ths_concepts_csv,
         },
@@ -314,7 +314,7 @@ fn maintain_panel_indicators(
             format!("跨股票指标 {finished}/{total}：{name}"),
         )
     };
-    let days = crate::data::panel::refresh_with_progress(conn, source_dir, false, Some(&report))
+    let days = crate::data::panel::refresh_new_dates_with_progress(conn, source_dir, Some(&report))
         .map_err(|e| {
             format!(
                 "行情已提交，跨股票指标补算失败；待补算区间保留，可在数据管理中执行指标列补算：{e}"
@@ -1269,13 +1269,12 @@ fn write_prepared_stock_batch(
                 }
             }
 
-            delete_one_stock_range(
-                tx,
-                &item.ts_code,
-                item.adj_type,
-                &item.start_date,
-                &item.end_date,
-            )?;
+            // Replacement is maintenance, not an explicit historical panel
+            // repair. The shared flush records only newly published dates.
+            tx.execute(
+                "DELETE FROM stock_data WHERE ts_code=? AND adj_type=? AND trade_date BETWEEN ? AND ?",
+                duckdb::params![item.ts_code, match item.adj_type { AdjType::Qfq => "qfq", AdjType::Hfq => "hfq", AdjType::Raw => "raw", AdjType::Ind => "ind" }, item.start_date, item.end_date],
+            ).map_err(|e| format!("替换股票旧行情失败:{e}"))?;
         }
 
         flush_stock_data_stage_table(tx)?;
@@ -1466,7 +1465,10 @@ where
                 }
             }
 
-            delete_trade_date_rows(tx, adj_type, &batch.trade_date)?;
+            tx.execute(
+                "DELETE FROM stock_data WHERE adj_type=? AND trade_date=?",
+                duckdb::params![match adj_type { AdjType::Qfq => "qfq", AdjType::Hfq => "hfq", AdjType::Raw => "raw", AdjType::Ind => "ind" }, batch.trade_date],
+            ).map_err(|e| format!("替换交易日旧行情失败:{e}"))?;
         }
 
         flush_stock_data_stage_table(tx)?;
@@ -3134,36 +3136,57 @@ prec=6
         assert_eq!(values.cols["TEST_MA"], vec![Some(9.)]);
         drop(reader);
 
-        // A historical index correction must also invalidate later results,
-        // and the incremental repair must agree with a complete rebuild.
+        // Historical replacements, including adjustment repairs, must not turn
+        // ordinary daily maintenance into a replay. Rebuild is explicit.
         let conn = Connection::open(source_db_path(source)).unwrap();
+        let repaired_rows = dates.iter().enumerate().map(|(day, date)| {
+            let mut row = index.rows[0].clone();
+            row.ts_code = "000001.SZ".into();
+            row.trade_date = date.clone();
+            row.pct_chg = (day + 1) as f64;
+            row.open *= 0.5;
+            row.high *= 0.5;
+            row.low *= 0.5;
+            row.close *= 0.5;
+            row
+        }).collect();
+        let repaired_stock = PreparedStockDownload {
+            ts_code: "000001.SZ".into(),
+            start_date: dates[0].clone(),
+            end_date: dates[10].clone(),
+            adj_type: AdjType::Qfq,
+            rows: repaired_rows,
+            indicators: HashMap::new(),
+        };
+        write_prepared_stock_batch(&conn, &[repaired_stock], false).unwrap();
+        assert_eq!(crate::data::panel::refresh_new_dates_with_progress(&conn, source, None).unwrap(), 0);
         index.start_date = dates[9].clone();
         index.end_date = dates[9].clone();
         index.rows[0].trade_date = dates[9].clone();
         index.rows[0].pct_chg = 5.;
         write_prepared_stock_batch(&conn, std::slice::from_ref(&index), false).unwrap();
         let requested = vec!["TEST_BASE".into(), "TEST_MA".into()];
-        assert!(
-            crate::data::panel::load_values(&conn, source, &requested, &[], &dates[9], &dates[10])
-                .unwrap()
-                .is_empty()
-        );
+        assert!(!crate::data::panel::load_values(&conn, source, &requested, &[], &dates[9], &dates[10]).unwrap().is_empty());
+        assert_eq!(crate::data::panel::refresh(&conn, source, false).unwrap(), 0);
         drop(conn);
         download_indices_after_basic_data(&config, &dates[10], None).unwrap();
         let reader = DataReader::new(source).unwrap();
         let repaired = reader
             .load_one_tail_rows("000001.SZ", "qfq", &dates[10], 1)
             .unwrap();
-        assert_eq!(repaired.cols["TEST_MA"], vec![Some(8.)]);
+        assert_eq!(repaired.cols["TEST_MA"], vec![Some(9.)]);
         drop(reader);
         let conn = Connection::open(source_db_path(source)).unwrap();
+        crate::data::panel::invalidate(&conn, &dates[0]).unwrap();
+        let error = crate::data::panel::refresh_new_dates_with_progress(&conn, source, None).unwrap_err();
+        assert!(error.contains("日常增量不会自动回退"), "{error}");
         crate::data::panel::refresh(&conn, source, true).unwrap();
         drop(conn);
         let reader = DataReader::new(source).unwrap();
         let rebuilt = reader
             .load_one_tail_rows("000001.SZ", "qfq", &dates[10], 1)
             .unwrap();
-        assert_eq!(repaired.cols["TEST_MA"], rebuilt.cols["TEST_MA"]);
+        assert_eq!(rebuilt.cols["TEST_MA"], vec![Some(8.)]);
         drop(reader);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -4064,3 +4087,4 @@ prec=6
         fs::remove_dir_all(source_dir).ok();
     }
 }
+

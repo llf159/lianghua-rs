@@ -273,7 +273,7 @@ pub fn insert_pro_bar_rows(
     append_rows_to_table(conn, STOCK_DATA_TABLE, adj_type, rows, None)?;
     if matches!(adj_type, AdjType::Qfq | AdjType::Ind) {
         if let Some(start) = rows.iter().map(|row| row.trade_date.as_str()).min() {
-            crate::data::panel::invalidate(conn, start)?;
+            crate::data::panel::invalidate_new_dates(conn, start)?;
         }
     }
     Ok(())
@@ -310,14 +310,15 @@ pub fn flush_stock_data_stage_table(conn: &Connection) -> Result<(), String> {
             |row| row.get(0),
         )
         .map_err(|e| e.to_string())?;
-    if let Some(start) = start {
-        crate::data::panel::invalidate(conn, &start)?;
-    }
     conn.execute_batch(&format!(
         "INSERT INTO {STOCK_DATA_TABLE} SELECT * FROM {STOCK_DATA_STAGE_TABLE};
          DROP TABLE IF EXISTS {STOCK_DATA_STAGE_TABLE}"
     ))
-    .map_err(|e| format!("提交临时写库表失败: {e}"))
+    .map_err(|e| format!("提交临时写库表失败: {e}"))?;
+    if let Some(start) = start {
+        crate::data::panel::invalidate_new_dates(conn, &start)?;
+    }
+    Ok(())
 }
 
 pub fn checkpoint_stock_data(conn: &Connection) -> Result<(), String> {
@@ -1167,3 +1168,4 @@ mod tests {
         let _ = remove_dir_all(source_dir);
     }
 }
+
