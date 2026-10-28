@@ -364,10 +364,18 @@ impl PanelSource for Source {
             item: vec![Stmt::Expr(expr.clone())],
         };
         let identifiers = expression_input_identifiers(&program);
-        if let Expr::Ident(name) = expr
-            && let Some(value) = vars.get(name).or_else(|| self.cached_inputs.get(name))
-        {
-            return Ok(value.clone());
+        if let Expr::Ident(name) = expr {
+            if let Some(value) = vars.get(name) {
+                return Ok(value.clone());
+            }
+            if let Some(value) = self.cached_inputs.get(name) {
+                return Ok(match value {
+                    PanelValue::Market(series) => PanelValue::Stocks(Arc::new(self.presence.iter().map(|present| {
+                        present.iter().zip(series.iter()).map(|(&present, &value)| if present { value } else { f64::NAN }).collect()
+                    }).collect())),
+                    _ => value.clone(),
+                });
+            }
         }
         let required = identifiers
             .iter()
@@ -390,67 +398,80 @@ impl PanelSource for Source {
         let mut out = vec![vec![f64::NAN; self.dates.len()]; self.stocks.len()];
         let lookup = self.stocks.iter().enumerate().map(|(i, code)| (code.as_str(), i)).collect::<HashMap<_, _>>();
         let mut evaluate = |code: &str, row: Option<RowData>| -> Result<(), String> {
-                let stock = lookup[code];
-                let mut rt = crate::expr::eval::Runtime::default();
-                if let Some(mut row) = row {
-                    let days = row
-                        .trade_dates
-                        .iter()
-                        .map(|date| self.day_lookup[date])
-                        .collect::<Vec<_>>();
-                    if let Expr::Ident(name) = expr
-                        && let Some(column) = row.cols.remove(name)
-                    {
-                        for (&day, value) in days.iter().zip(column) {
-                            out[stock][day] = value.filter(|v| v.is_finite()).unwrap_or(f64::NAN);
-                        }
-                        return Ok(());
-                    }
-                    for (name, column) in row.cols {
-                        let mut full = vec![None; self.dates.len()];
-                        for (&day, value) in days.iter().zip(column) {
-                            full[day] = value;
-                        }
-                        rt.vars.insert(name, Value::NumSeries(full));
-                    }
-                }
-                if identifiers.contains("SESSION") {
-                    rt.vars.insert(
-                        "SESSION".into(),
-                        Value::NumSeries(
-                            self.sessions.iter().map(|&day| Some(day as f64)).collect(),
-                        ),
-                    );
-                }
-                if identifiers.contains("LISTED_DAYS") {
-                    let listed = self.listed.get(code).copied().unwrap_or(0);
-                    rt.vars.insert(
-                        "LISTED_DAYS".into(),
-                        Value::NumSeries(
-                            self.sessions
-                                .iter()
-                                .map(|&day| Some(day as f64 - listed as f64 + 1.))
-                                .collect(),
-                        ),
-                    );
-                }
-                for key in &identifiers {
-                    if let Some(value) = vars.get(key).or_else(|| self.cached_inputs.get(key)) {
-                        rt.vars
-                            .insert(key.clone(), value.runtime_value(stock, &all_days));
-                    }
-                }
-                let values = rt
-                    .eval_program(&program)
-                    .map_err(|e| e.msg)?
-                    .into_num_series(self.dates.len())
-                    .map_err(|e| e.msg)?;
-                for (day, value) in values.into_iter().enumerate() {
-                    if self.presence[stock][day] {
+            let stock = lookup[code];
+            let mut rt = crate::expr::eval::Runtime::default();
+            if let Some(mut row) = row {
+                let days = row
+                    .trade_dates
+                    .iter()
+                    .map(|date| self.day_lookup[date])
+                    .collect::<Vec<_>>();
+                if let Expr::Ident(name) = expr
+                    && let Some(column) = row.cols.remove(name)
+                {
+                    for (&day, value) in days.iter().zip(column) {
                         out[stock][day] = value.filter(|v| v.is_finite()).unwrap_or(f64::NAN);
                     }
+                    return Ok(());
                 }
-                Ok(())
+                for (name, column) in row.cols {
+                    let mut full = vec![None; self.dates.len()];
+                    for (&day, value) in days.iter().zip(column) {
+                        full[day] = value;
+                    }
+                    rt.vars.insert(name, Value::NumSeries(full));
+                }
+            }
+            if identifiers.contains("SESSION") {
+                rt.vars.insert(
+                    "SESSION".into(),
+                    Value::NumSeries(
+                        self.sessions.iter().map(|&day| Some(day as f64)).collect(),
+                    ),
+                );
+            }
+            if identifiers.contains("LISTED_DAYS") {
+                let listed = self.listed.get(code).copied().unwrap_or(0);
+                rt.vars.insert(
+                    "LISTED_DAYS".into(),
+                    Value::NumSeries(
+                        self.sessions
+                            .iter()
+                            .map(|&day| Some(day as f64 - listed as f64 + 1.))
+                            .collect(),
+                    ),
+                );
+            }
+            for key in &identifiers {
+                if let Some(value) = vars.get(key) {
+                    rt.vars
+                        .insert(key.clone(), value.runtime_value(stock, &all_days));
+                } else if let Some(value) = self.cached_inputs.get(key) {
+                    let mut series = value.runtime_value(stock, &all_days);
+                    // Raw index inputs used to be injected only on this
+                    // stock's quote dates. Keep that padding semantics even
+                    // though their stored cache is shared across stocks.
+                    if matches!(value, PanelValue::Market(_))
+                        && let Value::NumSeries(series) = &mut series
+                    {
+                        for (day, item) in series.iter_mut().enumerate() {
+                            if !self.presence[stock][day] { *item = None; }
+                        }
+                    }
+                    rt.vars.insert(key.clone(), series);
+                }
+            }
+            let values = rt
+                .eval_program(&program)
+                .map_err(|e| e.msg)?
+                .into_num_series(self.dates.len())
+                .map_err(|e| e.msg)?;
+            for (day, value) in values.into_iter().enumerate() {
+                if self.presence[stock][day] {
+                    out[stock][day] = value.filter(|v| v.is_finite()).unwrap_or(f64::NAN);
+                }
+            }
+            Ok(())
         };
         if required.is_empty() {
             for code in &self.stocks {

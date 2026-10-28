@@ -68,11 +68,6 @@ jobs:
           cargo test --package lianghua-data chip_rebuild_completion_preserves_partial_and_other_model_debts
           cargo test --package lianghua-data maintain_cyq_chen_incremental_rebuilds_all_when_strategy_changes
 
-      - name: Test panel input reuse and incremental maintenance
-        run: |
-          cargo test --package lianghua-data panel
-          cargo test --package lianghua-download panel_refresh_waits_for_indexes_and_preserves_assignment_warmup
-
       - name: Test monitor daily baselines and pause behavior
         run: |
           cargo test --package lianghua-app-market daily_baseline::tests
@@ -90,4 +85,24 @@ jobs:
         run: |
           npm ci
           npm run build
+
+  panel-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+      - name: Setup DuckDB for panel regression tests
+        run: |
+          mkdir -p "$RUNNER_TEMP/duckdb"
+          curl --fail --location --retry 3 https://github.com/duckdb/duckdb/releases/download/v2.0.0/duckdb-shared-libs-linux-amd64.tar.gz -o "$RUNNER_TEMP/duckdb.tar.gz"
+          tar -xzf "$RUNNER_TEMP/duckdb.tar.gz" -C "$RUNNER_TEMP/duckdb"
+          echo "DUCKDB_LIB_DIR=$RUNNER_TEMP/duckdb" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/duckdb" >> "$GITHUB_ENV"
+      - name: Test panel input reuse and incremental maintenance
+        run: |
+          cargo test --package lianghua-data panel
+          cargo test --package lianghua-download panel_refresh_waits_for_indexes_and_preserves_assignment_warmup
 
