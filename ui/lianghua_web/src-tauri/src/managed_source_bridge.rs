@@ -1316,7 +1316,10 @@ pub async fn import_managed_source_zip(
                 let mut entry = archive
                     .by_index(index)
                     .map_err(|error| format!("读取 ZIP 条目失败: {error}"))?;
-                let entry_name = entry.name().replace('\\', "/");
+                let entry_name = entry
+                    .name()
+                    .map_err(|error| format!("读取 ZIP 条目名称失败: {error}"))?
+                    .replace('\\', "/");
                 if entry_name.trim().is_empty()
                     || entry_name == "__MACOSX"
                     || entry_name.starts_with("__MACOSX/")
@@ -1326,8 +1329,8 @@ pub async fn import_managed_source_zip(
 
                 let enclosed_name = entry
                     .enclosed_name()
-                    .ok_or_else(|| format!("ZIP 包含非法路径: {}", entry.name()))?;
-                let relative_path = strip_archive_root(enclosed_name, &archive_root);
+                    .ok_or_else(|| format!("ZIP 包含非法路径: {entry_name}"))?;
+                let relative_path = strip_archive_root(&enclosed_name, &archive_root);
                 if relative_path.as_os_str().is_empty() {
                     continue;
                 }

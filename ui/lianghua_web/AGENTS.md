@@ -54,3 +54,5 @@
 
 
 - 问题：TypeScript 7 缺少 typescript-eslint 需要的编程接口，而保留两套编译器违背项目的单版本要求；解决方案选择：统一使用受 typescript-eslint 支持的 TypeScript 6；解释：构建和 lint 使用同一套版本，待上游支持 7 后再整体升级。
+
+- 问题：Vite 8 默认把浏览器目标提高到 Chrome 111、Firefox 114、Safari 16.4，TypeScript 6 又默认开启 strict，升级会静默改变 WebView 兼容边界和类型检查强度；解决方案选择：Vite 显式沿用 Vite 7 的 Chrome 107、Firefox 104、Safari 16 基线，tsconfig 显式声明 strict；解释：在确认生产平板 WebView 版本前不丢失原有兼容范围，同时让严格类型检查成为可见配置而不是依赖编译器默认值。

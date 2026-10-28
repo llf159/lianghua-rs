@@ -4,11 +4,13 @@ import react from "@vitejs/plugin-react";
 export default defineConfig({
   plugins: [react()],
   build: {
+    target: ["chrome107", "edge107", "firefox104", "safari16.0"],
     rolldownOptions: {
       output: {
         codeSplitting: {
           includeDependenciesRecursively: false,
           groups: [{
+            debugName: "app",
             name(id) {
               if (id.includes("/src/pages/desktop/")) {
                 const pageName = id.split("/src/pages/desktop/")[1]?.split(".")[0];

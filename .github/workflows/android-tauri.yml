@@ -138,6 +138,7 @@ jobs:
         working-directory: ui/lianghua_web
         shell: bash
         run: |
+          ulimit -s 131072
           args=(android build --ci)
 
           if [ "${{ inputs.package_kind }}" = "apk-aab" ]; then

@@ -6,6 +6,9 @@
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
+    "windows": {
+      "staticVCRuntime": true
+    },
     "beforeDevCommand": {
       "script": "npm run dev",
       "cwd": ".."

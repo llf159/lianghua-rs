@@ -2,7 +2,7 @@
 
 后续 agents 修改本组件时请继续维护本文件，只记录难以从代码理解的工程取舍；首次设计和普通 bug 修复不记，没有合适记录时不要硬写。
 
-- 问题：本机 Rust 1.94.0（LLVM 21.1.8）在 Android Release 代码生成时出现 SIGBUS，已有堆栈落在 LLVM 指令调度阶段，磁盘与内存有余量且未发现对应内核 I/O/OOM 错误，但尚未确定根因；解决方案选择：Tauri 目录的 rust-toolchain.toml 与 Android CI 固定 Rust 1.95.0（LLVM 22），暂时绕过旧代码生成后端，不修改优化等级或 LTO；解释：以固定工具链及首次下载成本换取本机与 CI 一致，避免浮动 stable 带入不一致后端。这是尚未编译验证的绕过方案，不代表已证实 1.94.0 存在特定编译器缺陷；本次按用户要求不编译。后续先在 src-tauri 执行 rustup show active-toolchain 与 rustc -vV 确认版本，缺工具链时执行 rustup toolchain install 1.95.0 --profile minimal --target aarch64-linux-android；只有用户允许时才验证一次 aarch64 Release，复发时保留完整错误与信号信息继续定位，不盲目清空全部缓存。
+- 问题：Android release 的 LLVM 优化在 Rust 1.95.0 下会因编译线程栈不足触发 SIGSEGV；解决方案选择：`rust-toolchain.toml`、Android CI 和本机 `cargo-tauri` 入口统一固定 Rust 1.95.0，并设置 `RUST_MIN_STACK=134217728` 与 131072 KiB 的 shell 栈上限；解释：保持原 `cargo tauri` 命令不变，让工具链和栈限制由本机入口与 CI 分别保证，而不是依赖当前终端的手动设置。
 
 - 问题：东财人工验证后外部浏览器恢复，但 Rust 直连仍在 TLS 握手阶段断开，复制 Cookie 不能保证复用验证状态；解决方案选择：用户在独立 WebView 手动验证，分时通过同一窗口的官网 EventSource 接口取得首个完整快照后立即关闭并复用 Rust 严格解析，只在单股探测成功后接入补齐，不向远程页面授予应用 IPC 权限；解释：保留浏览器会话与网络栈，代价是补齐期间必须保留验证 WebView；桌面关闭按钮仅隐藏窗口以保留会话，再次打开恢复显示；每 200ms 读取一次异步结果、请求 12 秒超时，平衡 WebView 调度开销与补齐延迟，仍沿用后台源限速和监控暂停行为，不自动处理验证码。Android 验证页放在独立 singleInstance task，返回按钮和系统返回键只切回监控，避免 MainActivity 的 singleTask 回栈清掉验证页；Tao 的 set_focus 在 Android 未实现，重新显示验证页须走原生活动 Intent。
 

@@ -12,9 +12,7 @@
 
 接收后的本地基线包含自动备份及保留的本地历史，与云端原包版本分开记录。因此仅云端更新、设备本地未再编辑时，不会因自动备份多出文件就反向上传或制造冲突；这些本地保留资产会在以后实际编辑或显式整包上传时一起上传。筹码策略替换前只备份旧文件原文，不要求旧策略能成功解析；历史策略原文即使语法已失效也仍能保存和传输，直接启用的四份 TOML 配置仍检查语法。应用报错或中断会留下接收标记，后续普通同步暂停该项，避免将部分写入或中断后的新编辑当成已同步内容；核对差异后，可明确选择下载、恢复或策略来源合并。浏览器设置等待下一次内容核对确认落盘，写入失败时重试接收，部分写入或期间又编辑时提示冲突，不直接将未完成的接收上传为新版本。已有旧版误报冲突不会自动消失，可在内容对比后选择来源合并。
 
-Android 和 Windows 安装包内置 DuckDB parquet 扩展，读取或备份榜单快照无需临时联网安装扩展。Android 若旧版本报 `Extension Autoloading Error` / `Can't find the home directory`，请安装更新后的 APK；仅设置主目录不能补齐安装包缺失的扩展。重新打包命令：在 `ui/lianghua_web/src-tauri` 执行 `cargo tauri android build --ci --target aarch64 --apk`。
-
-Tauri 构建使用 `src-tauri/rust-toolchain.toml` 固定 Rust 1.95.0，Android CI 使用同版本。此配置用于绕过本机 Rust 1.94.0 / LLVM 21 在 Android Release 代码生成阶段出现的 SIGBUS，目前未重新编译验证。缺工具链时执行 `rustup toolchain install 1.95.0 --profile minimal --target aarch64-linux-android`；在 `src-tauri` 执行 `rustup show active-toolchain` 和 `rustc -vV` 检查，应显示 Rust 1.95.0 / LLVM 22。上述安装和版本检查均不编译项目。
+Android 和 Windows 安装包内置 DuckDB parquet 扩展，读取或备份榜单快照无需临时联网安装扩展。Android 若旧版本报 `Extension Autoloading Error` / `Can't find the home directory`，请安装更新后的 APK；仅设置主目录不能补齐安装包缺失的扩展。重新打包使用固定 Rust 1.95.0 和 128 MiB 进程栈：在 `ui/lianghua_web/src-tauri` 执行 `ulimit -s 131072 && cargo tauri android build --ci --target aarch64 --apk`。
 
 - 同步打分策略、筹码策略、全部策略备份及备注、计算时的策略快照、指标定义和图表指标文件；同步持久化的选股/验证/监控模板、自选名单及通用设置。
 - 总榜只有一个数据库快照包，内部包含最近5个已有结果交易日的汇总、规则和场景明细；相似榜另一个数据库快照包，内部只包含最新1天的排名、汇总、元数据和参数。旧的无冲突数据库快照版本会清理，本地其他日期保留。
