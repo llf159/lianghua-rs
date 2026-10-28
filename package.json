@@ -1,5 +1,5 @@
 {
   "dependencies": {
-    "@tauri-apps/api": "^2.11.1"
+    "@tauri-apps/api": "^2.12.4"
   }
 }

@@ -33,3 +33,5 @@
 - 问题：开发构建仅优化业务 crate 时，DuckDB 的 Rust Arrow 转换和追加桥接仍按未优化代码执行，放大数据库写入耗时；解决方案选择：`profile.dev.package.duckdb.opt-level = 3`；解释：只提高数据库桥接包的编译成本，保留其余开发调试配置；原生 DuckDB 动态库已单独编译，这个设置优化的是 Rust 桥接，不代表重新优化原生引擎或改变 release 配置。
 
 - 问题：duckdb-rs 从引擎1.5起更换版本编码，普通 caret 约束会跨引擎版本升级，而本机系统动态库仍可能停留在旧版；解决方案选择：各组件统一使用 `~1.20000.0`（DuckDB 2.0.0），同步 Cargo.lock 与 CI 原生库，Linux 沿用新版绑定默认的匹配原生库下载，Android/Windows 保留 bundled；解释：只允许同引擎下的绑定补丁升级，避免 Rust 绑定和原生库版本错配；`DUCKDB_LIB_DIR` 会覆盖默认下载，手动指定时必须提供2.0.0库。此次只更新依赖、未编译或迁移数据库；2.0能继续读写旧格式，但新建数据库默认采用2.0格式，旧引擎不能读取，跨设备共享新库时必须同步更新。
+
+- 问题：Reqwest 的未启用 HTTP/3 可选依赖在锁文件中也会引入较新的 quinn，并间接引入与应用 rand 0.9 不兼容的 rand 0.10；解决方案选择：锁定 quinn 0.11.9 和 quinn-proto 0.11.15，应用与通知插件统一使用 rand 0.9.5；解释：HTTP/3 当前未启用，这些版本只约束锁文件解析，不改变运行中的传输方式；后续全量更新依赖时检查锁文件，必要时依次执行 `cargo update -p quinn --precise 0.11.9` 和 `cargo update -p quinn-proto --precise 0.11.15`。

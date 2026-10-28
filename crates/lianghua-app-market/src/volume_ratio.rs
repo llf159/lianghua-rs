@@ -61,16 +61,13 @@ fn load_local_volume_averages(
     Ok(values)
 }
 
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone)]
 struct Baseline {
     data: TencentVolumeRatioData,
     source: usize,
-    #[serde(skip)]
     observed_high: f64,
     observed_opening_high: f64,
-    #[serde(skip)]
     next_point: usize,
-    #[serde(skip, default = "Instant::now")]
     loaded_at: Instant,
 }
 
@@ -280,8 +277,21 @@ impl Cache {
                 .map_err(|error| error.to_string())?;
             for row in rows {
                 let (code, bytes) = row.map_err(|error| error.to_string())?;
-                match bincode::deserialize::<Baseline>(&bytes) {
-                    Ok(baseline) if baseline.data.trade_date == self.date => {
+                match bincode::serde::decode_from_slice::<(TencentVolumeRatioData, usize, f64), _>(
+                    &bytes,
+                    bincode::config::legacy(),
+                ) {
+                    Ok(((data, source, observed_opening_high), _))
+                        if data.trade_date == self.date =>
+                    {
+                        let baseline = Baseline {
+                            data,
+                            source,
+                            observed_high: 0.0,
+                            observed_opening_high,
+                            next_point: 0,
+                            loaded_at: Instant::now(),
+                        };
                         self.entries.insert(code, Entry::Ready(baseline));
                     }
                     _ => {
@@ -317,7 +327,15 @@ impl Cache {
                     }) => baseline,
                     _ => continue,
                 };
-                let bytes = bincode::serialize(baseline).map_err(|error| error.to_string())?;
+                let bytes = bincode::serde::encode_to_vec(
+                    (
+                        &baseline.data,
+                        baseline.source,
+                        baseline.observed_opening_high,
+                    ),
+                    bincode::config::legacy(),
+                )
+                .map_err(|error| error.to_string())?;
                 statement
                     .execute(rusqlite::params![code, self.date, bytes])
                     .map_err(|error| error.to_string())?;
@@ -881,6 +899,61 @@ pub fn snapshot(
 mod tests {
     use super::*;
     use lianghua_provider::crawler::volume_ratio::TencentVolumeRatioPoint;
+
+    #[test]
+    fn legacy_bincode_baseline_remains_compatible() {
+        let baseline = Baseline {
+            data: TencentVolumeRatioData {
+                trade_date: "20261028".into(),
+                average_daily_volume: 100.0,
+                volume_to_hands: 1.0,
+                points: vec![TencentVolumeRatioPoint {
+                    time: "0930".into(),
+                    trading_minutes: 1.0,
+                    volume_ratio: 2.0,
+                }],
+            },
+            source: 2,
+            observed_high: 0.0,
+            observed_opening_high: 3.0,
+            next_point: 0,
+            loaded_at: Instant::now(),
+        };
+        // bincode 1 的 serialize 使用小端固定宽度整数；手写旧格式校验双向兼容。
+        let mut old_bytes = Vec::new();
+        old_bytes.extend_from_slice(&8_u64.to_le_bytes());
+        old_bytes.extend_from_slice(b"20261028");
+        old_bytes.extend_from_slice(&100_f64.to_le_bytes());
+        old_bytes.extend_from_slice(&1_f64.to_le_bytes());
+        old_bytes.extend_from_slice(&1_u64.to_le_bytes());
+        old_bytes.extend_from_slice(&4_u64.to_le_bytes());
+        old_bytes.extend_from_slice(b"0930");
+        old_bytes.extend_from_slice(&1_f64.to_le_bytes());
+        old_bytes.extend_from_slice(&2_f64.to_le_bytes());
+        old_bytes.extend_from_slice(&2_u64.to_le_bytes());
+        old_bytes.extend_from_slice(&3_f64.to_le_bytes());
+        assert_eq!(
+            bincode::serde::encode_to_vec(
+                (
+                    &baseline.data,
+                    baseline.source,
+                    baseline.observed_opening_high
+                ),
+                bincode::config::legacy(),
+            )
+            .unwrap(),
+            old_bytes
+        );
+        let ((data, source, observed_opening_high), consumed): (
+            (TencentVolumeRatioData, usize, f64),
+            _,
+        ) = bincode::serde::decode_from_slice(&old_bytes, bincode::config::legacy()).unwrap();
+        assert_eq!(consumed, old_bytes.len());
+        assert_eq!(data.trade_date, "20261028");
+        assert_eq!(data.points[0].time, "0930");
+        assert_eq!(source, 2);
+        assert_eq!(observed_opening_high, 3.0);
+    }
 
     #[test]
     fn preflight_checks_previous_session_once_and_rejects_old_baselines() {

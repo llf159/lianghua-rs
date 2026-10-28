@@ -3,7 +3,7 @@ use std::{
     collections::BTreeMap,
     io::{Cursor, Read, Write},
 };
-use zip::{ZipArchive, ZipWriter, write::FileOptions};
+use zip::{ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 pub(super) fn for_path(path: &str) -> Option<&'static str> {
     if path == "app/watch_observe.json"
@@ -45,7 +45,7 @@ pub(super) fn snapshots(
             archive
                 .start_file(
                     path,
-                    FileOptions::default().compression_method(zip::CompressionMethod::Stored),
+                    SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored),
                 )
                 .map_err(|e| e.to_string())?;
             archive.write_all(bytes).map_err(|e| e.to_string())?;

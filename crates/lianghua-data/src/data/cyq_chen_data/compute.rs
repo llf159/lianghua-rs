@@ -874,6 +874,7 @@ pub(super) fn write_cyq_chen_batches_from_channel(
                 write_cyq_chen_batch_groups(
                     writer_conn,
                     worker_rx,
+                    #[cfg(test)]
                     config,
                     written_stocks,
                     resumable,
@@ -934,7 +935,7 @@ pub(super) fn write_cyq_chen_batches_from_channel(
 fn write_cyq_chen_batch_groups(
     mut conn: Connection,
     rx: Arc<Mutex<Receiver<CyqChenWriteMessage>>>,
-    config: ChenChipConfig,
+    #[cfg(test)] config: ChenChipConfig,
     written_stocks: Option<Arc<AtomicUsize>>,
     resumable: bool,
 ) -> Result<(usize, usize), String> {
@@ -971,6 +972,7 @@ fn write_cyq_chen_batch_groups(
                     break;
                 };
                 let batch = match message {
+                    #[cfg(test)]
                     CyqChenWriteMessage::Batch(batch) => {
                         prepare_cyq_chen_batch_rows(batch, config)?
                     }

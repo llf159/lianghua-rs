@@ -164,6 +164,7 @@ pub(in crate::trigger_similarity) fn load_history_anchors(
     all_trade_dates: &[String],
     window_trade_days: usize,
 ) -> Result<(Vec<Anchor>, usize), String> {
+    // 窗口内是否有触发只需检查最近一次触发，避免区间 EXISTS 展开同股历史配对。
     let mut stmt = conn
         .prepare(
             r#"
@@ -175,13 +176,15 @@ pub(in crate::trigger_similarity) fn load_history_anchors(
             FROM rule_details r JOIN calendar c USING(trade_date)
             WHERE r.trade_date <= ? AND isfinite(TRY_CAST(r.rule_score AS DOUBLE))
                 AND ABS(TRY_CAST(r.rule_score AS DOUBLE)) > ?
-        ), eligible AS (
-            SELECT DISTINCT s.ts_code, s.trade_date
+        ), scored AS (
+            SELECT DISTINCT s.ts_code, s.trade_date, c.day_index
             FROM score_summary s JOIN calendar c USING(trade_date)
-            WHERE s.trade_date BETWEEN ? AND ? AND EXISTS (
-                SELECT 1 FROM triggers r WHERE r.ts_code = s.ts_code
-                    AND r.day_index BETWEEN c.day_index - ? + 1 AND c.day_index
-            )
+            WHERE s.trade_date BETWEEN ? AND ?
+        ), eligible AS (
+            SELECT s.ts_code, s.trade_date
+            FROM scored s ASOF JOIN triggers r
+                ON s.ts_code = r.ts_code AND s.day_index >= r.day_index
+            WHERE r.day_index >= s.day_index - ? + 1
         )
         SELECT ts_code, trade_date, count(*) OVER () AS universe_count
         FROM eligible
@@ -503,12 +506,17 @@ mod tests {
         let conn = duckdb::Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE score_summary(ts_code VARCHAR, trade_date VARCHAR);
             CREATE TABLE rule_details(ts_code VARCHAR, trade_date VARCHAR, rule_score DOUBLE);
-            INSERT INTO score_summary VALUES ('A','20240101'),('A','20240102'),('A','20240103'),('B','20240101'),('B','20240102'),('B','20240103');
-            INSERT INTO rule_details VALUES ('A','20240101',1),('B','20240102',-1);").unwrap();
+            INSERT INTO score_summary VALUES ('A','20240101'),('A','20240102'),('A','20240102'),('A','20240103'),
+                ('B','20240101'),('B','20240102'),('B','20240103'),
+                ('C','20240101'),('C','20240102'),('C','20240103'),
+                ('D','20240102'),('D','20240103'),('E','20240103');
+            INSERT INTO rule_details VALUES ('A','20240101',1),('A','20240101',2),('B','20240102',-1),
+                ('C','20240102',0),('C','20240102','NaN'),('C','20240102','Infinity'),('C','20240102',NULL),
+                ('D','20240104',1),('E','20240103',1);").unwrap();
         let dates: Vec<String> = vec!["20240101".into(), "20240102".into(), "20240103".into()];
         let (anchors, count) =
             load_history_anchors(&conn, &dates[1], &dates[2], &dates, 2).unwrap();
-        assert_eq!(count, 3);
+        assert_eq!(count, 4);
         let mut keys = anchors
             .iter()
             .map(|row| (row.ts_code.as_str(), row.end_trade_date.as_str()))
@@ -516,7 +524,12 @@ mod tests {
         keys.sort_unstable();
         assert_eq!(
             keys,
-            vec![("A", "20240102"), ("B", "20240102"), ("B", "20240103")]
+            vec![
+                ("A", "20240102"),
+                ("B", "20240102"),
+                ("B", "20240103"),
+                ("E", "20240103")
+            ]
         );
     }
 

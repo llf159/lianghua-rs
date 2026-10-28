@@ -66,7 +66,7 @@ use lianghua_app_strategy::stock_pick::{
 use serde::{Deserialize, Serialize};
 use tauri::Emitter;
 use tauri_plugin_fs::{FilePath, FsExt};
-use zip::{write::FileOptions, CompressionMethod, ZipWriter};
+use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 use {
     chart::indicator_settings::{
         get_chart_indicator_settings as core_get_chart_indicator_settings,
@@ -2482,8 +2482,8 @@ fn export_cyq_chen_strategy_file_to_destination(
     })
 }
 
-fn cyq_chen_zip_file_options() -> FileOptions {
-    FileOptions::default()
+fn cyq_chen_zip_file_options() -> SimpleFileOptions {
+    SimpleFileOptions::default()
         .compression_method(CompressionMethod::Deflated)
         .large_file(true)
 }

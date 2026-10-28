@@ -159,6 +159,8 @@ impl PreparedCyqChenWriteBatch {
 
 #[derive(Debug)]
 pub(super) enum CyqChenWriteMessage {
+    // 正式路径在计算线程预构造批次；测试保留原始批次以验证写入侧失败处理。
+    #[cfg(test)]
     Batch(CyqChenWriteBatch),
     PreparedBatch(PreparedCyqChenWriteBatch),
     Abort(String),

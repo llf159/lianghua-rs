@@ -1,4 +1,6 @@
-use super::compute::{append_prepared_cyq_chen_batch_rows, prepare_cyq_chen_batch_rows};
+use super::compute::append_prepared_cyq_chen_batch_rows;
+#[cfg(test)]
+use super::compute::prepare_cyq_chen_batch_rows;
 use super::store::{init_cyq_chen_db, remove_cyq_chen_db_artifacts, write_cyq_chen_meta};
 use super::{CYQ_CHEN_BIN_TABLE, CYQ_CHEN_SNAPSHOT_TABLE, CyqChenWriteMessage, DEFAULT_ADJ_TYPE};
 use crate::data::cyq_chen::ChenChipConfig;
@@ -136,6 +138,7 @@ pub(super) fn write_cyq_chen_maintenance_batches_from_channel(
                 let mut bin_rows = 0;
                 for _ in 0..64 {
                     let batch = match rx.recv() {
+                        #[cfg(test)]
                         Ok(CyqChenWriteMessage::Batch(batch)) => {
                             prepare_cyq_chen_batch_rows(batch, config)?
                         }

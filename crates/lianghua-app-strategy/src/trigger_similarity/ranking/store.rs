@@ -10,7 +10,14 @@ use std::fs;
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 pub(super) fn open_ranking_conn(source_path: &str) -> Result<Connection, String> {
-    let conn = Connection::open_in_memory().map_err(|e| format!("打开相似度查询连接失败: {e}"))?;
+    let temp_directory = Path::new(source_path).join(".strategy_similarity.tmp");
+    let config = duckdb::Config::default()
+        .max_memory("512MB")
+        .and_then(|config| config.threads(2))
+        .and_then(|config| config.with("temp_directory", temp_directory.to_string_lossy()))
+        .map_err(|e| format!("配置相似度查询资源失败: {e}"))?;
+    let conn = Connection::open_in_memory_with_flags(config)
+        .map_err(|e| format!("打开相似度查询连接失败: {e}"))?;
     for (path, alias) in [
         (crate::data::result_db_path(source_path), "trigger_score_db"),
         (source_db_path(source_path), "trigger_market_db"),

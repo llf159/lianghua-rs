@@ -48,7 +48,7 @@ lianghua-model = { path = "crates/lianghua-model" }
 lianghua-scoring = { path = "crates/lianghua-scoring" }
 duckdb = { version = "~1.20000.0", features = ["appender-arrow"] }
 serde_json = "1"
-toml = "0.9"
+toml = "1.1.8"
 
 [profile.release]
 opt-level = 3

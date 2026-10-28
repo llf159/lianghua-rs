@@ -4,11 +4,11 @@ use crate::statistics::validation::{
     RuleValidationSampleGroups, RuleValidationSampleRow, RuleValidationSampleStats,
     RuleValidationTriggerCountStats, VALIDATION_EPS,
 };
+use rand::random;
 #[cfg(test)]
 use rand::Rng;
 #[cfg(test)]
 use rand::SeedableRng;
-use rand::random;
 #[cfg(test)]
 use rand::rngs::StdRng;
 #[cfg(test)]

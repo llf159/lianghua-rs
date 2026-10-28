@@ -54,7 +54,7 @@ fn hex_val(b: u8) -> Option<u8> {
     }
 }
 use tauri_plugin_fs::{FilePath, FsExt};
-use zip::{write::FileOptions, CompressionMethod, ZipArchive, ZipWriter};
+use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
 const IMPORT_BUFFER_SIZE: usize = 1024 * 1024;
 const IMPORT_PROGRESS_STEP_BYTES: u64 = 32 * 1024 * 1024;
@@ -254,8 +254,8 @@ fn append_directory_to_zip<W: Write + Seek>(
     Ok(file_count)
 }
 
-fn zip_file_options() -> FileOptions {
-    FileOptions::default()
+fn zip_file_options() -> SimpleFileOptions {
+    SimpleFileOptions::default()
         .compression_method(CompressionMethod::Deflated)
         .large_file(true)
 }

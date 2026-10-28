@@ -7,7 +7,7 @@ use std::{
     io::{Cursor, Read, Write},
     path::Path,
 };
-use zip::{ZipArchive, ZipWriter, write::FileOptions};
+use zip::{ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 // 每类榜单一个逻辑数据库快照；包内所有日期的完整表在同一事务恢复。
 fn tables(similarity: bool) -> &'static [(&'static str, &'static str, &'static str)] {
@@ -183,7 +183,7 @@ fn pack(
     if snapshot {
         zip.start_file(
             "snapshot.json",
-            FileOptions::default().compression_method(zip::CompressionMethod::Stored),
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored),
         )
         .map_err(|e| e.to_string())?;
         zip.write_all(
@@ -223,7 +223,7 @@ fn pack(
         transaction.execute_batch(&format!("COPY (SELECT * FROM {table} {filter} ORDER BY ALL) TO {} (FORMAT PARQUET, COMPRESSION ZSTD)", sql_string(&target.to_string_lossy()))).map_err(|e| e.to_string())?;
         zip.start_file(
             format!("{table}.parquet"),
-            FileOptions::default().compression_method(zip::CompressionMethod::Stored),
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored),
         )
         .map_err(|e| e.to_string())?;
         zip.write_all(&fs::read(target).map_err(|e| e.to_string())?)

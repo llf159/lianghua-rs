@@ -4,24 +4,28 @@ import react from "@vitejs/plugin-react";
 export default defineConfig({
   plugins: [react()],
   build: {
-    rollupOptions: {
+    rolldownOptions: {
       output: {
-        onlyExplicitManualChunks: true,
-        manualChunks(id) {
-          if (id.includes("/src/pages/desktop/")) {
-            const pageName = id.split("/src/pages/desktop/")[1]?.split(".")[0];
-            return pageName ? `page-${pageName}` : undefined;
-          }
-          if (!id.includes("node_modules")) {
-            return undefined;
-          }
-          if (id.includes("react") || id.includes("scheduler")) {
-            return "vendor-react";
-          }
-          if (id.includes("@tauri-apps")) {
-            return "vendor-tauri";
-          }
-          return undefined;
+        codeSplitting: {
+          includeDependenciesRecursively: false,
+          groups: [{
+            name(id) {
+              if (id.includes("/src/pages/desktop/")) {
+                const pageName = id.split("/src/pages/desktop/")[1]?.split(".")[0];
+                return pageName ? `page-${pageName}` : null;
+              }
+              if (!id.includes("node_modules")) {
+                return null;
+              }
+              if (id.includes("react") || id.includes("scheduler")) {
+                return "vendor-react";
+              }
+              if (id.includes("@tauri-apps")) {
+                return "vendor-tauri";
+              }
+              return null;
+            },
+          }],
         },
       },
     },
