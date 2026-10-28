@@ -101,9 +101,9 @@ pub fn fetch_ths_concept_html(
 
 pub fn parse_ths_concept_names(html: &str) -> Result<Vec<String>, String> {
     let table_html = {
-        let start = html
-            .find(r#"<table class="gnContent">"#)
-            .ok_or_else(|| "未找到 gnContent 概念表格".to_string())?;
+        let start = html.find(r#"<table class="gnContent">"#).ok_or_else(|| {
+            "未找到 gnContent 概念表格，可能遇到访问验证或页面结构变化".to_string()
+        })?;
         let table_html = &html[start..];
         let end = table_html
             .find("</table>")
@@ -115,19 +115,25 @@ pub fn parse_ths_concept_names(html: &str) -> Result<Vec<String>, String> {
     let mut seen = HashSet::new();
 
     for part in table_html.split("<tr").skip(1) {
-        let Some((_, row_html)) = part.split_once('>') else {
+        let (row_tag, row_html) = part
+            .split_once('>')
+            .ok_or_else(|| "概念表格行标签不完整，可能发生页面结构变化".to_string())?;
+        let (row_html, _) = row_html
+            .split_once("</tr>")
+            .ok_or_else(|| "概念表格缺少 </tr> 结尾，可能发生页面结构变化".to_string())?;
+        if row_tag.contains(r#"class="extend_content""#) {
             continue;
-        };
-        let cells = (|row_html: &str| -> Vec<String> {
+        }
+        let cells = (|row_html: &str| -> Result<Vec<String>, String> {
             let mut cells = Vec::new();
 
             for part in row_html.split("<td").skip(1) {
-                let Some((_, after_open)) = part.split_once('>') else {
-                    continue;
-                };
-                let Some((cell_html, _)) = after_open.split_once("</td>") else {
-                    continue;
-                };
+                let (_, after_open) = part
+                    .split_once('>')
+                    .ok_or_else(|| "概念表格单元格标签不完整，可能发生页面结构变化".to_string())?;
+                let (cell_html, _) = after_open
+                    .split_once("</td>")
+                    .ok_or_else(|| "概念表格缺少 </td> 结尾，可能发生页面结构变化".to_string())?;
 
                 let text = (|raw: &str| -> String {
                     let decoded = (|raw: &str| -> String {
@@ -158,27 +164,35 @@ pub fn parse_ths_concept_names(html: &str) -> Result<Vec<String>, String> {
                 cells.push(text);
             }
 
-            cells
-        })(row_html);
-        let Some(index_text) = cells.first() else {
-            continue;
-        };
-
-        if !index_text.chars().all(|ch| ch.is_ascii_digit()) {
+            Ok(cells)
+        })(row_html)?;
+        if cells.is_empty() && row_html.contains("<th") {
             continue;
         }
+        let index_text = cells
+            .first()
+            .ok_or_else(|| "概念表格数据行缺少单元格，可能发生页面结构变化".to_string())?;
 
-        let Some(name) = cells.get(1).map(|value| value.trim()) else {
-            continue;
-        };
-        if name.is_empty() {
-            continue;
+        if index_text.is_empty() || !index_text.chars().all(|ch| ch.is_ascii_digit()) {
+            return Err("概念表格序号不是有效数字，可能发生页面结构变化".to_string());
         }
+
+        let name = cells
+            .get(1)
+            .map(|value| value.trim())
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| {
+                format!("概念表格第 {index_text} 行缺少概念名称，可能发生页面结构变化")
+            })?;
 
         let name = name.to_string();
         if seen.insert(name.clone()) {
             out.push(name);
         }
+    }
+
+    if out.is_empty() {
+        return Err("概念表格未解析到有效概念，可能遇到访问验证、空数据或页面结构变化".to_string());
     }
 
     Ok(out)
@@ -201,17 +215,9 @@ pub fn fetch_one_ths_concept_row(
 
     let normalized_name = name.trim().to_string();
     let html = fetch_ths_concept_html(http, &normalized_ts_code)?;
-    let concept = match parse_ths_concept_text(&html) {
-        Ok(value) => value,
-        Err(error)
-            if (|error: &str| -> bool { error.contains("未找到 gnContent 概念表格") })(
-                &error,
-            ) =>
-        {
-            String::new()
-        }
-        Err(error) => return Err(error),
-    };
+    let concept = parse_ths_concept_text(&html).map_err(|error| {
+        format!("同花顺概念页校验失败: ts_code={normalized_ts_code}, err={error}")
+    })?;
 
     Ok(ThsConceptRow {
         ts_code: normalized_ts_code,
@@ -301,4 +307,58 @@ pub fn fetch_ths_concept_rows(
     );
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_concept_names_and_deduplicates() {
+        let html = r#"<table class="gnContent">
+            <tr><th>序号</th><th>概念名称</th></tr>
+            <tr><td>1</td><td><a>跨境支付(CIPS)</a></td></tr>
+            <tr class="extend_content"><td colspan="4">概念解析</td></tr>
+            <tr><td>2</td><td>高股息精选</td></tr>
+            <tr><td>3</td><td>高股息精选</td></tr>
+        </table>"#;
+
+        assert_eq!(
+            parse_ths_concept_text(html).unwrap(),
+            "跨境支付(CIPS),高股息精选"
+        );
+    }
+
+    #[test]
+    fn rejects_unverified_or_changed_concept_pages() {
+        for (html, expected_error) in [
+            ("<html>请完成安全验证</html>", "未找到 gnContent"),
+            (r#"<table class="changed"></table>"#, "未找到 gnContent"),
+            (r#"<table class="gnContent">"#, "缺少 </table>"),
+            (r#"<table class="gnContent"></table>"#, "未解析到有效概念"),
+            (
+                r#"<table class="gnContent"><tr><td>1</td></tr></table>"#,
+                "缺少概念名称",
+            ),
+            (
+                r#"<table class="gnContent"><tr><td>1</td><td>有效概念</td></tr><tr><td>2</td><td></td></tr></table>"#,
+                "缺少概念名称",
+            ),
+            (
+                r#"<table class="gnContent"><tr><td>1</td><td>有效概念</td></tr><tr><td>2</td><td>残缺概念</tr></table>"#,
+                "缺少 </td>",
+            ),
+            (
+                r#"<table class="gnContent"><tr><td>1</td><td>残缺概念</td></table>"#,
+                "缺少 </tr>",
+            ),
+            (
+                r#"<table class="gnContent"><tr><td>1</td><td>有效概念</td></tr><tr><td></td><td>序号缺失</td></tr></table>"#,
+                "序号不是有效数字",
+            ),
+        ] {
+            let error = parse_ths_concept_text(html).unwrap_err();
+            assert!(error.contains(expected_error), "{error}");
+        }
+    }
 }
