@@ -1168,4 +1168,3 @@ mod tests {
         let _ = remove_dir_all(source_dir);
     }
 }
-

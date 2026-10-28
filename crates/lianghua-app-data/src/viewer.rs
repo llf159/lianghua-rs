@@ -1133,4 +1133,3 @@ prec=2
         fs::remove_dir_all(app_data_root).ok();
     }
 }
-

@@ -97,7 +97,10 @@ pub fn validate_definitions(defs: &[IndData]) -> Result<(), String> {
         }
         let scale = super::panel_scale::program_scale(&program, &scales);
         if def.scope != IndicatorScope::Stock && scale != Some([0.; 8]) {
-            return Err(format!("市场/横截面指标{}未消除或无法确认价格尺度；请在截面聚合前使用C/O、(C-O)/O等相对表达式", def.name));
+            return Err(format!(
+                "市场/横截面指标{}未消除或无法确认价格尺度；请在截面聚合前使用C/O、(C-O)/O等相对表达式",
+                def.name
+            ));
         }
         scales.insert(def.name.clone(), scale);
         available.insert(def.name.clone());
@@ -310,37 +313,80 @@ struct Source {
 
 impl Source {
     fn cache_inputs(&mut self, inputs: &HashSet<String>) -> Result<(), String> {
-        let indexes = self.reader.load_runtime_index_values(&self.dates[0], self.dates.last().expect("dates"))?;
+        let indexes = self
+            .reader
+            .load_runtime_index_values(&self.dates[0], self.dates.last().expect("dates"))?;
         for (key, by_date) in indexes {
-            let values = self.dates.iter().map(|date| by_date.get(date).copied().flatten()
-                .filter(|v| v.is_finite()).unwrap_or(f64::NAN)).collect();
-            self.cached_inputs.insert(key, PanelValue::Market(Arc::new(values)));
+            let values = self
+                .dates
+                .iter()
+                .map(|date| {
+                    by_date
+                        .get(date)
+                        .copied()
+                        .flatten()
+                        .filter(|v| v.is_finite())
+                        .unwrap_or(f64::NAN)
+                })
+                .collect();
+            self.cached_inputs
+                .insert(key, PanelValue::Market(Arc::new(values)));
         }
         self.reader.runtime_index_cols.clear();
-        let inputs = inputs.iter().filter(|key| !self.cached_inputs.contains_key(*key)).collect::<Vec<_>>();
+        let inputs = inputs
+            .iter()
+            .filter(|key| !self.cached_inputs.contains_key(*key))
+            .collect::<Vec<_>>();
         // Bound the extra raw-input matrices, not the complete runtime. A full
         // history can exceed this budget and must continue to stream instead.
-        let bytes = self.stocks.len().saturating_mul(self.dates.len())
-            .saturating_mul(inputs.len()).saturating_mul(std::mem::size_of::<f64>());
+        let bytes = self
+            .stocks
+            .len()
+            .saturating_mul(self.dates.len())
+            .saturating_mul(inputs.len())
+            .saturating_mul(std::mem::size_of::<f64>());
         if inputs.is_empty() || bytes > 64 * 1024 * 1024 {
             return Ok(());
         }
-        let mut columns = inputs.iter().map(|key| ((*key).clone(), vec![vec![f64::NAN; self.dates.len()]; self.stocks.len()]))
+        let mut columns = inputs
+            .iter()
+            .map(|key| {
+                (
+                    (*key).clone(),
+                    vec![vec![f64::NAN; self.dates.len()]; self.stocks.len()],
+                )
+            })
             .collect::<HashMap<_, _>>();
-        let lookup = self.stocks.iter().enumerate().map(|(i, code)| (code.as_str(), i)).collect::<HashMap<_, _>>();
-        self.reader.load_batch_streaming(&self.stocks, "qfq", &self.dates[0], self.dates.last().expect("dates"), |code, row| {
-            let row = row?;
-            let stock = lookup[code.as_str()];
-            for (key, matrix) in &mut columns {
-                if let Some(values) = row.cols.get(key) {
-                    for (date, value) in row.trade_dates.iter().zip(values) {
-                        matrix[stock][self.day_lookup[date]] = value.filter(|v| v.is_finite()).unwrap_or(f64::NAN);
+        let lookup = self
+            .stocks
+            .iter()
+            .enumerate()
+            .map(|(i, code)| (code.as_str(), i))
+            .collect::<HashMap<_, _>>();
+        self.reader.load_batch_streaming(
+            &self.stocks,
+            "qfq",
+            &self.dates[0],
+            self.dates.last().expect("dates"),
+            |code, row| {
+                let row = row?;
+                let stock = lookup[code.as_str()];
+                for (key, matrix) in &mut columns {
+                    if let Some(values) = row.cols.get(key) {
+                        for (date, value) in row.trade_dates.iter().zip(values) {
+                            matrix[stock][self.day_lookup[date]] =
+                                value.filter(|v| v.is_finite()).unwrap_or(f64::NAN);
+                        }
                     }
                 }
-            }
-            Ok(())
-        })?;
-        self.cached_inputs.extend(columns.into_iter().map(|(key, values)| (key, PanelValue::Stocks(Arc::new(values)))));
+                Ok(())
+            },
+        )?;
+        self.cached_inputs.extend(
+            columns
+                .into_iter()
+                .map(|(key, values)| (key, PanelValue::Stocks(Arc::new(values)))),
+        );
         Ok(())
     }
 }
@@ -370,16 +416,31 @@ impl PanelSource for Source {
             }
             if let Some(value) = self.cached_inputs.get(name) {
                 return Ok(match value {
-                    PanelValue::Market(series) => PanelValue::Stocks(Arc::new(self.presence.iter().map(|present| {
-                        present.iter().zip(series.iter()).map(|(&present, &value)| if present { value } else { f64::NAN }).collect()
-                    }).collect())),
+                    PanelValue::Market(series) => PanelValue::Stocks(Arc::new(
+                        self.presence
+                            .iter()
+                            .map(|present| {
+                                present
+                                    .iter()
+                                    .zip(series.iter())
+                                    .map(
+                                        |(&present, &value)| if present { value } else { f64::NAN },
+                                    )
+                                    .collect()
+                            })
+                            .collect(),
+                    )),
                     _ => value.clone(),
                 });
             }
         }
         let required = identifiers
             .iter()
-            .filter(|k| !vars.contains_key(*k) && !self.cached_inputs.contains_key(*k) && !matches!(k.as_str(), "SESSION" | "LISTED_DAYS"))
+            .filter(|k| {
+                !vars.contains_key(*k)
+                    && !self.cached_inputs.contains_key(*k)
+                    && !matches!(k.as_str(), "SESSION" | "LISTED_DAYS")
+            })
             .cloned()
             .collect::<HashSet<_>>();
         self.reader.cols_table = self
@@ -396,7 +457,12 @@ impl PanelSource for Source {
             .collect();
         let all_days = (0..self.dates.len()).collect::<Vec<_>>();
         let mut out = vec![vec![f64::NAN; self.dates.len()]; self.stocks.len()];
-        let lookup = self.stocks.iter().enumerate().map(|(i, code)| (code.as_str(), i)).collect::<HashMap<_, _>>();
+        let lookup = self
+            .stocks
+            .iter()
+            .enumerate()
+            .map(|(i, code)| (code.as_str(), i))
+            .collect::<HashMap<_, _>>();
         let mut evaluate = |code: &str, row: Option<RowData>| -> Result<(), String> {
             let stock = lookup[code];
             let mut rt = crate::expr::eval::Runtime::default();
@@ -425,9 +491,7 @@ impl PanelSource for Source {
             if identifiers.contains("SESSION") {
                 rt.vars.insert(
                     "SESSION".into(),
-                    Value::NumSeries(
-                        self.sessions.iter().map(|&day| Some(day as f64)).collect(),
-                    ),
+                    Value::NumSeries(self.sessions.iter().map(|&day| Some(day as f64)).collect()),
                 );
             }
             if identifiers.contains("LISTED_DAYS") {
@@ -455,7 +519,9 @@ impl PanelSource for Source {
                         && let Value::NumSeries(series) = &mut series
                     {
                         for (day, item) in series.iter_mut().enumerate() {
-                            if !self.presence[stock][day] { *item = None; }
+                            if !self.presence[stock][day] {
+                                *item = None;
+                            }
                         }
                     }
                     rt.vars.insert(key.clone(), series);
@@ -480,9 +546,13 @@ impl PanelSource for Source {
         } else {
             // One streaming query for all stocks and one shared index query,
             // even when a full-history input is too large to cache.
-            self.reader.load_batch_streaming(&self.stocks, "qfq", &self.dates[0], self.dates.last().expect("dates"), |code, row| {
-                evaluate(&code, Some(row?))
-            })?;
+            self.reader.load_batch_streaming(
+                &self.stocks,
+                "qfq",
+                &self.dates[0],
+                self.dates.last().expect("dates"),
+                |code, row| evaluate(&code, Some(row?)),
+            )?;
         }
         Ok(PanelValue::Stocks(Arc::new(out)))
     }
@@ -603,7 +673,9 @@ fn refresh_inner(
         return Ok(0);
     };
     if new_dates_only && saved_last.is_some_and(|end| &start <= end) {
-        return Err(format!("跨股票指标需要从{start}修复历史；日常增量不会自动回退重算，请在数据管理中手动执行指标列补算"));
+        return Err(format!(
+            "跨股票指标需要从{start}修复历史；日常增量不会自动回退重算，请在数据管理中手动执行指标列补算"
+        ));
     }
     let end_index = calendar.partition_point(|d| d <= &last);
     let output_index = calendar.partition_point(|d| d < &start).min(end_index);
@@ -789,7 +861,15 @@ fn refresh_inner(
     let input_started = std::time::Instant::now();
     source_data.cache_inputs(&raw_inputs)?;
     if let Some(cb) = progress {
-        cb(0, panel_defs.len() + 1, &format!("输入准备{:.3}秒；共享缓存{}个字段", input_started.elapsed().as_secs_f64(), source_data.cached_inputs.len()));
+        cb(
+            0,
+            panel_defs.len() + 1,
+            &format!(
+                "输入准备{:.3}秒；共享缓存{}个字段",
+                input_started.elapsed().as_secs_f64(),
+                source_data.cached_inputs.len()
+            ),
+        );
     }
     let mut rt = PanelRuntime::new(source_data);
     // Hide the output range before the first short write. Partial writes remain
@@ -1060,13 +1140,19 @@ prec=12
         // again, including reuse between the value and filter expressions.
         {
             let inputs = HashSet::from(["PCT_CHG".to_string(), "I_PCT_CHG".to_string()]);
-            let reader = DataReader::new_inner(source, Some(&inputs), Some(conn.try_clone().unwrap())).unwrap();
+            let reader =
+                DataReader::new_inner(source, Some(&inputs), Some(conn.try_clone().unwrap()))
+                    .unwrap();
             let mut cached = Source {
                 input_columns: reader.cols_table.clone(),
                 index_columns: reader.runtime_index_cols.clone(),
                 reader,
                 dates: dates[80..].to_vec(),
-                day_lookup: dates[80..].iter().enumerate().map(|(i, d)| (d.clone(), i)).collect(),
+                day_lookup: dates[80..]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, d)| (d.clone(), i))
+                    .collect(),
                 sessions: (80..100).collect(),
                 stocks: vec!["A".into()],
                 presence: vec![vec![true; 20]],
@@ -1074,10 +1160,18 @@ prec=12
                 cached_inputs: HashMap::new(),
             };
             cached.cache_inputs(&inputs).unwrap();
-            cached.reader.conn.execute_batch("CREATE TEMP TABLE stock_data AS SELECT * FROM stock_data LIMIT 0").unwrap();
+            cached
+                .reader
+                .conn
+                .execute_batch("CREATE TEMP TABLE stock_data AS SELECT * FROM stock_data LIMIT 0")
+                .unwrap();
             let mut runtime = PanelRuntime::new(cached);
-            let expression = parse_expression_program("CS_MEAN(PCT_CHG+I_PCT_CHG,PCT_CHG>0)").unwrap();
-            assert_eq!(runtime.eval_program(&expression).unwrap().at(0,0), Some(101.));
+            let expression =
+                parse_expression_program("CS_MEAN(PCT_CHG+I_PCT_CHG,PCT_CHG>0)").unwrap();
+            assert_eq!(
+                runtime.eval_program(&expression).unwrap().at(0, 0),
+                Some(101.)
+            );
         }
         // A repair can precede the remaining quotes' first date (for example,
         // after removing an early quote); full replay still starts at first.
@@ -1283,4 +1377,3 @@ prec=12
         std::fs::remove_dir_all(path).unwrap();
     }
 }
-

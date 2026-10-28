@@ -105,4 +105,3 @@ jobs:
         run: |
           cargo test --package lianghua-data panel
           cargo test --package lianghua-download panel_refresh_waits_for_indexes_and_preserves_assignment_warmup
-

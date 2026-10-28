@@ -22,10 +22,10 @@ use crate::{
         DataReader,
         concept_performance_data::rebuild_concept_performance_range,
         download_data::{
-            append_stage_pro_bar_rows, checkpoint_stock_data,
-            ensure_indicator_columns, flush_stock_data_stage_table,
-            init_stock_data_db, load_latest_close_map_before, load_latest_trade_date,
-            reset_stock_data_stage_table, write_stock_list_csv, write_ths_concepts_csv,
+            append_stage_pro_bar_rows, checkpoint_stock_data, ensure_indicator_columns,
+            flush_stock_data_stage_table, init_stock_data_db, load_latest_close_map_before,
+            load_latest_trade_date, reset_stock_data_stage_table, write_stock_list_csv,
+            write_ths_concepts_csv,
         },
         download_state::{
             ensure_stock_data_ready_for_derived, load_pending_stock_repairs,
@@ -1467,8 +1467,17 @@ where
 
             tx.execute(
                 "DELETE FROM stock_data WHERE adj_type=? AND trade_date=?",
-                duckdb::params![match adj_type { AdjType::Qfq => "qfq", AdjType::Hfq => "hfq", AdjType::Raw => "raw", AdjType::Ind => "ind" }, batch.trade_date],
-            ).map_err(|e| format!("替换交易日旧行情失败:{e}"))?;
+                duckdb::params![
+                    match adj_type {
+                        AdjType::Qfq => "qfq",
+                        AdjType::Hfq => "hfq",
+                        AdjType::Raw => "raw",
+                        AdjType::Ind => "ind",
+                    },
+                    batch.trade_date
+                ],
+            )
+            .map_err(|e| format!("替换交易日旧行情失败:{e}"))?;
         }
 
         flush_stock_data_stage_table(tx)?;
@@ -3139,17 +3148,21 @@ prec=6
         // Historical replacements, including adjustment repairs, must not turn
         // ordinary daily maintenance into a replay. Rebuild is explicit.
         let conn = Connection::open(source_db_path(source)).unwrap();
-        let repaired_rows = dates.iter().enumerate().map(|(day, date)| {
-            let mut row = index.rows[0].clone();
-            row.ts_code = "000001.SZ".into();
-            row.trade_date = date.clone();
-            row.pct_chg = (day + 1) as f64;
-            row.open *= 0.5;
-            row.high *= 0.5;
-            row.low *= 0.5;
-            row.close *= 0.5;
-            row
-        }).collect();
+        let repaired_rows = dates
+            .iter()
+            .enumerate()
+            .map(|(day, date)| {
+                let mut row = index.rows[0].clone();
+                row.ts_code = "000001.SZ".into();
+                row.trade_date = date.clone();
+                row.pct_chg = (day + 1) as f64;
+                row.open *= 0.5;
+                row.high *= 0.5;
+                row.low *= 0.5;
+                row.close *= 0.5;
+                row
+            })
+            .collect();
         let repaired_stock = PreparedStockDownload {
             ts_code: "000001.SZ".into(),
             start_date: dates[0].clone(),
@@ -3159,15 +3172,25 @@ prec=6
             indicators: HashMap::new(),
         };
         write_prepared_stock_batch(&conn, &[repaired_stock], false).unwrap();
-        assert_eq!(crate::data::panel::refresh_new_dates_with_progress(&conn, source, None).unwrap(), 0);
+        assert_eq!(
+            crate::data::panel::refresh_new_dates_with_progress(&conn, source, None).unwrap(),
+            0
+        );
         index.start_date = dates[9].clone();
         index.end_date = dates[9].clone();
         index.rows[0].trade_date = dates[9].clone();
         index.rows[0].pct_chg = 5.;
         write_prepared_stock_batch(&conn, std::slice::from_ref(&index), false).unwrap();
         let requested = vec!["TEST_BASE".into(), "TEST_MA".into()];
-        assert!(!crate::data::panel::load_values(&conn, source, &requested, &[], &dates[9], &dates[10]).unwrap().is_empty());
-        assert_eq!(crate::data::panel::refresh(&conn, source, false).unwrap(), 0);
+        assert!(
+            !crate::data::panel::load_values(&conn, source, &requested, &[], &dates[9], &dates[10])
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            crate::data::panel::refresh(&conn, source, false).unwrap(),
+            0
+        );
         drop(conn);
         download_indices_after_basic_data(&config, &dates[10], None).unwrap();
         let reader = DataReader::new(source).unwrap();
@@ -3178,7 +3201,8 @@ prec=6
         drop(reader);
         let conn = Connection::open(source_db_path(source)).unwrap();
         crate::data::panel::invalidate(&conn, &dates[0]).unwrap();
-        let error = crate::data::panel::refresh_new_dates_with_progress(&conn, source, None).unwrap_err();
+        let error =
+            crate::data::panel::refresh_new_dates_with_progress(&conn, source, None).unwrap_err();
         assert!(error.contains("日常增量不会自动回退"), "{error}");
         crate::data::panel::refresh(&conn, source, true).unwrap();
         drop(conn);
@@ -4087,4 +4111,3 @@ prec=6
         fs::remove_dir_all(source_dir).ok();
     }
 }
-
