@@ -9,6 +9,7 @@ pub mod download_state;
 pub mod dragon_tiger_data;
 pub mod extras;
 pub mod panel;
+mod panel_scale;
 mod read_retry;
 pub mod runtime;
 pub use read_retry::read_with_retry;
@@ -2335,3 +2336,4 @@ when = "C > O"
 }
 
 mod cyq_chen_temp;
+

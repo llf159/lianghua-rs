@@ -982,12 +982,12 @@ mod tests {
 [[ind]]
 name="MY_MARKET"
 scope="market"
-expr="CS_MEAN(C)"
+expr="CS_MEAN(C/C)"
 prec=2
 [[ind]]
 name="MY_RANK"
 scope="cross_section"
-expr="CS_RANK(C)"
+expr="CS_RANK(C/C)"
 prec=2
 "#,
         )
@@ -1133,3 +1133,4 @@ prec=2
         fs::remove_dir_all(app_data_root).ok();
     }
 }
+

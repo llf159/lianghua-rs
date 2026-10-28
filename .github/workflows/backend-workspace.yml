@@ -68,6 +68,11 @@ jobs:
           cargo test --package lianghua-data chip_rebuild_completion_preserves_partial_and_other_model_debts
           cargo test --package lianghua-data maintain_cyq_chen_incremental_rebuilds_all_when_strategy_changes
 
+      - name: Test panel input reuse and incremental maintenance
+        run: |
+          cargo test --package lianghua-data panel
+          cargo test --package lianghua-download panel_refresh_waits_for_indexes_and_preserves_assignment_warmup
+
       - name: Test monitor daily baselines and pause behavior
         run: |
           cargo test --package lianghua-app-market daily_baseline::tests
@@ -85,3 +90,4 @@ jobs:
         run: |
           npm ci
           npm run build
+
