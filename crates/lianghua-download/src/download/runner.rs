@@ -360,7 +360,7 @@ fn build_missing_ths_concept_items(
             let Some(concept) = cols.get(2).map(|value| value.trim()) else {
                 continue;
             };
-            if ts_code.is_empty() {
+            if ts_code.is_empty() || concept.is_empty() {
                 continue;
             }
 
@@ -2988,6 +2988,37 @@ mod tests {
             snapshot_row_count,
             market_value_row_count,
         }
+    }
+
+    #[test]
+    fn ths_concept_download_retries_cached_empty_concepts() {
+        let directory = temp_source_dir("ths-empty-concepts");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("stock_list.csv"),
+            "ts_code,symbol,name\n000001.SZ,000001,平安银行\n600519.SH,600519,贵州茅台\n000002.SZ,000002,万科A\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.join("stock_concepts.csv"),
+            "ts_code,name,concept\n000001.SZ,平安银行,\n600519.SH,贵州茅台,白酒概念\n000002.SZ,万科A,   \n",
+        )
+        .unwrap();
+
+        let (all_items, missing_items, existing_map) =
+            build_missing_ths_concept_items(directory.to_str().unwrap()).unwrap();
+
+        assert_eq!(all_items.len(), 3);
+        assert_eq!(
+            missing_items
+                .iter()
+                .map(|item| item.ts_code.as_str())
+                .collect::<Vec<_>>(),
+            vec!["000001.SZ", "000002.SZ"]
+        );
+        assert_eq!(existing_map.len(), 1);
+        assert_eq!(existing_map["600519.SH"].concept, "白酒概念");
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
