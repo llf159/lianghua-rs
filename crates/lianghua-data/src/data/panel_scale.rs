@@ -114,5 +114,7 @@ mod tests {
         for expression in ["CS_MEAN(C)", "CS_RANK(C)", "CS_MEAN(C)/CS_MEAN(O)", "CS_MEAN(C/I_CLOSE)", "CS_MEAN(C+1)/CS_MEAN(O)"] {
             assert_ne!(program_scale(&parse_expression_program(expression).unwrap(), &published), Some([0.; 8]), "{expression}");
         }
+        let examples = crate::data::IndsData::parse_from_text(include_str!("../../../../docs/indicator-market-examples.toml")).unwrap();
+        crate::data::panel::validate_definitions(&examples).unwrap();
     }
 }
