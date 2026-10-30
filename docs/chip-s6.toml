@@ -1,0 +1,578 @@
+# S6 inventory memory, medium strength. Requires chip engine version 2.
+# Buy bias is signed direction evidence; sell bias retains the version 1 semantics.
+version = 2
+
+[[strategy]]
+name = "main基础sell"
+holder = "main"
+direction = "sell"
+when = "C > 0"
+bias = 1.0
+confirm_after = 0
+
+
+[[strategy]]
+name = "P01_放量急跌破位_main_buy"
+holder = "main"
+direction = "buy"
+when = "(C < REF(LLV(L,20),1) AND TOR >= REF(MA(TOR,20),1) AND C / REF(C,1)-1 < -2*REF(MA(ABS(C/REF(C,1)-1),20),1))"
+bias = -0.08
+confirm_after = 0
+
+
+[[strategy]]
+name = "P01_放量急跌破位_main_sell"
+holder = "main"
+direction = "sell"
+when = "(C < REF(LLV(L,20),1) AND TOR >= REF(MA(TOR,20),1) AND C / REF(C,1)-1 < -2*REF(MA(ABS(C/REF(C,1)-1),20),1))"
+bias = 0.7
+confirm_after = 0
+
+
+[[strategy]]
+name = "P02_突破失败_main_buy"
+holder = "main"
+direction = "buy"
+when = "(REF(C,3) > REF(HHV(H,20),4) AND C < REF(HHV(H,20),4)*0.97)"
+bias = -0.06
+confirm_after = 0
+
+
+[[strategy]]
+name = "P02_突破失败_main_sell"
+holder = "main"
+direction = "sell"
+when = "(REF(C,3) > REF(HHV(H,20),4) AND C < REF(HHV(H,20),4)*0.97)"
+bias = 0.5
+confirm_after = 0
+
+
+[[strategy]]
+name = "P03_恢复后再失守_main_buy"
+holder = "main"
+direction = "buy"
+when = "(C < REF(LLV(L,10),1) AND REF(C,3) >= REF(MA(C,20),3))"
+bias = -0.06
+confirm_after = 0
+
+
+[[strategy]]
+name = "P03_恢复后再失守_main_sell"
+holder = "main"
+direction = "sell"
+when = "(C < REF(LLV(L,10),1) AND REF(C,3) >= REF(MA(C,20),3))"
+bias = 0.4
+confirm_after = 0
+
+
+[[strategy]]
+name = "P04_坑沿承接_main_buy"
+holder = "main"
+direction = "buy"
+when = "(REF(C,3) < REF(LLV(L,20),4) AND C > REF(O,3) AND C > MA(C,20) AND LLV(C,2) >= REF(O,3) AND MA(TOR,3) >= REF(MA(TOR,20),3))"
+bias = 0.12
+confirm_after = 0
+
+
+[[strategy]]
+name = "P04_坑沿承接_main_sell"
+holder = "main"
+direction = "sell"
+when = "(REF(C,3) < REF(LLV(L,20),4) AND C > REF(O,3) AND C > MA(C,20) AND LLV(C,2) >= REF(O,3) AND MA(TOR,3) >= REF(MA(TOR,20),3))"
+bias = -0.05
+confirm_after = 0
+
+
+[[strategy]]
+name = "P05_突破回踩守住_main_buy"
+holder = "main"
+direction = "buy"
+when = "(REF(C,3) > REF(HHV(H,20),4) AND C >= REF(HHV(H,20),4) AND LLV(L,3) >= REF(HHV(H,20),4)*0.97 AND LLV(L,3) <= REF(HHV(H,20),4)*1.03)"
+bias = 0.1
+confirm_after = 0
+
+
+[[strategy]]
+name = "P05_突破回踩守住_main_sell"
+holder = "main"
+direction = "sell"
+when = "(REF(C,3) > REF(HHV(H,20),4) AND C >= REF(HHV(H,20),4) AND LLV(L,3) >= REF(HHV(H,20),4)*0.97 AND LLV(L,3) <= REF(HHV(H,20),4)*1.03)"
+bias = -0.06
+confirm_after = 0
+
+
+[[strategy]]
+name = "P06_冲高回落_main_buy"
+holder = "main"
+direction = "buy"
+when = "(H > L AND (H-MAX(O,C))/(H-L) >= 0.5 AND C < REF(C,1) AND TOR >= REF(MA(TOR,20),1))"
+bias = -0.05
+confirm_after = 0
+
+
+[[strategy]]
+name = "P06_冲高回落_main_sell"
+holder = "main"
+direction = "sell"
+when = "(H > L AND (H-MAX(O,C))/(H-L) >= 0.5 AND C < REF(C,1) AND TOR >= REF(MA(TOR,20),1))"
+bias = 0.4
+confirm_after = 0
+
+
+[[strategy]]
+name = "P07_高位平台换手_main_buy"
+holder = "main"
+direction = "buy"
+when = "(C/REF(C,60) > 1.15 AND HHV(H,10)/LLV(L,10) < 1.12 AND TOR >= REF(MA(TOR,20),1))"
+bias = -0.07
+confirm_after = 0
+
+
+[[strategy]]
+name = "P07_高位平台换手_main_sell"
+holder = "main"
+direction = "sell"
+when = "(C/REF(C,60) > 1.15 AND HHV(H,10)/LLV(L,10) < 1.12 AND TOR >= REF(MA(TOR,20),1))"
+bias = 0.35
+confirm_after = 0
+
+
+[[strategy]]
+name = "P08_低位平台承接_main_buy"
+holder = "main"
+direction = "buy"
+when = "(HHV(H,20)/LLV(L,20) < 1.18 AND C < HHV(H,120)*0.90 AND C >= MA(C,20))"
+bias = 0.12
+confirm_after = 0
+
+
+[[strategy]]
+name = "P08_低位平台承接_main_sell"
+holder = "main"
+direction = "sell"
+when = "(HHV(H,20)/LLV(L,20) < 1.18 AND C < HHV(H,120)*0.90 AND C >= MA(C,20))"
+bias = -0.02
+confirm_after = 0
+
+
+[[strategy]]
+name = "P09_次低位平台承接_main_buy"
+holder = "main"
+direction = "buy"
+when = "(HHV(H,20)/LLV(L,20) < 1.18 AND C >= MA(C,20) AND C > LLV(L,120)*1.10 AND C < HHV(H,120)*0.95)"
+bias = 0.06
+confirm_after = 0
+
+
+[[strategy]]
+name = "P09_次低位平台承接_main_sell"
+holder = "main"
+direction = "sell"
+when = "(HHV(H,20)/LLV(L,20) < 1.18 AND C >= MA(C,20) AND C > LLV(L,120)*1.10 AND C < HHV(H,120)*0.95)"
+bias = -0.02
+confirm_after = 0
+
+
+[[strategy]]
+name = "P10_放量突破_main_buy"
+holder = "main"
+direction = "buy"
+when = "(C > REF(HHV(H,20),1) AND TOR >= REF(MA(TOR,20),1))"
+bias = 0.03
+confirm_after = 0
+
+
+[[strategy]]
+name = "P10_放量突破_main_sell"
+holder = "main"
+direction = "sell"
+when = "(C > REF(HHV(H,20),1) AND TOR >= REF(MA(TOR,20),1))"
+bias = 0.1
+confirm_after = 0
+
+
+[[strategy]]
+name = "P11_缩量回撤守趋势_main_buy"
+holder = "main"
+direction = "buy"
+when = "(C < MA(C,5) AND C >= MA(C,20) AND TOR < REF(MA(TOR,20),1))"
+bias = 0.06
+confirm_after = 0
+
+
+[[strategy]]
+name = "P11_缩量回撤守趋势_main_sell"
+holder = "main"
+direction = "sell"
+when = "(C < MA(C,5) AND C >= MA(C,20) AND TOR < REF(MA(TOR,20),1))"
+bias = -0.05
+confirm_after = 0
+
+
+[[strategy]]
+name = "P12_慢涨缩量_main_buy"
+holder = "main"
+direction = "buy"
+when = "(C >= MA(C,20) AND C >= REF(C,3) AND MA(TOR,3) < REF(MA(TOR,20),3))"
+bias = 0.04
+confirm_after = 0
+
+
+[[strategy]]
+name = "P12_慢涨缩量_main_sell"
+holder = "main"
+direction = "sell"
+when = "(C >= MA(C,20) AND C >= REF(C,3) AND MA(TOR,3) < REF(MA(TOR,20),3))"
+bias = -0.05
+confirm_after = 0
+
+
+[[strategy]]
+name = "P13_阴跌延续_main_buy"
+holder = "main"
+direction = "buy"
+when = "(C < MA(C,20) AND MA(C,5) < REF(MA(C,5),3) AND C < REF(C,3))"
+bias = -0.04
+confirm_after = 0
+
+
+[[strategy]]
+name = "P13_阴跌延续_main_sell"
+holder = "main"
+direction = "sell"
+when = "(C < MA(C,20) AND MA(C,5) < REF(MA(C,5),3) AND C < REF(C,3))"
+bias = 0.2
+confirm_after = 0
+
+
+[[strategy]]
+name = "P14_震荡上沿_main_buy"
+holder = "main"
+direction = "buy"
+when = "(HHV(H,20)/LLV(L,20) < 1.18 AND HHV(H,20)>LLV(L,20) AND (C-LLV(L,20))/(HHV(H,20)-LLV(L,20)) >= 0.75)"
+bias = -0.02
+confirm_after = 0
+
+
+[[strategy]]
+name = "P14_震荡上沿_main_sell"
+holder = "main"
+direction = "sell"
+when = "(HHV(H,20)/LLV(L,20) < 1.18 AND HHV(H,20)>LLV(L,20) AND (C-LLV(L,20))/(HHV(H,20)-LLV(L,20)) >= 0.75)"
+bias = 0.15
+confirm_after = 0
+
+
+[[strategy]]
+name = "P15_震荡下沿_main_buy"
+holder = "main"
+direction = "buy"
+when = "(HHV(H,20)/LLV(L,20) < 1.18 AND HHV(H,20)>LLV(L,20) AND (C-LLV(L,20))/(HHV(H,20)-LLV(L,20)) <= 0.25)"
+bias = 0.02
+confirm_after = 0
+
+
+[[strategy]]
+name = "P15_震荡下沿_main_sell"
+holder = "main"
+direction = "sell"
+when = "(HHV(H,20)/LLV(L,20) < 1.18 AND HHV(H,20)>LLV(L,20) AND (C-LLV(L,20))/(HHV(H,20)-LLV(L,20)) <= 0.25)"
+bias = -0.03
+confirm_after = 0
+
+
+[[strategy]]
+name = "P16_窄幅低换手等待_main_buy"
+holder = "main"
+direction = "buy"
+when = "(HHV(H,10)/LLV(L,10) < 1.08 AND TOR < REF(MA(TOR,20),1)*0.7)"
+bias = 0.0
+confirm_after = 0
+
+
+[[strategy]]
+name = "P16_窄幅低换手等待_main_sell"
+holder = "main"
+direction = "sell"
+when = "(HHV(H,10)/LLV(L,10) < 1.08 AND TOR < REF(MA(TOR,20),1)*0.7)"
+bias = -0.02
+confirm_after = 0
+
+
+[[strategy]]
+name = "K01_亏损且失守退出_main_sell"
+holder = "main"
+direction = "sell"
+when = "(RATEC < -5 AND ((C < REF(LLV(L,20),1) AND TOR >= REF(MA(TOR,20),1) AND C / REF(C,1)-1 < -2*REF(MA(ABS(C/REF(C,1)-1),20),1)) OR (REF(C,3) > REF(HHV(H,20),4) AND C < REF(HHV(H,20),4)*0.97) OR (C < REF(LLV(L,10),1) AND REF(C,3) >= REF(MA(C,20),3))))"
+bias = 0.3
+confirm_after = 0
+
+
+[[strategy]]
+name = "K02_亏损后回本释放_main_sell"
+holder = "main"
+direction = "sell"
+when = "(RATEC >= -3 AND RATEC <= 3 AND (RATEC + 100) * REF(LLV(C,60),1) / C < 95 AND C > REF(C,3)) AND NOT ((RATEC < -5 AND ((C < REF(LLV(L,20),1) AND TOR >= REF(MA(TOR,20),1) AND C / REF(C,1)-1 < -2*REF(MA(ABS(C/REF(C,1)-1),20),1)) OR (REF(C,3) > REF(HHV(H,20),4) AND C < REF(HHV(H,20),4)*0.97) OR (C < REF(LLV(L,10),1) AND REF(C,3) >= REF(MA(C,20),3)))))"
+bias = 0.32
+confirm_after = 0
+
+
+[[strategy]]
+name = "K03_趋势中浮盈持有_main_sell"
+holder = "main"
+direction = "sell"
+when = "(RATEC >= 10 AND C >= MA(C,20) AND MA(C,20) > REF(MA(C,20),5) AND NOT ((C < REF(LLV(L,20),1) AND TOR >= REF(MA(TOR,20),1) AND C / REF(C,1)-1 < -2*REF(MA(ABS(C/REF(C,1)-1),20),1)) OR (REF(C,3) > REF(HHV(H,20),4) AND C < REF(HHV(H,20),4)*0.97) OR (C < REF(LLV(L,10),1) AND REF(C,3) >= REF(MA(C,20),3)))) AND NOT ((RATEC < -5 AND ((C < REF(LLV(L,20),1) AND TOR >= REF(MA(TOR,20),1) AND C / REF(C,1)-1 < -2*REF(MA(ABS(C/REF(C,1)-1),20),1)) OR (REF(C,3) > REF(HHV(H,20),4) AND C < REF(HHV(H,20),4)*0.97) OR (C < REF(LLV(L,10),1) AND REF(C,3) >= REF(MA(C,20),3)))) OR (RATEC >= -3 AND RATEC <= 3 AND (RATEC + 100) * REF(LLV(C,60),1) / C < 95 AND C > REF(C,3)) OR (RATEC >= 0 AND ((RATEC + 100) * REF(HHV(C,60),1) / C - 100) >= 10 AND ((RATEC + 100) * REF(HHV(C,60),1) / C - 100) - RATEC >= MAX(5, ((RATEC + 100) * REF(HHV(C,60),1) / C - 100) * 0.30) AND C < REF(C,3)))"
+bias = -0.1
+confirm_after = 0
+
+
+[[strategy]]
+name = "K04_非趋势浮盈兑现_main_sell"
+holder = "main"
+direction = "sell"
+when = "(RATEC >= 10) AND NOT ((RATEC < -5 AND ((C < REF(LLV(L,20),1) AND TOR >= REF(MA(TOR,20),1) AND C / REF(C,1)-1 < -2*REF(MA(ABS(C/REF(C,1)-1),20),1)) OR (REF(C,3) > REF(HHV(H,20),4) AND C < REF(HHV(H,20),4)*0.97) OR (C < REF(LLV(L,10),1) AND REF(C,3) >= REF(MA(C,20),3)))) OR (RATEC >= -3 AND RATEC <= 3 AND (RATEC + 100) * REF(LLV(C,60),1) / C < 95 AND C > REF(C,3)) OR (RATEC >= 0 AND ((RATEC + 100) * REF(HHV(C,60),1) / C - 100) >= 10 AND ((RATEC + 100) * REF(HHV(C,60),1) / C - 100) - RATEC >= MAX(5, ((RATEC + 100) * REF(HHV(C,60),1) / C - 100) * 0.30) AND C < REF(C,3)) OR (RATEC >= 10 AND C >= MA(C,20) AND MA(C,20) > REF(MA(C,20),5) AND NOT ((C < REF(LLV(L,20),1) AND TOR >= REF(MA(TOR,20),1) AND C / REF(C,1)-1 < -2*REF(MA(ABS(C/REF(C,1)-1),20),1)) OR (REF(C,3) > REF(HHV(H,20),4) AND C < REF(HHV(H,20),4)*0.97) OR (C < REF(LLV(L,10),1) AND REF(C,3) >= REF(MA(C,20),3)))))"
+bias = 0.29
+confirm_after = 0
+
+
+[[strategy]]
+name = "K05_小亏等待_main_sell"
+holder = "main"
+direction = "sell"
+when = "(RATEC < 0 AND RATEC >= -10 AND NOT ((C < REF(LLV(L,20),1) AND TOR >= REF(MA(TOR,20),1) AND C / REF(C,1)-1 < -2*REF(MA(ABS(C/REF(C,1)-1),20),1)) OR (REF(C,3) > REF(HHV(H,20),4) AND C < REF(HHV(H,20),4)*0.97) OR (C < REF(LLV(L,10),1) AND REF(C,3) >= REF(MA(C,20),3)))) AND NOT ((RATEC < -5 AND ((C < REF(LLV(L,20),1) AND TOR >= REF(MA(TOR,20),1) AND C / REF(C,1)-1 < -2*REF(MA(ABS(C/REF(C,1)-1),20),1)) OR (REF(C,3) > REF(HHV(H,20),4) AND C < REF(HHV(H,20),4)*0.97) OR (C < REF(LLV(L,10),1) AND REF(C,3) >= REF(MA(C,20),3)))) OR (RATEC >= -3 AND RATEC <= 3 AND (RATEC + 100) * REF(LLV(C,60),1) / C < 95 AND C > REF(C,3)) OR (RATEC >= 0 AND ((RATEC + 100) * REF(HHV(C,60),1) / C - 100) >= 10 AND ((RATEC + 100) * REF(HHV(C,60),1) / C - 100) - RATEC >= MAX(5, ((RATEC + 100) * REF(HHV(C,60),1) / C - 100) * 0.30) AND C < REF(C,3)) OR (RATEC >= 10 AND C >= MA(C,20) AND MA(C,20) > REF(MA(C,20),5) AND NOT ((C < REF(LLV(L,20),1) AND TOR >= REF(MA(TOR,20),1) AND C / REF(C,1)-1 < -2*REF(MA(ABS(C/REF(C,1)-1),20),1)) OR (REF(C,3) > REF(HHV(H,20),4) AND C < REF(HHV(H,20),4)*0.97) OR (C < REF(LLV(L,10),1) AND REF(C,3) >= REF(MA(C,20),3)))) OR (RATEC >= 10))"
+bias = -0.1
+confirm_after = 0
+
+
+[[strategy]]
+name = "K06_深亏低成交留仓_main_sell"
+holder = "main"
+direction = "sell"
+when = "(RATEC < -10 AND TOR < REF(MA(TOR,20),1) AND NOT ((C < REF(LLV(L,20),1) AND TOR >= REF(MA(TOR,20),1) AND C / REF(C,1)-1 < -2*REF(MA(ABS(C/REF(C,1)-1),20),1)) OR (REF(C,3) > REF(HHV(H,20),4) AND C < REF(HHV(H,20),4)*0.97) OR (C < REF(LLV(L,10),1) AND REF(C,3) >= REF(MA(C,20),3)))) AND NOT ((RATEC < -5 AND ((C < REF(LLV(L,20),1) AND TOR >= REF(MA(TOR,20),1) AND C / REF(C,1)-1 < -2*REF(MA(ABS(C/REF(C,1)-1),20),1)) OR (REF(C,3) > REF(HHV(H,20),4) AND C < REF(HHV(H,20),4)*0.97) OR (C < REF(LLV(L,10),1) AND REF(C,3) >= REF(MA(C,20),3)))) OR (RATEC >= -3 AND RATEC <= 3 AND (RATEC + 100) * REF(LLV(C,60),1) / C < 95 AND C > REF(C,3)) OR (RATEC >= 0 AND ((RATEC + 100) * REF(HHV(C,60),1) / C - 100) >= 10 AND ((RATEC + 100) * REF(HHV(C,60),1) / C - 100) - RATEC >= MAX(5, ((RATEC + 100) * REF(HHV(C,60),1) / C - 100) * 0.30) AND C < REF(C,3)) OR (RATEC >= 10 AND C >= MA(C,20) AND MA(C,20) > REF(MA(C,20),5) AND NOT ((C < REF(LLV(L,20),1) AND TOR >= REF(MA(TOR,20),1) AND C / REF(C,1)-1 < -2*REF(MA(ABS(C/REF(C,1)-1),20),1)) OR (REF(C,3) > REF(HHV(H,20),4) AND C < REF(HHV(H,20),4)*0.97) OR (C < REF(LLV(L,10),1) AND REF(C,3) >= REF(MA(C,20),3)))) OR (RATEC >= 10) OR (RATEC < 0 AND RATEC >= -10 AND NOT ((C < REF(LLV(L,20),1) AND TOR >= REF(MA(TOR,20),1) AND C / REF(C,1)-1 < -2*REF(MA(ABS(C/REF(C,1)-1),20),1)) OR (REF(C,3) > REF(HHV(H,20),4) AND C < REF(HHV(H,20),4)*0.97) OR (C < REF(LLV(L,10),1) AND REF(C,3) >= REF(MA(C,20),3)))))"
+bias = -0.12
+confirm_after = 0
+
+
+[[strategy]]
+name = "K07_浮盈回吐退出_main_sell"
+holder = "main"
+direction = "sell"
+when = "(RATEC >= 0 AND ((RATEC + 100) * REF(HHV(C,60),1) / C - 100) >= 10 AND ((RATEC + 100) * REF(HHV(C,60),1) / C - 100) - RATEC >= MAX(5, ((RATEC + 100) * REF(HHV(C,60),1) / C - 100) * 0.30) AND C < REF(C,3)) AND NOT ((RATEC < -5 AND ((C < REF(LLV(L,20),1) AND TOR >= REF(MA(TOR,20),1) AND C / REF(C,1)-1 < -2*REF(MA(ABS(C/REF(C,1)-1),20),1)) OR (REF(C,3) > REF(HHV(H,20),4) AND C < REF(HHV(H,20),4)*0.97) OR (C < REF(LLV(L,10),1) AND REF(C,3) >= REF(MA(C,20),3)))) OR (RATEC >= -3 AND RATEC <= 3 AND (RATEC + 100) * REF(LLV(C,60),1) / C < 95 AND C > REF(C,3)))"
+bias = 0.25
+confirm_after = 0
+
+
+[[strategy]]
+name = "retail基础sell"
+holder = "retail"
+direction = "sell"
+when = "C > 0"
+bias = 1.0
+confirm_after = 0
+
+
+[[strategy]]
+name = "P01_放量急跌破位_retail_sell"
+holder = "retail"
+direction = "sell"
+when = "(C < REF(LLV(L,20),1) AND TOR >= REF(MA(TOR,20),1) AND C / REF(C,1)-1 < -2*REF(MA(ABS(C/REF(C,1)-1),20),1))"
+bias = 0.7
+confirm_after = 0
+
+
+[[strategy]]
+name = "P02_突破失败_retail_sell"
+holder = "retail"
+direction = "sell"
+when = "(REF(C,3) > REF(HHV(H,20),4) AND C < REF(HHV(H,20),4)*0.97)"
+bias = 0.5
+confirm_after = 0
+
+
+[[strategy]]
+name = "P03_恢复后再失守_retail_sell"
+holder = "retail"
+direction = "sell"
+when = "(C < REF(LLV(L,10),1) AND REF(C,3) >= REF(MA(C,20),3))"
+bias = 0.4
+confirm_after = 0
+
+
+[[strategy]]
+name = "P04_坑沿承接_retail_sell"
+holder = "retail"
+direction = "sell"
+when = "(REF(C,3) < REF(LLV(L,20),4) AND C > REF(O,3) AND C > MA(C,20) AND LLV(C,2) >= REF(O,3) AND MA(TOR,3) >= REF(MA(TOR,20),3))"
+bias = -0.05
+confirm_after = 0
+
+
+[[strategy]]
+name = "P05_突破回踩守住_retail_sell"
+holder = "retail"
+direction = "sell"
+when = "(REF(C,3) > REF(HHV(H,20),4) AND C >= REF(HHV(H,20),4) AND LLV(L,3) >= REF(HHV(H,20),4)*0.97 AND LLV(L,3) <= REF(HHV(H,20),4)*1.03)"
+bias = -0.06
+confirm_after = 0
+
+
+[[strategy]]
+name = "P06_冲高回落_retail_sell"
+holder = "retail"
+direction = "sell"
+when = "(H > L AND (H-MAX(O,C))/(H-L) >= 0.5 AND C < REF(C,1) AND TOR >= REF(MA(TOR,20),1))"
+bias = 0.4
+confirm_after = 0
+
+
+[[strategy]]
+name = "P07_高位平台换手_retail_sell"
+holder = "retail"
+direction = "sell"
+when = "(C/REF(C,60) > 1.15 AND HHV(H,10)/LLV(L,10) < 1.12 AND TOR >= REF(MA(TOR,20),1))"
+bias = 0.3
+confirm_after = 0
+
+
+[[strategy]]
+name = "P08_低位平台承接_retail_sell"
+holder = "retail"
+direction = "sell"
+when = "(HHV(H,20)/LLV(L,20) < 1.18 AND C < HHV(H,120)*0.90 AND C >= MA(C,20))"
+bias = -0.02
+confirm_after = 0
+
+
+[[strategy]]
+name = "P09_次低位平台承接_retail_sell"
+holder = "retail"
+direction = "sell"
+when = "(HHV(H,20)/LLV(L,20) < 1.18 AND C >= MA(C,20) AND C > LLV(L,120)*1.10 AND C < HHV(H,120)*0.95)"
+bias = -0.02
+confirm_after = 0
+
+
+[[strategy]]
+name = "P10_放量突破_retail_sell"
+holder = "retail"
+direction = "sell"
+when = "(C > REF(HHV(H,20),1) AND TOR >= REF(MA(TOR,20),1))"
+bias = 0.1
+confirm_after = 0
+
+
+[[strategy]]
+name = "P11_缩量回撤守趋势_retail_sell"
+holder = "retail"
+direction = "sell"
+when = "(C < MA(C,5) AND C >= MA(C,20) AND TOR < REF(MA(TOR,20),1))"
+bias = -0.05
+confirm_after = 0
+
+
+[[strategy]]
+name = "P12_慢涨缩量_retail_sell"
+holder = "retail"
+direction = "sell"
+when = "(C >= MA(C,20) AND C >= REF(C,3) AND MA(TOR,3) < REF(MA(TOR,20),3))"
+bias = -0.05
+confirm_after = 0
+
+
+[[strategy]]
+name = "P13_阴跌延续_retail_sell"
+holder = "retail"
+direction = "sell"
+when = "(C < MA(C,20) AND MA(C,5) < REF(MA(C,5),3) AND C < REF(C,3))"
+bias = 0.2
+confirm_after = 0
+
+
+[[strategy]]
+name = "P14_震荡上沿_retail_sell"
+holder = "retail"
+direction = "sell"
+when = "(HHV(H,20)/LLV(L,20) < 1.18 AND HHV(H,20)>LLV(L,20) AND (C-LLV(L,20))/(HHV(H,20)-LLV(L,20)) >= 0.75)"
+bias = 0.15
+confirm_after = 0
+
+
+[[strategy]]
+name = "P15_震荡下沿_retail_sell"
+holder = "retail"
+direction = "sell"
+when = "(HHV(H,20)/LLV(L,20) < 1.18 AND HHV(H,20)>LLV(L,20) AND (C-LLV(L,20))/(HHV(H,20)-LLV(L,20)) <= 0.25)"
+bias = -0.03
+confirm_after = 0
+
+
+[[strategy]]
+name = "P16_窄幅低换手等待_retail_sell"
+holder = "retail"
+direction = "sell"
+when = "(HHV(H,10)/LLV(L,10) < 1.08 AND TOR < REF(MA(TOR,20),1)*0.7)"
+bias = -0.02
+confirm_after = 0
+
+
+[[strategy]]
+name = "K01_亏损且失守退出_retail_sell"
+holder = "retail"
+direction = "sell"
+when = "(RATEC < -5 AND ((C < REF(LLV(L,20),1) AND TOR >= REF(MA(TOR,20),1) AND C / REF(C,1)-1 < -2*REF(MA(ABS(C/REF(C,1)-1),20),1)) OR (REF(C,3) > REF(HHV(H,20),4) AND C < REF(HHV(H,20),4)*0.97) OR (C < REF(LLV(L,10),1) AND REF(C,3) >= REF(MA(C,20),3))))"
+bias = 0.3
+confirm_after = 0
+
+
+[[strategy]]
+name = "K02_亏损后回本释放_retail_sell"
+holder = "retail"
+direction = "sell"
+when = "(RATEC >= -3 AND RATEC <= 3 AND (RATEC + 100) * REF(LLV(C,60),1) / C < 95 AND C > REF(C,3)) AND NOT ((RATEC < -5 AND ((C < REF(LLV(L,20),1) AND TOR >= REF(MA(TOR,20),1) AND C / REF(C,1)-1 < -2*REF(MA(ABS(C/REF(C,1)-1),20),1)) OR (REF(C,3) > REF(HHV(H,20),4) AND C < REF(HHV(H,20),4)*0.97) OR (C < REF(LLV(L,10),1) AND REF(C,3) >= REF(MA(C,20),3)))))"
+bias = 0.32
+confirm_after = 0
+
+
+[[strategy]]
+name = "K03_趋势中浮盈持有_retail_sell"
+holder = "retail"
+direction = "sell"
+when = "(RATEC >= 10 AND C >= MA(C,20) AND MA(C,20) > REF(MA(C,20),5) AND NOT ((C < REF(LLV(L,20),1) AND TOR >= REF(MA(TOR,20),1) AND C / REF(C,1)-1 < -2*REF(MA(ABS(C/REF(C,1)-1),20),1)) OR (REF(C,3) > REF(HHV(H,20),4) AND C < REF(HHV(H,20),4)*0.97) OR (C < REF(LLV(L,10),1) AND REF(C,3) >= REF(MA(C,20),3)))) AND NOT ((RATEC < -5 AND ((C < REF(LLV(L,20),1) AND TOR >= REF(MA(TOR,20),1) AND C / REF(C,1)-1 < -2*REF(MA(ABS(C/REF(C,1)-1),20),1)) OR (REF(C,3) > REF(HHV(H,20),4) AND C < REF(HHV(H,20),4)*0.97) OR (C < REF(LLV(L,10),1) AND REF(C,3) >= REF(MA(C,20),3)))) OR (RATEC >= -3 AND RATEC <= 3 AND (RATEC + 100) * REF(LLV(C,60),1) / C < 95 AND C > REF(C,3)) OR (RATEC >= 0 AND ((RATEC + 100) * REF(HHV(C,60),1) / C - 100) >= 10 AND ((RATEC + 100) * REF(HHV(C,60),1) / C - 100) - RATEC >= MAX(5, ((RATEC + 100) * REF(HHV(C,60),1) / C - 100) * 0.30) AND C < REF(C,3)))"
+bias = -0.06
+confirm_after = 0
+
+
+[[strategy]]
+name = "K04_非趋势浮盈兑现_retail_sell"
+holder = "retail"
+direction = "sell"
+when = "(RATEC >= 10) AND NOT ((RATEC < -5 AND ((C < REF(LLV(L,20),1) AND TOR >= REF(MA(TOR,20),1) AND C / REF(C,1)-1 < -2*REF(MA(ABS(C/REF(C,1)-1),20),1)) OR (REF(C,3) > REF(HHV(H,20),4) AND C < REF(HHV(H,20),4)*0.97) OR (C < REF(LLV(L,10),1) AND REF(C,3) >= REF(MA(C,20),3)))) OR (RATEC >= -3 AND RATEC <= 3 AND (RATEC + 100) * REF(LLV(C,60),1) / C < 95 AND C > REF(C,3)) OR (RATEC >= 0 AND ((RATEC + 100) * REF(HHV(C,60),1) / C - 100) >= 10 AND ((RATEC + 100) * REF(HHV(C,60),1) / C - 100) - RATEC >= MAX(5, ((RATEC + 100) * REF(HHV(C,60),1) / C - 100) * 0.30) AND C < REF(C,3)) OR (RATEC >= 10 AND C >= MA(C,20) AND MA(C,20) > REF(MA(C,20),5) AND NOT ((C < REF(LLV(L,20),1) AND TOR >= REF(MA(TOR,20),1) AND C / REF(C,1)-1 < -2*REF(MA(ABS(C/REF(C,1)-1),20),1)) OR (REF(C,3) > REF(HHV(H,20),4) AND C < REF(HHV(H,20),4)*0.97) OR (C < REF(LLV(L,10),1) AND REF(C,3) >= REF(MA(C,20),3)))))"
+bias = 0.34
+confirm_after = 0
+
+
+[[strategy]]
+name = "K05_小亏等待_retail_sell"
+holder = "retail"
+direction = "sell"
+when = "(RATEC < 0 AND RATEC >= -10 AND NOT ((C < REF(LLV(L,20),1) AND TOR >= REF(MA(TOR,20),1) AND C / REF(C,1)-1 < -2*REF(MA(ABS(C/REF(C,1)-1),20),1)) OR (REF(C,3) > REF(HHV(H,20),4) AND C < REF(HHV(H,20),4)*0.97) OR (C < REF(LLV(L,10),1) AND REF(C,3) >= REF(MA(C,20),3)))) AND NOT ((RATEC < -5 AND ((C < REF(LLV(L,20),1) AND TOR >= REF(MA(TOR,20),1) AND C / REF(C,1)-1 < -2*REF(MA(ABS(C/REF(C,1)-1),20),1)) OR (REF(C,3) > REF(HHV(H,20),4) AND C < REF(HHV(H,20),4)*0.97) OR (C < REF(LLV(L,10),1) AND REF(C,3) >= REF(MA(C,20),3)))) OR (RATEC >= -3 AND RATEC <= 3 AND (RATEC + 100) * REF(LLV(C,60),1) / C < 95 AND C > REF(C,3)) OR (RATEC >= 0 AND ((RATEC + 100) * REF(HHV(C,60),1) / C - 100) >= 10 AND ((RATEC + 100) * REF(HHV(C,60),1) / C - 100) - RATEC >= MAX(5, ((RATEC + 100) * REF(HHV(C,60),1) / C - 100) * 0.30) AND C < REF(C,3)) OR (RATEC >= 10 AND C >= MA(C,20) AND MA(C,20) > REF(MA(C,20),5) AND NOT ((C < REF(LLV(L,20),1) AND TOR >= REF(MA(TOR,20),1) AND C / REF(C,1)-1 < -2*REF(MA(ABS(C/REF(C,1)-1),20),1)) OR (REF(C,3) > REF(HHV(H,20),4) AND C < REF(HHV(H,20),4)*0.97) OR (C < REF(LLV(L,10),1) AND REF(C,3) >= REF(MA(C,20),3)))) OR (RATEC >= 10))"
+bias = -0.1
+confirm_after = 0
+
+
+[[strategy]]
+name = "K06_深亏低成交留仓_retail_sell"
+holder = "retail"
+direction = "sell"
+when = "(RATEC < -10 AND TOR < REF(MA(TOR,20),1) AND NOT ((C < REF(LLV(L,20),1) AND TOR >= REF(MA(TOR,20),1) AND C / REF(C,1)-1 < -2*REF(MA(ABS(C/REF(C,1)-1),20),1)) OR (REF(C,3) > REF(HHV(H,20),4) AND C < REF(HHV(H,20),4)*0.97) OR (C < REF(LLV(L,10),1) AND REF(C,3) >= REF(MA(C,20),3)))) AND NOT ((RATEC < -5 AND ((C < REF(LLV(L,20),1) AND TOR >= REF(MA(TOR,20),1) AND C / REF(C,1)-1 < -2*REF(MA(ABS(C/REF(C,1)-1),20),1)) OR (REF(C,3) > REF(HHV(H,20),4) AND C < REF(HHV(H,20),4)*0.97) OR (C < REF(LLV(L,10),1) AND REF(C,3) >= REF(MA(C,20),3)))) OR (RATEC >= -3 AND RATEC <= 3 AND (RATEC + 100) * REF(LLV(C,60),1) / C < 95 AND C > REF(C,3)) OR (RATEC >= 0 AND ((RATEC + 100) * REF(HHV(C,60),1) / C - 100) >= 10 AND ((RATEC + 100) * REF(HHV(C,60),1) / C - 100) - RATEC >= MAX(5, ((RATEC + 100) * REF(HHV(C,60),1) / C - 100) * 0.30) AND C < REF(C,3)) OR (RATEC >= 10 AND C >= MA(C,20) AND MA(C,20) > REF(MA(C,20),5) AND NOT ((C < REF(LLV(L,20),1) AND TOR >= REF(MA(TOR,20),1) AND C / REF(C,1)-1 < -2*REF(MA(ABS(C/REF(C,1)-1),20),1)) OR (REF(C,3) > REF(HHV(H,20),4) AND C < REF(HHV(H,20),4)*0.97) OR (C < REF(LLV(L,10),1) AND REF(C,3) >= REF(MA(C,20),3)))) OR (RATEC >= 10) OR (RATEC < 0 AND RATEC >= -10 AND NOT ((C < REF(LLV(L,20),1) AND TOR >= REF(MA(TOR,20),1) AND C / REF(C,1)-1 < -2*REF(MA(ABS(C/REF(C,1)-1),20),1)) OR (REF(C,3) > REF(HHV(H,20),4) AND C < REF(HHV(H,20),4)*0.97) OR (C < REF(LLV(L,10),1) AND REF(C,3) >= REF(MA(C,20),3)))))"
+bias = -0.15
+confirm_after = 0
+
+
+[[strategy]]
+name = "K07_浮盈回吐退出_retail_sell"
+holder = "retail"
+direction = "sell"
+when = "(RATEC >= 0 AND ((RATEC + 100) * REF(HHV(C,60),1) / C - 100) >= 10 AND ((RATEC + 100) * REF(HHV(C,60),1) / C - 100) - RATEC >= MAX(5, ((RATEC + 100) * REF(HHV(C,60),1) / C - 100) * 0.30) AND C < REF(C,3)) AND NOT ((RATEC < -5 AND ((C < REF(LLV(L,20),1) AND TOR >= REF(MA(TOR,20),1) AND C / REF(C,1)-1 < -2*REF(MA(ABS(C/REF(C,1)-1),20),1)) OR (REF(C,3) > REF(HHV(H,20),4) AND C < REF(HHV(H,20),4)*0.97) OR (C < REF(LLV(L,10),1) AND REF(C,3) >= REF(MA(C,20),3)))) OR (RATEC >= -3 AND RATEC <= 3 AND (RATEC + 100) * REF(LLV(C,60),1) / C < 95 AND C > REF(C,3)))"
+bias = 0.34
+confirm_after = 0

@@ -2367,4 +2367,57 @@ bias = 0.5
 
         fs::remove_dir_all(source_dir).expect("cleanup temp dir");
     }
+    #[test]
+    fn s6_switch_blocks_old_checkpoint_then_rebuilds_from_history() {
+        let source_dir = unique_temp_source_dir();
+        prepare_source_db(&source_dir);
+        let source_path = source_dir.to_str().unwrap();
+        let config = ChenChipConfig {
+            warmup_days: 1,
+            bucket_pct: 5.0,
+        };
+        rebuild_cyq_chen_all(source_path, config, Some("20260401"), Some("20260403")).unwrap();
+        let old_rows = snapshot_rows_for_compare(source_path);
+        fs::write(
+            chip_change_rule_path(source_path),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../docs/chip-s6.toml"
+            )),
+        )
+        .unwrap();
+        assert!(
+            query_cyq_chen_strategy_maintenance_status(source_path)
+                .unwrap()
+                .strategy_changed
+        );
+        let skipped = maintain_cyq_chen_incremental_if_db_exists(source_path, false, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(skipped.snapshot_rows, 0);
+        assert_eq!(snapshot_rows_for_compare(source_path), old_rows);
+        let rebuilt = maintain_cyq_chen_incremental_if_db_exists(source_path, true, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(rebuilt.start_date.as_deref(), Some("20260401"));
+        assert!(
+            !query_cyq_chen_strategy_maintenance_status(source_path)
+                .unwrap()
+                .strategy_changed
+        );
+        let rows = snapshot_rows_for_compare(source_path);
+        rebuild_cyq_chen_all(source_path, config, None, None).unwrap();
+        assert_eq!(snapshot_rows_for_compare(source_path), rows);
+        let conn = crate::data::open_db_readonly(cyq_chen_db_path(source_path)).unwrap();
+        let hash: String = conn
+            .query_row(
+                "SELECT value FROM cyq_chen_meta WHERE key='strategy_hash'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(hash.starts_with("s6-v1:"));
+        drop(conn);
+        fs::remove_dir_all(source_dir).unwrap();
+    }
 }

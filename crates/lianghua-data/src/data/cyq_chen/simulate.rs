@@ -395,6 +395,7 @@ pub(super) fn apply_buy_for_day(
     runtime_len: usize,
     day_index: usize,
     turnover_rate: f64,
+    main_before_sell: f64,
 ) -> Result<(), String> {
     if turnover_rate <= EPS {
         return Ok(());
@@ -434,7 +435,26 @@ pub(super) fn apply_buy_for_day(
         runtime_len,
         day_index,
     )?;
-    let (main_share, retail_share) = buy_holder_shares(main_bias, retail_bias);
+    let (main_share, retail_share) = if chip_config.version == 2 {
+        // Version 2 buy biases are signed direction evidence, with zero as neutral.
+        let evidence = main_bias;
+        let direction = if evidence > 1e-12 {
+            (0.85 - main_before_sell / 100.0).max(0.0)
+        } else if evidence < -1e-12 {
+            (0.10 - main_before_sell / 100.0).min(0.0)
+        } else {
+            0.0
+        };
+        let strength = (evidence.abs() * 4.0 * if evidence < 0.0 { 3.0 } else { 1.0 }).min(1.0);
+        // Inventory is measured per 100 original chips; holder_chip_totals above
+        // normalizes the remaining inventory after selling and cannot supply S.
+        let main_sold =
+            main_before_sell - buckets.iter().map(|bucket| bucket.main_chip).sum::<f64>();
+        let main = (main_sold / turnover_rate + strength * direction).clamp(0.0, 1.0);
+        (main, 1.0 - main)
+    } else {
+        buy_holder_shares(main_bias, retail_bias)
+    };
 
     for (bucket_index, weight) in weights {
         let bucket_buy_amount = turnover_rate * weight / total_weight;
@@ -934,6 +954,7 @@ bias = 1.0
             bars.len(),
             0,
             10.0,
+            0.0,
         )
         .expect("buy should apply");
 
@@ -942,5 +963,133 @@ bias = 1.0
 
         assert_close(main_total, 70.0);
         assert_close(retail_total, 40.0);
+    }
+    #[test]
+    fn s6_migration_preserves_neutral_inventory_and_obeys_trade_limits() {
+        for (evidence, main_sell, retail_sell, expected_first) in [
+            (0.0, 1.0, 2.0, 50.0),
+            (0.12, 1.0, 1.0, 51.68),
+            (-0.04, 1.0, 1.0, 48.08),
+            (0.12, 1.0, 0.0, 50.0), // All turnover already belongs to main; buying cannot exceed it.
+            (-0.04, 0.0, 1.0, 50.0), // No main inventory was sold; negative evidence cannot reclassify it.
+        ] {
+            let config = ChipChangeConfig::from_toml_str(&format!(
+                r#"
+version = 2
+[[strategy]]
+name = "direction"
+holder = "main"
+direction = "buy"
+when = "C > 0"
+bias = {evidence}
+[[strategy]]
+name = "main cost turnover"
+holder = "main"
+direction = "sell"
+when = "C > 0"
+bias = {main_sell}
+[[strategy]]
+name = "retail cost turnover"
+holder = "retail"
+direction = "sell"
+when = "C > 0"
+bias = {retail_sell}
+"#
+            ))
+            .unwrap();
+            let mut row = sample_row_data();
+            row.cols.get_mut("TOR").unwrap()[2] = Some(0.0);
+            let snapshots = compute_chen_chip_snapshots_from_row_data(
+                &row,
+                &row.trade_dates[0],
+                &config,
+                ChenChipConfig {
+                    warmup_days: 0,
+                    bucket_pct: 5.0,
+                },
+            )
+            .unwrap();
+            assert_close(snapshots[0].main_total, expected_first);
+            assert_close(snapshots[2].main_total, snapshots[1].main_total);
+            let mut previous_main = 50.0;
+            for snapshot in snapshots {
+                let flow = snapshot.flow.as_ref().unwrap();
+                assert_close(snapshot.total_chips, 100.0);
+                assert_close(
+                    snapshot.main_total - previous_main,
+                    flow.main_bought - flow.main_sold,
+                );
+                assert!(flow.main_bought >= 0.0 && flow.main_bought <= 10.0 + 1e-9);
+                assert!(
+                    snapshot
+                        .bins
+                        .iter()
+                        .all(|b| b.main_chip >= 0.0 && b.retail_chip >= 0.0)
+                );
+                if evidence == 0.0 {
+                    assert_close(snapshot.main_total, 50.0);
+                }
+                previous_main = snapshot.main_total;
+            }
+        }
+    }
+
+    #[test]
+    fn s6_checkpoint_continuation_matches_full_replay() {
+        use crate::data::cyq_chen::{
+            ChenChipFeatureState,
+            compute_chen_chip_snapshots_from_initial_bins_with_compiled_config_with_features,
+            compute_chen_chip_snapshots_with_compiled_config_with_features,
+        };
+        let mut config = sample_config();
+        config.version = 2;
+        config.strategy[0].bias = 0.12;
+        let compiled = config.compile().unwrap();
+        let row = sample_row_data();
+        let compute = ChenChipConfig {
+            warmup_days: 0,
+            bucket_pct: 5.0,
+        };
+        let full =
+            compute_chen_chip_snapshots_from_row_data(&row, &row.trade_dates[0], &config, compute)
+                .unwrap();
+        let prefix = RowData {
+            trade_dates: row.trade_dates[..3].to_vec(),
+            cols: row
+                .cols
+                .iter()
+                .map(|(k, v)| (k.clone(), v[..3].to_vec()))
+                .collect(),
+        };
+        let mut state = ChenChipFeatureState::default();
+        let head = compute_chen_chip_snapshots_with_compiled_config_with_features(
+            &prefix,
+            &prefix.trade_dates[0],
+            &compiled,
+            compute,
+            &mut state,
+        )
+        .unwrap();
+        let last = head.last().unwrap();
+        let mut restored = serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        let tail =
+            compute_chen_chip_snapshots_from_initial_bins_with_compiled_config_with_features(
+                &row,
+                &row.trade_dates[3],
+                &last.bins,
+                &[],
+                &compiled,
+                compute,
+                &mut restored,
+            )
+            .unwrap();
+        for (actual, expected) in head.iter().chain(&tail).zip(&full) {
+            assert_close(actual.main_total, expected.main_total);
+            assert_eq!(actual.bins.len(), expected.bins.len());
+            for (a, b) in actual.bins.iter().zip(&expected.bins) {
+                assert_close(a.main_chip, b.main_chip);
+                assert_close(a.retail_chip, b.retail_chip);
+            }
+        }
     }
 }

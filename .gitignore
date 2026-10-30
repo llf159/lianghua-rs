@@ -37,6 +37,8 @@ market*
 /STRATEGY_CONFIRMATION_HANDOFF.md
 /STRATEGY_SYSTEM_DESIGN.md
 
+!/docs/chip-s6.toml
+
 # Local build caches and database spill files
 /node_modules/
 /.tmp/

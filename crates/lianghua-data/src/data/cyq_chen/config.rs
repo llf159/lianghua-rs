@@ -191,15 +191,27 @@ impl ChipChangeConfig {
     }
 
     fn validate(&self) -> Result<(), String> {
-        if self.version != 1 {
+        if !matches!(self.version, 1 | 2) {
             return Err(format!(
-                "筹码变化策略文件 version 只支持 1，当前为 {}",
+                "筹码变化策略文件 version 只支持 1 或 2，当前为 {}",
                 self.version
             ));
         }
 
         for (index, strategy) in self.strategy.iter().enumerate() {
             let n = index + 1;
+            if strategy.name.trim().starts_with("RESEARCH_") {
+                return Err(format!("第{n}个策略含研究标记，不能导入生产"));
+            }
+            if self.version == 2
+                && (strategy.confirm_after > 0
+                    || (strategy.direction == ChipDirection::Buy
+                        && strategy.holder != super::ChipHolder::Main))
+            {
+                return Err(format!(
+                    "第{n}个策略不符合版本 2：仅支持主力买入方向证据，且不能使用后验归属"
+                ));
+            }
             if strategy.name.trim().is_empty() {
                 return Err(format!("第{n}个strategy的name字段为空"));
             }
@@ -587,7 +599,7 @@ mod tests {
     fn chip_change_config_rejects_bad_version() {
         let version_error = ChipChangeConfig::from_toml_str(
             r#"
-    version = 2
+    version = 3
     strategy = []
     "#,
         )
@@ -630,5 +642,29 @@ mod tests {
         )
         .expect_err("expression should fail");
         assert!(error.contains("表达式解析错误"));
+    }
+    #[test]
+    fn s6_config_validates_production_rules_and_rejects_unsupported_identity_updates() {
+        let mut config = ChipChangeConfig::from_toml_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/chip-s6.toml"
+        )))
+        .unwrap();
+        assert_eq!(config.version, 2);
+        assert_eq!(config.compile().unwrap().strategies.len(), 64);
+        let buy = config
+            .strategy
+            .iter()
+            .position(|r| r.direction == ChipDirection::Buy)
+            .unwrap();
+        config.strategy[buy].holder = ChipHolder::Retail;
+        assert!(config.compile().unwrap_err().contains("仅支持主力买入"));
+        config.strategy[buy].holder = ChipHolder::Main;
+        config.strategy[buy].confirm_after = 1;
+        assert!(config.compile().unwrap_err().contains("后验归属"));
+        config.strategy[buy].confirm_after = 0;
+        config.strategy[buy].name = "RESEARCH_BALANCED_MEMORY".into();
+        config.version = 1;
+        assert!(config.compile().unwrap_err().contains("研究标记"));
     }
 }

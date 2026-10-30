@@ -137,6 +137,7 @@ export type CyqChenL2Day = {
 }
 
 export type CyqChenSingleStockData = {
+  version: number
   basis?: CyqChenBasis | null
   l2Days: CyqChenL2Day[]
   resolvedTsCode: string
@@ -154,6 +155,7 @@ export type CyqChenSingleStockData = {
 }
 
 export type CyqChenSingleStockRequest = {
+  version: number
   compareMechanisms?: boolean
   sourcePath: string
   tsCode: string
@@ -177,6 +179,7 @@ export type CyqChenStrategyBackupItem = {
 }
 
 export type CyqChenStrategyPageData = {
+  version: number
   filePath: string
   exists: boolean
   strategies: CyqChenStrategyDraft[]
@@ -219,16 +222,17 @@ export async function getCyqChenStrategyPage(sourcePath: string) {
 export async function saveCyqChenStrategyFile(
   sourcePath: string,
   strategies: CyqChenStrategyDraft[],
+  version: number,
 ) {
   return invoke<CyqChenStrategyPageData>('save_cyq_chen_strategy_file', {
     sourcePath,
-    draft: { strategies },
+    draft: { version, strategies },
   })
 }
 
-export async function checkCyqChenStrategyFileDraft(strategies: CyqChenStrategyDraft[]) {
+export async function checkCyqChenStrategyFileDraft(strategies: CyqChenStrategyDraft[], version: number) {
   return invoke<string>('check_cyq_chen_strategy_file_draft', {
-    draft: { strategies },
+    draft: { version, strategies },
   })
 }
 

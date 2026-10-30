@@ -34,6 +34,7 @@ const EMPTY_CHIP_CHANGE_TEMPLATE: &str = "version = 1\n";
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CyqChenSingleStockRequest {
+    pub version: Option<u32>,
     #[serde(default)]
     pub compare_mechanisms: bool,
     pub source_path: String,
@@ -59,6 +60,7 @@ pub struct CyqChenKlineRow {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CyqChenSingleStockData {
+    pub version: u32,
     pub resolved_ts_code: String,
     pub start_date: String,
     pub end_date: String,
@@ -94,6 +96,7 @@ pub struct CyqChenL2Day {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CyqChenStrategyPageData {
+    pub version: u32,
     pub file_path: String,
     pub exists: bool,
     pub strategies: Vec<ChipChangeStrategy>,
@@ -142,6 +145,7 @@ pub struct CyqChenStrategyBackupDiff {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CyqChenStrategyFileDraft {
+    pub version: Option<u32>,
     pub strategies: Vec<ChipChangeStrategy>,
 }
 
@@ -161,7 +165,7 @@ fn chip_change_backup_dir(source_path: &str) -> PathBuf {
 
 fn validate_chip_change_draft(draft: CyqChenStrategyFileDraft) -> Result<ChipChangeConfig, String> {
     let config = ChipChangeConfig {
-        version: 1,
+        version: draft.version.unwrap_or(1),
         strategy: draft.strategies,
     };
     config.compile()?;
@@ -297,10 +301,10 @@ fn copy_file_to_destination(
 fn build_strategy_page_data(source_path: &str) -> Result<CyqChenStrategyPageData, String> {
     let path = chip_change_rule_path(source_path);
     let exists = path.exists();
-    let strategies = if exists {
-        ChipChangeConfig::load(source_path)?.strategy
+    let config = if exists {
+        ChipChangeConfig::load(source_path)?
     } else {
-        (|| -> Vec<ChipChangeStrategy> {
+        (|| -> ChipChangeConfig {
             toml::from_str::<ChipChangeConfig>(
                 r#"
 version = 1
@@ -334,14 +338,14 @@ when = "RATEC > 20 AND C < O"
 bias = -0.6
 "#,
             )
-            .map(|config| config.strategy)
-            .unwrap_or_default()
+            .expect("built-in chip strategy must be valid")
         })()
     };
     Ok(CyqChenStrategyPageData {
+        version: config.version,
         file_path: path.display().to_string(),
         exists,
-        strategies,
+        strategies: config.strategy,
         backups: (|source_path: &str| -> Result<Vec<CyqChenStrategyBackupItem>, String> {
             let backup_dir = chip_change_backup_dir(source_path);
             if !backup_dir.exists() {
@@ -445,14 +449,17 @@ pub fn get_cyq_chen_strategy_page(source_path: &str) -> Result<CyqChenStrategyPa
 
 pub fn save_cyq_chen_strategy_file(
     source_path: &str,
-    draft: CyqChenStrategyFileDraft,
+    mut draft: CyqChenStrategyFileDraft,
 ) -> Result<CyqChenStrategyPageData, String> {
     let source_path = source_path.trim();
     if source_path.is_empty() {
         return Err("数据目录为空，请先确认当前数据源".to_string());
     }
-    let config = validate_chip_change_draft(draft)?;
     let path = chip_change_rule_path(source_path);
+    if draft.version.is_none() && path.exists() {
+        draft.version = Some(ChipChangeConfig::load(source_path)?.version);
+    }
+    let config = validate_chip_change_draft(draft)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("创建筹码策略目录失败: {e}"))?;
     }
@@ -976,7 +983,13 @@ pub fn run_cyq_chen_single_stock_test(
         bucket_pct: request.bucket_pct,
     };
     let chip_config = ChipChangeConfig {
-        version: 1,
+        version: match request.version {
+            Some(version) => version,
+            None if chip_change_rule_path(source_path).exists() => {
+                ChipChangeConfig::load(source_path)?.version
+            }
+            None => 1,
+        },
         strategy: request.strategies,
     };
     let compiled_chip_config = chip_config.compile()?;
@@ -1063,6 +1076,7 @@ pub fn run_cyq_chen_single_stock_test(
             Ok(data) => data,
             Err(err) if err.contains("trade_dates为空") => {
                 return Ok(CyqChenSingleStockData {
+                    version: chip_config.version,
                     resolved_ts_code: ts_code,
                     start_date,
                     end_date,
@@ -1080,6 +1094,7 @@ pub fn run_cyq_chen_single_stock_test(
 
     if row_data.trade_dates.is_empty() {
         return Ok(CyqChenSingleStockData {
+            version: chip_config.version,
             resolved_ts_code: ts_code,
             start_date,
             end_date,
@@ -1214,6 +1229,7 @@ pub fn run_cyq_chen_single_stock_test(
     }
 
     Ok(CyqChenSingleStockData {
+        version: chip_config.version,
         resolved_ts_code: ts_code,
         start_date,
         end_date,
@@ -1662,6 +1678,7 @@ mod tests {
         prepare_source_db(&source_dir);
 
         let data = run_cyq_chen_single_stock_test(CyqChenSingleStockRequest {
+            version: None,
             compare_mechanisms: true,
             source_path: source_dir.to_str().expect("utf8 path").to_string(),
             ts_code: "000001".to_string(),
@@ -1718,6 +1735,7 @@ mod tests {
         prepare_source_db(&source_dir);
 
         let data = run_cyq_chen_single_stock_test(CyqChenSingleStockRequest {
+            version: None,
             compare_mechanisms: true,
             source_path: source_dir.to_str().expect("utf8 path").to_string(),
             ts_code: "000999".to_string(),
@@ -1742,5 +1760,56 @@ mod tests {
         assert!(data.snapshots.is_empty());
 
         fs::remove_dir_all(source_dir).expect("cleanup temp dir");
+    }
+    #[test]
+    fn s6_save_and_single_stock_test_preserve_model_version() {
+        let source_dir = unique_temp_source_dir();
+        prepare_source_db(&source_dir);
+        let source_path = source_dir.to_str().unwrap();
+        let config = crate::data::cyq_chen::ChipChangeConfig::from_toml_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/chip-s6.toml"
+        )))
+        .unwrap();
+        let page = super::save_cyq_chen_strategy_file(
+            source_path,
+            super::CyqChenStrategyFileDraft {
+                version: Some(2),
+                strategies: config.strategy,
+            },
+        )
+        .unwrap();
+        assert_eq!(page.version, 2);
+        // A client without the new field must not downgrade an existing S6 file on save.
+        let page = super::save_cyq_chen_strategy_file(
+            source_path,
+            super::CyqChenStrategyFileDraft {
+                version: None,
+                strategies: page.strategies,
+            },
+        )
+        .unwrap();
+        assert_eq!(page.version, 2);
+        let data = run_cyq_chen_single_stock_test(CyqChenSingleStockRequest {
+            version: Some(page.version),
+            compare_mechanisms: true,
+            source_path: source_path.into(),
+            ts_code: "000001".into(),
+            start_date: Some("20260401".into()),
+            end_date: Some("20260407".into()),
+            warmup_days: 2,
+            bucket_pct: 5.0,
+            strategies: page.strategies,
+        })
+        .unwrap();
+        assert_eq!(data.version, 2);
+        assert!(!data.snapshots.is_empty());
+        assert!(
+            data.snapshots
+                .iter()
+                .all(|s| (s.main_total - 50.0).abs() < 1e-8)
+        );
+        assert!(!source_dir.join("cyq_chen.db").exists());
+        fs::remove_dir_all(source_dir).unwrap();
     }
 }

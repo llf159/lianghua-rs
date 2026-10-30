@@ -40,6 +40,7 @@ pub(super) const EPS: f64 = 1e-10;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChipChangeConfig {
+    /// 1: fixed buyer weights; 2: S6 inventory-neutral directional migration.
     pub version: u32,
     pub strategy: Vec<ChipChangeStrategy>,
 }
@@ -359,9 +360,9 @@ pub(super) fn replay_chen_chip_snapshots(
     mut emit: impl FnMut(ChenChipSnapshot) -> Result<(), String>,
 ) -> Result<(), String> {
     validate_compute_config(config)?;
-    if chip_config.version != 1 {
+    if !matches!(chip_config.version, 1 | 2) {
         return Err(format!(
-            "筹码变化策略文件 version 只支持 1，当前为 {}",
+            "筹码变化策略文件 version 只支持 1 或 2，当前为 {}",
             chip_config.version
         ));
     }
@@ -471,6 +472,7 @@ pub(super) fn replay_chen_chip_snapshots(
             len,
             day_index,
             bar.turnover_rate,
+            main_before,
         )?;
         after_buy.clear();
         after_buy.extend(buckets.iter().map(ChipBucket::total_chip));
@@ -534,9 +536,9 @@ pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config_with_f
     feature_state: &mut ChenChipFeatureState,
 ) -> Result<Vec<ChenChipSnapshot>, String> {
     validate_compute_config(config)?;
-    if chip_config.version != 1 {
+    if !matches!(chip_config.version, 1 | 2) {
         return Err(format!(
-            "筹码变化策略文件 version 只支持 1，当前为 {}",
+            "筹码变化策略文件 version 只支持 1 或 2，当前为 {}",
             chip_config.version
         ));
     }
@@ -692,6 +694,7 @@ pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config_with_f
             len,
             day_index,
             bar.turnover_rate,
+            main_before,
         )?;
         after_buy.clear();
         after_buy.extend(buckets.iter().map(ChipBucket::total_chip));

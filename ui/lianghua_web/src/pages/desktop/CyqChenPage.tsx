@@ -2452,6 +2452,7 @@ export default function CyqChenPage() {
   const [endDateInput, setEndDateInput] = useState(persistedDraft.endDateInput)
   const [warmupDaysInput, setWarmupDaysInput] = useState(persistedDraft.warmupDaysInput)
   const [bucketPctInput, setBucketPctInput] = useState(persistedDraft.bucketPctInput)
+  const [strategyVersion, setStrategyVersion] = useState(1)
   const [strategies, setStrategies] = useState<CyqChenStrategyDraft[]>(() => cloneDefaultStrategies())
   const [sourcePath, setSourcePath] = useState('')
   const [stockLookupRows, setStockLookupRows] = useState<StockLookupRow[]>([])
@@ -2551,8 +2552,9 @@ export default function CyqChenPage() {
           return
         }
         setSourcePath(nextSourcePath)
+        setStrategyVersion(page.version)
         setStrategies(page.strategies.map((strategy) => ({ ...strategy })))
-        setNotice(page.exists ? '已读取 chip_change_rule.toml。' : '策略文件不存在，已载入默认测试配置。')
+        setNotice(page.exists ? `已读取 ${page.version === 2 ? 'S6 库存记忆' : '旧版'}筹码策略。` : '策略文件不存在，已载入默认测试配置。')
       } catch (loadError) {
         if (!canceled) {
           setError(`读取筹码策略失败: ${String(loadError)}`)
@@ -2655,6 +2657,7 @@ export default function CyqChenPage() {
       const nextSourcePath = sourcePath || await ensureManagedSourcePath()
       setSourcePath(nextSourcePath)
       const nextResult = await runCyqChenSingleStockTest({
+        version: strategyVersion,
         compareMechanisms,
         sourcePath: nextSourcePath,
         tsCode: resolvedTestTsCode,
@@ -2671,7 +2674,7 @@ export default function CyqChenPage() {
       setSavedRuns((items) => [
         {
           id: `${Date.now()}`,
-          label: `${nextResult.resolvedTsCode} ${nextResult.startDate}-${nextResult.endDate}`,
+          label: `${nextResult.version === 2 ? 'S6' : '旧版'} ${nextResult.resolvedTsCode} ${nextResult.startDate}-${nextResult.endDate}`,
           data: nextResult,
         },
         ...items,
@@ -2811,7 +2814,7 @@ export default function CyqChenPage() {
             </div>
             <p>
               {result
-                ? `${result.startDate} 至 ${result.endDate} · 输出起点 ${result.outputStartDate ?? '--'}`
+                ? `${result.version === 2 ? 'S6 库存记忆' : '旧版筹码'} · ${result.startDate} 至 ${result.endDate} · 输出起点 ${result.outputStartDate ?? '--'}`
                 : '设置单票参数后运行计算'}
             </p>
           </div>
