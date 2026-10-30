@@ -225,6 +225,8 @@ pub(super) struct RuleUniverseRow {
 
 #[derive(Debug, Clone)]
 pub(super) struct RuleDayBaseSample {
+    entry_date: u32,
+    label_end_date: u32,
     ts_code_id: u32,
     residual_return: f64,
     er_change: f64,
@@ -315,11 +317,31 @@ pub(super) struct ResidualCacheInput<'a> {
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct RuleBacktestOutcome {
+    entry_date: u32,
+    label_end_date: u32,
     residual_return: f64,
     er_change: f64,
 }
 
 impl RuleLayerRuntimeCache {
+    pub fn visit_label_windows(
+        &self,
+        mut visit: impl FnMut(&str, &str, u32, u32, f64) -> Result<(), String>,
+    ) -> Result<(), String> {
+        for day in &self.day_groups {
+            for sample in &day.samples {
+                visit(
+                    self.ts_code(sample.ts_code_id),
+                    &day.trade_date,
+                    sample.entry_date,
+                    sample.label_end_date,
+                    sample.residual_return,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn trade_dates(&self) -> impl Iterator<Item = &str> {
         self.day_groups
             .iter()
@@ -1464,6 +1486,8 @@ mod tests {
                     (
                         "d0".to_string(),
                         RuleBacktestOutcome {
+                            entry_date: 0,
+                            label_end_date: 0,
                             residual_return: 1.0,
                             er_change: 0.0,
                         },
@@ -1471,6 +1495,8 @@ mod tests {
                     (
                         "d1".to_string(),
                         RuleBacktestOutcome {
+                            entry_date: 0,
+                            label_end_date: 0,
                             residual_return: 2.0,
                             er_change: 0.0,
                         },
@@ -1482,6 +1508,8 @@ mod tests {
                 HashMap::from([(
                     "d0".to_string(),
                     RuleBacktestOutcome {
+                        entry_date: 0,
+                        label_end_date: 0,
                         residual_return: 3.0,
                         er_change: 0.0,
                     },

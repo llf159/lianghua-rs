@@ -767,6 +767,8 @@ pub(super) fn build_rule_day_groups(
             continue;
         };
         current_samples.push(RuleDayBaseSample {
+            entry_date: 0,
+            label_end_date: 0,
             ts_code_id,
             residual_return: outcome.residual_return,
             er_change: outcome.er_change,
@@ -832,6 +834,8 @@ mod tests {
                     trade_date: Arc::from("d0"),
                     score_offset: 0,
                     samples: vec![RuleDayBaseSample {
+                        entry_date: 0,
+                        label_end_date: 0,
                         ts_code_id: 0,
                         residual_return: 1.0,
                         er_change: 1.0,
@@ -842,11 +846,15 @@ mod tests {
                     score_offset: 2,
                     samples: vec![
                         RuleDayBaseSample {
+                            entry_date: 0,
+                            label_end_date: 0,
                             ts_code_id: 0,
                             residual_return: 1.0,
                             er_change: 0.0,
                         },
                         RuleDayBaseSample {
+                            entry_date: 0,
+                            label_end_date: 0,
                             ts_code_id: 1,
                             residual_return: 1.0,
                             er_change: 0.0,

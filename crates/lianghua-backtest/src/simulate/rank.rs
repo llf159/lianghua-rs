@@ -354,6 +354,22 @@ pub struct RankTopKPeriodSummary {
     pub hac_lag: usize,
 }
 
+/// 固定原始排名成员的可观察后验；缺标签不改变席位。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct FixedRankTopKSummary {
+    pub period_label: String,
+    pub top_k: usize,
+    pub ranking_days: usize,
+    pub calendar_days: Option<usize>,
+    pub quarter_status: String,
+    pub observed_days: usize,
+    pub member_count: usize,
+    pub ineligible_count: usize,
+    pub unknown_eligibility_count: usize,
+    pub label_count: usize,
+    pub avg_daily_return: Option<f64>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RankLayerMetrics {
     pub points: Vec<RankLayerPoint>,
@@ -369,6 +385,7 @@ pub struct RankLayerMetrics {
     pub layer_samples: Vec<RankLayerSamplePoint>,
     pub top_k_summaries: Vec<RankTopKSummary>,
     pub top_k_period_summaries: Vec<RankTopKPeriodSummary>,
+    pub fixed_top_k_summaries: Vec<FixedRankTopKSummary>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -478,7 +495,25 @@ pub fn calc_rank_layer_metrics_from_db(
         &rule_layer_config,
     )?;
 
-    calc_rank_layer_metrics_with_lookup(&all_samples, &input.layer_config, Some(&rank_lookup))
+    let eligibility = super::build_backtest_sample_eligibility(
+        source_dir,
+        input.layer_config.min_listed_trade_days,
+    )?;
+    let mut metrics = calc_rank_layer_metrics_with_lookup(
+        &all_samples,
+        &input.layer_config,
+        Some(&rank_lookup),
+        Some(&eligibility),
+    )?;
+    if let Ok(calendar) = crate::data::load_trade_date_list(source_dir) {
+        annotate_fixed_quarters(
+            &mut metrics.fixed_top_k_summaries,
+            &calendar,
+            &input.start_date,
+            &input.end_date,
+        );
+    }
+    Ok(metrics)
 }
 
 pub fn calc_rank_layer_metrics_from_score_rows(
@@ -511,14 +546,32 @@ pub fn calc_rank_layer_metrics_from_score_rows(
         &rule_layer_config,
     )?;
 
-    calc_rank_layer_metrics_with_lookup(&all_samples, &input.layer_config, Some(&rank_lookup))
+    let eligibility = super::build_backtest_sample_eligibility(
+        source_dir,
+        input.layer_config.min_listed_trade_days,
+    )?;
+    let mut metrics = calc_rank_layer_metrics_with_lookup(
+        &all_samples,
+        &input.layer_config,
+        Some(&rank_lookup),
+        Some(&eligibility),
+    )?;
+    if let Ok(calendar) = crate::data::load_trade_date_list(source_dir) {
+        annotate_fixed_quarters(
+            &mut metrics.fixed_top_k_summaries,
+            &calendar,
+            &input.start_date,
+            &input.end_date,
+        );
+    }
+    Ok(metrics)
 }
 
 pub fn calc_rank_layer_metrics(
     samples: &[RuleLayerSamplePoint],
     config: &RankLayerConfig,
 ) -> Result<RankLayerMetrics, String> {
-    calc_rank_layer_metrics_with_lookup(samples, config, None)
+    calc_rank_layer_metrics_with_lookup(samples, config, None, None)
 }
 
 pub fn calc_rank_layer_metrics_from_rank_samples(
@@ -549,13 +602,14 @@ pub fn calc_rank_layer_metrics_from_rank_samples(
             .max()
             .unwrap_or(""),
     );
-    calc_rank_layer_metrics_with_lookup(&samples, config, Some(&rank_lookup))
+    calc_rank_layer_metrics_with_lookup(&samples, config, Some(&rank_lookup), None)
 }
 
 fn calc_rank_layer_metrics_with_lookup(
     samples: &[RuleLayerSamplePoint],
     config: &RankLayerConfig,
     rank_lookup: Option<&RankLayerLookup>,
+    eligibility: Option<&super::BacktestSampleEligibility>,
 ) -> Result<RankLayerMetrics, String> {
     config.validate()?;
 
@@ -963,6 +1017,110 @@ fn calc_rank_layer_metrics_with_lookup(
             (summaries, period_summaries)
         })(top_k_daily_points, config.backtest_period);
 
+    // 上市资格在选择席位之前判断；资格未知单列，标签缺失不改变席位。
+    let mut fixed_top_k_summaries = Vec::new();
+    if let Some(lookup) = rank_lookup
+        .filter(|_| config.target.total_mv_min.is_none() && config.target.total_mv_max.is_none())
+    {
+        let mut ranked_days: BTreeMap<&str, (Vec<(&str, i64)>, usize, usize)> = BTreeMap::new();
+        for (code, dates) in &lookup.sample_ranks {
+            for (date, rank) in dates {
+                let day = ranked_days.entry(date).or_default();
+                match eligibility
+                    .map(|item| item.sample_status(code, date))
+                    .unwrap_or(Some(true))
+                {
+                    Some(true) => day.0.push((code, *rank)),
+                    Some(false) => day.1 += 1,
+                    None => day.2 += 1,
+                }
+            }
+        }
+        let mut last_rank_by_day = HashMap::new();
+        for (date, (members, _, _)) in &mut ranked_days {
+            members.sort_unstable_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(b.0)));
+            members.truncate(DEFAULT_TOP_KS.last().copied().unwrap_or(0));
+            if let Some((_, rank)) = members.last() {
+                last_rank_by_day.insert(*date, *rank);
+            }
+        }
+        let labels = samples
+            .iter()
+            .filter(|sample| {
+                sample.residual_return.is_finite()
+                    && sample_database_rank(&sample.trade_date, sample, Some(lookup))
+                        .zip(last_rank_by_day.get(sample.trade_date.as_str()))
+                        .is_some_and(|(rank, last_rank)| rank <= *last_rank)
+            })
+            .map(|sample| {
+                (
+                    (sample.trade_date.as_str(), sample.ts_code.as_str()),
+                    sample.residual_return,
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let mut grouped: BTreeMap<(usize, String), (usize, usize, usize, usize, usize, Vec<f64>)> =
+            BTreeMap::new();
+        for (date, (members, ineligible_count, unknown_count)) in ranked_days {
+            let quarter = date
+                .get(4..6)
+                .and_then(|month| month.parse::<u8>().ok())
+                .filter(|month| (1..=12).contains(month))
+                .and_then(|month| {
+                    date.get(..4)
+                        .map(|year| format!("{year} Q{}", (month - 1) / 3 + 1))
+                });
+            for top_k in DEFAULT_TOP_KS {
+                let selected = members.iter().take(top_k).collect::<Vec<_>>();
+                let values = selected
+                    .iter()
+                    .filter_map(|(code, _)| labels.get(&(date, *code)).copied())
+                    .collect::<Vec<_>>();
+                for period in std::iter::once("全部".to_string()).chain(quarter.iter().cloned()) {
+                    let entry = grouped.entry((top_k, period)).or_default();
+                    entry.0 += 1;
+                    entry.1 += selected.len();
+                    entry.2 += ineligible_count;
+                    entry.3 += unknown_count;
+                    entry.4 += values.len();
+                    if let Some(value) = mean(&values) {
+                        entry.5.push(value);
+                    }
+                }
+            }
+        }
+        fixed_top_k_summaries = grouped
+            .into_iter()
+            .map(
+                |(
+                    (top_k, period_label),
+                    (
+                        ranking_days,
+                        member_count,
+                        ineligible_count,
+                        unknown_eligibility_count,
+                        label_count,
+                        values,
+                    ),
+                )| {
+                    FixedRankTopKSummary {
+                        period_label,
+                        top_k,
+                        ranking_days,
+                        calendar_days: None,
+                        quarter_status: "unknown".to_string(),
+                        observed_days: values.len(),
+                        member_count,
+                        ineligible_count,
+                        unknown_eligibility_count,
+                        label_count,
+                        avg_daily_return: mean(&values),
+                    }
+                },
+            )
+            .collect();
+    }
+
     let ic_mean = mean(&ic_values);
     let ic_std = sample_std(&ic_values);
     let icir = match (ic_mean, ic_std) {
@@ -1023,7 +1181,79 @@ fn calc_rank_layer_metrics_with_lookup(
         layer_samples,
         top_k_summaries,
         top_k_period_summaries,
+        fixed_top_k_summaries,
     })
+}
+
+fn annotate_fixed_quarters(
+    summaries: &mut [FixedRankTopKSummary],
+    calendar: &[String],
+    start_date: &str,
+    end_date: &str,
+) {
+    let mut days = calendar
+        .iter()
+        .map(String::as_str)
+        .filter(|day| day.len() == 8 && day.bytes().all(|byte| byte.is_ascii_digit()))
+        .collect::<Vec<_>>();
+    days.sort_unstable();
+    days.dedup();
+    for summary in summaries {
+        let (calendar_days, status) = quarter_coverage(
+            &summary.period_label,
+            summary.ranking_days,
+            &days,
+            start_date,
+            end_date,
+        );
+        summary.calendar_days = calendar_days;
+        summary.quarter_status = status.to_string();
+    }
+}
+
+pub(super) fn quarter_coverage(
+    period: &str,
+    ranking_days: usize,
+    days: &[&str],
+    start_date: &str,
+    end_date: &str,
+) -> (Option<usize>, &'static str) {
+    let Some((year, quarter)) = period.split_once(" Q") else {
+        return (None, "unknown");
+    };
+    if year.len() != 4 || !year.bytes().all(|byte| byte.is_ascii_digit()) {
+        return (None, "unknown");
+    }
+    let (start_suffix, end_suffix) = match quarter {
+        "1" => ("0101", "0331"),
+        "2" => ("0401", "0630"),
+        "3" => ("0701", "0930"),
+        "4" => ("1001", "1231"),
+        _ => return (None, "unknown"),
+    };
+    let quarter_start = format!("{year}{start_suffix}");
+    let quarter_end = format!("{year}{end_suffix}");
+    if !days
+        .first()
+        .is_some_and(|day| *day < quarter_start.as_str())
+        || !days.last().is_some_and(|day| *day > quarter_end.as_str())
+    {
+        return (None, "unknown");
+    }
+    let first_index = days.partition_point(|day| *day < quarter_start.as_str());
+    let end_index = days.partition_point(|day| *day <= quarter_end.as_str());
+    if first_index == end_index {
+        return (None, "unknown");
+    }
+    let count = end_index - first_index;
+    let status = if start_date > days[first_index] || end_date < days[end_index - 1] {
+        "partial"
+    } else if ranking_days != count {
+        "missing_rank_days"
+    } else {
+        "range_covered"
+    };
+    (Some(count), status)
 }
 
 #[derive(Debug, Clone)]
@@ -1149,7 +1379,7 @@ fn mean(values: &[f64]) -> Option<f64> {
     Some(values.iter().sum::<f64>() / values.len() as f64)
 }
 
-fn sample_std(values: &[f64]) -> Option<f64> {
+pub(super) fn sample_std(values: &[f64]) -> Option<f64> {
     if values.len() < 2 {
         return None;
     }
@@ -1165,7 +1395,7 @@ fn sample_std(values: &[f64]) -> Option<f64> {
     Some(var.sqrt())
 }
 
-fn spearman_corr(x: &[f64], y: &[f64]) -> Option<f64> {
+pub(super) fn spearman_corr(x: &[f64], y: &[f64]) -> Option<f64> {
     if x.len() != y.len() || x.len() < 2 {
         return None;
     }
@@ -1565,6 +1795,7 @@ mod tests {
                 layer_method: RankLayerMethod::SampleCount,
             },
             Some(&rank_lookup),
+            None,
         )
         .expect("rank metrics should build");
 
@@ -1639,6 +1870,7 @@ mod tests {
                 layer_method: RankLayerMethod::Rank,
             },
             Some(&stale_lookup),
+            None,
         )
         .expect("rank metrics should build");
 
@@ -1701,6 +1933,7 @@ mod tests {
                 layer_method: RankLayerMethod::Rank,
             },
             Some(&rank_lookup),
+            None,
         )
         .expect("rank metrics should build");
 
@@ -1747,6 +1980,119 @@ mod tests {
     }
 
     #[test]
+    fn fixed_top_k_keeps_missing_labels_and_separate_quarters() {
+        let samples = vec![
+            RuleLayerSamplePoint {
+                ts_code: "B".into(),
+                trade_date: "20240102".into(),
+                rule_score: 1.0,
+                residual_return: 9.0,
+                er_change: 0.0,
+            },
+            RuleLayerSamplePoint {
+                ts_code: "A".into(),
+                trade_date: "20240401".into(),
+                rule_score: 2.0,
+                residual_return: 2.0,
+                er_change: 0.0,
+            },
+        ];
+        let lookup = RankLayerLookup {
+            sample_ranks: HashMap::from([
+                (
+                    "A".into(),
+                    HashMap::from([("20240102".into(), 1), ("20240401".into(), 1)]),
+                ),
+                (
+                    "B".into(),
+                    HashMap::from([("20240102".into(), 2), ("20240401".into(), 2)]),
+                ),
+            ]),
+            day_max_ranks: HashMap::from([("20240102".into(), 2), ("20240401".into(), 2)]),
+        };
+        let metrics = calc_rank_layer_metrics_with_lookup(
+            &samples,
+            &RankLayerConfig {
+                target: Default::default(),
+                min_samples_per_day: 1,
+                backtest_period: 1,
+                min_listed_trade_days: 0,
+                layer_count: 2,
+                layer_method: RankLayerMethod::Rank,
+            },
+            Some(&lookup),
+            None,
+        )
+        .unwrap();
+        let q1 = metrics
+            .fixed_top_k_summaries
+            .iter()
+            .find(|item| item.top_k == 1 && item.period_label == "2024 Q1")
+            .unwrap();
+        assert_eq!(
+            (
+                q1.ranking_days,
+                q1.observed_days,
+                q1.member_count,
+                q1.label_count
+            ),
+            (1, 0, 1, 0)
+        );
+        assert_eq!(q1.avg_daily_return, None);
+        let calendar = ["20231229", "20240102", "20240329", "20240401"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let mut quarter = vec![q1.clone()];
+        super::annotate_fixed_quarters(&mut quarter, &calendar, "20240103", "20240329");
+        assert_eq!(quarter[0].quarter_status, "partial");
+        assert_eq!(quarter[0].calendar_days, Some(2));
+        super::annotate_fixed_quarters(&mut quarter, &calendar, "20240102", "20240329");
+        assert_eq!(quarter[0].quarter_status, "missing_rank_days");
+        quarter[0].ranking_days = 2;
+        super::annotate_fixed_quarters(&mut quarter, &calendar, "20240102", "20240329");
+        assert_eq!(quarter[0].quarter_status, "range_covered");
+        let q2 = metrics
+            .fixed_top_k_summaries
+            .iter()
+            .find(|item| item.top_k == 1 && item.period_label == "2024 Q2")
+            .unwrap();
+        assert_eq!((q2.member_count, q2.label_count), (1, 1));
+        assert_eq!(q2.avg_daily_return, Some(2.0));
+
+        let mut with_unknown = lookup.clone();
+        with_unknown
+            .sample_ranks
+            .insert("C".into(), HashMap::from([("20240102".into(), 3)]));
+        let eligibility = super::super::BacktestSampleEligibility {
+            trade_date_to_index: HashMap::from([("20240102".into(), 1), ("20240401".into(), 2)]),
+            listed_trade_index_by_ts: HashMap::from([("A".into(), 1), ("B".into(), 0)]),
+            min_listed_trade_days: 2,
+        };
+        let qualified = calc_rank_layer_metrics_with_lookup(
+            &samples,
+            &RankLayerConfig {
+                target: Default::default(),
+                min_samples_per_day: 1,
+                backtest_period: 1,
+                min_listed_trade_days: 2,
+                layer_count: 2,
+                layer_method: RankLayerMethod::Rank,
+            },
+            Some(&with_unknown),
+            Some(&eligibility),
+        )
+        .unwrap();
+        let q1 = qualified
+            .fixed_top_k_summaries
+            .iter()
+            .find(|item| item.top_k == 1 && item.period_label == "2024 Q1")
+            .unwrap();
+        assert_eq!((q1.ineligible_count, q1.unknown_eligibility_count), (1, 1));
+        assert_eq!(q1.avg_daily_return, Some(9.0));
+    }
+
+    #[test]
     fn rank_metrics_select_top_thousand_without_sorting_the_full_day() {
         let trade_date = "20240102";
         let samples = (1..=1500)
@@ -1784,6 +2130,7 @@ mod tests {
                 layer_method: RankLayerMethod::SampleCount,
             },
             Some(&rank_lookup),
+            None,
         )
         .expect("rank metrics should build");
 

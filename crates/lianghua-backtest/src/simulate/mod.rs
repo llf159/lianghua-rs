@@ -1,6 +1,8 @@
+pub mod comparison;
 pub mod dimension;
 pub mod fp_utils;
 pub mod rank;
+pub mod research_statistics;
 pub mod rule;
 pub mod scene;
 
@@ -124,18 +126,19 @@ pub struct BacktestSampleEligibility {
 
 impl BacktestSampleEligibility {
     pub fn allows_sample(&self, ts_code: &str, trade_date: &str) -> bool {
-        if self.min_listed_trade_days == 0 {
-            return true;
-        }
-
-        let Some(sample_idx) = self.trade_date_to_index.get(trade_date).copied() else {
+        if self.min_listed_trade_days > 0 && !self.trade_date_to_index.contains_key(trade_date) {
             return false;
-        };
-        let Some(listed_idx) = self.listed_trade_index_by_ts.get(ts_code).copied() else {
-            return true;
-        };
+        }
+        self.sample_status(ts_code, trade_date).unwrap_or(true)
+    }
 
-        sample_idx + 1 >= listed_idx + self.min_listed_trade_days
+    pub fn sample_status(&self, ts_code: &str, trade_date: &str) -> Option<bool> {
+        if self.min_listed_trade_days == 0 {
+            return Some(true);
+        }
+        let sample_idx = self.trade_date_to_index.get(trade_date).copied()?;
+        let listed_idx = self.listed_trade_index_by_ts.get(ts_code).copied()?;
+        Some(sample_idx + 1 >= listed_idx + self.min_listed_trade_days)
     }
 }
 

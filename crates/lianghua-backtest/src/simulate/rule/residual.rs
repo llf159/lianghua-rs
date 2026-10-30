@@ -435,6 +435,8 @@ pub(super) fn build_forward_backtest_outcome_map(
             out.insert(
                 residual_points[index].trade_date.clone(),
                 RuleBacktestOutcome {
+                    entry_date: residual_points[index + 1].trade_date.parse().unwrap_or(0),
+                    label_end_date: end_trade_date.parse().unwrap_or(0),
                     residual_return,
                     er_change,
                 },

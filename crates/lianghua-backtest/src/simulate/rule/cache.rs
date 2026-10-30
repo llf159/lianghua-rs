@@ -476,6 +476,8 @@ pub(super) fn build_rule_layer_runtime_cache_from_universe_rows(
                     continue;
                 }
                 day_groups[day_group_id].samples.push(RuleDayBaseSample {
+                    entry_date: outcome.entry_date,
+                    label_end_date: outcome.label_end_date,
                     ts_code_id,
                     residual_return: outcome.residual_return,
                     er_change: outcome.er_change,
