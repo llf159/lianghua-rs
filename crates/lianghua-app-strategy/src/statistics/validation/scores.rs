@@ -268,34 +268,42 @@ pub(in crate::statistics) fn build_validation_triggered_scores_for_combos(
             .take(combos.len())
             .collect::<Vec<ValidationTriggeredScoreMap>>(),
     );
-    let results = ts_codes
-        .par_iter()
-        .map_init(
-            || {
-                DataReader::new_with_runtime_keys(source_path, &required_runtime_keys).map(
-                    |reader| {
-                        (
-                            reader,
-                            CyqChenFieldInjector::new(source_path, &used_cyq_chen_keys),
-                            SimilarityRankFieldInjector::new(source_path, needs_similarity_rank),
-                        )
-                    },
-                )
-            },
-            |worker_res, ts_code| {
-                let (reader, cyq_chen_injector, similarity_rank_injector) =
-                    worker_res.as_mut().map_err(|err| err.clone())?;
+    // One bounded producer batches database work; Rayon workers only evaluate expressions.
+    // A batch and queue each target ~64K stock-days, with at least one stock.
+    let batch_size = (65_536 / need_rows.max(1)).clamp(1, 64);
+    std::thread::scope(|scope| -> Result<(), String> {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(batch_size);
+        let producer = scope.spawn(move || -> Result<(), String> {
+            let reader = DataReader::new_with_runtime_keys(source_path, &required_runtime_keys)?;
+            let cyq_chen_injector = CyqChenFieldInjector::new(source_path, &used_cyq_chen_keys);
+            let similarity_rank_injector =
+                SimilarityRankFieldInjector::new(source_path, needs_similarity_rank);
+            for codes in ts_codes.chunks(batch_size) {
+                let rows =
+                    reader.load_batch_tail_rows(codes, stock_adj_type, end_date, need_rows)?;
+                let mut rows = rows.into_iter().collect::<Vec<_>>();
+                let _ = cyq_chen_injector.inject_batch(&mut rows);
+                if needs_similarity_rank {
+                    similarity_rank_injector.inject_batch(&mut rows)?;
+                }
+                for row in rows {
+                    if sender.send(row).is_err() {
+                        return Ok(());
+                    }
+                }
+            }
+            Ok(())
+        });
+        let results = receiver
+            .into_iter()
+            .par_bridge()
+            .map(|(ts_code, row_data)| {
                 let ValidationTsCodeEvaluation {
                     ts_code,
                     combo_hits,
-                } = (|reader: &mut DataReader,
-                      cyq_chen_injector: &CyqChenFieldInjector,
-                      similarity_rank_injector: &SimilarityRankFieldInjector,
+                } = (|mut row_data: crate::data::RowData,
                       ts_code: &str,
-                      stock_adj_type: &str,
                       start_date: &str,
-                      end_date: &str,
-                      need_rows: usize,
                       st_list: &HashSet<String>,
                       total_share_map: &HashMap<String, f64>,
                       rank_score_series_map: &HashMap<
@@ -303,15 +311,8 @@ pub(in crate::statistics) fn build_validation_triggered_scores_for_combos(
                     HashMap<String, ValidationRankScoreInfo>,
                 >,
                       needs_rank_score: bool,
-                      needs_similarity_rank: bool,
                       combos: &[PreparedValidationCombo]|
                  -> Result<ValidationTsCodeEvaluation, String> {
-                    let mut row_data =
-                        reader.load_one_tail_rows(ts_code, stock_adj_type, end_date, need_rows)?;
-                    let _ = cyq_chen_injector.inject(&mut row_data, ts_code);
-                    if needs_similarity_rank {
-                        similarity_rank_injector.inject(&mut row_data, ts_code)?;
-                    }
                     inject_stock_extra_fields(
                         &mut row_data,
                         ts_code,
@@ -462,19 +463,13 @@ pub(in crate::statistics) fn build_validation_triggered_scores_for_combos(
                         combo_hits,
                     })
                 })(
-                    reader,
-                    cyq_chen_injector,
-                    similarity_rank_injector,
-                    ts_code,
-                    stock_adj_type,
+                    row_data,
+                    &ts_code,
                     start_date,
-                    end_date,
-                    need_rows,
                     st_list,
                     &total_share_map,
                     &rank_score_series_map,
                     needs_rank_score,
-                    needs_similarity_rank,
                     combos,
                 )?;
 
@@ -488,13 +483,17 @@ pub(in crate::statistics) fn build_validation_triggered_scores_for_combos(
                 }
 
                 Ok::<(), String>(())
-            },
-        )
-        .collect::<Vec<_>>();
+            })
+            .collect::<Vec<_>>();
 
-    for result in results {
-        result?;
-    }
+        producer
+            .join()
+            .map_err(|_| "研究行情读取线程异常退出".to_string())??;
+        for result in results {
+            result?;
+        }
+        Ok(())
+    })?;
 
     combo_triggered_maps
         .into_inner()

@@ -203,16 +203,13 @@ pub fn run_rank_comparison(
         .duration_since(UNIX_EPOCH)
         .map_err(|e| e.to_string())?
         .as_nanos();
-    let temporary = std::env::temp_dir().join(format!(
-        "lianghua-rank-comparison-{serial:x}-{:x}",
+    let _archive_access = crate::research_archive::research_archive_lock(source, false)?;
+    let archive_root = std::path::Path::new(source).join("research_runs_v1");
+    let temporary = archive_root.join(format!(
+        ".pending-ranking-{serial:x}-{:x}",
         rand::random::<u64>()
     ));
     fs::create_dir(&temporary).map_err(|e| format!("创建隔离评分配置失败: {e}"))?;
-    let archive_root = std::path::Path::new(source).join("research_runs_v1");
-    if let Err(error) = fs::create_dir_all(&archive_root) {
-        let _ = fs::remove_dir_all(&temporary);
-        return Err(format!("创建研究存档目录失败: {error}"));
-    }
     let membership_staging = archive_root.join(format!(
         ".pending-members-{serial:x}-{:x}.db",
         rand::random::<u64>()

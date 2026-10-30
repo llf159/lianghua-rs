@@ -187,6 +187,16 @@ impl ValidationResearchOutput {
             );
             let _ = std::fs::remove_file(&temporary);
             let (scored, profile) = scored?;
+            log::info!(
+                "研究隔离基线：{}股，准备{}ms，计算{}ms，排名及收尾{}ms",
+                profile.stock_count,
+                profile.prepare_ms,
+                profile.compute_and_send_batches_ms,
+                profile
+                    .total_ms
+                    .saturating_sub(profile.prepare_ms)
+                    .saturating_sub(profile.compute_and_send_batches_ms),
+            );
             let allowed = codes.iter().map(String::as_str).collect::<HashSet<_>>();
             let mut writer = conn
                 .appender("baseline_scores")
@@ -390,17 +400,49 @@ impl ValidationResearchOutput {
     ) -> Result<(), String> {
         let conn = self.open()?;
         let mut writer = conn.appender("signals").map_err(|e| e.to_string())?;
-        for (code, days) in map {
-            for (day, score) in days {
-                writer
-                    .append_row(params![
-                        combo,
-                        code,
-                        day,
-                        score.is_finite().then_some(*score)
-                    ])
-                    .map_err(|e| e.to_string())?;
+        use duckdb::arrow::{
+            array::{ArrayRef, Float64Array, StringArray},
+            record_batch::RecordBatch,
+        };
+        use std::sync::Arc;
+        let mut rows = map.iter().flat_map(|(code, days)| {
+            days.iter()
+                .map(move |(day, score)| (code.as_str(), day.as_str(), *score))
+        });
+        loop {
+            let batch = rows.by_ref().take(8192).collect::<Vec<_>>();
+            if batch.is_empty() {
+                break;
             }
+            let batch = RecordBatch::try_from_iter([
+                (
+                    "combo_key",
+                    Arc::new(StringArray::from_iter_values(std::iter::repeat_n(
+                        combo,
+                        batch.len(),
+                    ))) as ArrayRef,
+                ),
+                (
+                    "ts_code",
+                    Arc::new(StringArray::from_iter_values(batch.iter().map(|row| row.0)))
+                        as ArrayRef,
+                ),
+                (
+                    "trade_date",
+                    Arc::new(StringArray::from_iter_values(batch.iter().map(|row| row.1)))
+                        as ArrayRef,
+                ),
+                (
+                    "score",
+                    Arc::new(Float64Array::from_iter(
+                        batch.iter().map(|row| row.2.is_finite().then_some(row.2)),
+                    )) as ArrayRef,
+                ),
+            ])
+            .map_err(|e| e.to_string())?;
+            writer
+                .append_record_batch(batch)
+                .map_err(|e| e.to_string())?;
         }
         writer.flush().map_err(|e| e.to_string())?;
         drop(writer);

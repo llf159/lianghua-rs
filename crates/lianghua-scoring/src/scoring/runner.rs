@@ -100,7 +100,7 @@ fn rank_summary_rows_preserving_order(
     let mut order = (0..rows.len())
         .map(|index| index as u32)
         .collect::<Vec<_>>();
-    order.sort_unstable_by(|&left, &right| {
+    order.par_sort_unstable_by(|&left, &right| {
         let left = &rows[left as usize];
         let right = &rows[right as usize];
         left.trade_date
@@ -114,28 +114,41 @@ fn rank_summary_rows_preserving_order(
             .then_with(|| left.ts_code.cmp(&right.ts_code))
     });
 
-    // 与持久化总榜共用同分规则：J 升序，缺失排最后，再按代码排序。
-    // 只读取发生同分的股票，并按日期和批次释放 J 值，避免缓存全部行情。
+    // Batch adjacent dates rather than querying each day and each 512-stock slice.
+    // Keep only requested ties in memory; read source J once per bounded date block.
     let mut conn = None;
-    let mut day_start = 0;
-    while day_start < order.len() {
-        let date = rows[order[day_start] as usize].trade_date.clone();
-        let mut day_end = day_start + 1;
-        while day_end < order.len() && rows[order[day_end] as usize].trade_date == date {
-            day_end += 1;
-        }
+    let mut block_start = 0;
+    while block_start < order.len() {
+        let mut block_end = block_start;
         let mut ties = Vec::new();
-        let mut group_start = day_start;
-        while group_start < day_end {
-            let score = rows[order[group_start] as usize].total_score;
-            let mut group_end = group_start + 1;
-            while group_end < day_end && rows[order[group_end] as usize].total_score == score {
-                group_end += 1;
+        let mut day_ranges = Vec::new();
+        loop {
+            let day_start = block_end;
+            let date = &rows[order[day_start] as usize].trade_date;
+            block_end += 1;
+            while block_end < order.len() && &rows[order[block_end] as usize].trade_date == date {
+                block_end += 1;
             }
-            if group_end - group_start > 1 {
-                ties.push((group_start, group_end));
+            day_ranges.push((day_start, block_end));
+            let mut group_start = day_start;
+            while group_start < block_end {
+                let score = rows[order[group_start] as usize].total_score;
+                let mut group_end = group_start + 1;
+                while group_end < block_end && rows[order[group_end] as usize].total_score == score
+                {
+                    group_end += 1;
+                }
+                if group_end - group_start > 1 {
+                    ties.push((group_start, group_end));
+                }
+                group_start = group_end;
             }
-            group_start = group_end;
+            if block_end == order.len()
+                || block_end - block_start >= 131_072
+                || day_ranges.len() == 32
+            {
+                break;
+            }
         }
         if !ties.is_empty() {
             if conn.is_none() {
@@ -149,42 +162,68 @@ fn rank_summary_rows_preserving_order(
                 );
             }
             let db = conn.as_ref().expect("connection initialized");
-            let codes = ties
+            let requested = ties
                 .iter()
                 .flat_map(|(start, end)| order[*start..*end].iter())
-                .map(|index| rows[*index as usize].ts_code.as_str())
-                .collect::<Vec<_>>();
-            let mut j_values = HashMap::<String, f64>::new();
-            for chunk in codes.chunks(512) {
-                let placeholders = std::iter::repeat_n("?", chunk.len())
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let sql = format!(
-                    "SELECT ts_code, TRY_CAST(j AS DOUBLE) FROM stock_data WHERE adj_type = ? AND trade_date = ? AND ts_code IN ({placeholders})"
-                );
-                let mut stmt = db
-                    .prepare(&sql)
-                    .map_err(|e| format!("准备同分J值查询失败: {e}"))?;
-                let params = std::iter::once(adj_type)
-                    .chain(std::iter::once(date.as_str()))
-                    .chain(chunk.iter().copied());
-                let mut result = stmt
-                    .query(duckdb::params_from_iter(params))
-                    .map_err(|e| format!("查询同分J值失败: {e}"))?;
-                while let Some(row) = result.next().map_err(|e| format!("读取同分J值失败: {e}"))?
-                {
-                    let code: String = row.get(0).map_err(|e| e.to_string())?;
-                    let value: Option<f64> = row.get(1).map_err(|e| e.to_string())?;
-                    if let Some(value) = value {
-                        j_values.insert(code, value);
+                .map(|&index| {
+                    let row = &rows[index as usize];
+                    ((row.ts_code.as_str(), row.trade_date.as_str()), index)
+                })
+                .collect::<HashMap<_, _>>();
+            let mut j_values = HashMap::<u32, f64>::new();
+            let mut stmt = db.prepare("SELECT ts_code, trade_date, TRY_CAST(j AS DOUBLE) FROM stock_data WHERE adj_type = ? AND trade_date BETWEEN ? AND ?").map_err(|e| format!("准备同分J值查询失败: {e}"))?;
+            stmt.execute(duckdb::params![
+                adj_type,
+                rows[order[block_start] as usize].trade_date,
+                rows[order[block_end - 1] as usize].trade_date
+            ])
+            .map_err(|e| format!("查询同分J值失败: {e}"))?;
+            use duckdb::arrow::{
+                array::{Array, Float64Array, StringArray},
+                record_batch::RecordBatch,
+            };
+            while let Some(array) = stmt.step().map_err(|e| format!("读取同分J值失败: {e}"))?
+            {
+                let batch = RecordBatch::from(&array);
+                let codes = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or("同分J值股票列不是字符串")?;
+                let dates = batch
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or("同分J值日期列不是字符串")?;
+                let values = batch
+                    .column(2)
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .ok_or("同分J值不是DOUBLE")?;
+                for index in 0..batch.num_rows() {
+                    if codes.is_null(index) || dates.is_null(index) || values.is_null(index) {
+                        continue;
+                    }
+                    if let Some(&row_id) = requested.get(&(codes.value(index), dates.value(index)))
+                    {
+                        j_values.insert(row_id, values.value(index));
                     }
                 }
             }
+            drop(requested);
+            let mut remaining = &mut order[block_start..block_end];
+            let mut cursor = block_start;
+            let mut groups = Vec::with_capacity(ties.len());
             for (start, end) in ties {
-                order[start..end].sort_unstable_by(|&left, &right| {
-                    let left = &rows[left as usize];
-                    let right = &rows[right as usize];
-                    let by_j = match (j_values.get(&left.ts_code), j_values.get(&right.ts_code)) {
+                let (_, tail) = remaining.split_at_mut(start - cursor);
+                let (group, tail) = tail.split_at_mut(end - start);
+                groups.push(group);
+                remaining = tail;
+                cursor = end;
+            }
+            groups.into_par_iter().for_each(|group| {
+                group.sort_unstable_by(|left, right| {
+                    let by_j = match (j_values.get(left), j_values.get(right)) {
                         (Some(a), Some(b)) if a.is_nan() && b.is_nan() => std::cmp::Ordering::Equal,
                         (Some(a), Some(_)) if a.is_nan() => std::cmp::Ordering::Greater,
                         (Some(_), Some(b)) if b.is_nan() => std::cmp::Ordering::Less,
@@ -193,14 +232,20 @@ fn rank_summary_rows_preserving_order(
                         (None, Some(_)) => std::cmp::Ordering::Greater,
                         (None, None) => std::cmp::Ordering::Equal,
                     };
-                    by_j.then_with(|| left.ts_code.cmp(&right.ts_code))
+                    by_j.then_with(|| {
+                        rows[*left as usize]
+                            .ts_code
+                            .cmp(&rows[*right as usize].ts_code)
+                    })
                 });
+            });
+        }
+        for (start, end) in day_ranges {
+            for (rank, row_id) in order[start..end].iter().enumerate() {
+                rows[*row_id as usize].rank = Some(rank as i64 + 1);
             }
         }
-        for (rank, row_id) in order[day_start..day_end].iter().enumerate() {
-            rows[*row_id as usize].rank = Some(rank as i64 + 1);
-        }
-        day_start = day_end;
+        block_start = block_end;
     }
     Ok(())
 }
@@ -1205,6 +1250,7 @@ mod tests {
         let source = duckdb::Connection::open(source_db_path(directory.to_str().unwrap())).unwrap();
         source.execute_batch("CREATE TABLE stock_data(ts_code VARCHAR, trade_date VARCHAR, adj_type VARCHAR, j DOUBLE);
             INSERT INTO stock_data VALUES ('A','20260105','qfq',9),('B','20260105','qfq',1),('C','20260105','qfq',NULL),('D','20260105','qfq',1),('A','20260106','qfq',9),('B','20260106','qfq',1),('A','20260105','hfq',-10)").unwrap();
+        source.execute_batch("INSERT INTO stock_data SELECT ts_code, strftime(DATE '2026-02-01' + CAST(i AS INTEGER), '%Y%m%d'), adj_type, j FROM stock_data, range(65) AS days(i) WHERE trade_date='20260105'").unwrap();
         drop(source);
         let mut rows = [
             ("C", "20260105", 5.0),
@@ -1240,6 +1286,31 @@ mod tests {
                 ("B", "20260106", 2)
             ]
         );
+        // Cross multiple date-block boundaries and compare every rank against production.
+        let source = crate::data::open_db_readonly(
+            source_db_path(directory.to_str().unwrap())
+                .to_str()
+                .unwrap(),
+        )
+        .unwrap();
+        rows.extend(source.prepare("SELECT ts_code, trade_date FROM stock_data WHERE adj_type='qfq' AND trade_date>='20260201' ORDER BY trade_date DESC, ts_code DESC").unwrap().query_map([], |row| Ok(ScoreSummary {
+            ts_code: row.get(0)?, trade_date: row.get(1)?, total_score: 5.0, rank: None,
+        })).unwrap().collect::<Result<Vec<_>,_>>().unwrap());
+        drop(source);
+        let original_order = rows
+            .iter()
+            .map(|row| (row.ts_code.clone(), row.trade_date.clone(), row.total_score))
+            .collect::<Vec<_>>();
+        rank_summary_rows_preserving_order(&mut rows, directory.to_str().unwrap(), "qfq").unwrap();
+        assert!(rows.iter().zip(&original_order).all(|(row, original)| (
+            &row.ts_code,
+            &row.trade_date,
+            row.total_score
+        ) == (
+            &original.0,
+            &original.1,
+            original.2
+        )));
         let result_path = directory.join("comparison.db");
         let saved = duckdb::Connection::open(&result_path).unwrap();
         saved.execute_batch("CREATE TABLE score_summary(ts_code VARCHAR, trade_date VARCHAR, total_score DOUBLE, rank INTEGER)").unwrap();

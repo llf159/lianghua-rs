@@ -723,10 +723,35 @@ impl DataReader {
         start_date: &str,
         end_date: &str,
     ) -> Result<HashMap<String, RowData>, String> {
+        self.load_batch_rows(ts_codes, adj_type, start_date, end_date, None)
+    }
+
+    /// Keep the same per-stock row-count warmup as load_one_tail_rows, including suspensions.
+    pub fn load_batch_tail_rows(
+        &self,
+        ts_codes: &[String],
+        adj_type: &str,
+        end_date: &str,
+        need_rows: usize,
+    ) -> Result<HashMap<String, RowData>, String> {
+        if need_rows == 0 {
+            return Err("need_rows不能为0".to_string());
+        }
+        self.load_batch_rows(ts_codes, adj_type, "", end_date, Some(need_rows))
+    }
+
+    fn load_batch_rows(
+        &self,
+        ts_codes: &[String],
+        adj_type: &str,
+        start_date: &str,
+        end_date: &str,
+        tail_rows: Option<usize>,
+    ) -> Result<HashMap<String, RowData>, String> {
         if ts_codes.is_empty() {
             return Ok(HashMap::new());
         }
-        let sql = self.batch_query_sql(ts_codes);
+        let sql = self.batch_query_sql(ts_codes, tail_rows);
 
         let mut result = read_with_retry("读取批量行情", || -> Result<_, String> {
             let mut stmt = self
@@ -798,12 +823,23 @@ impl DataReader {
             Ok(result)
         })?;
 
+        let start_date = if tail_rows.is_some() {
+            result
+                .values()
+                .filter_map(|row| row.trade_dates.first())
+                .min()
+                .map(String::as_str)
+                .unwrap_or(end_date)
+                .to_string()
+        } else {
+            start_date.to_string()
+        };
         for row_data in result.values_mut() {
             self.inject_estimated_market_cap(row_data)?;
         }
         result.retain(|_, row_data| !row_data.trade_dates.is_empty());
         if !result.is_empty() && !self.runtime_index_cols.is_empty() {
-            let index_values_by_key = self.load_runtime_index_values(start_date, end_date)?;
+            let index_values_by_key = self.load_runtime_index_values(&start_date, end_date)?;
             for row_data in result.values_mut() {
                 self.inject_runtime_index_series(row_data, &index_values_by_key);
                 row_data.validate()?;
@@ -816,7 +852,7 @@ impl DataReader {
                 &self.source_dir,
                 &self.runtime_panel_fields,
                 ts_codes,
-                start_date,
+                &start_date,
                 end_date,
             )?;
             for (code, row) in result.iter_mut() {
@@ -886,7 +922,7 @@ impl DataReader {
             if remaining.is_empty() {
                 return Ok(());
             }
-            let sql = self.batch_query_sql(&remaining);
+            let sql = self.batch_query_sql(&remaining, None);
             let mut stmt = self
                 .conn
                 .prepare(&sql)
@@ -972,7 +1008,7 @@ impl DataReader {
         }
     }
 
-    fn batch_query_sql(&self, ts_codes: &[String]) -> String {
+    fn batch_query_sql(&self, ts_codes: &[String], tail_rows: Option<usize>) -> String {
         let mut select_cols = vec!["ts_code".to_string(), "trade_date".to_string()];
         for (db_col, _) in &self.cols_table {
             select_cols.push(format!(
@@ -993,10 +1029,12 @@ impl DataReader {
               AND adj_type = ?
               AND trade_date >= ?
               AND trade_date <= ?
+            {}
             ORDER BY ts_code, trade_date ASC
             "#,
             select_cols.join(",\n"),
-            escaped.join(", ")
+            escaped.join(", "),
+            tail_rows.map(|count| format!("QUALIFY row_number() OVER (PARTITION BY ts_code ORDER BY trade_date DESC) <= {count}")).unwrap_or_default()
         )
     }
 
@@ -2239,6 +2277,14 @@ when = "C > O"
             .expect("insert row");
         }
 
+        conn.execute_batch(
+            "INSERT INTO stock_data VALUES
+            ('000002.SZ','20231229','qfq',9,9.5,NULL,100,NULL),
+            ('000002.SZ','20240103','qfq',10,11,1,200,10),
+            ('000002.SZ','20240104','qfq',11,12,1,300,11)",
+        )
+        .unwrap();
+
         let program = parse_expression_program(
             "C > 0 AND I > 0 AND I300 > 0 AND I1000 > 0 AND I_PCT_CHG > 0 AND I_V > 0 AND I_O > 0 AND I300_C > 0 AND I300_MA5 > 0",
         )
@@ -2282,6 +2328,36 @@ when = "C > O"
             batch["000001.SZ"].cols["I300_MA5"],
             row_data.cols["I300_MA5"]
         );
+        // Suspension gaps, short histories, missing stocks and index fields must match
+        // the original per-stock tail query, rather than a shared calendar cutoff.
+        let codes = [
+            "000001.SZ".to_string(),
+            "000002.SZ".to_string(),
+            "missing".to_string(),
+        ];
+        for count in [1, 2, 9] {
+            let tails = reader
+                .load_batch_tail_rows(&codes, "qfq", "20240103", count)
+                .unwrap();
+            assert!(!tails.contains_key("missing"));
+            for code in &codes[..2] {
+                let expected = reader
+                    .load_one_tail_rows(code, "qfq", "20240103", count)
+                    .unwrap();
+                if expected.trade_dates.is_empty() {
+                    assert!(!tails.contains_key(code));
+                } else {
+                    assert_eq!(tails[code].trade_dates, expected.trade_dates);
+                    assert_eq!(tails[code].cols, expected.cols);
+                }
+            }
+        }
+        assert!(
+            reader
+                .load_batch_tail_rows(&codes, "qfq", "20240103", 0)
+                .is_err()
+        );
+
         let mut streamed = None;
         reader
             .load_batch_streaming(

@@ -820,27 +820,6 @@ pub fn run_rule_expression_validation(
         backtest_period: params.backtest_period,
         min_listed_trade_days: params.min_listed_trade_days,
     };
-    if let Some(progress) = progress {
-        progress("读取行情和计算后验")?;
-    }
-    let runtime_cache = Arc::new(
-        build_rule_layer_runtime_cache_from_stock_data_with_ts_filter(
-            &source_conn,
-            &source_path,
-            &params.stock_adj_type,
-            &params.index_ts_code,
-            params.index_beta,
-            params.concept_beta,
-            params.industry_beta,
-            &params.start_date,
-            &params.end_date,
-            &layer_config,
-            params.allowed_ts_codes.as_ref(),
-        )?,
-    );
-    if let Some(progress) = progress {
-        progress("准备股票日证据与隔离基线评分")?;
-    }
     let validation_required_runtime_keys =
         collect_rule_validation_runtime_keys(&execution_plan.combos);
     let validation_reader =
@@ -854,16 +833,49 @@ pub fn run_rule_expression_validation(
         validation_ts_codes
             .retain(|ts_code| ts_code_allowed_by_filter(Some(allowed_ts_codes), ts_code));
     }
-    if let Some(research) = research {
-        research.prepare(
+    if let Some(progress) = progress {
+        progress("并行准备后验与股票日证据、隔离基线评分")?;
+    }
+    let preparation_started = std::time::Instant::now();
+    let runtime_cache = std::thread::scope(|scope| -> Result<_, String> {
+        let preparation = research.map(|research| {
+            scope.spawn(|| {
+                research.prepare(
+                    &source_path,
+                    &params.stock_adj_type,
+                    &params.start_date,
+                    &params.end_date,
+                    params.min_listed_trade_days,
+                    &validation_ts_codes,
+                    true,
+                )
+            })
+        });
+        let runtime_cache = build_rule_layer_runtime_cache_from_stock_data_with_ts_filter(
+            &source_conn,
             &source_path,
             &params.stock_adj_type,
+            &params.index_ts_code,
+            params.index_beta,
+            params.concept_beta,
+            params.industry_beta,
             &params.start_date,
             &params.end_date,
-            params.min_listed_trade_days,
-            &validation_ts_codes,
-            true,
-        )?;
+            &layer_config,
+            params.allowed_ts_codes.as_ref(),
+        );
+        if let Some(preparation) = preparation {
+            preparation
+                .join()
+                .map_err(|_| "研究证据准备线程异常退出".to_string())??;
+        }
+        runtime_cache.map(Arc::new)
+    })?;
+    log::info!(
+        "表达式研究：后验与基线准备耗时 {:.3}s",
+        preparation_started.elapsed().as_secs_f64()
+    );
+    if let Some(research) = research {
         if params.return_metric == crate::simulate::BacktestReturnMetric::ResidualReturn {
             research.save_labels(params.backtest_period, runtime_cache.as_ref())?;
         } else {
@@ -1031,6 +1043,7 @@ pub fn run_rule_expression_validation(
                 execution_plan.combos.len()
             ))?;
         }
+        let signal_started = std::time::Instant::now();
         let cached = research
             .map(|research| {
                 combo_chunk
@@ -1057,6 +1070,12 @@ pub fn run_rule_expression_validation(
                 )?
             };
 
+        log::info!(
+            "表达式研究：{}组信号读取/计算耗时 {:.3}s",
+            combo_chunk.len(),
+            signal_started.elapsed().as_secs_f64()
+        );
+        let statistics_started = std::time::Instant::now();
         for (combo, mut triggered_score_map) in
             combo_chunk.iter().zip(combo_triggered_maps.into_iter())
         {
@@ -1259,6 +1278,11 @@ pub fn run_rule_expression_validation(
                 )?,
             );
         }
+        log::info!(
+            "表达式研究：{}组证据保存与统计耗时 {:.3}s",
+            combo_chunk.len(),
+            statistics_started.elapsed().as_secs_f64()
+        );
     }
 
     if let Some(progress) = progress {

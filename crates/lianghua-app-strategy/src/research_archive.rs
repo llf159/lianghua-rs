@@ -21,6 +21,88 @@ pub fn try_research_execution() -> Result<std::sync::MutexGuard<'static, ()>, St
     }
 }
 
+/// Shared access spans a job or archive mutation; cleanup only proceeds with exclusive access.
+/// The OS releases locks after process termination, including force kills.
+pub fn research_archive_lock(source_path: &str, cleanup: bool) -> Result<Option<File>, String> {
+    let root = archive_root(source_path)?;
+    fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(root.join(".activity.lock"))
+        .map_err(|e| format!("打开研究存档锁失败: {e}"))?;
+    #[cfg(not(target_os = "android"))]
+    let locked = if cleanup {
+        file.try_lock()
+    } else {
+        file.lock_shared().map_err(std::fs::TryLockError::Error)
+    };
+    #[cfg(target_os = "android")]
+    let locked = {
+        use std::os::fd::AsRawFd;
+        let operation = if cleanup {
+            libc::LOCK_EX | libc::LOCK_NB
+        } else {
+            libc::LOCK_SH
+        };
+        if unsafe { libc::flock(file.as_raw_fd(), operation) } == 0 {
+            Ok(())
+        } else {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                Err(std::fs::TryLockError::WouldBlock)
+            } else {
+                Err(std::fs::TryLockError::Error(error))
+            }
+        }
+    };
+    match locked {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(error)) => Err(format!("锁定研究存档失败: {error}")),
+    }
+}
+
+fn cleanup_research_run(path: &Path, incomplete: bool) {
+    for name in [
+        ".configuration.json.pending",
+        ".result.json.pending",
+        ".header.json.pending",
+        ".pending-package",
+        "evidence.baseline.toml",
+    ]
+    .into_iter()
+    .chain(
+        incomplete
+            .then_some([
+                "members.db",
+                "members.db.wal",
+                "members.db.tmp",
+                "evidence.db",
+                "evidence.db.wal",
+                "evidence.db.tmp",
+                "report.json",
+                "report.md",
+                "experiment.lhresearch",
+            ])
+            .into_iter()
+            .flatten(),
+    ) {
+        let file = path.join(name);
+        let result = match fs::symlink_metadata(&file) {
+            Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(&file),
+            Ok(_) => fs::remove_file(&file),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => Err(error),
+        };
+        if let Err(error) = result {
+            log::warn!("清理研究半成品失败，稍后重试 {}: {error}", file.display());
+        }
+    }
+}
+
 pub struct ResearchArchiveLease {
     pub source_path: String,
     pub run_id: String,
@@ -56,6 +138,8 @@ pub struct ResearchArchiveHeader {
     pub input_identity: String,
     #[serde(default)]
     pub owner_session: String,
+    #[serde(default)]
+    pub cleanup_lock: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -96,6 +180,7 @@ pub fn save_research_archive(
     membership_staging: Option<&Path>,
     membership_source_run_id: Option<&str>,
 ) -> Result<ResearchArchiveHeader, String> {
+    let _access = research_archive_lock(source_path, false)?;
     if !matches!(
         status,
         "draft" | "running" | "completed" | "failed" | "cancelled" | "interrupted"
@@ -179,6 +264,7 @@ pub fn save_research_archive(
             .unwrap_or("unverified")
             .to_string(),
         owner_session: archive_session().to_string(),
+        cleanup_lock: true,
     };
     let write_result = (|| -> Result<(), String> {
         for (name, value) in [
@@ -243,13 +329,84 @@ pub fn list_research_archives(source_path: &str) -> Result<Vec<ResearchArchiveHe
     if !root.exists() {
         return Ok(Vec::new());
     }
+    let cleanup = research_archive_lock(source_path, true)?;
+    let entries = fs::read_dir(root)
+        .map_err(|e| format!("读取研究存档目录失败: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    // Old versions did not hold the activity lock. Do not sweep while their owner may be alive.
+    let cleanup = cleanup.filter(|_| {
+        !entries.iter().any(|entry| {
+            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                return false;
+            }
+            let header = File::open(entry.path().join("header.json"))
+                .ok()
+                .and_then(|file| {
+                    serde_json::from_reader::<_, ResearchArchiveHeader>(BufReader::new(file)).ok()
+                });
+            header.is_some_and(|header| {
+                if header.status != "running" || header.cleanup_lock {
+                    return false;
+                }
+                #[cfg(any(target_os = "linux", target_os = "android"))]
+                {
+                    header
+                        .owner_session
+                        .split_once('-')
+                        .and_then(|(pid, _)| pid.parse::<u32>().ok())
+                        .is_none_or(|pid| Path::new("/proc").join(pid.to_string()).exists())
+                }
+                #[cfg(not(any(target_os = "linux", target_os = "android")))]
+                {
+                    true
+                }
+            })
+        })
+    });
     let mut out = Vec::new();
-    for entry in fs::read_dir(root).map_err(|e| format!("读取研究存档目录失败: {e}"))? {
-        let entry = entry.map_err(|e| e.to_string())?;
+    for entry in entries {
         let Some(name) = entry.file_name().to_str().map(str::to_string) else {
             continue;
         };
         if archive_run_path(source_path, &name).is_err() {
+            if cleanup.is_some() {
+                let temporary = name
+                    .strip_prefix(".pending-")
+                    .is_some_and(|id| archive_run_path(source_path, id).is_ok())
+                    || name.strip_prefix(".import-").is_some_and(|id| {
+                        id.len() == 16 && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    })
+                    || name
+                        .strip_prefix(".pending-members-")
+                        .or_else(|| name.strip_prefix(".pending-evidence-"))
+                        .or_else(|| name.strip_prefix(".pending-ranking-"))
+                        .is_some_and(|id| {
+                            let id = id
+                                .strip_suffix(".db.wal")
+                                .or_else(|| id.strip_suffix(".db.tmp"))
+                                .or_else(|| id.strip_suffix(".db"))
+                                .unwrap_or(id);
+                            !id.is_empty()
+                                && id.len() <= 80
+                                && id
+                                    .bytes()
+                                    .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+                        });
+                if temporary {
+                    let result = if entry.file_type().map_err(|e| e.to_string())?.is_dir() {
+                        fs::remove_dir_all(entry.path())
+                    } else {
+                        fs::remove_file(entry.path())
+                    };
+                    if let Err(error) = result {
+                        log::warn!("清理研究暂存文件失败 {}: {error}", entry.path().display());
+                    }
+                }
+            }
+            continue;
+        }
+        if !entry.file_type().map_err(|e| e.to_string())?.is_dir() {
             continue;
         }
         let file = File::open(entry.path().join("header.json"))
@@ -259,14 +416,20 @@ pub fn list_research_archives(source_path: &str) -> Result<Vec<ResearchArchiveHe
         if header.run_id != name || header.version != 1 {
             return Err(format!("研究存档{name}编号或版本不匹配"));
         }
-        if header.status == "running" && header.owner_session != archive_session() {
-            header = finish_research_archive(
+        if cleanup.is_some()
+            && header.status == "running"
+            && header.owner_session != archive_session()
+        {
+            header = finish_research_archive_unlocked(
                 source_path,
                 &name,
                 "interrupted",
                 None,
                 serde_json::json!({"error":"上次进程在运行完成前退出；保留原配置，可复制后完整重跑，未提交阶段不复用"}),
             )?;
+        }
+        if cleanup.is_some() && header.status != "running" {
+            cleanup_research_run(&entry.path(), header.status != "completed");
         }
         out.push(header);
     }
@@ -408,6 +571,17 @@ pub fn finish_research_archive(
     configuration: Option<Value>,
     result: Value,
 ) -> Result<ResearchArchiveHeader, String> {
+    let _access = research_archive_lock(source_path, false)?;
+    finish_research_archive_unlocked(source_path, run_id, status, configuration, result)
+}
+
+fn finish_research_archive_unlocked(
+    source_path: &str,
+    run_id: &str,
+    status: &str,
+    configuration: Option<Value>,
+    result: Value,
+) -> Result<ResearchArchiveHeader, String> {
     if !matches!(
         status,
         "draft" | "completed" | "failed" | "cancelled" | "interrupted"
@@ -446,6 +620,7 @@ pub fn finish_research_archive(
         fs::rename(path.join(format!(".{name}.pending")), path.join(name))
             .map_err(|e| e.to_string())?;
     }
+    cleanup_research_run(&path, status != "completed");
     Ok(run.header)
 }
 
@@ -466,6 +641,7 @@ pub fn research_artifact_path(
 
 /// Export beside the original journal; the report is portable and contains saved values only.
 pub fn export_research_archive(source_path: &str, run_id: &str) -> Result<String, String> {
+    let _access = research_archive_lock(source_path, false)?;
     let mut run = read_research_archive(source_path, run_id)?;
     if run.header.status == "running" {
         return Err("运行尚未完成".into());
@@ -622,6 +798,7 @@ pub fn import_research_archive(
     source_path: &str,
     package: impl Read,
 ) -> Result<ResearchArchiveHeader, String> {
+    let _access = research_archive_lock(source_path, false)?;
     use sha2::{Digest, Sha256};
     let root = archive_root(source_path)?;
     fs::create_dir_all(&root).map_err(|e| e.to_string())?;
@@ -764,6 +941,7 @@ pub fn import_research_archive(
 }
 
 pub fn delete_research_archive(source_path: &str, run_id: &str) -> Result<(), String> {
+    let _access = research_archive_lock(source_path, false)?;
     if read_research_archive_header(source_path, run_id)?.status == "running" {
         return Err("运行中的研究不能删除，请先取消".into());
     }

@@ -1313,6 +1313,7 @@ async fn run_strategy_paper_validation(
 ) -> Result<StrategyPaperValidationData, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let _execution=lianghua_app_strategy::research_archive::try_research_execution()?;
+        let _archive_access=lianghua_app_strategy::research_archive::research_archive_lock(&source_path,false)?;
         let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
             .read()
             .unwrap_or_else(|e| e.into_inner());
@@ -1970,6 +1971,8 @@ async fn run_rule_expression_validation(
     let worker_id = task_id.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let _execution = lianghua_app_strategy::research_archive::try_research_execution()?;
+        let _archive_access =
+            lianghua_app_strategy::research_archive::research_archive_lock(&source_path, false)?;
         let progress = |phase: &str| -> Result<(), String> {
             if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
                 return Err("表达式回测已取消".to_string());

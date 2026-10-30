@@ -2607,6 +2607,7 @@ dependencies = [
  "lianghua-download",
  "lianghua-model",
  "lianghua-scoring",
+ "libc",
  "log",
  "rand",
  "rayon",

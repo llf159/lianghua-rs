@@ -61,6 +61,8 @@ pub async fn run_rank_comparison(
     let parent = request.parent_run_id.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let _execution = lianghua_app_strategy::research_archive::try_research_execution()?;
+        let _archive_access =
+            lianghua_app_strategy::research_archive::research_archive_lock(&source_path, false)?;
         let check_cancelled = || cancelled.load(Ordering::Relaxed);
         let progress = |phase: &str| -> Result<(), String> {
             if check_cancelled() {

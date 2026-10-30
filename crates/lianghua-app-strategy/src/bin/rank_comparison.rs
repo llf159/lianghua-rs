@@ -16,6 +16,8 @@ fn main() -> Result<(), String> {
             .map_err(|e| e.to_string())?;
     let _execution = try_research_execution()?;
     let source = request.source_path.clone();
+    let _archive_access =
+        lianghua_app_strategy::research_archive::research_archive_lock(&source, false)?;
     let journal = save_research_archive(
         &source,
         request.parent_run_id.clone(),
