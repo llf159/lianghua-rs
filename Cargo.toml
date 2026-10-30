@@ -69,3 +69,9 @@ opt-level = 3
 
 [profile.dev.package.lianghua-backtest]
 opt-level = 3
+
+[profile.dev.package.lianghua-core]
+opt-level = 3
+
+[profile.dev.package.lianghua-app-strategy]
+opt-level = 3

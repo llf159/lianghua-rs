@@ -84,7 +84,7 @@ const COLUMN_LABELS: Record<VisibleColumn, string> = {
 }
 
 const COLUMN_WIDTHS: Record<VisibleColumn, number> = {
-  rank: 50,
+  rank: 56,
   name: 120,
   total_rank: 124,
   total_mv_yi: 110,

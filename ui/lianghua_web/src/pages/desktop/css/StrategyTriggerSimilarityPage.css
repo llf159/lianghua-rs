@@ -398,8 +398,8 @@
   position: sticky;
   left: 0;
   z-index: 2;
-  width: 50px;
-  min-width: 50px;
+  width: 56px;
+  min-width: 56px;
   background-color: #fff;
   box-shadow: 1px 0 0 #e6ebf2;
 }
@@ -407,7 +407,7 @@
 .trigger-sim-ranking-table th:nth-child(2),
 .trigger-sim-ranking-table td:nth-child(2) {
   position: sticky;
-  left: 50px;
+  left: 56px;
   z-index: 2;
   width: 120px;
   min-width: 120px;

@@ -472,7 +472,9 @@ impl TrackProgram {
         let first_output = calendar.partition_point(|date| date.as_str() < start);
         let begin = first_output.saturating_sub(definition.max_age());
         let prepared = self.prepare(rt)?;
-        let mut windows = VecDeque::<(usize, TrackState)>::new();
+        // Consecutive origins with identical complete states have the same future
+        // transitions. Keep their origin range, but advance the shared state once.
+        let mut windows = VecDeque::<(usize, usize, TrackState)>::new();
         let mut index =
             dates.partition_point(|date| calendar.get(begin).is_some_and(|first| date < first));
         for (session, date) in calendar.iter().enumerate().skip(begin) {
@@ -483,9 +485,12 @@ impl TrackProgram {
             let window_start = session.saturating_sub(definition.max_age());
             while windows
                 .front()
-                .is_some_and(|(origin, _)| *origin < window_start)
+                .is_some_and(|(_, last, _)| *last < window_start)
             {
                 windows.pop_front();
+            }
+            if let Some((first, _, _)) = windows.front_mut() {
+                *first = (*first).max(window_start);
             }
             if session
                 <= calendar
@@ -493,9 +498,15 @@ impl TrackProgram {
                     .saturating_sub(1)
                     .saturating_sub(definition.max_age())
             {
-                windows.push_back((session, TrackState::default()));
+                if let Some((_, last, state)) = windows.back_mut()
+                    && state.event.is_none()
+                {
+                    *last = session;
+                } else {
+                    windows.push_back((session, session, TrackState::default()));
+                }
             }
-            for (window, (_, state)) in windows.iter_mut().enumerate() {
+            for (window, (_, _, state)) in windows.iter_mut().enumerate() {
                 let score = prepared.advance(
                     state,
                     definition,
@@ -515,12 +526,38 @@ impl TrackProgram {
                     scores[index] = score;
                 }
             }
+            // Merge only full states, including captures, step history and stop reason;
+            // equal scores alone do not imply interchangeable future behaviour.
+            let mut group = 0;
+            while group + 1 < windows.len() {
+                let same_state = windows[group].2 == windows[group + 1].2
+                    && match (&windows[group].2.event, &windows[group + 1].2.event) {
+                        (Some(left), Some(right)) => {
+                            left.score.to_bits() == right.score.to_bits()
+                                && left.source_score.map(f64::to_bits)
+                                    == right.source_score.map(f64::to_bits)
+                                && left
+                                    .captured
+                                    .values()
+                                    .zip(right.captured.values())
+                                    .all(|(left, right)| left.to_bits() == right.to_bits())
+                        }
+                        (None, None) => true,
+                        _ => false,
+                    };
+                if same_state {
+                    windows[group].1 = windows[group + 1].1;
+                    windows.remove(group + 1);
+                } else {
+                    group += 1;
+                }
+            }
         }
         Ok((
             scores,
             windows
                 .pop_front()
-                .map(|(_, state)| state)
+                .map(|(_, _, state)| state)
                 .unwrap_or_default(),
         ))
     }

@@ -320,6 +320,10 @@ fn scoring_single_core(
         ts_code,
         &mut total_scores,
         &mut details_series,
+        !matches!(
+            memory_mode,
+            ScoringMemoryMode::RuleBacktest | ScoringMemoryMode::SceneOnly
+        ),
     )?;
     let kept_scores = &total_scores[keep_from..];
 

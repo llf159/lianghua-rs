@@ -117,8 +117,76 @@ impl ValidationResearchOutput {
             writer.flush().map_err(|e| e.to_string())?;
         }
         let cap_sql = crate::data::extras::estimated_market_cap_sql(&source_conn)?;
+        use duckdb::arrow::{
+            array::{ArrayRef, BooleanArray, Float64Array, Int16Array, Int64Array, StringArray},
+            record_batch::RecordBatch,
+        };
+        use std::sync::Arc;
+        let boards = codes
+            .iter()
+            .map(|code| crate::utils::utils::board_category(code, None))
+            .collect::<Vec<_>>();
+        let bucket_labels = std::iter::once("缺失".to_string())
+            .chain(std::iter::once("未分组".to_string()))
+            .chain(
+                (1..=self.grouping.market_cap_boundaries.len() + 1)
+                    .map(|index| format!("组{index}")),
+            )
+            .collect::<Vec<_>>();
+        type ObservationRow<'a> = (&'a str, &'a str, u32, Option<f64>, u16, i16, bool);
+        let mut batch = Vec::<ObservationRow>::with_capacity(8192);
         let mut writer = conn.appender("observations").map_err(|e| e.to_string())?;
-        for chunk in codes.chunks(128) {
+        let mut flush = |batch: &mut Vec<ObservationRow>| -> Result<(), String> {
+            if batch.is_empty() {
+                return Ok(());
+            }
+            let record = RecordBatch::try_from_iter([
+                (
+                    "ts_code",
+                    Arc::new(StringArray::from_iter_values(batch.iter().map(|row| row.0)))
+                        as ArrayRef,
+                ),
+                (
+                    "trade_date",
+                    Arc::new(StringArray::from_iter_values(batch.iter().map(|row| row.1)))
+                        as ArrayRef,
+                ),
+                (
+                    "board",
+                    Arc::new(StringArray::from_iter_values(
+                        batch.iter().map(|row| boards[row.2 as usize]),
+                    )) as ArrayRef,
+                ),
+                (
+                    "market_cap",
+                    Arc::new(Float64Array::from_iter(batch.iter().map(|row| row.3))) as ArrayRef,
+                ),
+                (
+                    "cap_group",
+                    Arc::new(StringArray::from_iter_values(
+                        batch
+                            .iter()
+                            .map(|row| bucket_labels[row.4 as usize].as_str()),
+                    )) as ArrayRef,
+                ),
+                (
+                    "eligibility",
+                    Arc::new(Int16Array::from_iter(batch.iter().map(|row| row.5))) as ArrayRef,
+                ),
+                (
+                    "quote_present",
+                    Arc::new(BooleanArray::from_iter(batch.iter().map(|row| row.6))) as ArrayRef,
+                ),
+            ])
+            .map_err(|e| e.to_string())?;
+            writer
+                .append_record_batch(record)
+                .map_err(|e| e.to_string())?;
+            batch.clear();
+            Ok(())
+        };
+        for (chunk_index, chunk) in codes.chunks(128).enumerate() {
+            let base = chunk_index * 128;
             let placeholders = std::iter::repeat_n("?", chunk.len())
                 .collect::<Vec<_>>()
                 .join(",");
@@ -130,21 +198,19 @@ impl ValidationResearchOutput {
                         .chain(chunk.iter().map(String::as_str)),
                 ))
                 .map_err(|e| e.to_string())?;
-            let mut quotes = HashMap::<(String, String), Option<f64>>::new();
+            let mut quotes = HashMap::<String, HashMap<String, Option<f64>>>::new();
             while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-                quotes.insert(
-                    (
-                        row.get(0).map_err(|e| e.to_string())?,
-                        row.get(1).map_err(|e| e.to_string())?,
-                    ),
-                    row.get(2).map_err(|e| e.to_string())?,
-                );
+                let code: String = row.get(0).map_err(|e| e.to_string())?;
+                let day: String = row.get(1).map_err(|e| e.to_string())?;
+                let cap: Option<f64> = row.get(2).map_err(|e| e.to_string())?;
+                quotes.entry(code).or_default().insert(day, cap);
             }
-            for code in chunk {
-                // Code-based board classification is stable; historical ST is deliberately not inferred from today's name.
-                let board = crate::utils::utils::board_category(code, None);
+            for (offset, code) in chunk.iter().enumerate() {
                 for day in &calendar {
-                    let quote = quotes.get(&(code.clone(), day.clone()));
+                    let quote = quotes
+                        .get(code.as_str())
+                        .and_then(|days| days.get(day.as_str()));
+                    let quote_present = quote.is_some();
                     let cap = quote
                         .copied()
                         .flatten()
@@ -154,20 +220,34 @@ impl ValidationResearchOutput {
                         Some(false) => 0,
                         None => -1,
                     };
-                    writer
-                        .append_row(params![
-                            code,
-                            day,
-                            board,
-                            cap,
-                            ResearchGrouping::bucket(cap, &self.grouping.market_cap_boundaries),
-                            status,
-                            quote.is_some()
-                        ])
-                        .map_err(|e| e.to_string())?;
+                    let bucket = match cap {
+                        None => 0u16,
+                        Some(_) if self.grouping.market_cap_boundaries.is_empty() => 1,
+                        Some(value) => {
+                            2 + self
+                                .grouping
+                                .market_cap_boundaries
+                                .partition_point(|boundary| value >= *boundary)
+                                as u16
+                        }
+                    };
+                    batch.push((
+                        code.as_str(),
+                        day.as_str(),
+                        (base + offset) as u32,
+                        cap,
+                        bucket,
+                        status,
+                        quote_present,
+                    ));
+                    if batch.len() >= 8192 {
+                        flush(&mut batch)?;
+                    }
                 }
             }
         }
+        flush(&mut batch)?;
+        drop(flush);
         writer.flush().map_err(|e| e.to_string())?;
         drop(writer);
         let baseline_status = if !snapshot_baseline_scores {
@@ -198,31 +278,130 @@ impl ValidationResearchOutput {
                     .saturating_sub(profile.compute_and_send_batches_ms),
             );
             let allowed = codes.iter().map(String::as_str).collect::<HashSet<_>>();
+            let baseline_bucket_labels = std::iter::once("缺失".to_string())
+                .chain(std::iter::once("未分组".to_string()))
+                .chain(
+                    (1..=self.grouping.baseline_score_boundaries.len() + 1)
+                        .map(|index| format!("组{index}")),
+                )
+                .collect::<Vec<_>>();
+            let mut batch = Vec::<(&str, &str, Option<f64>, Option<i64>, u16)>::with_capacity(8192);
             let mut writer = conn
                 .appender("baseline_scores")
                 .map_err(|e| e.to_string())?;
+            let mut flush = |batch: &mut Vec<(&str, &str, Option<f64>, Option<i64>, u16)>| -> Result<(), String> {
+                if batch.is_empty() {
+                    return Ok(());
+                }
+                let record = RecordBatch::try_from_iter([
+                    (
+                        "ts_code",
+                        Arc::new(StringArray::from_iter_values(
+                            batch.iter().map(|row| row.0),
+                        )) as ArrayRef,
+                    ),
+                    (
+                        "trade_date",
+                        Arc::new(StringArray::from_iter_values(
+                            batch.iter().map(|row| row.1),
+                        )) as ArrayRef,
+                    ),
+                    (
+                        "score",
+                        Arc::new(Float64Array::from_iter(batch.iter().map(|row| row.2)))
+                            as ArrayRef,
+                    ),
+                    (
+                        "rank",
+                        Arc::new(Int64Array::from_iter(batch.iter().map(|row| row.3)))
+                            as ArrayRef,
+                    ),
+                    (
+                        "score_group",
+                        Arc::new(StringArray::from_iter_values(
+                            batch
+                                .iter()
+                                .map(|row| baseline_bucket_labels[row.4 as usize].as_str()),
+                        )) as ArrayRef,
+                    ),
+                ])
+                .map_err(|e| e.to_string())?;
+                writer
+                    .append_record_batch(record)
+                    .map_err(|e| e.to_string())?;
+                batch.clear();
+                Ok(())
+            };
             let mut count = 0;
             for row in &scored.summary_rows {
                 if !allowed.contains(row.ts_code.as_str()) {
                     continue;
                 }
                 let score = row.total_score.is_finite().then_some(row.total_score);
-                writer
-                    .append_row(params![
-                        row.ts_code,
-                        row.trade_date,
-                        score,
-                        row.rank,
-                        ResearchGrouping::bucket(score, &self.grouping.baseline_score_boundaries)
-                    ])
-                    .map_err(|e| e.to_string())?;
+                let bucket = match score {
+                    None => 0u16,
+                    Some(_) if self.grouping.baseline_score_boundaries.is_empty() => 1,
+                    Some(value) => {
+                        2 + self
+                            .grouping
+                            .baseline_score_boundaries
+                            .partition_point(|boundary| value >= *boundary)
+                            as u16
+                    }
+                };
+                batch.push((
+                    row.ts_code.as_str(),
+                    row.trade_date.as_str(),
+                    score,
+                    row.rank,
+                    bucket,
+                ));
                 count += 1;
+                if batch.len() >= 8192 {
+                    flush(&mut batch)?;
+                }
             }
+            flush(&mut batch)?;
+            drop(flush);
             writer.flush().map_err(|e| e.to_string())?;
             drop(writer);
+            let mut batch = Vec::<(&str, &str, &str, f64)>::with_capacity(8192);
             let mut writer = conn
                 .appender("baseline_rule_scores")
                 .map_err(|e| e.to_string())?;
+            let mut flush = |batch: &mut Vec<(&str, &str, &str, f64)>| -> Result<(), String> {
+                if batch.is_empty() {
+                    return Ok(());
+                }
+                let record = RecordBatch::try_from_iter([
+                    (
+                        "rule_name",
+                        Arc::new(StringArray::from_iter_values(batch.iter().map(|row| row.0)))
+                            as ArrayRef,
+                    ),
+                    (
+                        "ts_code",
+                        Arc::new(StringArray::from_iter_values(batch.iter().map(|row| row.1)))
+                            as ArrayRef,
+                    ),
+                    (
+                        "trade_date",
+                        Arc::new(StringArray::from_iter_values(batch.iter().map(|row| row.2)))
+                            as ArrayRef,
+                    ),
+                    (
+                        "score",
+                        Arc::new(Float64Array::from_iter(batch.iter().map(|row| row.3)))
+                            as ArrayRef,
+                    ),
+                ])
+                .map_err(|e| e.to_string())?;
+                writer
+                    .append_record_batch(record)
+                    .map_err(|e| e.to_string())?;
+                batch.clear();
+                Ok(())
+            };
             for hit in &scored.compact_rule_rows {
                 let row = scored
                     .summary_rows
@@ -236,11 +415,19 @@ impl ValidationResearchOutput {
                     .get(hit.rule_id as usize)
                     .ok_or("基线规则索引无效")?;
                 if hit.rule_score.is_finite() {
-                    writer
-                        .append_row(params![name, row.ts_code, row.trade_date, hit.rule_score])
-                        .map_err(|e| e.to_string())?;
+                    batch.push((
+                        name.as_str(),
+                        row.ts_code.as_str(),
+                        row.trade_date.as_str(),
+                        hit.rule_score,
+                    ));
+                    if batch.len() >= 8192 {
+                        flush(&mut batch)?;
+                    }
                 }
             }
+            flush(&mut batch)?;
+            drop(flush);
             writer.flush().map_err(|e| e.to_string())?;
             drop(writer);
             for (key, value) in [

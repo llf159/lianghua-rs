@@ -95,7 +95,7 @@ const CONCEPT_COLUMN_MIN_WIDTH = 240;
 const DEFAULT_COLUMN_ORDER = 500;
 
 const COLUMN_CONFIG: Record<string, ColumnConfig> = {
-  rank: { label: "排名", order: 10, width: 50 },
+  rank: { label: "排名", order: 10, width: 56 },
   name: { label: "股票", order: 20, width: 120 },
   total_mv_yi: { label: "总市值(亿)", order: 40, width: 110 },
   board: { label: "板块", order: 50, width: 108 },

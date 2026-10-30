@@ -840,7 +840,8 @@ pub fn run_rule_expression_validation(
     let runtime_cache = std::thread::scope(|scope| -> Result<_, String> {
         let preparation = research.map(|research| {
             scope.spawn(|| {
-                research.prepare(
+                let started = std::time::Instant::now();
+                let result = research.prepare(
                     &source_path,
                     &params.stock_adj_type,
                     &params.start_date,
@@ -848,7 +849,12 @@ pub fn run_rule_expression_validation(
                     params.min_listed_trade_days,
                     &validation_ts_codes,
                     true,
-                )
+                );
+                log::info!(
+                    "表达式研究：隔离基线准备耗时 {:.3}s",
+                    started.elapsed().as_secs_f64()
+                );
+                result
             })
         });
         let runtime_cache = build_rule_layer_runtime_cache_from_stock_data_with_ts_filter(
@@ -875,6 +881,7 @@ pub fn run_rule_expression_validation(
         "表达式研究：后验与基线准备耗时 {:.3}s",
         preparation_started.elapsed().as_secs_f64()
     );
+    let indexing_started = std::time::Instant::now();
     if let Some(research) = research {
         if params.return_metric == crate::simulate::BacktestReturnMetric::ResidualReturn {
             research.save_labels(params.backtest_period, runtime_cache.as_ref())?;
@@ -903,20 +910,26 @@ pub fn run_rule_expression_validation(
             research.save_labels(params.backtest_period, &raw_cache)?;
         }
     }
+    let labels_done = indexing_started.elapsed();
     let st_list = load_st_list(&source_path)?;
     let explain_map = all_rules
         .iter()
         .map(|rule| (rule.name.clone(), rule.explain.clone()))
         .collect::<HashMap<_, _>>();
     let stock_meta_map = load_validation_sample_stock_meta_map(&source_path)?;
-    let universe_index = build_validation_universe_index(
-        &calc_rule_layer_metrics_with_samples_from_cache(
-            runtime_cache.as_ref(),
-            &ValidationTriggeredScoreMap::new(),
-            &layer_config,
-        )?
-        .samples,
-    );
+    let metrics_started = std::time::Instant::now();
+    let samples = calc_rule_layer_metrics_with_samples_from_cache(
+        runtime_cache.as_ref(),
+        &ValidationTriggeredScoreMap::new(),
+        &layer_config,
+    )?
+    .samples;
+    let metrics_done = metrics_started.elapsed();
+    let universe_started = std::time::Instant::now();
+    let universe_index = build_validation_universe_index(&samples);
+    drop(samples);
+    let universe_done = universe_started.elapsed();
+    let existing_started = std::time::Instant::now();
     let existing_rule_score_index = load_validation_existing_rule_score_index(
         &source_path,
         &params.start_date,
@@ -924,10 +937,21 @@ pub fn run_rule_expression_validation(
         &universe_index,
         research,
     )?;
+    let existing_done = existing_started.elapsed();
+    let daily_started = std::time::Instant::now();
     let existing_rule_daily_returns = build_validation_existing_rule_daily_returns(
         &universe_index,
         &existing_rule_score_index,
         params.min_samples_per_day,
+    );
+    let daily_done = daily_started.elapsed();
+    log::info!(
+        "表达式研究：索引明细 标签{:.3}s 指标采样{:.3}s 样本索引{:.3}s 基线规则{:.3}s 日收益{:.3}s",
+        labels_done.as_secs_f64(),
+        metrics_done.as_secs_f64(),
+        universe_done.as_secs_f64(),
+        existing_done.as_secs_f64(),
+        daily_done.as_secs_f64()
     );
     let requested_core_rule_names = core_rule_names.unwrap_or_default();
     if requested_core_rule_names
@@ -1034,6 +1058,10 @@ pub fn run_rule_expression_validation(
             fold.train_end_index = first_unsafe.saturating_sub(1);
         }
     }
+    log::info!(
+        "表达式研究：保存标签与构建统计索引耗时 {:.3}s",
+        indexing_started.elapsed().as_secs_f64()
+    );
     let mut combo_results = Vec::with_capacity(execution_plan.combos.len());
     for combo_chunk in execution_plan.combos.chunks(16) {
         if let Some(progress) = progress {

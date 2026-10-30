@@ -235,6 +235,7 @@ impl ScoringTrackingPlan {
         code: &str,
         total: &mut [f64],
         details: &mut Vec<RuleScoreSeries>,
+        save_checkpoint: bool,
     ) -> Result<Vec<TrackingScoreState>, String> {
         if self.is_empty() {
             return Ok(Vec::new());
@@ -248,6 +249,33 @@ impl ScoringTrackingPlan {
             .iter()
             .map(|&index| (index, details[index].series.clone()))
             .collect::<HashMap<_, _>>();
+        let mut states = BTreeMap::new();
+        for (definition, program, source) in &self.tracks {
+            let (scores, state) = program.rolling_scores(
+                definition,
+                rt,
+                dates,
+                &self.calendar,
+                start,
+                source.map(|index| sources[&index].as_slice()),
+            )?;
+            if source.is_some() {
+                for (value, score) in total.iter_mut().zip(&scores) {
+                    *value += score;
+                }
+                details.push(RuleScoreSeries {
+                    name: definition.score_name(),
+                    triggered: scores.iter().map(|score| *score != 0.0).collect(),
+                    series: scores,
+                });
+            }
+            if save_checkpoint {
+                states.insert(definition.id.clone(), state);
+            }
+        }
+        if !save_checkpoint {
+            return Ok(Vec::new());
+        }
         let signature = {
             let mut hash = DefaultHasher::new();
             self.calendar.hash(&mut hash);
@@ -273,28 +301,6 @@ impl ScoringTrackingPlan {
             }
             hash.finish()
         };
-        let mut states = BTreeMap::new();
-        for (definition, program, source) in &self.tracks {
-            let (scores, state) = program.rolling_scores(
-                definition,
-                rt,
-                dates,
-                &self.calendar,
-                start,
-                source.map(|index| sources[&index].as_slice()),
-            )?;
-            if source.is_some() {
-                for (value, score) in total.iter_mut().zip(&scores) {
-                    *value += score;
-                }
-                details.push(RuleScoreSeries {
-                    name: definition.score_name(),
-                    triggered: scores.iter().map(|score| *score != 0.0).collect(),
-                    series: scores,
-                });
-            }
-            states.insert(definition.id.clone(), state);
-        }
         let checkpoint = RankingTrackCheckpoint {
             computed_at: self.computed_at,
             resumed: false,

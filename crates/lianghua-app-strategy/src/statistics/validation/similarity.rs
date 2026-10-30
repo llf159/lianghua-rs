@@ -9,6 +9,8 @@ use crate::statistics::common::open_result_conn;
 use crate::statistics::validation::RuleValidationSimilarityRow;
 use crate::statistics::validation::VALIDATION_EPS;
 use crate::statistics::validation::samples::compare_option_f64_desc;
+use duckdb::arrow::array::{Array, Float64Array, StringArray};
+use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::params;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -381,71 +383,123 @@ pub(in crate::statistics) fn load_validation_existing_rule_score_index(
     };
     let mut stmt = result_conn.prepare(&format!("SELECT rule_name,ts_code,trade_date,TRY_CAST({score_column} AS DOUBLE) FROM {table} WHERE trade_date>=? AND trade_date<=? AND TRY_CAST({score_column} AS DOUBLE) IS NOT NULL"))
         .map_err(|error| format!("读取基线策略分项失败: {error}"))?;
-    let mut rows = stmt
-        .query(params![start_date, end_date])
+    stmt.execute(params![start_date, end_date])
         .map_err(|error| format!("查询已有策略分数失败: {error}"))?;
 
     let mut index = ValidationExistingRuleScoreIndex::default();
     let mut rule_index_by_name = HashMap::<String, u32>::new();
-    while let Some(row) = rows
-        .next()
+    // Baseline rule detail is read back from the run's own DuckDB. Decode each
+    // Arrow batch once and borrow strings instead of allocating three Strings
+    // per row; only new rule names need an owned key.
+    while let Some(array) = stmt
+        .step()
         .map_err(|error| format!("读取已有策略分数失败: {error}"))?
     {
-        let rule_name: String = row.get(0).map_err(|e| format!("读取规则名失败: {e}"))?;
-        let ts_code: String = row.get(1).map_err(|e| format!("读取代码失败: {e}"))?;
-        let trade_date: String = row.get(2).map_err(|e| format!("读取交易日失败: {e}"))?;
-        let score: f64 = row.get(3).map_err(|e| format!("读取规则分失败: {e}"))?;
-        *index
-            .range_trigger_counts
-            .entry(rule_name.clone())
-            .or_default() += 1;
-        let pair_hash = validation_pair_hash(&ts_code, &trade_date);
-        let Some(&universe_index) = universe.index_by_pair.get(&pair_hash) else {
-            continue;
-        };
-        *index
-            .universe_trigger_counts
-            .entry(rule_name.clone())
-            .or_default() += 1;
-        if score.abs() <= VALIDATION_EPS {
-            continue;
+        let batch = RecordBatch::from(&array);
+        let rule_names = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or("基线规则名不是字符串")?;
+        let ts_codes = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or("基线股票代码不是字符串")?;
+        let trade_dates = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or("基线交易日不是字符串")?;
+        let scores = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .ok_or("基线规则分不是DOUBLE")?;
+        for row in 0..batch.num_rows() {
+            if rule_names.is_null(row)
+                || ts_codes.is_null(row)
+                || trade_dates.is_null(row)
+                || scores.is_null(row)
+            {
+                continue;
+            }
+            let rule_name = rule_names.value(row);
+            let ts_code = ts_codes.value(row);
+            let trade_date = trade_dates.value(row);
+            let score = scores.value(row);
+            if let Some(count) = index.range_trigger_counts.get_mut(rule_name) {
+                *count += 1;
+            } else {
+                index.range_trigger_counts.insert(rule_name.to_string(), 1);
+            }
+            let pair_hash = validation_pair_hash(ts_code, trade_date);
+            let Some(&universe_index) = universe.index_by_pair.get(&pair_hash) else {
+                continue;
+            };
+            if let Some(count) = index.universe_trigger_counts.get_mut(rule_name) {
+                *count += 1;
+            } else {
+                index
+                    .universe_trigger_counts
+                    .insert(rule_name.to_string(), 1);
+            }
+            if score.abs() <= VALIDATION_EPS {
+                continue;
+            }
+            let rule_index = if let Some(existing) = rule_index_by_name.get(rule_name) {
+                *existing
+            } else {
+                let created = index.rule_names.len() as u32;
+                rule_index_by_name.insert(rule_name.to_string(), created);
+                index.rule_names.push(rule_name.to_string());
+                index.hit_counts.push(0);
+                index.score_sums.push(0.0);
+                index.score_square_sums.push(0.0);
+                created
+            };
+            index.hit_counts[rule_index as usize] += 1;
+            index.score_sums[rule_index as usize] += score;
+            index.score_square_sums[rule_index as usize] += score * score;
+            index.hits.push(ValidationRuleHit {
+                pair_hash,
+                universe_index,
+                rule_index,
+                score,
+            });
         }
-        let rule_index = if let Some(existing) = rule_index_by_name.get(&rule_name) {
-            *existing
-        } else {
-            let created = index.rule_names.len() as u32;
-            rule_index_by_name.insert(rule_name.clone(), created);
-            index.rule_names.push(rule_name);
-            index.hit_counts.push(0);
-            index.score_sums.push(0.0);
-            index.score_square_sums.push(0.0);
-            created
-        };
-        index.hit_counts[rule_index as usize] += 1;
-        index.score_sums[rule_index as usize] += score;
-        index.score_square_sums[rule_index as usize] += score * score;
-        index.hits.push(ValidationRuleHit {
-            pair_hash,
-            universe_index,
-            rule_index,
-            score,
-        });
     }
     index
         .hits
         .sort_unstable_by_key(|hit| (hit.pair_hash, hit.rule_index));
     if research.is_some() {
         let mut stmt = result_conn.prepare("SELECT ts_code,trade_date FROM baseline_scores WHERE score IS NOT NULL AND trade_date BETWEEN ? AND ?").map_err(|e| e.to_string())?;
-        index.scored_pairs = Some(
-            stmt.query_map(params![start_date, end_date], |row| {
-                let code: String = row.get(0)?;
-                let day: String = row.get(1)?;
-                Ok(validation_pair_hash(&code, &day))
-            })
-            .map_err(|e| e.to_string())?
-            .collect::<Result<HashSet<_>, _>>()
-            .map_err(|e| e.to_string())?,
-        );
+        stmt.execute(params![start_date, end_date])
+            .map_err(|e| e.to_string())?;
+        let mut scored_pairs = HashSet::new();
+        while let Some(array) = stmt.step().map_err(|e| e.to_string())? {
+            let batch = RecordBatch::from(&array);
+            let ts_codes = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or("基线股票代码不是字符串")?;
+            let trade_dates = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or("基线交易日不是字符串")?;
+            for row in 0..batch.num_rows() {
+                if ts_codes.is_null(row) || trade_dates.is_null(row) {
+                    continue;
+                }
+                scored_pairs.insert(validation_pair_hash(
+                    ts_codes.value(row),
+                    trade_dates.value(row),
+                ));
+            }
+        }
+        index.scored_pairs = Some(scored_pairs);
     }
     Ok(index)
 }
