@@ -1360,6 +1360,15 @@
   pointer-events: none;
 }
 
+.details-chart-cyq-status {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  color: #94a3b8;
+  font-size: 14px;
+  text-align: center;
+}
+
 .details-chart-cyq-divider {
   stroke: rgba(77, 90, 112, 0.26);
   stroke-dasharray: 2 3;

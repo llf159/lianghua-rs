@@ -1052,12 +1052,13 @@ async fn get_stock_detail_cyq(
     source_path: String,
     ts_code: String,
     chip_model: Option<String>,
+    trade_date: Option<String>,
 ) -> Result<StockDetailCyqData, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
             .read()
             .unwrap_or_else(|e| e.into_inner());
-        core_get_stock_detail_cyq(source_path, ts_code, chip_model)
+        core_get_stock_detail_cyq(source_path, ts_code, chip_model, trade_date)
     })
     .await
     .map_err(|error| error.to_string())?

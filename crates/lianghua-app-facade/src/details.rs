@@ -293,6 +293,8 @@ pub struct StockDetailCyqData {
     pub model: String,
     pub factor: Option<u32>,
     pub snapshots: Vec<DetailCyqSnapshot>,
+    pub has_earlier_snapshots: bool,
+    pub has_later_snapshots: bool,
 }
 
 #[derive(Debug)]
@@ -1996,6 +1998,7 @@ pub fn get_stock_detail_cyq(
     source_path: String,
     ts_code: String,
     chip_model: Option<String>,
+    trade_date: Option<String>,
 ) -> Result<StockDetailCyqData, String> {
     if source_path.trim().is_empty() {
         return Err("数据目录为空，请先到数据管理页确认当前目录".to_string());
@@ -2035,6 +2038,8 @@ pub fn get_stock_detail_cyq(
                     model: "chen".to_string(),
                     factor: None,
                     snapshots: Vec::new(),
+                    has_earlier_snapshots: false,
+                    has_later_snapshots: false,
                 });
             };
             if !cyq_table_exists(&conn, "cyq_chen_snapshot")?
@@ -2045,6 +2050,8 @@ pub fn get_stock_detail_cyq(
                     model: "chen".to_string(),
                     factor: None,
                     snapshots: Vec::new(),
+                    has_earlier_snapshots: false,
+                    has_later_snapshots: false,
                 });
             }
 
@@ -2140,8 +2147,27 @@ pub fn get_stock_detail_cyq(
                     model: "chen".to_string(),
                     factor: None,
                     snapshots,
+                    has_earlier_snapshots: false,
+                    has_later_snapshots: false,
                 });
             }
+
+            let selected_index = trade_date
+                .as_deref()
+                .map(str::trim)
+                .filter(|date| !date.is_empty())
+                .map(|date| {
+                    snapshots
+                        .partition_point(|snapshot| snapshot.trade_date.as_str() <= date)
+                        .saturating_sub(1)
+                })
+                .unwrap_or(snapshots.len() - 1);
+            // Keep 60 days for scaling, plus 60 days in either direction for cursor movement.
+            let window_start = selected_index.saturating_sub(119);
+            let window_end = (selected_index + 61).min(snapshots.len());
+            let has_earlier_snapshots = window_start > 0;
+            let has_later_snapshots = window_end < snapshots.len();
+            snapshots = snapshots.drain(window_start..window_end).collect();
 
             let mut snapshot_index_by_trade_date = HashMap::with_capacity(snapshots.len());
             for (index, snapshot) in snapshots.iter().enumerate() {
@@ -2151,21 +2177,22 @@ pub fn get_stock_detail_cyq(
             let mut bin_stmt = conn
                 .prepare(
                     r#"
-            SELECT bin.trade_date, bin.price, bin.price_low, bin.price_high,
-                   bin.main_chip, bin.retail_chip, bin.total_chip,
-                   snap.main_total, snap.retail_total, snap.total_chips
-            FROM cyq_chen_bin bin
-            JOIN cyq_chen_snapshot snap
-              ON snap.ts_code = bin.ts_code
-             AND snap.trade_date = bin.trade_date
-             AND snap.adj_type = bin.adj_type
-            WHERE bin.ts_code = ? AND bin.adj_type = ?
-            ORDER BY bin.trade_date ASC, bin.bin_index ASC
+            SELECT trade_date, price, price_low, price_high,
+                   main_chip, retail_chip, total_chip
+            FROM cyq_chen_bin
+            WHERE ts_code = ? AND adj_type = ?
+              AND trade_date BETWEEN ? AND ?
+            ORDER BY trade_date ASC, bin_index ASC
             "#,
                 )
                 .map_err(|e| format!("预编译新筹码分布查询失败: {e}"))?;
             let mut bin_rows = bin_stmt
-                .query(params![&normalized_ts_code, DEFAULT_ADJ_TYPE])
+                .query(params![
+                    &normalized_ts_code,
+                    DEFAULT_ADJ_TYPE,
+                    &snapshots[0].trade_date,
+                    &snapshots[snapshots.len() - 1].trade_date
+                ])
                 .map_err(|e| format!("查询新筹码分布失败: {e}"))?;
 
             while let Some(row) = bin_rows
@@ -2188,14 +2215,9 @@ pub fn get_stock_detail_cyq(
                 let total_chip: f64 = row
                     .get(6)
                     .map_err(|e| format!("读取新筹码混合值失败: {e}"))?;
-                let main_total: f64 = row
-                    .get(7)
-                    .map_err(|e| format!("读取新筹码主力总量失败: {e}"))?;
-                let retail_total: f64 = row
-                    .get(8)
-                    .map_err(|e| format!("读取新筹码散户总量失败: {e}"))?;
-                let total_chips: f64 =
-                    row.get(9).map_err(|e| format!("读取新筹码总量失败: {e}"))?;
+                let main_total = snapshots[snapshot_index].main_total.unwrap_or(0.0);
+                let retail_total = snapshots[snapshot_index].retail_total.unwrap_or(0.0);
+                let total_chips = snapshots[snapshot_index].total_chips.unwrap_or(0.0);
                 let pct = |value: f64, total: f64| {
                     if total.abs() <= f64::EPSILON {
                         0.0
@@ -2228,6 +2250,8 @@ pub fn get_stock_detail_cyq(
                 model: "chen".to_string(),
                 factor: None,
                 snapshots,
+                has_earlier_snapshots,
+                has_later_snapshots,
             })
         })(&source_path, &ts_code),
         _ => (|source_path: &str, ts_code: &str| -> Result<StockDetailCyqData, String> {
@@ -2250,6 +2274,8 @@ pub fn get_stock_detail_cyq(
                     model: "legacy".to_string(),
                     factor: None,
                     snapshots: Vec::new(),
+                    has_earlier_snapshots: false,
+                    has_later_snapshots: false,
                 });
             };
             if !cyq_table_exists(&conn, "cyq_snapshot")? || !cyq_table_exists(&conn, "cyq_bin")? {
@@ -2258,6 +2284,8 @@ pub fn get_stock_detail_cyq(
                     model: "legacy".to_string(),
                     factor: None,
                     snapshots: Vec::new(),
+                    has_earlier_snapshots: false,
+                    has_later_snapshots: false,
                 });
             }
 
@@ -2349,8 +2377,27 @@ pub fn get_stock_detail_cyq(
                     model: "legacy".to_string(),
                     factor,
                     snapshots,
+                    has_earlier_snapshots: false,
+                    has_later_snapshots: false,
                 });
             }
+
+            let selected_index = trade_date
+                .as_deref()
+                .map(str::trim)
+                .filter(|date| !date.is_empty())
+                .map(|date| {
+                    snapshots
+                        .partition_point(|snapshot| snapshot.trade_date.as_str() <= date)
+                        .saturating_sub(1)
+                })
+                .unwrap_or(snapshots.len() - 1);
+            // Keep 60 days for scaling, plus 60 days in either direction for cursor movement.
+            let window_start = selected_index.saturating_sub(119);
+            let window_end = (selected_index + 61).min(snapshots.len());
+            let has_earlier_snapshots = window_start > 0;
+            let has_later_snapshots = window_end < snapshots.len();
+            snapshots = snapshots.drain(window_start..window_end).collect();
 
             let mut snapshot_index_by_trade_date = HashMap::with_capacity(snapshots.len());
             for (index, snapshot) in snapshots.iter().enumerate() {
@@ -2363,12 +2410,18 @@ pub fn get_stock_detail_cyq(
             SELECT trade_date, price, price_low, price_high, chip, chip_pct
             FROM cyq_bin
             WHERE ts_code = ? AND adj_type = ?
+              AND trade_date BETWEEN ? AND ?
             ORDER BY trade_date ASC, bin_index ASC
             "#,
                 )
                 .map_err(|e| format!("预编译筹码分布查询失败: {e}"))?;
             let mut bin_rows = bin_stmt
-                .query(params![&normalized_ts_code, DEFAULT_ADJ_TYPE])
+                .query(params![
+                    &normalized_ts_code,
+                    DEFAULT_ADJ_TYPE,
+                    &snapshots[0].trade_date,
+                    &snapshots[snapshots.len() - 1].trade_date
+                ])
                 .map_err(|e| format!("查询筹码分布失败: {e}"))?;
 
             while let Some(row) = bin_rows
@@ -2406,6 +2459,8 @@ pub fn get_stock_detail_cyq(
                 model: "legacy".to_string(),
                 factor,
                 snapshots,
+                has_earlier_snapshots,
+                has_later_snapshots,
             })
         })(&source_path, &ts_code),
     }
@@ -2614,6 +2669,82 @@ mod tests {
     use duckdb::{Connection, params};
 
     use super::*;
+
+    #[test]
+    fn detail_cyq_loads_bounded_windows_for_both_models() {
+        let source_dir = unique_temp_dir("details_cyq_window");
+        fs::create_dir_all(&source_dir).unwrap();
+        let source_path = source_dir.to_str().unwrap();
+        crate::data::cyq_chen_data::init_cyq_chen_db(&cyq_chen_db_path(source_path)).unwrap();
+        let conn = Connection::open(cyq_chen_db_path(source_path)).unwrap();
+        conn.execute_batch(&format!(
+            r#"
+            INSERT INTO cyq_chen_snapshot
+                (ts_code, trade_date, adj_type, close, min_price, max_price,
+                 main_total, retail_total, total_chips)
+            SELECT '000001.SZ', strftime(DATE '2025-01-01' + i::INTEGER, '%Y%m%d'),
+                   'qfq', 10, 9, 11, 20, 10, 30 FROM range(400) t(i);
+            INSERT INTO cyq_chen_bin
+            SELECT ts_code, trade_date, adj_type, i::INTEGER, 9 + i, 8.5 + i, 9.5 + i,
+                   10, 5, 15 FROM cyq_chen_snapshot CROSS JOIN range(2) t(i);
+            ATTACH '{}' AS legacy;
+            CREATE TABLE legacy.cyq_snapshot AS
+            SELECT ts_code, trade_date, adj_type, 1::BIGINT AS factor, close,
+                   min_price, max_price, total_chips, total_profit_ratio AS benefit_part,
+                   percent_70_price_low, percent_70_price_high, percent_70_concentration,
+                   percent_90_price_low, percent_90_price_high, percent_90_concentration
+            FROM cyq_chen_snapshot;
+            CREATE TABLE legacy.cyq_bin AS
+            SELECT ts_code, trade_date, adj_type, bin_index, price, price_low, price_high,
+                   total_chip AS chip, 0.5::DOUBLE AS chip_pct FROM cyq_chen_bin;
+            DETACH legacy;
+            "#,
+            cyq_db_path(source_path)
+                .to_string_lossy()
+                .replace('\'', "''")
+        ))
+        .unwrap();
+        drop(conn);
+        for model in ["chen", "legacy"] {
+            for (selected_day, expected_start, expected_end) in
+                [(None, 280, 400), (Some(200), 81, 261), (Some(10), 0, 71)]
+            {
+                let selected_date = selected_day.map(|day| {
+                    (chrono::NaiveDate::from_ymd_opt(2025, 1, 1).unwrap()
+                        + chrono::Duration::days(day))
+                    .format("%Y%m%d")
+                    .to_string()
+                });
+                let data = get_stock_detail_cyq(
+                    source_path.to_string(),
+                    "000001".into(),
+                    Some(model.into()),
+                    selected_date,
+                )
+                .unwrap();
+                assert_eq!(data.snapshots.len(), expected_end - expected_start);
+                assert_eq!(data.has_earlier_snapshots, expected_start > 0);
+                assert_eq!(data.has_later_snapshots, expected_end < 400);
+                for (day, snapshot) in (expected_start..expected_end).zip(&data.snapshots) {
+                    assert_eq!(
+                        snapshot.trade_date,
+                        (chrono::NaiveDate::from_ymd_opt(2025, 1, 1).unwrap()
+                            + chrono::Duration::days(day as i64))
+                        .format("%Y%m%d")
+                        .to_string()
+                    );
+                    assert_eq!(snapshot.bins.len(), 2);
+                    assert_eq!(snapshot.bins[0].chip, 15.0);
+                    assert_eq!(snapshot.bins[0].chip_pct, 0.5);
+                    if model == "chen" {
+                        assert_eq!(snapshot.bins[0].main_chip_pct, Some(0.5));
+                        assert_eq!(snapshot.bins[0].retail_chip_pct, Some(0.5));
+                    }
+                }
+            }
+        }
+        fs::remove_dir_all(source_dir).unwrap();
+    }
 
     #[test]
     fn default_kline_panels_only_contains_price_panel() {

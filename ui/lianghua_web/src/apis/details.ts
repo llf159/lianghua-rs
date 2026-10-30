@@ -335,6 +335,8 @@ export type StockDetailCyqData = {
   model?: 'legacy' | 'chen' | string
   factor?: number | null
   snapshots: DetailCyqSnapshot[]
+  has_earlier_snapshots: boolean
+  has_later_snapshots: boolean
 }
 
 export async function getStockDetailPage(query: StockDetailQuery) {
@@ -415,6 +417,7 @@ export async function getStockDetailCyq(query: {
   sourcePath: string
   tsCode: string
   chipModel?: 'legacy' | 'chen'
+  tradeDate?: string
 }) {
   return invoke<StockDetailCyqData>('get_stock_detail_cyq', query)
 }
