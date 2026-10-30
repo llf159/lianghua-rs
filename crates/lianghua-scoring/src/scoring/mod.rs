@@ -269,6 +269,7 @@ fn combination_score_parts(
 fn scoring_rule_cache(
     rule: &CachedRule,
     rt: &mut Runtime,
+    mut availability: Option<&mut Vec<bool>>,
 ) -> Result<(Vec<f64>, Vec<bool>), String> {
     if let Some(combination) = &rule.combination {
         return (|rule: &CachedRule,
@@ -452,6 +453,9 @@ fn scoring_rule_cache(
             (i + 1).saturating_sub(rule.scope_windows)
         };
         let complete = missing_prefix[i + 1] == missing_prefix[start];
+        if let Some(availability) = availability.as_deref_mut() {
+            availability.push(complete);
+        }
         let hit = scope_state.advance(rule.scope_way, rule.scope_windows, &bs, i);
         if !complete {
             out.push(0.0);
@@ -506,7 +510,21 @@ pub fn evaluate_cached_rule_scores(
     rule: &CachedRule,
     rt: &mut Runtime,
 ) -> Result<(Vec<f64>, Vec<bool>), String> {
-    scoring_rule_cache(rule, rt)
+    scoring_rule_cache(rule, rt, None)
+}
+
+/// Research needs to distinguish an unknown input window from a known non-hit.
+/// The scoring and scope calculation are shared with production.
+pub fn evaluate_cached_rule_scores_with_availability(
+    rule: &CachedRule,
+    rt: &mut Runtime,
+) -> Result<(Vec<f64>, Vec<bool>, Vec<bool>), String> {
+    if rule.combination.is_some() {
+        return Err("单表达式研究不支持组合规则".into());
+    }
+    let mut available = Vec::new();
+    let (scores, triggered) = scoring_rule_cache(rule, rt, Some(&mut available))?;
+    Ok((scores, triggered, available))
 }
 
 pub fn scoring_rules_details_cache(
@@ -518,7 +536,7 @@ pub fn scoring_rules_details_cache(
     let mut details = Vec::with_capacity(rules_cache.len());
 
     for rule in rules_cache {
-        let (score, triggered) = scoring_rule_cache(&rule, rt)?;
+        let (score, triggered) = scoring_rule_cache(&rule, rt, None)?;
         let min_len = usize::min(total.len(), score.len());
         for i in 0..min_len {
             total[i] += score[i];
@@ -542,7 +560,7 @@ pub fn scoring_rules_total_cache(
     let mut total = vec![50.0; len];
 
     for rule in rules_cache {
-        let (score, _) = scoring_rule_cache(rule, rt)?;
+        let (score, _) = scoring_rule_cache(rule, rt, None)?;
         let min_len = usize::min(total.len(), score.len());
         for i in 0..min_len {
             total[i] += score[i];

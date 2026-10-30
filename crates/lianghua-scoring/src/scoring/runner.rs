@@ -15,10 +15,7 @@ use crate::data::{
     DataReader, RowData, RuntimeKeyCollectOptions, ScoreRule, ScoreScene,
     collect_runtime_keys_from_expr_programs, expr_program_uses_runtime_key, result_db_path,
     runtime::row_into_rt,
-    scoring_store::{
-        init_result_db, rank_scene_rows, rank_summary_rows_by_score,
-        write_score_batches_from_channel,
-    },
+    scoring_store::{init_result_db, rank_scene_rows, write_score_batches_from_channel},
     source_db_path,
 };
 use crate::scoring::{
@@ -89,7 +86,17 @@ fn format_elapsed_ms(elapsed_ms: u64) -> String {
     format!("{:.3}s", elapsed_ms as f64 / 1_000.0)
 }
 
-fn rank_summary_rows_preserving_order(rows: &mut [ScoreSummary]) {
+fn rank_summary_rows_preserving_order(
+    rows: &mut [ScoreSummary],
+    source_dir: &str,
+    adj_type: &str,
+) -> Result<(), String> {
+    if rows.len() > u32::MAX as usize {
+        return Err("评分结果过多，无法构建排名索引".to_string());
+    }
+    if rows.iter().any(|row| !row.total_score.is_finite()) {
+        return Err("评分含非有限值，无法安全构建内存排名".to_string());
+    }
     let mut order = (0..rows.len())
         .map(|index| index as u32)
         .collect::<Vec<_>>();
@@ -106,18 +113,96 @@ fn rank_summary_rows_preserving_order(rows: &mut [ScoreSummary]) {
             })
             .then_with(|| left.ts_code.cmp(&right.ts_code))
     });
-    let mut current_trade_date = String::new();
-    let mut current_rank = 0i64;
-    for row_id in order {
-        let row = &mut rows[row_id as usize];
-        if current_trade_date != row.trade_date {
-            current_trade_date.clone_from(&row.trade_date);
-            current_rank = 1;
-        } else {
-            current_rank += 1;
+
+    // 与持久化总榜共用同分规则：J 升序，缺失排最后，再按代码排序。
+    // 只读取发生同分的股票，并按日期和批次释放 J 值，避免缓存全部行情。
+    let mut conn = None;
+    let mut day_start = 0;
+    while day_start < order.len() {
+        let date = rows[order[day_start] as usize].trade_date.clone();
+        let mut day_end = day_start + 1;
+        while day_end < order.len() && rows[order[day_end] as usize].trade_date == date {
+            day_end += 1;
         }
-        row.rank = Some(current_rank);
+        let mut ties = Vec::new();
+        let mut group_start = day_start;
+        while group_start < day_end {
+            let score = rows[order[group_start] as usize].total_score;
+            let mut group_end = group_start + 1;
+            while group_end < day_end && rows[order[group_end] as usize].total_score == score {
+                group_end += 1;
+            }
+            if group_end - group_start > 1 {
+                ties.push((group_start, group_end));
+            }
+            group_start = group_end;
+        }
+        if !ties.is_empty() {
+            if conn.is_none() {
+                let path = source_db_path(source_dir);
+                let path = path
+                    .to_str()
+                    .ok_or_else(|| "原始库路径不是有效UTF-8".to_string())?;
+                conn = Some(
+                    crate::data::open_db_readonly(path)
+                        .map_err(|e| format!("打开原始库读取同分J值失败: {e}"))?,
+                );
+            }
+            let db = conn.as_ref().expect("connection initialized");
+            let codes = ties
+                .iter()
+                .flat_map(|(start, end)| order[*start..*end].iter())
+                .map(|index| rows[*index as usize].ts_code.as_str())
+                .collect::<Vec<_>>();
+            let mut j_values = HashMap::<String, f64>::new();
+            for chunk in codes.chunks(512) {
+                let placeholders = std::iter::repeat_n("?", chunk.len())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let sql = format!(
+                    "SELECT ts_code, TRY_CAST(j AS DOUBLE) FROM stock_data WHERE adj_type = ? AND trade_date = ? AND ts_code IN ({placeholders})"
+                );
+                let mut stmt = db
+                    .prepare(&sql)
+                    .map_err(|e| format!("准备同分J值查询失败: {e}"))?;
+                let params = std::iter::once(adj_type)
+                    .chain(std::iter::once(date.as_str()))
+                    .chain(chunk.iter().copied());
+                let mut result = stmt
+                    .query(duckdb::params_from_iter(params))
+                    .map_err(|e| format!("查询同分J值失败: {e}"))?;
+                while let Some(row) = result.next().map_err(|e| format!("读取同分J值失败: {e}"))?
+                {
+                    let code: String = row.get(0).map_err(|e| e.to_string())?;
+                    let value: Option<f64> = row.get(1).map_err(|e| e.to_string())?;
+                    if let Some(value) = value {
+                        j_values.insert(code, value);
+                    }
+                }
+            }
+            for (start, end) in ties {
+                order[start..end].sort_unstable_by(|&left, &right| {
+                    let left = &rows[left as usize];
+                    let right = &rows[right as usize];
+                    let by_j = match (j_values.get(&left.ts_code), j_values.get(&right.ts_code)) {
+                        (Some(a), Some(b)) if a.is_nan() && b.is_nan() => std::cmp::Ordering::Equal,
+                        (Some(a), Some(_)) if a.is_nan() => std::cmp::Ordering::Greater,
+                        (Some(_), Some(b)) if b.is_nan() => std::cmp::Ordering::Less,
+                        (Some(a), Some(b)) => a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => std::cmp::Ordering::Equal,
+                    };
+                    by_j.then_with(|| left.ts_code.cmp(&right.ts_code))
+                });
+            }
+        }
+        for (rank, row_id) in order[day_start..day_end].iter().enumerate() {
+            rows[*row_id as usize].rank = Some(rank as i64 + 1);
+        }
+        day_start = day_end;
     }
+    Ok(())
 }
 
 fn scoring_single_core(
@@ -961,10 +1046,13 @@ pub fn scoring_all_to_memory_with_mode(
 
     let mut batch = batch;
     if !batch.summary_rows.is_empty() {
-        if matches!(memory_mode, ScoringMemoryMode::RuleBacktest) {
-            rank_summary_rows_preserving_order(&mut batch.summary_rows);
-        } else {
-            rank_summary_rows_by_score(&mut batch.summary_rows);
+        rank_summary_rows_preserving_order(&mut batch.summary_rows, source_dir, adj_type)?;
+        if !matches!(memory_mode, ScoringMemoryMode::RuleBacktest) {
+            batch.summary_rows.sort_unstable_by(|a, b| {
+                a.trade_date
+                    .cmp(&b.trade_date)
+                    .then_with(|| a.rank.cmp(&b.rank))
+            });
         }
     }
     if !batch.scene_rows.is_empty() {
@@ -1102,6 +1190,90 @@ mod tests {
             assigned_names,
             combination: None,
         }
+    }
+
+    #[test]
+    fn in_memory_rank_matches_production_j_tiebreak_without_reordering_rows() {
+        let directory = std::env::temp_dir().join(format!(
+            "lianghua-memory-rank-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let source = duckdb::Connection::open(source_db_path(directory.to_str().unwrap())).unwrap();
+        source.execute_batch("CREATE TABLE stock_data(ts_code VARCHAR, trade_date VARCHAR, adj_type VARCHAR, j DOUBLE);
+            INSERT INTO stock_data VALUES ('A','20260105','qfq',9),('B','20260105','qfq',1),('C','20260105','qfq',NULL),('D','20260105','qfq',1),('A','20260106','qfq',9),('B','20260106','qfq',1),('A','20260105','hfq',-10)").unwrap();
+        drop(source);
+        let mut rows = [
+            ("C", "20260105", 5.0),
+            ("A", "20260105", 5.0),
+            ("B", "20260105", 5.0),
+            ("D", "20260105", 5.0),
+            ("A", "20260106", 6.0),
+            ("B", "20260106", 5.0),
+        ]
+        .into_iter()
+        .map(|(code, date, score)| ScoreSummary {
+            ts_code: code.into(),
+            trade_date: date.into(),
+            total_score: score,
+            rank: None,
+        })
+        .collect::<Vec<_>>();
+        rank_summary_rows_preserving_order(&mut rows, directory.to_str().unwrap(), "qfq").unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|row| (
+                    row.ts_code.as_str(),
+                    row.trade_date.as_str(),
+                    row.rank.unwrap()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("C", "20260105", 4),
+                ("A", "20260105", 3),
+                ("B", "20260105", 1),
+                ("D", "20260105", 2),
+                ("A", "20260106", 1),
+                ("B", "20260106", 2)
+            ]
+        );
+        let result_path = directory.join("comparison.db");
+        let saved = duckdb::Connection::open(&result_path).unwrap();
+        saved.execute_batch("CREATE TABLE score_summary(ts_code VARCHAR, trade_date VARCHAR, total_score DOUBLE, rank INTEGER)").unwrap();
+        for row in &rows {
+            saved
+                .execute(
+                    "INSERT INTO score_summary VALUES (?, ?, ?, NULL)",
+                    duckdb::params![row.ts_code, row.trade_date, row.total_score],
+                )
+                .unwrap();
+        }
+        drop(saved);
+        crate::data::scoring_store::build_rank_tiebreak(
+            result_path.to_str().unwrap(),
+            source_db_path(directory.to_str().unwrap())
+                .to_str()
+                .unwrap(),
+            "qfq",
+            TieBreakWay::KdjJ,
+        )
+        .unwrap();
+        let saved = duckdb::Connection::open(&result_path).unwrap();
+        for row in &rows {
+            let stored: i64 = saved
+                .query_row(
+                    "SELECT rank FROM score_summary WHERE ts_code = ? AND trade_date = ?",
+                    duckdb::params![row.ts_code, row.trade_date],
+                    |item| item.get(0),
+                )
+                .unwrap();
+            assert_eq!(row.rank, Some(stored));
+        }
+        drop(saved);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
