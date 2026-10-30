@@ -1,8 +1,10 @@
 import groovy.json.JsonSlurper
+import com.android.build.api.dsl.ApplicationExtension
 import java.io.File
 import java.util.Properties
 import org.gradle.api.artifacts.dsl.RepositoryHandler
 import org.gradle.api.artifacts.repositories.MavenArtifactRepository
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     id("com.android.application")
@@ -73,7 +75,7 @@ repositories {
     rustlsPlatformVerifier(rustlsPlatformVerifier.repoPath)
 }
 
-android {
+extensions.configure<ApplicationExtension> {
     compileSdk = 36
     namespace = "com.mingyuan.lianghua"
     defaultConfig {
@@ -108,11 +110,14 @@ android {
     buildFeatures {
         buildConfig = true
     }
-    kotlinOptions {
-        jvmTarget = "11"
-    }
     lint {
         checkReleaseBuilds = false
+    }
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(JvmTarget.JVM_11)
     }
 }
 

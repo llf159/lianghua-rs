@@ -36,3 +36,7 @@ market*
 /RESEARCH_SUMMARY.md
 /STRATEGY_CONFIRMATION_HANDOFF.md
 /STRATEGY_SYSTEM_DESIGN.md
+
+# Local build caches and database spill files
+/node_modules/
+/.tmp/

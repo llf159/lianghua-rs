@@ -73,10 +73,7 @@ pub(super) fn read(
     let mut total = 0u64;
     for index in 0..archive.len() {
         let entry = archive.by_index(index).map_err(|e| e.to_string())?;
-        let path = entry
-            .name()
-            .map_err(|e| e.to_string())?
-            .into_owned();
+        let path = entry.name().map_err(|e| e.to_string())?.into_owned();
         validate_path(&path)?;
         if for_path(&path) != Some(group) || files.contains_key(&path) {
             return Err("配置包内容分组错误或存在重复路径".into());
