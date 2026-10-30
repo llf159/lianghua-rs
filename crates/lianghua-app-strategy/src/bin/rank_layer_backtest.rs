@@ -36,11 +36,11 @@ fn main() {
     let result = match arguments[1].as_str() {
         "database" => run_rank_layer_backtest(
             common.0, common.1, common.2, common.3, common.4, common.5, common.6, common.7,
-            common.8, common.9, common.10, None, common.11, common.12, common.13, common.14,
+            common.8, common.9, common.10, None, common.11, common.12, common.13, common.14, None,
         ),
         "transient" => run_transient_rank_layer_backtest(
             common.0, common.1, common.2, common.3, common.4, common.5, common.6, common.7,
-            common.8, common.9, common.10, None, common.11, common.12, common.13, common.14,
+            common.8, common.9, common.10, None, common.11, common.12, common.13, common.14, None,
         ),
         value => {
             eprintln!("模式必须是 database 或 transient，实际为:{value}");

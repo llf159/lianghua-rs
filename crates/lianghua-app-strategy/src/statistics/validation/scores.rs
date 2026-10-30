@@ -16,7 +16,7 @@ use crate::expr::validation::estimate_expression_warmup;
 use crate::expr::validation::parse_expression_program;
 use crate::expr::validation::validate_expression_functions;
 use crate::scoring::CachedRule;
-use crate::scoring::evaluate_cached_rule_scores;
+use crate::scoring::evaluate_cached_rule_scores_with_availability;
 use crate::scoring::tools::CyqChenFieldInjector;
 use crate::scoring::tools::SimilarityRankFieldInjector;
 #[cfg(test)]
@@ -186,6 +186,7 @@ pub(in crate::statistics) fn build_validation_triggered_scores_for_combos(
     ts_codes: &[String],
     st_list: &HashSet<String>,
     combos: &[PreparedValidationCombo],
+    include_non_hits: bool,
 ) -> Result<Vec<ValidationTriggeredScoreMap>, String> {
     if combos.is_empty() {
         return Ok(Vec::new());
@@ -367,8 +368,30 @@ pub(in crate::statistics) fn build_validation_triggered_scores_for_combos(
                             restore_runtime_values(&mut runtime, &restore_values[combo_index]);
                         }
 
-                        let (scores, triggered_flags) =
-                            evaluate_cached_rule_scores(&combo.cached_rule, &mut runtime)?;
+                        let (scores, triggered_flags, available) =
+                            evaluate_cached_rule_scores_with_availability(
+                                &combo.cached_rule,
+                                &mut runtime,
+                            )?;
+                        if include_non_hits {
+                            let values = trade_dates
+                                .iter()
+                                .enumerate()
+                                .skip(keep_from)
+                                .map(|(index, day)| {
+                                    let value = if !available.get(index).copied().unwrap_or(false) {
+                                        f64::NAN
+                                    } else if triggered_flags.get(index).copied().unwrap_or(false) {
+                                        scores.get(index).copied().unwrap_or(f64::NAN)
+                                    } else {
+                                        0.0
+                                    };
+                                    (day.clone(), value)
+                                })
+                                .collect();
+                            combo_hits.push((combo_index, values));
+                            continue;
+                        }
                         let Some(date_score_map) =
                             (|trade_dates: &[String],
                               keep_from: usize,
@@ -516,6 +539,7 @@ pub(in crate::statistics) fn build_validation_triggered_scores(
         &ts_codes,
         &st_list,
         &[combo],
+        false,
     )?;
     Ok(triggered_maps.pop().unwrap_or_default())
 }
@@ -1209,6 +1233,7 @@ mod tests {
             &ts_codes,
             &st_list,
             &combos,
+            false,
         )
         .expect("build batch triggered scores");
 

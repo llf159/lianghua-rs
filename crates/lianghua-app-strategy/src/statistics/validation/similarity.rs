@@ -9,9 +9,9 @@ use crate::statistics::common::open_result_conn;
 use crate::statistics::validation::RuleValidationSimilarityRow;
 use crate::statistics::validation::VALIDATION_EPS;
 use crate::statistics::validation::samples::compare_option_f64_desc;
-use duckdb::{Connection, params};
-use std::collections::HashMap;
+use duckdb::params;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeMap, HashMap, HashSet};
 #[derive(Debug, Clone)]
 pub(in crate::statistics) struct ValidationSimilarityCache {
     pub(in crate::statistics) total_samples: f64,
@@ -161,6 +161,7 @@ pub(in crate::statistics) fn build_compact_rule_similarity_rows(
                 score_pearson: None,
                 return_pearson: None,
                 shared_return_days: 0,
+                ..Default::default()
             })
         })
         .collect::<Vec<_>>();
@@ -274,6 +275,7 @@ pub(in crate::statistics) fn build_validation_similarity_rows_from_overlap(
                 score_pearson: None,
                 return_pearson: None,
                 shared_return_days: 0,
+                ..Default::default()
             })
         })
         .collect::<Vec<_>>();
@@ -293,12 +295,6 @@ pub(in crate::statistics) struct ValidationUniverseIndex {
     pub(in crate::statistics) day_indices: Vec<u32>,
     pub(in crate::statistics) trade_dates: Vec<String>,
     pub(in crate::statistics) index_by_pair: HashMap<u64, u32>,
-}
-
-impl ValidationUniverseIndex {
-    pub(in crate::statistics) fn len(&self) -> usize {
-        self.residual_returns.len()
-    }
 }
 
 pub(in crate::statistics) fn build_validation_universe_index(
@@ -355,6 +351,7 @@ pub(in crate::statistics) struct ValidationExistingRuleScoreIndex {
     pub(in crate::statistics) hits: Vec<ValidationRuleHit>,
     pub(in crate::statistics) range_trigger_counts: HashMap<String, usize>,
     pub(in crate::statistics) universe_trigger_counts: HashMap<String, usize>,
+    pub(in crate::statistics) scored_pairs: Option<HashSet<u64>>,
 }
 
 pub(in crate::statistics) fn load_validation_existing_rule_score_index(
@@ -362,85 +359,95 @@ pub(in crate::statistics) fn load_validation_existing_rule_score_index(
     start_date: &str,
     end_date: &str,
     universe: &ValidationUniverseIndex,
-) -> ValidationExistingRuleScoreIndex {
-    if !result_db_path(source_path).exists() {
-        return ValidationExistingRuleScoreIndex::default();
-    }
-    let Ok(result_conn) = open_result_conn(source_path) else {
-        return ValidationExistingRuleScoreIndex::default();
-    };
-    (|result_conn: &Connection| -> Result<ValidationExistingRuleScoreIndex, String> {
-        let mut stmt = result_conn
-            .prepare(
-                r#"
-                SELECT
-                    rule_name,
-                    ts_code,
-                    trade_date,
-                    TRY_CAST(rule_score AS DOUBLE)
-                FROM rule_details
-                WHERE trade_date >= ?
-                  AND trade_date <= ?
-                  AND TRY_CAST(rule_score AS DOUBLE) IS NOT NULL
-                "#,
-            )
-            .map_err(|error| format!("预编译已有策略分数查询失败: {error}"))?;
-        let mut rows = stmt
-            .query(params![start_date, end_date])
-            .map_err(|error| format!("查询已有策略分数失败: {error}"))?;
-
-        let mut index = ValidationExistingRuleScoreIndex::default();
-        let mut rule_index_by_name = HashMap::<String, u32>::new();
-        while let Some(row) = rows
-            .next()
-            .map_err(|error| format!("读取已有策略分数失败: {error}"))?
-        {
-            let rule_name: String = row.get(0).map_err(|e| format!("读取规则名失败: {e}"))?;
-            let ts_code: String = row.get(1).map_err(|e| format!("读取代码失败: {e}"))?;
-            let trade_date: String = row.get(2).map_err(|e| format!("读取交易日失败: {e}"))?;
-            let score: f64 = row.get(3).map_err(|e| format!("读取规则分失败: {e}"))?;
-            *index
-                .range_trigger_counts
-                .entry(rule_name.clone())
-                .or_default() += 1;
-            let pair_hash = validation_pair_hash(&ts_code, &trade_date);
-            let Some(&universe_index) = universe.index_by_pair.get(&pair_hash) else {
-                continue;
-            };
-            *index
-                .universe_trigger_counts
-                .entry(rule_name.clone())
-                .or_default() += 1;
-            if score.abs() <= VALIDATION_EPS {
-                continue;
-            }
-            let rule_index = if let Some(existing) = rule_index_by_name.get(&rule_name) {
-                *existing
-            } else {
-                let created = index.rule_names.len() as u32;
-                rule_index_by_name.insert(rule_name.clone(), created);
-                index.rule_names.push(rule_name);
-                index.hit_counts.push(0);
-                index.score_sums.push(0.0);
-                index.score_square_sums.push(0.0);
-                created
-            };
-            index.hit_counts[rule_index as usize] += 1;
-            index.score_sums[rule_index as usize] += score;
-            index.score_square_sums[rule_index as usize] += score * score;
-            index.hits.push(ValidationRuleHit {
-                pair_hash,
-                universe_index,
-                rule_index,
-                score,
-            });
+    research: Option<&crate::research_evidence::ValidationResearchOutput>,
+) -> Result<ValidationExistingRuleScoreIndex, String> {
+    let result_conn = if let Some(research) = research {
+        research.open()?
+    } else {
+        if !result_db_path(source_path).exists() {
+            return Ok(ValidationExistingRuleScoreIndex::default());
         }
-        index
-            .hits
-            .sort_unstable_by_key(|hit| (hit.pair_hash, hit.rule_index));
-        Ok(index)
-    })(&result_conn)
-    .unwrap_or_default()
+        open_result_conn(source_path)?
+    };
+    let table = if research.is_some() {
+        "baseline_rule_scores"
+    } else {
+        "rule_details"
+    };
+    let score_column = if research.is_some() {
+        "score"
+    } else {
+        "rule_score"
+    };
+    let mut stmt = result_conn.prepare(&format!("SELECT rule_name,ts_code,trade_date,TRY_CAST({score_column} AS DOUBLE) FROM {table} WHERE trade_date>=? AND trade_date<=? AND TRY_CAST({score_column} AS DOUBLE) IS NOT NULL"))
+        .map_err(|error| format!("读取基线策略分项失败: {error}"))?;
+    let mut rows = stmt
+        .query(params![start_date, end_date])
+        .map_err(|error| format!("查询已有策略分数失败: {error}"))?;
+
+    let mut index = ValidationExistingRuleScoreIndex::default();
+    let mut rule_index_by_name = HashMap::<String, u32>::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| format!("读取已有策略分数失败: {error}"))?
+    {
+        let rule_name: String = row.get(0).map_err(|e| format!("读取规则名失败: {e}"))?;
+        let ts_code: String = row.get(1).map_err(|e| format!("读取代码失败: {e}"))?;
+        let trade_date: String = row.get(2).map_err(|e| format!("读取交易日失败: {e}"))?;
+        let score: f64 = row.get(3).map_err(|e| format!("读取规则分失败: {e}"))?;
+        *index
+            .range_trigger_counts
+            .entry(rule_name.clone())
+            .or_default() += 1;
+        let pair_hash = validation_pair_hash(&ts_code, &trade_date);
+        let Some(&universe_index) = universe.index_by_pair.get(&pair_hash) else {
+            continue;
+        };
+        *index
+            .universe_trigger_counts
+            .entry(rule_name.clone())
+            .or_default() += 1;
+        if score.abs() <= VALIDATION_EPS {
+            continue;
+        }
+        let rule_index = if let Some(existing) = rule_index_by_name.get(&rule_name) {
+            *existing
+        } else {
+            let created = index.rule_names.len() as u32;
+            rule_index_by_name.insert(rule_name.clone(), created);
+            index.rule_names.push(rule_name);
+            index.hit_counts.push(0);
+            index.score_sums.push(0.0);
+            index.score_square_sums.push(0.0);
+            created
+        };
+        index.hit_counts[rule_index as usize] += 1;
+        index.score_sums[rule_index as usize] += score;
+        index.score_square_sums[rule_index as usize] += score * score;
+        index.hits.push(ValidationRuleHit {
+            pair_hash,
+            universe_index,
+            rule_index,
+            score,
+        });
+    }
+    index
+        .hits
+        .sort_unstable_by_key(|hit| (hit.pair_hash, hit.rule_index));
+    if research.is_some() {
+        let mut stmt = result_conn.prepare("SELECT ts_code,trade_date FROM baseline_scores WHERE score IS NOT NULL AND trade_date BETWEEN ? AND ?").map_err(|e| e.to_string())?;
+        index.scored_pairs = Some(
+            stmt.query_map(params![start_date, end_date], |row| {
+                let code: String = row.get(0)?;
+                let day: String = row.get(1)?;
+                Ok(validation_pair_hash(&code, &day))
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<HashSet<_>, _>>()
+            .map_err(|e| e.to_string())?,
+        );
+    }
+    Ok(index)
 }
 
 #[derive(Clone, Copy)]
@@ -504,93 +511,167 @@ pub(in crate::statistics) fn build_validation_expression_similarity_rows(
     candidate_daily_returns: &HashMap<String, f64>,
     exclude_rule_name: Option<&str>,
     explain_map: &HashMap<String, String>,
+    candidate_available: Option<&HashSet<u64>>,
 ) -> Vec<RuleValidationSimilarityRow> {
-    if candidate_scores.is_empty() || index.rule_names.is_empty() {
+    if index.rule_names.is_empty() {
         return Vec::new();
     }
-
-    let left_trigger_count = candidate_scores.len();
-    let left_sum = candidate_scores.values().sum::<f64>();
-    let left_square_sum = candidate_scores
-        .values()
-        .map(|value| value * value)
-        .sum::<f64>();
-    let mut joint_counts = vec![0usize; index.rule_names.len()];
-    let mut cross_sums = vec![0.0_f64; index.rule_names.len()];
-    for (pair_hash, score) in candidate_scores {
-        let start = index.hits.partition_point(|hit| hit.pair_hash < *pair_hash);
-        for hit in index.hits[start..]
-            .iter()
-            .take_while(|hit| hit.pair_hash == *pair_hash)
-        {
-            joint_counts[hit.rule_index as usize] += 1;
-            cross_sums[hit.rule_index as usize] += score * hit.score;
+    #[derive(Default)]
+    struct Period {
+        universe: usize,
+        candidate_available: usize,
+        baseline_available: usize,
+        common: usize,
+        left_count: usize,
+        left_sum: f64,
+        left_square_sum: f64,
+        // right count, right sum, right squares, joint count, cross sum per native rule.
+        rules: Vec<(usize, f64, f64, usize, f64)>,
+    }
+    let quarters = universe
+        .trade_dates
+        .iter()
+        .map(|day| {
+            let month = day.get(4..6)?.parse::<usize>().ok()?;
+            (1..=12)
+                .contains(&month)
+                .then(|| format!("{} Q{}", &day[..4], (month - 1) / 3 + 1))
+        })
+        .collect::<Vec<_>>();
+    let mut periods = BTreeMap::<&str, Period>::new();
+    let mut common_pairs = HashSet::new();
+    for (pair, &sample_index) in &universe.index_by_pair {
+        let candidate_known = candidate_available.is_none_or(|known| known.contains(pair));
+        let baseline_known = index
+            .scored_pairs
+            .as_ref()
+            .is_none_or(|known| known.contains(pair));
+        let common = candidate_known && baseline_known;
+        if common {
+            common_pairs.insert(*pair);
+        }
+        let left = candidate_scores.get(pair).copied().unwrap_or(0.);
+        let day = universe.day_indices[sample_index as usize] as usize;
+        for period in std::iter::once("全部").chain(quarters[day].as_deref()) {
+            let aggregate = periods.entry(period).or_insert_with(|| Period {
+                rules: vec![(0, 0., 0., 0, 0.); index.rule_names.len()],
+                ..Default::default()
+            });
+            aggregate.universe += 1;
+            aggregate.candidate_available += usize::from(candidate_known);
+            aggregate.baseline_available += usize::from(baseline_known);
+            if common {
+                aggregate.common += 1;
+                aggregate.left_count += usize::from(left.abs() > VALIDATION_EPS);
+                aggregate.left_sum += left;
+                aggregate.left_square_sum += left * left;
+            }
         }
     }
-
+    for hit in &index.hits {
+        if !common_pairs.contains(&hit.pair_hash) {
+            continue;
+        }
+        let left = candidate_scores.get(&hit.pair_hash).copied().unwrap_or(0.);
+        let day = universe.day_indices[hit.universe_index as usize] as usize;
+        for period in std::iter::once("全部").chain(quarters[day].as_deref()) {
+            let Some(aggregate) = periods.get_mut(period) else {
+                continue;
+            };
+            let right = &mut aggregate.rules[hit.rule_index as usize];
+            right.0 += 1;
+            right.1 += hit.score;
+            right.2 += hit.score * hit.score;
+            right.3 += usize::from(left.abs() > VALIDATION_EPS);
+            right.4 += left * hit.score;
+        }
+    }
     let excluded_rule_name = exclude_rule_name
         .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let universe_count = universe.len();
-    let mut rows = index
-        .rule_names
+        .filter(|name| !name.is_empty());
+    let quarter_by_date = universe
+        .trade_dates
         .iter()
-        .enumerate()
-        .filter_map(|(rule_index, rule_name)| {
-            if excluded_rule_name.is_some_and(|excluded| rule_name == excluded) {
-                return None;
+        .zip(&quarters)
+        .filter_map(|(day, quarter)| Some((day.as_str(), quarter.as_deref()?)))
+        .collect::<HashMap<_, _>>();
+    let mut dates = candidate_daily_returns.keys().collect::<Vec<_>>();
+    dates.sort_unstable();
+    let mut rows = Vec::new();
+    for (period, aggregate) in periods {
+        for (rule_index, rule_name) in index.rule_names.iter().enumerate() {
+            if excluded_rule_name.is_some_and(|name| name == rule_name) {
+                continue;
             }
-            let right_trigger_count = index.hit_counts[rule_index];
-            let joint_trigger_count = joint_counts[rule_index];
+            let (right_count, right_sum, right_square_sum, joint_count, cross_sum) =
+                aggregate.rules[rule_index];
             let metrics = calc_signal_pair_metrics(SignalPairMoments {
-                universe_count,
-                left_trigger_count,
-                right_trigger_count,
-                joint_trigger_count,
-                left_sum,
-                right_sum: index.score_sums[rule_index],
-                left_square_sum,
-                right_square_sum: index.score_square_sums[rule_index],
-                cross_sum: cross_sums[rule_index],
+                universe_count: aggregate.common,
+                left_trigger_count: aggregate.left_count,
+                right_trigger_count: right_count,
+                joint_trigger_count: joint_count,
+                left_sum: aggregate.left_sum,
+                right_sum,
+                left_square_sum: aggregate.left_square_sum,
+                right_square_sum,
+                cross_sum,
             });
-
-            let mut left_values = Vec::new();
-            let mut right_values = Vec::new();
+            let mut left_returns = Vec::new();
+            let mut right_returns = Vec::new();
             if let Some(rule_daily) = rule_daily_returns.get(rule_index) {
-                for (trade_date, left_value) in candidate_daily_returns {
-                    if let Some(right_value) = rule_daily.get(trade_date) {
-                        left_values.push(*left_value);
-                        right_values.push(*right_value);
+                for day in &dates {
+                    if period != "全部"
+                        && quarter_by_date.get(day.as_str()).copied() != Some(period)
+                    {
+                        continue;
+                    }
+                    if let Some(right) = rule_daily.get(*day) {
+                        left_returns.push(candidate_daily_returns[*day]);
+                        right_returns.push(*right);
                     }
                 }
             }
-
-            Some(RuleValidationSimilarityRow {
+            rows.push(RuleValidationSimilarityRow {
+                period: period.to_string(),
+                universe_samples: Some(aggregate.universe),
+                candidate_available_samples: Some(aggregate.candidate_available),
+                baseline_available_samples: Some(aggregate.baseline_available),
+                shared_score_samples: Some(aggregate.common),
                 rule_name: rule_name.clone(),
                 explain: explain_map.get(rule_name).cloned(),
-                overlap_samples: joint_trigger_count,
-                overlap_rate_vs_validation: (left_trigger_count > 0)
-                    .then_some(joint_trigger_count as f64 / left_trigger_count as f64),
-                overlap_rate_vs_existing: (right_trigger_count > 0)
-                    .then_some(joint_trigger_count as f64 / right_trigger_count as f64),
-                overlap_lift: (left_trigger_count > 0 && right_trigger_count > 0).then_some(
-                    joint_trigger_count as f64 * universe_count as f64
-                        / (left_trigger_count as f64 * right_trigger_count as f64),
-                ),
+                overlap_samples: joint_count,
+                overlap_rate_vs_validation: (aggregate.left_count > 0)
+                    .then(|| joint_count as f64 / aggregate.left_count as f64),
+                overlap_rate_vs_existing: (right_count > 0)
+                    .then(|| joint_count as f64 / right_count as f64),
+                overlap_lift: (aggregate.left_count > 0 && right_count > 0).then(|| {
+                    joint_count as f64 * aggregate.common as f64
+                        / (aggregate.left_count as f64 * right_count as f64)
+                }),
                 jaccard: metrics.jaccard,
                 phi: metrics.phi,
                 score_pearson: metrics.score_pearson,
-                return_pearson: pearson_corr(&left_values, &right_values),
-                shared_return_days: left_values.len(),
-            })
-        })
-        .collect::<Vec<_>>();
-    rows.sort_by(|left, right| {
-        compare_option_f64_desc(left.jaccard, right.jaccard)
-            .then_with(|| right.overlap_samples.cmp(&left.overlap_samples))
-            .then_with(|| left.rule_name.cmp(&right.rule_name))
+                return_pearson: pearson_corr(&left_returns, &right_returns),
+                shared_return_days: left_returns.len(),
+            });
+        }
+    }
+    rows.sort_by(|a, b| {
+        b.period
+            .eq("全部")
+            .cmp(&a.period.eq("全部"))
+            .then_with(|| a.period.cmp(&b.period))
+            .then_with(|| compare_option_f64_desc(a.jaccard, b.jaccard))
+            .then_with(|| b.overlap_samples.cmp(&a.overlap_samples))
+            .then_with(|| a.rule_name.cmp(&b.rule_name))
     });
-    rows.truncate(20);
+    let selected = rows
+        .iter()
+        .filter(|row| row.period == "全部")
+        .take(20)
+        .map(|row| row.rule_name.clone())
+        .collect::<HashSet<_>>();
+    rows.retain(|row| selected.contains(&row.rule_name));
     rows
 }
 
@@ -615,7 +696,7 @@ mod tests {
     use crate::statistics::validation::walk_forward::build_validation_incremental;
     use crate::statistics::validation::walk_forward::sort_validation_points;
     use duckdb::Connection;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::fs::create_dir_all;
 
     #[test]
@@ -741,7 +822,9 @@ mod tests {
             "20240102",
             "20240104",
             &universe,
-        );
+            None,
+        )
+        .unwrap();
 
         assert_eq!(index.rule_names, vec!["有效策略".to_string()]);
         assert_eq!(index.universe_trigger_counts.get("零分策略"), Some(&2));
@@ -792,13 +875,105 @@ mod tests {
             &HashMap::new(),
             None,
             &HashMap::new(),
+            None,
         );
 
-        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].period, "全部");
+        assert_eq!(rows[1].period, "2024 Q1");
+        assert_eq!(rows[0].shared_score_samples, Some(4));
         assert_eq!(rows[0].overlap_samples, 0);
         assert_eq!(rows[0].jaccard, Some(0.0));
         assert_eq!(rows[0].phi, Some(-1.0));
         assert_eq!(rows[0].score_pearson, Some(-1.0));
+    }
+
+    #[test]
+    fn validation_similarity_retains_quarters_and_masks_unavailable_stock_days() {
+        let samples = ["20240102", "20240402"]
+            .into_iter()
+            .flat_map(|day| {
+                ["A", "B", "C", "D"]
+                    .into_iter()
+                    .map(move |code| RuleLayerSamplePoint {
+                        ts_code: code.into(),
+                        trade_date: day.into(),
+                        rule_score: 0.,
+                        residual_return: 1.,
+                        er_change: 0.,
+                    })
+            })
+            .collect::<Vec<_>>();
+        let universe = build_validation_universe_index(&samples);
+        let mut index = ValidationExistingRuleScoreIndex {
+            rule_names: vec!["核心".into()],
+            scored_pairs: Some(
+                universe
+                    .index_by_pair
+                    .keys()
+                    .copied()
+                    .filter(|pair| *pair != validation_pair_hash("D", "20240402"))
+                    .collect(),
+            ),
+            ..Default::default()
+        };
+        let mut candidate_scores = HashMap::new();
+        for (sample_index, sample) in samples.iter().enumerate() {
+            if sample.ts_code == "A" || sample.ts_code == "B" {
+                let pair = validation_pair_hash(&sample.ts_code, &sample.trade_date);
+                candidate_scores.insert(pair, 1.);
+                index.hits.push(ValidationRuleHit {
+                    pair_hash: pair,
+                    universe_index: sample_index as u32,
+                    rule_index: 0,
+                    score: 1.,
+                });
+            }
+        }
+        let candidate_available = universe
+            .index_by_pair
+            .keys()
+            .copied()
+            .filter(|pair| *pair != validation_pair_hash("B", "20240102"))
+            .collect::<HashSet<_>>();
+        let returns = HashMap::from([("20240102".to_string(), 1.), ("20240402".to_string(), 2.)]);
+        let rows = build_validation_expression_similarity_rows(
+            &universe,
+            &index,
+            &[returns.clone()],
+            &candidate_scores,
+            &returns,
+            None,
+            &HashMap::new(),
+            Some(&candidate_available),
+        );
+        assert_eq!(rows.len(), 3);
+        let all = &rows[0];
+        assert_eq!(all.period, "全部");
+        assert_eq!(
+            (
+                all.universe_samples,
+                all.candidate_available_samples,
+                all.baseline_available_samples,
+                all.shared_score_samples
+            ),
+            (Some(8), Some(7), Some(7), Some(6))
+        );
+        assert_eq!(
+            (
+                all.overlap_samples,
+                all.jaccard,
+                all.score_pearson,
+                all.shared_return_days
+            ),
+            (3, Some(1.), Some(1.), 2)
+        );
+        for quarter in rows.iter().filter(|row| row.period != "全部") {
+            assert_eq!(quarter.shared_score_samples, Some(3));
+            assert_eq!(quarter.score_pearson, Some(1.));
+            assert_eq!(quarter.shared_return_days, 1);
+            assert_eq!(quarter.return_pearson, None);
+        }
     }
 
     #[test]
@@ -842,6 +1017,7 @@ mod tests {
             &HashMap::new(),
             None,
             &HashMap::new(),
+            None,
         );
         assert_eq!(rows[0].jaccard, Some(1.0));
         assert_eq!(rows[0].score_pearson, Some(1.0));
@@ -922,6 +1098,7 @@ mod tests {
             &HashMap::new(),
             None,
             &HashMap::new(),
+            None,
         );
         assert_eq!(rows[0].jaccard, Some(0.0));
 

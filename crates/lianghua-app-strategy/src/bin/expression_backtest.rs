@@ -73,6 +73,8 @@ fn main() -> Result<(), String> {
         request.total_mv_max,
         request.walk_forward_folds,
         request.core_rule_names,
+        None,
+        None,
     )?;
     fs::write(
         &args[1],

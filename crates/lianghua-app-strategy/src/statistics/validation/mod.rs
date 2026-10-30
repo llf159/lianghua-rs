@@ -9,7 +9,6 @@ use crate::data::RuleStage;
 use crate::data::RuleTag;
 use crate::data::ScopeWay;
 use crate::data::ScoreRule;
-use crate::data::result_db_path;
 use crate::data::source_db_path;
 use crate::expr::lexer::TokenKind;
 use crate::expr::parser::lex_all;
@@ -25,7 +24,7 @@ use crate::simulate::rule::build_rule_layer_runtime_cache_from_stock_data_with_t
 use crate::simulate::rule::calc_rule_layer_metrics_with_samples_from_cache;
 use crate::simulate::rule::visit_triggered_rule_samples_from_cache;
 use crate::statistics::backtest::{RuleLayerBacktestData, RuleLayerBacktestRunParams};
-use crate::statistics::common::{open_result_conn, parse_scope_way_input, scope_way_label};
+use crate::statistics::common::{parse_scope_way_input, scope_way_label};
 use crate::statistics::universe::{
     ValidationSampleStockMeta, build_backtest_stock_filter, load_validation_sample_stock_meta_map,
     ts_code_allowed_by_filter,
@@ -68,8 +67,13 @@ pub struct RuleValidationUnknownValue {
     pub value: f64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 pub struct RuleValidationSimilarityRow {
+    pub period: String,
+    pub universe_samples: Option<usize>,
+    pub candidate_available_samples: Option<usize>,
+    pub baseline_available_samples: Option<usize>,
+    pub shared_score_samples: Option<usize>,
     pub rule_name: String,
     pub explain: Option<String>,
     pub overlap_samples: usize,
@@ -153,9 +157,19 @@ pub struct RuleExpressionValidationData {
     pub scope_way: String,
     pub scope_windows: usize,
     pub sample_limit_per_group: usize,
+    pub random_sample_method: String,
     pub walk_forward_folds: usize,
     pub core_rule_names: Vec<String>,
     pub combo_results: Vec<RuleValidationComboResult>,
+    pub horizon: usize,
+    pub input_identity: String,
+    pub baseline_origin: String,
+    pub input_manifest: serde_json::Value,
+    pub label_algorithm: String,
+    pub archive_run_id: Option<String>,
+    pub membership_saved: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub additional_periods: Vec<RuleExpressionValidationData>,
 }
 
 #[derive(Debug, Serialize)]
@@ -163,62 +177,21 @@ pub struct ValidationCoreRuleOption {
     pub name: String,
     pub trigger_count: usize,
     pub valid_trigger_count: usize,
+    pub native_recompute: bool,
 }
 
 pub fn get_validation_core_rule_options(
     source_path: &str,
 ) -> Result<Vec<ValidationCoreRuleOption>, String> {
-    if !result_db_path(source_path).exists() {
-        return Ok(Vec::new());
-    }
-    let mut options = Vec::new();
-    let Ok(conn) = open_result_conn(source_path) else {
-        return Ok(options);
-    };
-    let query_result = (|conn: &duckdb::Connection| -> Result<(), String> {
-        let mut stmt = conn
-            .prepare(
-                r#"
-                SELECT
-                    rule_name,
-                    COUNT(*),
-                    SUM(
-                        CASE
-                            WHEN ABS(TRY_CAST(rule_score AS DOUBLE)) > ? THEN 1
-                            ELSE 0
-                        END
-                    )
-                FROM rule_details
-                WHERE rule_name IS NOT NULL AND TRIM(rule_name) <> ''
-                GROUP BY rule_name
-                ORDER BY rule_name
-                "#,
-            )
-            .map_err(|error| format!("预编译核心策略可用性查询失败: {error}"))?;
-        let mut rows = stmt
-            .query(duckdb::params![VALIDATION_EPS])
-            .map_err(|error| format!("查询核心策略可用性失败: {error}"))?;
-        while let Some(row) = rows
-            .next()
-            .map_err(|error| format!("读取核心策略可用性失败: {error}"))?
-        {
-            let name: String = row.get(0).map_err(|e| format!("读取规则名失败: {e}"))?;
-            let trigger_count: i64 = row.get(1).map_err(|e| format!("读取触发数失败: {e}"))?;
-            let valid_trigger_count: i64 =
-                row.get(2).map_err(|e| format!("读取有效触发数失败: {e}"))?;
-            options.push(ValidationCoreRuleOption {
-                name,
-                trigger_count: trigger_count.max(0) as usize,
-                valid_trigger_count: valid_trigger_count.max(0) as usize,
-            });
-        }
-        Ok(())
-    })(&conn);
-    if let Err(error) = query_result {
-        eprintln!("读取核心策略可用性失败: {error}");
-        return Ok(Vec::new());
-    }
-    Ok(options)
+    Ok(ScoreRule::load_rules(source_path)?
+        .into_iter()
+        .map(|rule| ValidationCoreRuleOption {
+            name: rule.name,
+            trigger_count: 0,
+            valid_trigger_count: 0,
+            native_recompute: true,
+        })
+        .collect())
 }
 
 #[derive(Debug, Serialize)]
@@ -241,6 +214,8 @@ pub struct RuleValidationWalkForwardFold {
 pub struct RuleValidationWalkForwardData {
     pub fold_count: usize,
     pub purge_days: usize,
+    pub label_boundaries_checked: bool,
+    pub label_boundary_excluded_days: usize,
     pub folds: Vec<RuleValidationWalkForwardFold>,
     pub ic_positive_folds: usize,
     pub residual_positive_folds: usize,
@@ -266,6 +241,8 @@ pub struct RuleValidationIncrementalFold {
 pub struct RuleValidationIncrementalData {
     pub core_rule_names: Vec<String>,
     pub purge_days: usize,
+    pub label_boundaries_checked: bool,
+    pub label_boundary_excluded_days: usize,
     pub folds: Vec<RuleValidationIncrementalFold>,
     pub positive_folds: usize,
 }
@@ -364,7 +341,12 @@ pub fn run_rule_expression_validation(
     total_mv_max: Option<f64>,
     walk_forward_folds: Option<usize>,
     core_rule_names: Option<Vec<String>>,
+    progress: Option<&dyn Fn(&str) -> Result<(), String>>,
+    research: Option<&crate::research_evidence::ValidationResearchOutput>,
 ) -> Result<RuleExpressionValidationData, String> {
+    if let Some(progress) = progress {
+        progress("检查表达式和输入")?;
+    }
     let source_path = source_path.trim().to_string();
     if source_path.is_empty() {
         return Err("数据目录不能为空".to_string());
@@ -838,6 +820,9 @@ pub fn run_rule_expression_validation(
         backtest_period: params.backtest_period,
         min_listed_trade_days: params.min_listed_trade_days,
     };
+    if let Some(progress) = progress {
+        progress("读取行情和计算后验")?;
+    }
     let runtime_cache = Arc::new(
         build_rule_layer_runtime_cache_from_stock_data_with_ts_filter(
             &source_conn,
@@ -853,6 +838,9 @@ pub fn run_rule_expression_validation(
             params.allowed_ts_codes.as_ref(),
         )?,
     );
+    if let Some(progress) = progress {
+        progress("准备股票日证据与隔离基线评分")?;
+    }
     let validation_required_runtime_keys =
         collect_rule_validation_runtime_keys(&execution_plan.combos);
     let validation_reader =
@@ -865,6 +853,43 @@ pub fn run_rule_expression_validation(
     if let Some(allowed_ts_codes) = params.allowed_ts_codes.as_ref() {
         validation_ts_codes
             .retain(|ts_code| ts_code_allowed_by_filter(Some(allowed_ts_codes), ts_code));
+    }
+    if let Some(research) = research {
+        research.prepare(
+            &source_path,
+            &params.stock_adj_type,
+            &params.start_date,
+            &params.end_date,
+            params.min_listed_trade_days,
+            &validation_ts_codes,
+            true,
+        )?;
+        if params.return_metric == crate::simulate::BacktestReturnMetric::ResidualReturn {
+            research.save_labels(params.backtest_period, runtime_cache.as_ref())?;
+        } else {
+            let raw_config = RuleLayerConfig {
+                target: crate::simulate::BacktestTargetConfig {
+                    return_metric: crate::simulate::BacktestReturnMetric::ResidualReturn,
+                    total_mv_min: params.total_mv_min,
+                    total_mv_max: params.total_mv_max,
+                },
+                ..layer_config.clone()
+            };
+            let raw_cache = build_rule_layer_runtime_cache_from_stock_data_with_ts_filter(
+                &source_conn,
+                &source_path,
+                &params.stock_adj_type,
+                &params.index_ts_code,
+                params.index_beta,
+                params.concept_beta,
+                params.industry_beta,
+                &params.start_date,
+                &params.end_date,
+                &raw_config,
+                params.allowed_ts_codes.as_ref(),
+            )?;
+            research.save_labels(params.backtest_period, &raw_cache)?;
+        }
     }
     let st_list = load_st_list(&source_path)?;
     let explain_map = all_rules
@@ -885,7 +910,8 @@ pub fn run_rule_expression_validation(
         &params.start_date,
         &params.end_date,
         &universe_index,
-    );
+        research,
+    )?;
     let existing_rule_daily_returns = build_validation_existing_rule_daily_returns(
         &universe_index,
         &existing_rule_score_index,
@@ -931,7 +957,7 @@ pub fn run_rule_expression_validation(
             } else if let Some(count) = existing_rule_score_index.range_trigger_counts.get(name) {
                 format!("{name}（区间内触发 {count} 次，但都不在本次股票池样本内）")
             } else {
-                format!("{name}（结果库区间内没有触发记录）")
+                format!("{name}（本次基线区间内没有非零触发记录）")
             }
         };
         let zero_scored = missing_core_rule_names.iter().any(|name| {
@@ -940,16 +966,16 @@ pub fn run_rule_expression_validation(
                 .contains_key(*name)
         });
         let hint = if zero_scored {
-            "核心策略在结果库里分数被归零或未重算（排名计算用的策略版本与当前策略文件可能不一致），请重算该区间评分，或改选其他核心策略"
+            "核心策略在本次基线样本内分数全为0，请调整研究区间或改选其他核心策略"
         } else if existing_rule_score_index.rule_names.is_empty()
             && existing_rule_score_index.range_trigger_counts.is_empty()
         {
-            "结果库中没有可用的策略评分，请先执行排名计算（Ranking Compute）"
+            "本次基线没有可用的策略评分，请检查策略配置和研究区间"
         } else {
-            "请先在排名计算中生成这些策略的评分，或改选其他核心策略"
+            "请检查研究区间和股票池，或改选其他核心策略"
         };
         return Err(format!(
-            "核心策略在结果库中不可用作增量 predictor: {}；{hint}",
+            "核心策略在本次基线中不可用作收益回归输入: {}；{hint}",
             missing_core_rule_names
                 .iter()
                 .map(|name| describe(name))
@@ -958,35 +984,108 @@ pub fn run_rule_expression_validation(
         ));
     }
     let resolved_walk_forward_folds = walk_forward_folds.unwrap_or(4).clamp(1, 8);
-    let mut validation_calendar = runtime_cache
-        .trade_dates()
-        .map(str::to_string)
-        .collect::<Vec<_>>();
+    let mut validation_calendar = crate::data::load_trade_date_list(&source_path)?;
+    validation_calendar.retain(|day| day >= &params.start_date && day <= &params.end_date);
     validation_calendar.sort_unstable();
     validation_calendar.dedup();
     let validation_purge_days = params.backtest_period;
     let validation_hac_lag = params.backtest_period.saturating_sub(1);
-    let validation_fold_plan = build_validation_fold_plan(
+    let mut validation_fold_plan = build_validation_fold_plan(
         validation_calendar.len(),
         resolved_walk_forward_folds,
         validation_purge_days,
     );
+    let mut latest_label_ends = HashMap::<String, u32>::new();
+    runtime_cache.visit_label_windows(|_, day, _, end, _| {
+        latest_label_ends
+            .entry(day.to_string())
+            .and_modify(|latest| *latest = (*latest).max(end))
+            .or_insert(end);
+        Ok(())
+    })?;
+    for fold in &mut validation_fold_plan {
+        fold.label_boundaries_checked = true;
+        let first_test_date = validation_calendar[fold.test_start_index]
+            .parse::<u32>()
+            .map_err(|error| error.to_string())?;
+        // Preserve a contiguous expanding prefix; a long stock-specific label must not cross test start.
+        if let Some(first_unsafe) = validation_calendar[..=fold.train_end_index]
+            .iter()
+            .position(|day| {
+                latest_label_ends
+                    .get(day)
+                    .is_some_and(|end| *end >= first_test_date)
+            })
+        {
+            fold.label_boundary_excluded_days = fold.train_end_index + 1 - first_unsafe;
+            fold.training_labels_ready = first_unsafe > 0;
+            fold.train_end_index = first_unsafe.saturating_sub(1);
+        }
+    }
     let mut combo_results = Vec::with_capacity(execution_plan.combos.len());
     for combo_chunk in execution_plan.combos.chunks(16) {
-        let combo_triggered_maps = build_validation_triggered_scores_for_combos(
-            &source_path,
-            &params.stock_adj_type,
-            &execution_plan.query_start_date,
-            &params.start_date,
-            &params.end_date,
-            execution_plan.need_rows,
-            &validation_ts_codes,
-            &st_list,
-            combo_chunk,
-        )?;
+        if let Some(progress) = progress {
+            progress(&format!(
+                "计算参数组合 {}/{}",
+                combo_results.len() + 1,
+                execution_plan.combos.len()
+            ))?;
+        }
+        let cached = research
+            .map(|research| {
+                combo_chunk
+                    .iter()
+                    .map(|combo| research.load_signals(&combo.variant.combo_key))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?;
+        let combo_triggered_maps =
+            if let Some(cached) = cached.filter(|cached| cached.iter().all(Option::is_some)) {
+                cached.into_iter().map(Option::unwrap).collect()
+            } else {
+                build_validation_triggered_scores_for_combos(
+                    &source_path,
+                    &params.stock_adj_type,
+                    &execution_plan.query_start_date,
+                    &params.start_date,
+                    &params.end_date,
+                    execution_plan.need_rows,
+                    &validation_ts_codes,
+                    &st_list,
+                    combo_chunk,
+                    research.is_some(),
+                )?
+            };
 
-        for (combo, triggered_score_map) in combo_chunk.iter().zip(combo_triggered_maps.into_iter())
+        for (combo, mut triggered_score_map) in
+            combo_chunk.iter().zip(combo_triggered_maps.into_iter())
         {
+            if let Some(progress) = progress {
+                progress(&format!(
+                    "统计参数组合 {}/{}",
+                    combo_results.len() + 1,
+                    execution_plan.combos.len()
+                ))?;
+            }
+            let candidate_available = research.map(|_| {
+                triggered_score_map
+                    .iter()
+                    .flat_map(|(code, days)| {
+                        days.iter()
+                            .filter(|(_, score)| score.is_finite())
+                            .map(move |(day, _)| validation_pair_hash(code, day))
+                    })
+                    .collect::<HashSet<_>>()
+            });
+            if let Some(research) = research {
+                if !research.has_signals(&combo.variant.combo_key)? {
+                    research.save_signals(&combo.variant.combo_key, &triggered_score_map)?;
+                }
+                for days in triggered_score_map.values_mut() {
+                    days.retain(|_, score| score.is_finite() && score.abs() > VALIDATION_EPS);
+                }
+                triggered_score_map.retain(|_, days| !days.is_empty());
+            }
             combo_results.push(
                 (|params: &RuleLayerBacktestRunParams,
                   seed_rule: &ValidationSeedRule,
@@ -1004,7 +1103,8 @@ pub fn run_rule_expression_validation(
                   hac_lag: usize,
                   explain_map: &HashMap<String, String>,
                   stock_meta_map: &HashMap<String, ValidationSampleStockMeta>,
-                  sample_limit_per_group: usize|
+                  sample_limit_per_group: usize,
+                  candidate_available: Option<&HashSet<u64>>|
                  -> Result<RuleValidationComboResult, String> {
                     let metrics_with_samples = calc_rule_layer_metrics_with_samples_from_cache(
                         runtime_cache,
@@ -1080,6 +1180,7 @@ pub fn run_rule_expression_validation(
                         &candidate_daily_returns,
                         seed_rule.exclude_rule_name.as_deref(),
                         explain_map,
+                        candidate_available,
                     );
                     let walk_forward = build_validation_walk_forward(
                         calendar,
@@ -1154,17 +1255,35 @@ pub fn run_rule_expression_validation(
                     &explain_map,
                     &stock_meta_map,
                     sample_limit_per_group,
+                    candidate_available.as_ref(),
                 )?,
             );
         }
     }
 
+    if let Some(progress) = progress {
+        progress("整理结果")?;
+    }
     Ok(RuleExpressionValidationData {
+        horizon: params.backtest_period,
+        input_identity: "unverified".into(),
+        baseline_origin: if research.is_some() {
+            "isolated_native_scoring_v1"
+        } else {
+            "historical_scoring_unverified"
+        }
+        .into(),
+        input_manifest: serde_json::Value::Null,
+        label_algorithm: "forward_open_compounded_residual_v1".into(),
+        archive_run_id: None,
+        membership_saved: research.is_some(),
+        additional_periods: Vec::new(),
         import_rule_name: seed_rule.rule_name,
         import_rule_explain: seed_rule.rule_explain,
         scope_way: scope_way_label(seed_rule.scope_way),
         scope_windows: seed_rule.scope_windows,
         sample_limit_per_group,
+        random_sample_method: "sha256-validation-samples-v1-seed-0".to_string(),
         walk_forward_folds: resolved_walk_forward_folds,
         core_rule_names: core_series
             .iter()
@@ -1237,6 +1356,8 @@ mod tests {
             None,
             Some(4),
             None,
+            None,
+            None,
         )
         .expect_err("bad expression should fail before stock filtering");
 
@@ -1280,43 +1401,126 @@ mod tests {
         )
         .expect("write score_rule.toml");
 
-        let data = super::run_rule_expression_validation(
-            source_dir_str.to_string(),
-            String::new(),
-            Some("C > REF(C, N)".to_string()),
-            Some("LAST".to_string()),
-            Some(1),
-            Some("qfq".to_string()),
-            "000001.SH".to_string(),
-            Some(0.5),
-            Some(0.2),
-            Some(0.0),
-            "20240102".to_string(),
-            "20240104".to_string(),
-            Some(1),
-            Some(0),
-            Some(1),
-            None,
-            None,
-            Some(vec![
-                crate::statistics::validation::RuleValidationUnknownConfig {
-                    name: "N".to_string(),
-                    start: 1.0,
-                    end: 2.0,
-                    step: 1.0,
-                },
-            ]),
-            Some(1),
-            None,
-            Some(false),
-            None,
-            None,
-            Some(2),
-            None,
-        )
-        .expect("rule expression validation");
+        let conn = duckdb::Connection::open(crate::data::source_db_path(source_dir_str)).unwrap();
+        conn.execute("INSERT INTO stock_data SELECT '000001.SH',trade_date,'ind',open,high,low,close,vol,amount,pre_close,change,pct_chg FROM stock_data WHERE adj_type='qfq'",[]).unwrap();
+        drop(conn);
+        let output = crate::research_evidence::ValidationResearchOutput {
+            path: source_dir.join("evidence.db"),
+            grouping: Default::default(),
+            statistics: Default::default(),
+        };
+        let phases = std::cell::RefCell::new(Vec::new());
+        let progress = |phase: &str| {
+            phases.borrow_mut().push(phase.to_string());
+            Ok(())
+        };
+        let mut outputs = Vec::new();
+        for horizon in [1, 2] {
+            let data = super::run_rule_expression_validation(
+                source_dir_str.to_string(),
+                String::new(),
+                Some("C > REF(C, N)".to_string()),
+                Some("LAST".to_string()),
+                Some(1),
+                Some("qfq".to_string()),
+                "000001.SH".to_string(),
+                Some(0.5),
+                Some(0.2),
+                Some(0.0),
+                "20240102".to_string(),
+                "20240104".to_string(),
+                Some(1),
+                Some(0),
+                Some(horizon),
+                None,
+                None,
+                Some(vec![
+                    crate::statistics::validation::RuleValidationUnknownConfig {
+                        name: "N".to_string(),
+                        start: 1.0,
+                        end: 2.0,
+                        step: 1.0,
+                    },
+                ]),
+                Some(1),
+                None,
+                Some(false),
+                None,
+                None,
+                Some(2),
+                None,
+                Some(&progress),
+                Some(&output),
+            )
+            .expect("rule expression validation");
+            outputs.push(data);
+        }
+        let data = outputs.remove(0);
+        let db = output.open().unwrap();
+        assert_eq!(data.baseline_origin, "isolated_native_scoring_v1");
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM baseline_scores", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM baseline_rule_scores", [], |row| row
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+            3
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT value FROM metadata WHERE key='baseline_origin'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            "isolated_native_scoring_v1"
+        );
+        assert!(!crate::data::result_db_path(source_dir_str).exists());
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM signals", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            6
+        );
+        assert_eq!(
+            db.query_row("SELECT count(DISTINCT horizon) FROM labels", [], |row| row
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+            2
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT label_end_date FROM labels WHERE horizon=1 AND trade_date='20240103'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            "20240104"
+        );
+        assert!(
+            output
+                .load_signals("validation_combo_001")
+                .unwrap()
+                .unwrap()["000001.SZ"]["20240102"]
+                .is_nan()
+        );
+        drop(db);
 
         assert_eq!(data.combo_results.len(), 2);
+        assert!(
+            phases
+                .borrow()
+                .iter()
+                .any(|phase| phase == "统计参数组合 2/2")
+        );
         assert_eq!(data.core_rule_names, Vec::<String>::new());
         for (index, combo) in data.combo_results.iter().enumerate() {
             assert_eq!(combo.unknown_values.len(), 1);
@@ -1350,11 +1554,13 @@ mod tests {
             None,
             Some(2),
             Some(vec!["不存在的核心策略".to_string()]),
+            None,
+            None,
         )
         .expect_err("missing core strategy should fail");
         assert!(
             missing_core_error.contains("不存在的核心策略")
-                && missing_core_error.contains("结果库区间内没有触发记录"),
+                && missing_core_error.contains("本次基线区间内没有非零触发记录"),
             "{missing_core_error}"
         );
         let _ = std::fs::remove_dir_all(&source_dir);

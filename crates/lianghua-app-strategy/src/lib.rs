@@ -11,9 +11,13 @@ pub mod manage;
 pub mod overview;
 pub mod overview_classic;
 pub mod paper_validation;
+pub mod rank_comparison;
 pub mod ranking_compute;
+pub mod research_archive;
 pub mod statistics;
 pub mod stock_pick;
 pub mod stock_similarity;
 pub mod tracking;
 pub mod trigger_similarity;
+
+pub mod research_evidence;

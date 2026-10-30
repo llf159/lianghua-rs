@@ -2,6 +2,8 @@ mod cloud_sync_bridge;
 mod data_download_bridge;
 mod eastmoney_session;
 mod managed_source_bridge;
+mod rank_comparison_bridge;
+mod research_archive_bridge;
 mod strategy_tracking_bridge;
 mod warehouse;
 
@@ -1306,28 +1308,37 @@ async fn run_strategy_paper_validation(
     buy_selection_mode: Option<String>,
     buy_expression: String,
     sell_expression: String,
+    research_selection: Option<lianghua_app_strategy::paper_validation::PaperResearchSelection>,
+    account_settings: Option<lianghua_app_strategy::paper_validation::PaperAccountSettings>,
 ) -> Result<StrategyPaperValidationData, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _execution=lianghua_app_strategy::research_archive::try_research_execution()?;
         let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
             .read()
             .unwrap_or_else(|e| e.into_inner());
-        run_with_heap_trim(|| {
+        let mut configuration=serde_json::json!({"start_date":start_date,"end_date":end_date,"min_listed_trade_days":min_listed_trade_days,"index_ts_code":index_ts_code,"test_ts_code":test_ts_code,"board":board,"buy_price_basis":buy_price_basis,"slippage_pct":slippage_pct,"max_position_count":max_position_count,"buy_selection_mode":buy_selection_mode,"buy_expression":buy_expression,"sell_expression":sell_expression,"research_selection":research_selection,"account_settings":account_settings,"input_manifest":lianghua_app_strategy::research_archive::research_input_manifest(&source_path)?});
+        if let Some(selection)=research_selection.as_ref() {
+            configuration["research_source"]=serde_json::to_value(lianghua_app_strategy::research_archive::read_research_archive(&source_path,&selection.run_id)?).map_err(|e|e.to_string())?;
+        }
+        let journal=lianghua_app_strategy::research_archive::save_research_archive(&source_path,research_selection.as_ref().map(|selection|selection.run_id.clone()),"交易模拟验证".into(),configuration,serde_json::json!({}),"paper_validation","running",None,None)?;
+        let _lease=lianghua_app_strategy::research_archive::ResearchArchiveLease{source_path:source_path.clone(),run_id:journal.run_id.clone()};
+        let mut result=run_with_heap_trim(|| {
             core_run_strategy_paper_validation(
-                &source_path,
-                start_date,
-                end_date,
-                min_listed_trade_days,
-                index_ts_code,
-                test_ts_code,
-                board,
-                buy_price_basis,
-                slippage_pct,
-                max_position_count,
-                buy_selection_mode,
-                buy_expression,
-                sell_expression,
+                &source_path,start_date,end_date,min_listed_trade_days,index_ts_code,test_ts_code,board,buy_price_basis,slippage_pct,max_position_count,buy_selection_mode,buy_expression,sell_expression,research_selection.clone(),account_settings,
             )
-        })
+        });
+        if let Ok(data)=&mut result {data.archive_run_id=Some(journal.run_id.clone());}
+        let status=if result.is_ok(){"completed"}else{"failed"};
+        let payload=match &result{Ok(data)=>serde_json::to_value(data).map_err(|e|e.to_string())?,Err(error)=>serde_json::json!({"error":error})};
+        if result.is_ok() {
+            if let Some(selection)=research_selection.as_ref(){
+                let original=lianghua_app_strategy::research_archive::research_artifact_path(&source_path,&selection.run_id,"members.db")?;
+                let destination=lianghua_app_strategy::research_archive::research_artifact_path(&source_path,&journal.run_id,"members.db")?;
+                std::fs::copy(original,destination).map_err(|e|e.to_string())?;
+            }
+        }
+        lianghua_app_strategy::research_archive::finish_research_archive(&source_path,&journal.run_id,status,None,payload)?;
+        result
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1693,6 +1704,7 @@ async fn run_rank_layer_backtest(
     layer_method: Option<String>,
     board: Option<String>,
     exclude_st_board: Option<bool>,
+    market_value_boundaries: Option<Vec<f64>>,
 ) -> Result<RankLayerBacktestData, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
@@ -1716,6 +1728,7 @@ async fn run_rank_layer_backtest(
                 layer_method,
                 board,
                 exclude_st_board,
+                market_value_boundaries,
             )
         })
     })
@@ -1839,6 +1852,7 @@ async fn run_transient_rank_layer_backtest(
     layer_method: Option<String>,
     board: Option<String>,
     exclude_st_board: Option<bool>,
+    market_value_boundaries: Option<Vec<f64>>,
 ) -> Result<RankLayerBacktestData, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
@@ -1862,6 +1876,7 @@ async fn run_transient_rank_layer_backtest(
                 layer_method,
                 board,
                 exclude_st_board,
+                market_value_boundaries,
             )
         })
     })
@@ -1879,8 +1894,29 @@ fn get_validation_core_rule_options(
     core_get_validation_core_rule_options(&source_path)
 }
 
+static EXPRESSION_VALIDATION_TASKS: std::sync::OnceLock<
+    std::sync::Mutex<
+        std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    >,
+> = std::sync::OnceLock::new();
+
+#[tauri::command]
+fn cancel_rule_expression_validation(task_id: String) -> Result<(), String> {
+    let tasks = EXPRESSION_VALIDATION_TASKS
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|_| "表达式回测任务锁已损坏")?;
+    tasks
+        .get(&task_id)
+        .ok_or("表达式回测任务已结束或不存在")?
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    Ok(())
+}
+
 #[tauri::command]
 async fn run_rule_expression_validation(
+    app: tauri::AppHandle,
+    task_id: Option<String>,
     source_path: String,
     import_rule_name: String,
     when: Option<String>,
@@ -1906,43 +1942,207 @@ async fn run_rule_expression_validation(
     total_mv_max: Option<f64>,
     walk_forward_folds: Option<usize>,
     core_rule_names: Option<Vec<String>>,
+    additional_periods: Option<Vec<usize>>,
+    research_grouping: Option<lianghua_app_strategy::research_evidence::ResearchGrouping>,
+    research_statistics: Option<
+        lianghua_backtest::simulate::research_statistics::ResearchStatisticsSettings,
+    >,
+    research_question: Option<String>,
+    research_configuration: Option<serde_json::Value>,
+    parent_run_id: Option<String>,
+    verify_inputs: Option<bool>,
 ) -> Result<RuleExpressionValidationData, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        run_with_heap_trim(|| {
-            core_run_rule_expression_validation(
-                source_path,
-                import_rule_name,
-                when,
-                scope_way,
-                scope_windows,
-                stock_adj_type,
-                index_ts_code,
-                index_beta,
-                concept_beta,
-                industry_beta,
-                start_date,
-                end_date,
-                min_samples_per_rule_day,
-                min_listed_trade_days,
-                backtest_period,
-                return_metric,
-                manual_strategy,
-                unknown_configs,
-                sample_limit_per_group,
-                board,
-                exclude_st_board,
-                total_mv_min,
-                total_mv_max,
-                walk_forward_folds,
-                core_rule_names,
+    let task_id = task_id.unwrap_or_default();
+    if task_id.len() > 128 {
+        return Err("表达式回测任务编号无效".to_string());
+    }
+    let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    if !task_id.is_empty() {
+        let mut tasks = EXPRESSION_VALIDATION_TASKS
+            .get_or_init(Default::default)
+            .lock()
+            .map_err(|_| "表达式回测任务锁已损坏")?;
+        if tasks.contains_key(&task_id) {
+            return Err("表达式回测任务编号重复".to_string());
+        }
+        tasks.insert(task_id.clone(), cancelled.clone());
+    }
+    let worker_id = task_id.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let _execution = lianghua_app_strategy::research_archive::try_research_execution()?;
+        let progress = |phase: &str| -> Result<(), String> {
+            if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err("表达式回测已取消".to_string());
+            }
+            if !worker_id.is_empty() {
+                let _ = app.emit(
+                    "expression-validation-progress",
+                    serde_json::json!({ "task_id": worker_id, "phase": phase }),
+                );
+            }
+            Ok(())
+        };
+        use lianghua_app_strategy::research_archive::{
+            finish_research_archive, research_artifact_path, research_input_manifest,
+            save_research_archive,
+        };
+        let _cloud_guard = if verify_inputs.unwrap_or(false) {
+            Some(
+                lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner()),
             )
-        })
+        } else {
+            None
+        };
+        let _read_guard = if _cloud_guard.is_none() {
+            Some(
+                lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner()),
+            )
+        } else {
+            None
+        };
+        let mut configuration = research_configuration.unwrap_or_else(|| serde_json::json!({}));
+        let journal = save_research_archive(
+            &source_path,
+            parent_run_id,
+            research_question.unwrap_or_default(),
+            configuration.clone(),
+            serde_json::json!({}),
+            "expression_validation",
+            "running",
+            None,
+            None,
+        )?;
+        let _lease = lianghua_app_strategy::research_archive::ResearchArchiveLease {
+            source_path: source_path.clone(),
+            run_id: journal.run_id.clone(),
+        };
+        let output = lianghua_app_strategy::research_evidence::ValidationResearchOutput {
+            path: research_artifact_path(&source_path, &journal.run_id, "evidence.db")?,
+            grouping: research_grouping.unwrap_or_default(),
+            statistics: research_statistics.unwrap_or_default(),
+        };
+        let result = (|| -> Result<RuleExpressionValidationData, String> {
+            progress("等待仓库可用")?;
+            configuration["input_manifest"] = research_input_manifest(&source_path)?;
+            output.grouping.validate()?;
+            output.statistics.validate()?;
+            let before = if verify_inputs.unwrap_or(false) {
+                lianghua_app_strategy::rank_comparison::comparison_input_digests(
+                    &source_path,
+                    &|| cancelled.load(std::sync::atomic::Ordering::Relaxed),
+                )?
+            } else {
+                Vec::new()
+            };
+            let mut periods = vec![backtest_period.unwrap_or(1).max(1)];
+            for period in additional_periods.unwrap_or_default() {
+                if period == 0 || period > 252 {
+                    return Err("评价周期须在1至252个交易日之间".into());
+                }
+                if !periods.contains(&period) {
+                    periods.push(period);
+                }
+            }
+            if periods.len() > 6 {
+                return Err("一次最多比较6个周期".into());
+            }
+            let mut results = Vec::new();
+            for period in periods {
+                progress(&format!("准备{period}日评价"))?;
+                let mut data = run_with_heap_trim(|| {
+                    core_run_rule_expression_validation(
+                        source_path.clone(),
+                        import_rule_name.clone(),
+                        when.clone(),
+                        scope_way.clone(),
+                        scope_windows,
+                        stock_adj_type.clone(),
+                        index_ts_code.clone(),
+                        index_beta,
+                        concept_beta,
+                        industry_beta,
+                        start_date.clone(),
+                        end_date.clone(),
+                        min_samples_per_rule_day,
+                        min_listed_trade_days,
+                        Some(period),
+                        return_metric,
+                        manual_strategy.clone(),
+                        unknown_configs.clone(),
+                        sample_limit_per_group,
+                        board.clone(),
+                        exclude_st_board,
+                        total_mv_min,
+                        total_mv_max,
+                        walk_forward_folds,
+                        core_rule_names.clone(),
+                        Some(&progress),
+                        Some(&output),
+                    )
+                })?;
+                data.archive_run_id = Some(journal.run_id.clone());
+                data.input_manifest = configuration["input_manifest"].clone();
+                data.input_identity = if verify_inputs.unwrap_or(false) {
+                    "content_checked_not_snapshot"
+                } else {
+                    "unverified"
+                }
+                .into();
+                results.push(data);
+            }
+            if verify_inputs.unwrap_or(false)
+                && before
+                    != lianghua_app_strategy::rank_comparison::comparison_input_digests(
+                        &source_path,
+                        &|| cancelled.load(std::sync::atomic::Ordering::Relaxed),
+                    )?
+            {
+                return Err("运行期间输入内容变化，结果不可提交，请重跑".into());
+            }
+            let mut data = results.remove(0);
+            data.additional_periods = results;
+            progress("提交完整研究结果")?;
+            Ok(data)
+        })();
+        let result = result.map_err(|error| {
+            if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                "表达式回测已取消".to_string()
+            } else {
+                error
+            }
+        });
+        let status = match &result {
+            Ok(_) => "completed",
+            Err(error) if error == "表达式回测已取消" => "cancelled",
+            Err(_) => "failed",
+        };
+        let payload = match &result {
+            Ok(data) => serde_json::to_value(data).map_err(|e| e.to_string())?,
+            Err(error) => serde_json::json!({"error":error}),
+        };
+        finish_research_archive(
+            &source_path,
+            &journal.run_id,
+            status,
+            Some(configuration),
+            payload,
+        )?;
+        result
     })
     .await
-    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string());
+    if !task_id.is_empty() {
+        EXPRESSION_VALIDATION_TASKS
+            .get_or_init(Default::default)
+            .lock()
+            .map_err(|_| "表达式回测任务锁已损坏")?
+            .remove(&task_id);
+    }
+    result?
 }
 
 #[tauri::command]
@@ -3232,6 +3432,19 @@ pub fn run() {
             run_transient_scene_layer_backtest,
             run_transient_rule_layer_backtest,
             run_rule_expression_validation,
+            cancel_rule_expression_validation,
+            rank_comparison_bridge::read_rank_comparison_baseline,
+            rank_comparison_bridge::run_rank_comparison,
+            rank_comparison_bridge::cancel_rank_comparison,
+            research_archive_bridge::list_research_archives,
+            research_archive_bridge::list_research_evidence,
+            research_archive_bridge::summarize_research_evidence,
+            research_archive_bridge::export_research_archive,
+            research_archive_bridge::import_research_archive,
+            research_archive_bridge::save_research_archive,
+            research_archive_bridge::read_research_archive,
+            research_archive_bridge::delete_research_archive,
+            research_archive_bridge::list_rank_comparison_members,
             get_validation_core_rule_options,
             get_ranking_compute_status,
             preview_ranking_score_calculation_warnings,

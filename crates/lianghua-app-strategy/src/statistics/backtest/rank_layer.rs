@@ -83,54 +83,85 @@ pub(in crate::statistics) fn build_rank_market_value_summaries(
     input: &RankLayerFromDbInput,
     summary_rows: &[ScoreSummary],
     samples: &[crate::simulate::rank::RankLayerSamplePoint],
+    boundaries: &[f64],
 ) -> Result<Vec<RankLayerMarketValueSummary>, String> {
+    if boundaries.is_empty() {
+        return Ok(Vec::new());
+    }
+    if boundaries
+        .iter()
+        .any(|value| !value.is_finite() || *value <= 0.0)
+        || boundaries.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err("市值分组边界必须是严格递增的正数".to_string());
+    }
     let conn = crate::data::open_db_readonly(crate::data::source_db_path(source_path))
         .map_err(|e| e.to_string())?;
     let market_cap_sql = crate::data::extras::estimated_market_cap_sql(&conn)?;
     let mut out = Vec::new();
 
-    for (group_label, total_mv_min, total_mv_max) in
-        (|| -> [(&'static str, Option<f64>, Option<f64>); 3] {
-            [
-                ("小市值(<50亿)", None, Some(50.0)),
-                ("中市值(50-200亿)", Some(50.0), Some(200.0)),
-                ("大市值(>=200亿)", Some(200.0), None),
-            ]
-        })()
-    {
-        let sql = format!(
-            r#"
-            WITH caps AS (
-                SELECT ts_code, trade_date, {market_cap_sql} AS market_cap
-                FROM stock_data WHERE adj_type = ? AND trade_date >= ? AND trade_date <= ?
-            )
-            SELECT ts_code, trade_date FROM caps
-            WHERE market_cap > 0 AND isfinite(market_cap)
-              AND (? IS NULL OR market_cap >= ?)
-              AND (? IS NULL OR market_cap < ?)
-        "#
-        );
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| format!("预编译历史市值分组失败:{e}"))?;
-        let mut rows = stmt
-            .query(duckdb::params![
-                &input.stock_adj_type,
-                &input.start_date,
-                &input.end_date,
-                total_mv_min,
-                total_mv_min,
-                total_mv_max,
-                total_mv_max
-            ])
-            .map_err(|e| format!("查询历史市值分组失败:{e}"))?;
+    let mut groups = Vec::new();
+    for index in 0..=boundaries.len() {
+        let min = index.checked_sub(1).map(|i| boundaries[i]);
+        let max = boundaries.get(index).copied();
+        let label = match (min, max) {
+            (None, Some(max)) => format!("<{max}亿"),
+            (Some(min), Some(max)) => format!("{min}–{max}亿"),
+            (Some(min), None) => format!("≥{min}亿"),
+            (None, None) => unreachable!(),
+        };
+        groups.push((label, min, max, false));
+    }
+    groups.push(("市值缺失".to_string(), None, None, true));
+    let mut assigned_pairs = HashSet::new();
+    for (group_label, total_mv_min, total_mv_max, missing) in groups {
         let mut group_pairs = HashSet::new();
-        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-            let ts_code: String = row.get(0).map_err(|e| e.to_string())?;
-            let date: String = row.get(1).map_err(|e| e.to_string())?;
-            group_pairs.insert(
-                crate::statistics::validation::similarity::validation_pair_hash(&ts_code, &date),
+        if missing {
+            for row in summary_rows {
+                let pair = crate::statistics::validation::similarity::validation_pair_hash(
+                    &row.ts_code,
+                    &row.trade_date,
+                );
+                if !assigned_pairs.contains(&pair) {
+                    group_pairs.insert(pair);
+                }
+            }
+        } else {
+            let sql = format!(
+                r#"
+                WITH caps AS (
+                    SELECT ts_code, trade_date, {market_cap_sql} AS market_cap
+                    FROM stock_data WHERE adj_type = ? AND trade_date >= ? AND trade_date <= ?
+                )
+                SELECT ts_code, trade_date FROM caps
+                WHERE market_cap > 0 AND isfinite(market_cap)
+                  AND (? IS NULL OR market_cap >= ?)
+                  AND (? IS NULL OR market_cap < ?)
+            "#
             );
+            let mut stmt = conn
+                .prepare(&sql)
+                .map_err(|e| format!("预编译历史市值分组失败:{e}"))?;
+            let mut rows = stmt
+                .query(duckdb::params![
+                    &input.stock_adj_type,
+                    &input.start_date,
+                    &input.end_date,
+                    total_mv_min,
+                    total_mv_min,
+                    total_mv_max,
+                    total_mv_max
+                ])
+                .map_err(|e| format!("查询历史市值分组失败:{e}"))?;
+            while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+                let ts_code: String = row.get(0).map_err(|e| e.to_string())?;
+                let date: String = row.get(1).map_err(|e| e.to_string())?;
+                let pair = crate::statistics::validation::similarity::validation_pair_hash(
+                    &ts_code, &date,
+                );
+                group_pairs.insert(pair);
+                assigned_pairs.insert(pair);
+            }
         }
         let group_rows = summary_rows
             .iter()
@@ -162,9 +193,11 @@ pub(in crate::statistics) fn build_rank_market_value_summaries(
             &group_rows,
         )?;
         out.push(RankLayerMarketValueSummary {
-            group_label: group_label.to_string(),
+            group_label,
             total_mv_min,
             total_mv_max,
+            member_count: group_rows.len(),
+            label_count: group_samples.len(),
             point_count: metrics.point_count,
             sample_count: metrics.sample_count,
             avg_er_change: metrics.avg_er_change,
@@ -292,6 +325,89 @@ mod tests {
     use crate::statistics::backtest::rank_layer::build_rank_layer_sample_groups;
     use crate::statistics::universe::ValidationSampleStockMeta;
     use std::collections::HashMap;
+
+    #[test]
+    fn market_value_groups_use_requested_boundary_and_keep_missing() {
+        let directory = std::env::temp_dir().join(format!(
+            "lianghua-market-groups-{:016x}",
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let source = directory.to_str().unwrap();
+        let conn = duckdb::Connection::open(crate::data::source_db_path(source)).unwrap();
+        conn.execute_batch("CREATE TABLE stock_data(ts_code VARCHAR, trade_date VARCHAR, adj_type VARCHAR, amount DOUBLE, tor DOUBLE);
+            INSERT INTO stock_data VALUES ('A','20240102','qfq',20000,1),('B','20240102','qfq',30000,1),('C','20240102','qfq',100000,1),('D','20240102','qfq',200000,1),('E','20240102','qfq',NULL,1)").unwrap();
+        drop(conn);
+        let rows = ["A", "B", "C", "D", "E", "F"]
+            .into_iter()
+            .enumerate()
+            .map(|(i, code)| crate::scoring_model::ScoreSummary {
+                ts_code: code.into(),
+                trade_date: "20240102".into(),
+                total_score: 10.0 - i as f64,
+                rank: Some(i as i64 + 1),
+            })
+            .collect::<Vec<_>>();
+        let samples = rows
+            .iter()
+            .enumerate()
+            .map(|(i, row)| RankLayerSamplePoint {
+                layer_index: 1,
+                ts_code: row.ts_code.clone(),
+                trade_date: row.trade_date.clone(),
+                score: row.total_score,
+                residual_return: i as f64,
+                er_change: 0.0,
+            })
+            .collect::<Vec<_>>();
+        let input = crate::simulate::rank::RankLayerFromDbInput {
+            stock_adj_type: "qfq".into(),
+            index_ts_code: "000001.SH".into(),
+            index_beta: 0.0,
+            concept_beta: 0.0,
+            industry_beta: 0.0,
+            start_date: "20240102".into(),
+            end_date: "20240102".into(),
+            layer_config: crate::simulate::rank::RankLayerConfig {
+                target: Default::default(),
+                min_samples_per_day: 1,
+                backtest_period: 1,
+                min_listed_trade_days: 0,
+                layer_count: 2,
+                layer_method: crate::simulate::rank::RankLayerMethod::SampleCount,
+            },
+        };
+        let groups =
+            super::build_rank_market_value_summaries(source, &input, &rows, &samples, &[50.0])
+                .unwrap();
+        assert_eq!(
+            groups
+                .iter()
+                .map(|group| (
+                    group.group_label.as_str(),
+                    group.member_count,
+                    group.label_count,
+                    group.sample_count
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("<50亿", 2, 2, 2),
+                ("≥50亿", 2, 2, 2),
+                ("市值缺失", 2, 2, 2)
+            ]
+        );
+        assert!(
+            super::build_rank_market_value_summaries(
+                source,
+                &input,
+                &rows,
+                &samples,
+                &[50.0, 50.0]
+            )
+            .is_err()
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn rank_layer_samples_keep_full_observation_counts_and_per_board_limit() {

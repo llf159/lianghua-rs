@@ -2612,6 +2612,7 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
+ "sha2",
  "toml 1.1.8+spec-1.1.0",
 ]
 

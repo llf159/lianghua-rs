@@ -1,6 +1,6 @@
 use crate::simulate::dimension::calc_linear_orthogonal_diagnostics;
-use crate::simulate::fp_utils::calc_newey_west_t_value;
 use crate::simulate::fp_utils::pearson_corr;
+use crate::simulate::research_statistics::calc_calendar_hac_t;
 use crate::simulate::rule::RuleLayerPoint;
 use crate::statistics::backtest::RULE_BACKTEST_EPS;
 use crate::statistics::validation::scores::mean_f64;
@@ -12,6 +12,9 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Copy)]
 pub(in crate::statistics) struct ValidationFoldPlan {
     pub(in crate::statistics) train_end_index: usize,
+    pub(in crate::statistics) training_labels_ready: bool,
+    pub(in crate::statistics) label_boundaries_checked: bool,
+    pub(in crate::statistics) label_boundary_excluded_days: usize,
     pub(in crate::statistics) test_start_index: usize,
     pub(in crate::statistics) test_end_index: usize,
 }
@@ -46,6 +49,9 @@ pub(in crate::statistics) fn build_validation_fold_plan(
         };
         folds.push(ValidationFoldPlan {
             train_end_index,
+            training_labels_ready: true,
+            label_boundaries_checked: false,
+            label_boundary_excluded_days: 0,
             test_start_index,
             test_end_index,
         });
@@ -87,7 +93,7 @@ pub(in crate::statistics) fn build_validation_walk_forward(
             .map(|trade_date| points_by_date.get(trade_date.as_str()).copied())
             .collect::<Vec<_>>();
         let valid_days = daily.iter().filter(|point| point.is_some()).count();
-        let sufficient = valid_days >= 20;
+        let sufficient = valid_days >= 20 && plan.training_labels_ready;
         let ic_values = daily
             .iter()
             .filter_map(|point| *point)
@@ -111,7 +117,13 @@ pub(in crate::statistics) fn build_validation_walk_forward(
         let (ic_mean, ic_t_value, avg_residual_return, spread_mean) = if sufficient {
             (
                 mean_f64(&ic_values),
-                calc_newey_west_t_value(&ic_values, hac_lag),
+                calc_calendar_hac_t(
+                    &daily
+                        .iter()
+                        .map(|point| point.and_then(|point| point.ic))
+                        .collect::<Vec<_>>(),
+                    hac_lag,
+                ),
                 mean_f64(&residual_values),
                 mean_f64(&spread_values),
             )
@@ -144,6 +156,12 @@ pub(in crate::statistics) fn build_validation_walk_forward(
     RuleValidationWalkForwardData {
         fold_count: rows.len(),
         purge_days,
+        label_boundaries_checked: !folds.is_empty()
+            && folds.iter().all(|fold| fold.label_boundaries_checked),
+        label_boundary_excluded_days: folds
+            .iter()
+            .map(|fold| fold.label_boundary_excluded_days)
+            .sum(),
         ic_positive_folds: rows
             .iter()
             .filter(|row| row.ic_mean.is_some_and(|value| value > 0.0))
@@ -174,6 +192,12 @@ pub(in crate::statistics) fn build_validation_incremental(
             .map(|(rule_name, _)| rule_name.clone())
             .collect(),
         purge_days,
+        label_boundaries_checked: !folds.is_empty()
+            && folds.iter().all(|fold| fold.label_boundaries_checked),
+        label_boundary_excluded_days: folds
+            .iter()
+            .map(|fold| fold.label_boundary_excluded_days)
+            .sum(),
         folds: Vec::with_capacity(folds.len()),
         positive_folds: 0,
     };
@@ -199,6 +223,7 @@ pub(in crate::statistics) fn build_validation_incremental(
         let collect_rows = |from: usize, to: usize| {
             let mut rows = Vec::<Vec<f64>>::new();
             let mut targets = Vec::<f64>::new();
+            let mut indices = Vec::new();
             for index in from..=to {
                 let Some(target_value) = target[index] else {
                     continue;
@@ -212,11 +237,17 @@ pub(in crate::statistics) fn build_validation_incremental(
                 };
                 rows.push(row);
                 targets.push(target_value);
+                indices.push(index);
             }
-            (rows, targets)
+            (rows, targets, indices)
         };
-        let (train_rows, train_targets) = collect_rows(0, plan.train_end_index);
-        let (test_rows, test_targets) = collect_rows(plan.test_start_index, plan.test_end_index);
+        let (train_rows, train_targets, _) = if plan.training_labels_ready {
+            collect_rows(0, plan.train_end_index)
+        } else {
+            (Vec::new(), Vec::new(), Vec::new())
+        };
+        let (test_rows, test_targets, test_indices) =
+            collect_rows(plan.test_start_index, plan.test_end_index);
 
         let mut fold = RuleValidationIncrementalFold {
             fold_index,
@@ -333,7 +364,11 @@ pub(in crate::statistics) fn build_validation_incremental(
                 fold.status = "ok".to_string();
                 fold.test_day_count = residuals.len();
                 fold.incremental_mean = mean_f64(&residuals);
-                fold.incremental_hac_t = calc_newey_west_t_value(&residuals, hac_lag);
+                let mut residual_axis = vec![None; plan.test_end_index - plan.test_start_index + 1];
+                for (index, value) in test_indices.iter().zip(&residuals) {
+                    residual_axis[index - plan.test_start_index] = Some(*value);
+                }
+                fold.incremental_hac_t = calc_calendar_hac_t(&residual_axis, hac_lag);
                 fold.positive_day_ratio = (!residuals.is_empty()).then(|| {
                     residuals.iter().filter(|value| **value > 0.0).count() as f64
                         / residuals.len() as f64

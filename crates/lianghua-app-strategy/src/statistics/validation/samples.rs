@@ -4,7 +4,6 @@ use crate::statistics::validation::{
     RuleValidationSampleGroups, RuleValidationSampleRow, RuleValidationSampleStats,
     RuleValidationTriggerCountStats, VALIDATION_EPS,
 };
-use rand::random;
 #[cfg(test)]
 use rand::Rng;
 #[cfg(test)]
@@ -13,6 +12,7 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 #[cfg(test)]
 use rayon::prelude::*;
+use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -204,9 +204,17 @@ impl<'a> ValidationSampleAccumulator<'a> {
                 );
             }
 
+            let mut hash = Sha256::new();
+            hash.update(b"validation-samples-v1-seed-0\0");
+            hash.update(row.ts_code.as_bytes());
+            hash.update(b"\0");
+            hash.update(row.trade_date.as_bytes());
+            hash.update((row.trigger_count as u64).to_le_bytes());
+            let digest = hash.finalize();
+            let key = u64::from_le_bytes(digest[..8].try_into().expect("SHA-256 输出至少 8 字节"));
             push_limited_random_sample(
                 random_by_board.entry(bucket_key).or_default(),
-                random::<u64>(),
+                key,
                 row,
                 self.sample_limit_per_group,
             );
@@ -354,7 +362,10 @@ pub(in crate::statistics) fn push_limited_random_sample(
         return;
     };
 
-    if key < rows[worst_index].0 {
+    if key < rows[worst_index].0
+        || (key == rows[worst_index].0
+            && compare_random_validation_sample(&row, &rows[worst_index].1) == Ordering::Less)
+    {
         rows[worst_index] = (key, row);
     }
 }
@@ -499,6 +510,39 @@ mod tests {
     use crate::statistics::validation::samples::build_validation_sample_groups;
     use crate::statistics::validation::samples::resolve_validation_trigger_count;
     use std::collections::HashMap;
+
+    #[test]
+    fn random_samples_are_reproducible_across_input_order() {
+        let meta = HashMap::new();
+        let mut first = super::ValidationSampleAccumulator::new(3, &meta, None, false, 1.0, false);
+        let mut second = super::ValidationSampleAccumulator::new(3, &meta, None, false, 1.0, false);
+        let codes = (0..20)
+            .map(|index| format!("{index:06}.SZ"))
+            .collect::<Vec<_>>();
+        for code in &codes {
+            first.push(crate::simulate::rule::RuleLayerSamplePointRef {
+                ts_code: code,
+                trade_date: "20260105",
+                rule_score: 1.0,
+                residual_return: 1.0,
+            });
+        }
+        for code in codes.iter().rev() {
+            second.push(crate::simulate::rule::RuleLayerSamplePointRef {
+                ts_code: code,
+                trade_date: "20260105",
+                rule_score: 1.0,
+                residual_return: 1.0,
+            });
+        }
+        let (_, _, _, _, a, _) = first.into_parts();
+        let (_, _, _, _, b, _) = second.into_parts();
+        assert_eq!(
+            a.random.iter().map(|row| &row.ts_code).collect::<Vec<_>>(),
+            b.random.iter().map(|row| &row.ts_code).collect::<Vec<_>>()
+        );
+        assert_eq!(a.random.len(), 3);
+    }
 
     #[test]
     fn validation_trigger_count_uses_each_score_multiple() {

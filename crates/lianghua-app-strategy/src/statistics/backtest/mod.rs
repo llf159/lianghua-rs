@@ -278,6 +278,8 @@ pub struct RankLayerSampleGroup {
 
 #[derive(Debug, Serialize)]
 pub struct RankLayerBacktestData {
+    pub label_algorithm: String,
+    pub input_identity: String,
     pub stock_adj_type: String,
     pub index_ts_code: String,
     pub index_beta: f64,
@@ -305,6 +307,7 @@ pub struct RankLayerBacktestData {
     pub ic_t_value: Option<f64>,
     pub top_k_summaries: Vec<RankTopKSummaryData>,
     pub top_k_period_summaries: Vec<RankTopKPeriodSummaryData>,
+    pub fixed_top_k_summaries: Vec<crate::simulate::rank::FixedRankTopKSummary>,
     pub layer_summaries: Vec<RankLayerBucketSummary>,
     pub layer_sample_groups: Vec<RankLayerSampleGroup>,
     pub market_value_summaries: Vec<RankLayerMarketValueSummary>,
@@ -315,6 +318,8 @@ pub struct RankLayerMarketValueSummary {
     pub group_label: String,
     pub total_mv_min: Option<f64>,
     pub total_mv_max: Option<f64>,
+    pub member_count: usize,
+    pub label_count: usize,
     pub point_count: usize,
     pub sample_count: usize,
     pub avg_er_change: Option<f64>,
@@ -1064,7 +1069,18 @@ pub fn run_rank_layer_backtest(
     layer_method: Option<String>,
     board: Option<String>,
     exclude_st_board: Option<bool>,
+    market_value_boundaries: Option<Vec<f64>>,
 ) -> Result<RankLayerBacktestData, String> {
+    let market_value_boundaries = market_value_boundaries.unwrap_or_default();
+    if market_value_boundaries
+        .iter()
+        .any(|value| !value.is_finite() || *value <= 0.0)
+        || market_value_boundaries
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+    {
+        return Err("市值分组边界必须是严格递增的正数".to_string());
+    }
     validate_backtest_strategy_expressions(&source_path)?;
     let source_db = source_db_path(&source_path);
     let source_db_str = source_db
@@ -1144,6 +1160,7 @@ pub fn run_rank_layer_backtest(
             &input,
             &summary_rows,
             &metrics.layer_samples,
+            &market_value_boundaries,
         )?;
         let stock_meta_map = load_validation_sample_stock_meta_map(source_path)?;
         let layer_sample_groups = build_rank_layer_sample_groups(
@@ -1152,6 +1169,8 @@ pub fn run_rank_layer_backtest(
             &stock_meta_map,
         );
         Ok(RankLayerBacktestData {
+            label_algorithm: "forward_open_compounded_residual_v1".into(),
+            input_identity: "unverified_historical_score_inputs".into(),
             stock_adj_type: input.stock_adj_type,
             index_ts_code: input.index_ts_code,
             index_beta: input.index_beta,
@@ -1161,7 +1180,7 @@ pub fn run_rank_layer_backtest(
             end_date: input.end_date,
             resolved_board: params.resolved_board.clone(),
             exclude_st_board: params.exclude_st_board,
-            market_value_grouping: true,
+            market_value_grouping: !market_value_boundaries.is_empty(),
             min_samples_per_rank_day: input.layer_config.effective_min_samples_per_day(),
             min_listed_trade_days: input.layer_config.min_listed_trade_days,
             backtest_period: input.layer_config.backtest_period,
@@ -1180,6 +1199,7 @@ pub fn run_rank_layer_backtest(
             ic_t_value: metrics.ic_t_value,
             top_k_summaries: rank_top_k_summary_data(metrics.top_k_summaries),
             top_k_period_summaries: rank_top_k_period_summary_data(metrics.top_k_period_summaries),
+            fixed_top_k_summaries: metrics.fixed_top_k_summaries,
             layer_summaries: metrics
                 .layers
                 .into_iter()
@@ -1581,7 +1601,18 @@ pub fn run_transient_rank_layer_backtest(
     layer_method: Option<String>,
     board: Option<String>,
     exclude_st_board: Option<bool>,
+    market_value_boundaries: Option<Vec<f64>>,
 ) -> Result<RankLayerBacktestData, String> {
+    let market_value_boundaries = market_value_boundaries.unwrap_or_default();
+    if market_value_boundaries
+        .iter()
+        .any(|value| !value.is_finite() || *value <= 0.0)
+        || market_value_boundaries
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+    {
+        return Err("市值分组边界必须是严格递增的正数".to_string());
+    }
     validate_backtest_strategy_expressions(&source_path)?;
     let source_db = source_db_path(&source_path);
     let source_db_str = source_db
@@ -1658,6 +1689,7 @@ pub fn run_transient_rank_layer_backtest(
         &input,
         &summary_rows,
         &metrics.layer_samples,
+        &market_value_boundaries,
     )?;
     let stock_meta_map = load_validation_sample_stock_meta_map(&source_path)?;
     let layer_sample_groups = build_rank_layer_sample_groups(
@@ -1666,6 +1698,8 @@ pub fn run_transient_rank_layer_backtest(
         &stock_meta_map,
     );
     Ok(RankLayerBacktestData {
+        label_algorithm: "forward_open_compounded_residual_v1".into(),
+        input_identity: "unverified_historical_score_inputs".into(),
         stock_adj_type: input.stock_adj_type,
         index_ts_code: input.index_ts_code,
         index_beta: input.index_beta,
@@ -1675,7 +1709,7 @@ pub fn run_transient_rank_layer_backtest(
         end_date: input.end_date,
         resolved_board: params.resolved_board,
         exclude_st_board: params.exclude_st_board,
-        market_value_grouping: true,
+        market_value_grouping: !market_value_boundaries.is_empty(),
         min_samples_per_rank_day: input.layer_config.effective_min_samples_per_day(),
         min_listed_trade_days: input.layer_config.min_listed_trade_days,
         backtest_period: input.layer_config.backtest_period,
@@ -1693,6 +1727,7 @@ pub fn run_transient_rank_layer_backtest(
         ic_t_value: metrics.ic_t_value,
         top_k_summaries: rank_top_k_summary_data(metrics.top_k_summaries),
         top_k_period_summaries: rank_top_k_period_summary_data(metrics.top_k_period_summaries),
+        fixed_top_k_summaries: metrics.fixed_top_k_summaries,
         layer_summaries: metrics
             .layers
             .into_iter()
