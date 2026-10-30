@@ -27,7 +27,8 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::RwLock;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 pub(super) fn bucket_history_key(price_low: f64, price_high: f64) -> (u64, u64) {
@@ -818,6 +819,73 @@ pub(super) fn finish_cyq_chen_write(
     Ok(rows)
 }
 
+pub(super) fn rewrite_unverified_cyq_batch(
+    conn: &mut Connection,
+    batches: &[PreparedCyqChenWriteBatch],
+    codes: &[String],
+    progress_prefix: Option<&str>,
+) -> Result<(), String> {
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    for table in [
+        CYQ_CHEN_SNAPSHOT_TABLE,
+        CYQ_CHEN_BIN_TABLE,
+        "cyq_chen_checkpoint",
+    ] {
+        tx.execute(
+            &format!(
+                "DELETE FROM {table} WHERE adj_type = 'qfq' AND ts_code IN ({})",
+                vec!["?"; codes.len()].join(",")
+            ),
+            duckdb::params_from_iter(codes.iter()),
+        )
+        .map_err(|e| format!("重试当前筹码批次时无法清理旧行，保留现场，表 {table}: {e}"))?;
+    }
+    if let Some(prefix) = progress_prefix {
+        for suffix in ["done", "unverified"] {
+            tx.execute(
+                &format!(
+                    "DELETE FROM {prefix}_{suffix} WHERE ts_code IN ({})",
+                    vec!["?"; codes.len()].join(",")
+                ),
+                duckdb::params_from_iter(codes.iter()),
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    {
+        let mut snapshots = tx
+            .appender(CYQ_CHEN_SNAPSHOT_TABLE)
+            .map_err(|e| e.to_string())?;
+        let mut bins = tx.appender(CYQ_CHEN_BIN_TABLE).map_err(|e| e.to_string())?;
+        for batch in batches {
+            if let Some(prefix) = progress_prefix {
+                for code in &batch.completed_ts_codes {
+                    if prefix == "cyq_chen_maintenance" {
+                        tx.execute(
+                            "INSERT INTO cyq_chen_maintenance_done VALUES (?, ?)",
+                            params![code, batch.replace_ts_codes.contains(code)],
+                        )
+                        .map_err(|e| e.to_string())?;
+                    } else {
+                        tx.execute("INSERT INTO cyq_chen_rebuild_done VALUES (?)", [code])
+                            .map_err(|e| e.to_string())?;
+                    }
+                    tx.execute(
+                        &format!("INSERT INTO {prefix}_unverified VALUES (?)"),
+                        [code],
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
+            }
+            append_prepared_cyq_chen_batch_rows(&tx, &mut snapshots, &mut bins, batch.clone())?;
+        }
+        snapshots.flush().map_err(|e| e.to_string())?;
+        bins.flush().map_err(|e| e.to_string())?;
+    }
+    tx.commit()
+        .map_err(|e| format!("重新提交当前筹码批次失败:{e}"))
+}
+
 pub(super) fn write_cyq_chen_batches_from_channel(
     db_path: &str,
     rx: Receiver<CyqChenWriteMessage>,
@@ -842,7 +910,8 @@ pub(super) fn write_cyq_chen_batches_from_channel(
             .map_err(|e| format!("检查重建进度表失败:{e}"))? == 1;
     if resumable {
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS cyq_chen_rebuild_error(ts_code VARCHAR PRIMARY KEY, error VARCHAR)",
+            "CREATE TABLE IF NOT EXISTS cyq_chen_rebuild_error(ts_code VARCHAR PRIMARY KEY, error VARCHAR);
+             CREATE TABLE IF NOT EXISTS cyq_chen_rebuild_unverified(ts_code VARCHAR PRIMARY KEY)",
         )
         .map_err(|e| format!("创建新筹码重建错误表失败:{e}"))?;
     }
@@ -865,20 +934,32 @@ pub(super) fn write_cyq_chen_batches_from_channel(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let shared_rx = Arc::new(Mutex::new(rx));
+    let batch_access = Arc::new(RwLock::new(()));
+    let aborted = Arc::new(AtomicBool::new(false));
     let writer_handles = writer_connections
         .into_iter()
         .map(|writer_conn| {
             let worker_rx = Arc::clone(&shared_rx);
             let written_stocks = written_stocks.clone();
+            let batch_access = Arc::clone(&batch_access);
+            let aborted = Arc::clone(&aborted);
+            let db_path = db_path.to_string();
             std::thread::spawn(move || {
-                write_cyq_chen_batch_groups(
+                let result = write_cyq_chen_batch_groups(
                     writer_conn,
                     worker_rx,
                     #[cfg(test)]
                     config,
                     written_stocks,
                     resumable,
-                )
+                    &db_path,
+                    &batch_access,
+                    &aborted,
+                );
+                if result.is_err() {
+                    aborted.store(true, Ordering::Relaxed);
+                }
+                result
             })
         })
         .collect::<Vec<_>>();
@@ -893,7 +974,12 @@ pub(super) fn write_cyq_chen_batches_from_channel(
                 bin_rows += bins;
             }
             Ok(Err(error)) => {
-                writer_error.get_or_insert(error);
+                if writer_error
+                    .as_deref()
+                    .is_none_or(|previous: &str| previous.starts_with("其他筹码批次失败"))
+                {
+                    writer_error = Some(error);
+                }
             }
             Err(_) => {
                 writer_error.get_or_insert("新筹码并行写库线程异常退出".to_string());
@@ -938,17 +1024,26 @@ fn write_cyq_chen_batch_groups(
     #[cfg(test)] config: ChenChipConfig,
     written_stocks: Option<Arc<AtomicUsize>>,
     resumable: bool,
+    db_path: &str,
+    batch_access: &RwLock<()>,
+    aborted: &AtomicBool,
 ) -> Result<(usize, usize), String> {
     let mut snapshot_rows = 0usize;
     let mut bin_rows = 0usize;
     let mut drained = false;
     let profile = std::env::var_os("LIANGHUA_CYQ_WRITE_PROFILE").is_some();
     while !drained {
+        if aborted.load(Ordering::Relaxed) {
+            return Err("其他筹码批次失败，停止接收后续计算".into());
+        }
+        let writing = batch_access.read().map_err(|_| "新筹码批次校验锁已损坏")?;
         let tx = conn
             .transaction()
             .map_err(|e| format!("创建筹码批次事务失败:{e}"))?;
         let mut wait_time = Duration::ZERO;
         let mut append_time = Duration::ZERO;
+        let mut group_codes = Vec::new();
+        let mut retry_batches = Vec::new();
         let (added_stocks, added_snapshot_rows, added_bin_rows, flush_time) = {
             let mut snapshot_app = tx
                 .appender(CYQ_CHEN_SNAPSHOT_TABLE)
@@ -960,7 +1055,10 @@ fn write_cyq_chen_batch_groups(
             let mut group_stocks = 0usize;
             let mut group_snapshot_rows = 0usize;
             let mut group_bin_rows = 0usize;
-            while group_batches < 64 && group_stocks < 32 && group_bin_rows < 500_000 {
+            while group_batches < 128 && group_stocks < 64 && group_bin_rows < 1_000_000 {
+                if aborted.load(Ordering::Relaxed) {
+                    return Err("其他筹码批次失败，当前未提交批次已回滚".into());
+                }
                 let started = Instant::now();
                 let message = rx
                     .lock()
@@ -984,6 +1082,8 @@ fn write_cyq_chen_batch_groups(
                         return Err("临时库写入不接受增量提交标记".into());
                     }
                 };
+                group_codes.extend(batch.completed_ts_codes.iter().cloned());
+                group_codes.extend(batch.checkpoints.iter().map(|row| row.0.clone()));
                 if !batch.errors.is_empty() {
                     if !resumable {
                         return Err("新筹码个股错误只能保存在重建临时库".to_string());
@@ -1007,6 +1107,11 @@ fn write_cyq_chen_batch_groups(
                         .map_err(|e| format!("清理已修复的新筹码个股错误失败:{e}"))?;
                         tx.execute("INSERT INTO cyq_chen_rebuild_done VALUES (?)", [ts_code])
                             .map_err(|e| format!("保存重建股票进度失败:{e}"))?;
+                        tx.execute(
+                            "INSERT INTO cyq_chen_rebuild_unverified VALUES (?)",
+                            [ts_code],
+                        )
+                        .map_err(|e| format!("保存重建待校验股票失败:{e}"))?;
                     }
                 }
                 group_stocks += if resumable {
@@ -1015,6 +1120,7 @@ fn write_cyq_chen_batch_groups(
                     batch.stock_count
                 };
                 let started = Instant::now();
+                retry_batches.push(batch.clone());
                 let (snapshots, bins) = append_prepared_cyq_chen_batch_rows(
                     &tx,
                     &mut snapshot_app,
@@ -1043,16 +1149,65 @@ fn write_cyq_chen_batch_groups(
         let started = Instant::now();
         tx.commit().map_err(|e| format!("提交筹码批次失败:{e}"))?;
         let commit_time = started.elapsed();
+        drop(writing);
+        let started = Instant::now();
+        if added_stocks > 0 {
+            group_codes.sort_unstable();
+            group_codes.dedup();
+            let _verifying = batch_access.write().map_err(|_| "新筹码批次校验锁已损坏")?;
+            for attempt in 0..=2 {
+                conn.execute_batch("CHECKPOINT")
+                    .map_err(|e| format!("落盘筹码提交批次失败:{e}"))?;
+                match crate::data::read_with_retry("回读当前筹码提交批次", || {
+                    super::store::verify_cyq_chen_db(
+                        std::path::Path::new(db_path),
+                        Some(&group_codes),
+                    )
+                }) {
+                    Ok(()) => break,
+                    Err(error)
+                        if attempt < 2
+                            && crate::data::read_retry::is_retryable_read_error(&error) =>
+                    {
+                        eprintln!(
+                            "当前筹码批次校验失败，仅重写本批 {} 只股票，重试 {}/2: {error}",
+                            group_codes.len(),
+                            attempt + 1
+                        );
+                        rewrite_unverified_cyq_batch(
+                            &mut conn,
+                            &retry_batches,
+                            &group_codes,
+                            resumable.then_some("cyq_chen_rebuild"),
+                        )?;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            if resumable {
+                let tx = conn.transaction().map_err(|e| e.to_string())?;
+                for code in &group_codes {
+                    tx.execute(
+                        "DELETE FROM cyq_chen_rebuild_unverified WHERE ts_code = ?",
+                        [code],
+                    )
+                    .map_err(|e| format!("确认重建批次校验完成失败:{e}"))?;
+                }
+                tx.commit().map_err(|e| e.to_string())?;
+            }
+        }
+        let verify_time = started.elapsed();
         if let Some(written_stocks) = &written_stocks {
             written_stocks.fetch_add(added_stocks, Ordering::Relaxed);
         }
         if profile && added_stocks > 0 {
             eprintln!(
-                "新筹码写库 stocks={added_stocks} snapshots={added_snapshot_rows} bins={added_bin_rows} wait_ms={} append_ms={} flush_ms={} commit_ms={}",
+                "新筹码写库 stocks={added_stocks} snapshots={added_snapshot_rows} bins={added_bin_rows} wait_ms={} append_ms={} flush_ms={} commit_ms={} verify_ms={}",
                 wait_time.as_millis(),
                 append_time.as_millis(),
                 flush_time.as_millis(),
                 commit_time.as_millis(),
+                verify_time.as_millis(),
             );
         }
         snapshot_rows += added_snapshot_rows;
@@ -1072,6 +1227,100 @@ mod tests {
     };
     use std::fs;
     use std::sync::mpsc::sync_channel;
+
+    #[test]
+    fn batch_retry_and_resume_preserve_other_stocks_without_duplicates() {
+        use duckdb::Connection;
+
+        let source_dir = unique_temp_source_dir();
+        prepare_source_db(&source_dir);
+        let source = source_dir.to_str().unwrap();
+        let reader = crate::data::DataReader::new(source).unwrap();
+        let config = ChenChipConfig {
+            warmup_days: 2,
+            bucket_pct: 5.0,
+        };
+        let chip = crate::data::cyq_chen::load_compiled_chip_change_config(source).unwrap();
+        let codes = vec!["000001.SZ".to_string()];
+        let batch = super::prepare_cyq_chen_batch_rows(
+            super::compute_cyq_chen_stock_group_batch(
+                &reader,
+                None,
+                "20260401",
+                "20260401",
+                "20260408",
+                &chip,
+                config,
+                &std::collections::HashSet::new(),
+                &std::collections::HashMap::new(),
+                &codes,
+                None,
+                None,
+            )
+            .unwrap(),
+            config,
+        )
+        .unwrap();
+        for prefix in ["cyq_chen_rebuild", "cyq_chen_maintenance"] {
+            let path = source_dir.join(format!("{prefix}.db"));
+            init_cyq_chen_db(&path).unwrap();
+            let mut conn = Connection::open(&path).unwrap();
+            conn.execute_batch(&format!(
+                "CREATE TABLE {prefix}_done(ts_code VARCHAR PRIMARY KEY{});
+                 CREATE TABLE {prefix}_unverified(ts_code VARCHAR PRIMARY KEY);
+                 INSERT INTO cyq_chen_snapshot(ts_code, trade_date, adj_type) VALUES ('000002.SZ','20260401','qfq');
+                 INSERT INTO cyq_chen_bin(ts_code, trade_date, adj_type) VALUES ('000002.SZ','20260401','qfq');
+                 INSERT INTO cyq_chen_checkpoint(ts_code, adj_type) VALUES ('000002.SZ','qfq');
+                 INSERT INTO {prefix}_done VALUES ('000002.SZ'{});",
+                if prefix.ends_with("maintenance") { ", replace_history BOOLEAN" } else { "" },
+                if prefix.ends_with("maintenance") { ", false" } else { "" },
+            )).unwrap();
+            for _ in 0..2 {
+                super::rewrite_unverified_cyq_batch(
+                    &mut conn,
+                    std::slice::from_ref(&batch),
+                    &codes,
+                    Some(prefix),
+                )
+                .unwrap();
+                for (table, expected) in [
+                    ("cyq_chen_snapshot", batch.snapshot_rows),
+                    ("cyq_chen_bin", batch.bin_rows),
+                    ("cyq_chen_checkpoint", 1),
+                ] {
+                    let count: usize = conn
+                        .query_row(
+                            &format!("SELECT count(*) FROM {table} WHERE ts_code = '000001.SZ'"),
+                            [],
+                            |row| row.get(0),
+                        )
+                        .unwrap();
+                    assert_eq!(count, expected, "{prefix}: {table}");
+                }
+            }
+            conn.execute_batch("CHECKPOINT").unwrap();
+            super::super::store::verify_cyq_chen_db(&path, Some(&codes)).unwrap();
+            super::super::store::reset_unverified_cyq_batches(&mut conn, prefix).unwrap();
+            for table in ["cyq_chen_snapshot", "cyq_chen_bin", "cyq_chen_checkpoint"] {
+                let remaining: Vec<String> = conn
+                    .prepare(&format!("SELECT ts_code FROM {table}"))
+                    .unwrap()
+                    .query_map([], |row| row.get(0))
+                    .unwrap()
+                    .collect::<Result<_, _>>()
+                    .unwrap();
+                assert_eq!(remaining, vec!["000002.SZ"], "{prefix}: {table}");
+            }
+            let done: String = conn
+                .query_row(&format!("SELECT ts_code FROM {prefix}_done"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(done, "000002.SZ");
+        }
+        drop(reader);
+        fs::remove_dir_all(source_dir).unwrap();
+    }
 
     #[test]
     fn streamed_columns_match_collected_snapshots_with_posterior_checkpoint() {

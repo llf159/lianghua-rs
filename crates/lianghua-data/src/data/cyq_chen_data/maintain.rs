@@ -834,7 +834,7 @@ pub fn rebuild_cyq_chen_all_with_progress(
     let mut completed = HashSet::<String>::new();
     if rebuild_db.exists() {
         // 打不开或 WAL 无法恢复时保留现场，不把 I/O 故障当成无进度而直接删库。
-        let conn = Connection::open(&rebuild_db).map_err(|e| {
+        let mut conn = Connection::open(&rebuild_db).map_err(|e| {
             format!(
                 "恢复新筹码重建库失败，进度保留在 {}: {e}",
                 rebuild_db.display()
@@ -854,6 +854,7 @@ pub fn rebuild_cyq_chen_all_with_progress(
             None
         };
         if previous.as_deref() == Some(&signature) {
+            super::store::reset_unverified_cyq_batches(&mut conn, "cyq_chen_rebuild")?;
             let mut stmt = conn
                 .prepare("SELECT ts_code FROM cyq_chen_rebuild_done")
                 .map_err(|e| format!("读取重建进度失败:{e}"))?;

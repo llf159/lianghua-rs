@@ -125,7 +125,7 @@ pub struct CyqChenWriteBatch {
     pub stocks: Vec<ComputedCyqChenStock>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct PreparedCyqChenWriteBatch {
     stock_count: usize,
     completed_ts_codes: Vec<String>,

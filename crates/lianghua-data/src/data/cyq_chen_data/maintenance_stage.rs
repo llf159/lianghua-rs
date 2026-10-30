@@ -68,7 +68,7 @@ pub(super) fn prepare_maintenance_stage(
     let mut completed = HashSet::new();
     if path.exists() {
         // 读取或 WAL 恢复出错必须保留现场；只有确认输入已变才丢弃旧代次。
-        let conn = Connection::open(&path)
+        let mut conn = Connection::open(&path)
             .map_err(|e| format!("恢复新筹码维护进度失败，文件保留在 {}: {e}", path.display()))?;
         let exists: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name = 'cyq_chen_maintenance_input')",
@@ -86,6 +86,7 @@ pub(super) fn prepare_maintenance_stage(
             None
         };
         if previous.as_deref() == Some(signature.as_str()) {
+            super::store::reset_unverified_cyq_batches(&mut conn, "cyq_chen_maintenance")?;
             let mut stmt = conn
                 .prepare("SELECT ts_code FROM cyq_chen_maintenance_done")
                 .map_err(|e| e.to_string())?;
@@ -102,7 +103,7 @@ pub(super) fn prepare_maintenance_stage(
     init_cyq_chen_db(&path)?;
     let mut conn = Connection::open(&path).map_err(|e| e.to_string())?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
-    tx.execute_batch("CREATE TABLE IF NOT EXISTS cyq_chen_maintenance_input(signature VARCHAR, total BIGINT); CREATE TABLE IF NOT EXISTS cyq_chen_maintenance_done(ts_code VARCHAR PRIMARY KEY, replace_history BOOLEAN); DELETE FROM cyq_chen_maintenance_input;")
+    tx.execute_batch("CREATE TABLE IF NOT EXISTS cyq_chen_maintenance_input(signature VARCHAR, total BIGINT); CREATE TABLE IF NOT EXISTS cyq_chen_maintenance_done(ts_code VARCHAR PRIMARY KEY, replace_history BOOLEAN); CREATE TABLE IF NOT EXISTS cyq_chen_maintenance_unverified(ts_code VARCHAR PRIMARY KEY); DELETE FROM cyq_chen_maintenance_input;")
         .map_err(|e| e.to_string())?;
     tx.execute(
         "INSERT INTO cyq_chen_maintenance_input VALUES (?, ?)",
@@ -128,6 +129,8 @@ pub(super) fn write_cyq_chen_maintenance_batches_from_channel(
         let mut finished = false;
         let mut interrupted = None;
         while !finished && interrupted.is_none() {
+            let mut group_codes = Vec::new();
+            let mut retry_batches = Vec::new();
             let tx = stage.transaction().map_err(|e| e.to_string())?;
             {
                 let mut snapshots = tx
@@ -136,7 +139,7 @@ pub(super) fn write_cyq_chen_maintenance_batches_from_channel(
                 let mut bins = tx.appender(CYQ_CHEN_BIN_TABLE).map_err(|e| e.to_string())?;
                 let mut stocks = 0;
                 let mut bin_rows = 0;
-                for _ in 0..64 {
+                for _ in 0..128 {
                     let batch = match rx.recv() {
                         #[cfg(test)]
                         Ok(CyqChenWriteMessage::Batch(batch)) => {
@@ -159,7 +162,14 @@ pub(super) fn write_cyq_chen_maintenance_batches_from_channel(
                     if !batch.errors.is_empty() {
                         return Err("维护批次包含未完成的个股错误".into());
                     }
+                    group_codes.extend(batch.completed_ts_codes.iter().cloned());
+                    group_codes.extend(batch.checkpoints.iter().map(|row| row.0.clone()));
                     for code in &batch.completed_ts_codes {
+                        tx.execute(
+                            "INSERT INTO cyq_chen_maintenance_unverified VALUES (?)",
+                            [code],
+                        )
+                        .map_err(|e| format!("保存维护待校验股票失败:{e}"))?;
                         tx.execute(
                             "INSERT INTO cyq_chen_maintenance_done VALUES (?, ?)",
                             params![code, batch.replace_ts_codes.contains(code)],
@@ -168,8 +178,9 @@ pub(super) fn write_cyq_chen_maintenance_batches_from_channel(
                     }
                     stocks += batch.completed_ts_codes.len();
                     bin_rows += batch.bin_rows;
+                    retry_batches.push(batch.clone());
                     append_prepared_cyq_chen_batch_rows(&tx, &mut snapshots, &mut bins, batch)?;
-                    if stocks >= 32 || bin_rows >= 500_000 {
+                    if stocks >= 64 || bin_rows >= 1_000_000 {
                         break;
                     }
                 }
@@ -178,6 +189,53 @@ pub(super) fn write_cyq_chen_maintenance_batches_from_channel(
             }
             // Abort/断连也提交已成功收到的完整股票，正式结果仍完全不动。
             tx.commit().map_err(|e| format!("提交维护进度失败:{e}"))?;
+            if !group_codes.is_empty() {
+                group_codes.sort_unstable();
+                group_codes.dedup();
+                for attempt in 0..=2 {
+                    stage
+                        .execute_batch("CHECKPOINT")
+                        .map_err(|e| format!("落盘维护批次失败:{e}"))?;
+                    drop(stage);
+                    let verified =
+                        crate::data::read_with_retry("回读当前筹码维护批次", || {
+                            super::store::verify_cyq_chen_db(stage_path, Some(&group_codes))
+                        });
+                    match verified {
+                        Ok(()) => {
+                            stage = Connection::open(stage_path).map_err(|e| e.to_string())?;
+                            break;
+                        }
+                        Err(error)
+                            if attempt < 2
+                                && crate::data::read_retry::is_retryable_read_error(&error) =>
+                        {
+                            eprintln!(
+                                "当前筹码维护批次校验失败，仅重写本批 {} 只股票，重试 {}/2: {error}",
+                                group_codes.len(),
+                                attempt + 1
+                            );
+                            stage = Connection::open(stage_path).map_err(|e| e.to_string())?;
+                            super::compute::rewrite_unverified_cyq_batch(
+                                &mut stage,
+                                &retry_batches,
+                                &group_codes,
+                                Some("cyq_chen_maintenance"),
+                            )?;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                let tx = stage.transaction().map_err(|e| e.to_string())?;
+                for code in &group_codes {
+                    tx.execute(
+                        "DELETE FROM cyq_chen_maintenance_unverified WHERE ts_code = ?",
+                        [code],
+                    )
+                    .map_err(|e| format!("确认维护批次校验完成失败:{e}"))?;
+                }
+                tx.commit().map_err(|e| e.to_string())?;
+            }
         }
         if let Some(reason) = interrupted {
             return Err(format!("新筹码维护计算中断:{reason}"));

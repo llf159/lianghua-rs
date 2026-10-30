@@ -12,23 +12,7 @@ pub fn read_with_retry<T, E: Display>(
         match read() {
             Ok(value) => return Ok(value),
             Err(error) => {
-                let message = error.to_string().to_ascii_lowercase();
-                let retryable = [
-                    "io error:",
-                    "i/o error",
-                    "input/output error",
-                    "computed checksum",
-                ]
-                .iter()
-                .any(|text| message.contains(text))
-                    && ![
-                        "permission denied",
-                        "no such file or directory",
-                        "no space left on device",
-                        "read-only file system",
-                    ]
-                    .iter()
-                    .any(|text| message.contains(text));
+                let retryable = is_retryable_read_error(&error.to_string());
                 if !retryable || retries == 3 {
                     if retries > 0 {
                         eprintln!("{context}: 自动重试 {retries} 次后读取仍失败: {error}");
@@ -42,6 +26,26 @@ pub fn read_with_retry<T, E: Display>(
             }
         }
     }
+}
+
+pub(super) fn is_retryable_read_error(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    [
+        "io error:",
+        "i/o error",
+        "input/output error",
+        "computed checksum",
+    ]
+    .iter()
+    .any(|text| message.contains(text))
+        && ![
+            "permission denied",
+            "no such file or directory",
+            "no space left on device",
+            "read-only file system",
+        ]
+        .iter()
+        .any(|text| message.contains(text))
 }
 
 #[cfg(test)]

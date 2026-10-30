@@ -227,6 +227,62 @@ pub(super) fn checkpoint_cyq_chen_db_if_exists(db_path: &Path) -> Result<(), Str
     })
 }
 
+pub(super) fn verify_cyq_chen_db(
+    db_path: &Path,
+    ts_codes: Option<&[String]>,
+) -> Result<(), String> {
+    // Writers must be quiescent and checkpointed throughout this independent read-only open.
+    let conn = crate::data::open_db_readonly(db_path)
+        .map_err(|e| format!("打开新筹码回读校验库失败, path={}: {e}", db_path.display()))?;
+    conn.execute_batch("SET threads = 1; SET memory_limit = '1GB'")
+        .map_err(|e| format!("设置新筹码回读校验资源上限失败:{e}"))?;
+    for table in ["cyq_chen_snapshot", "cyq_chen_bin", "cyq_chen_checkpoint"] {
+        // count(*) can use metadata; hashing every column forces actual block reads and decoding.
+        let mut sql = format!("SELECT bit_xor(hash(*COLUMNS(*))) FROM {table}");
+        let codes = ts_codes.unwrap_or_default();
+        if ts_codes.is_some() {
+            if codes.is_empty() {
+                continue;
+            }
+            sql.push_str(&format!(
+                " WHERE ts_code IN ({})",
+                vec!["?"; codes.len()].join(",")
+            ));
+        }
+        conn.query_row(&sql, duckdb::params_from_iter(codes.iter()), |row| {
+            row.get::<_, Option<u64>>(0)
+        })
+        .map_err(|e| {
+            format!(
+                "新筹码回读校验失败，正式库未替换；文件保留在 {}，表 {table}: {e}",
+                db_path.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+pub(super) fn reset_unverified_cyq_batches(
+    conn: &mut Connection,
+    prefix: &str,
+) -> Result<(), String> {
+    conn.execute_batch(&format!(
+        "CREATE TABLE IF NOT EXISTS {prefix}_unverified(ts_code VARCHAR PRIMARY KEY)"
+    ))
+    .map_err(|e| format!("创建新筹码待校验批次表失败:{e}"))?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    // Only unverified stocks are replayed after interruption; validated batches remain resumable.
+    for table in ["cyq_chen_snapshot", "cyq_chen_bin", "cyq_chen_checkpoint"] {
+        tx.execute_batch(&format!(
+            "DELETE FROM {table} WHERE adj_type = 'qfq' AND ts_code IN (SELECT ts_code FROM {prefix}_unverified)"
+        ))
+        .map_err(|e| format!("清理未校验批次失败，进度保留，请检查存储，表 {table}: {e}"))?;
+    }
+    tx.execute_batch(&format!("DELETE FROM {prefix}_done WHERE ts_code IN (SELECT ts_code FROM {prefix}_unverified); DELETE FROM {prefix}_unverified"))
+        .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())
+}
+
 #[cfg(unix)]
 pub(super) fn replace_cyq_chen_db(temp_path: &Path, db_path: &Path) -> Result<(), String> {
     checkpoint_cyq_chen_db_if_exists(db_path)?;
@@ -284,13 +340,22 @@ pub(super) fn current_chip_change_strategy_hash(source_dir: &str) -> Result<Stri
             path.display()
         )
     })?;
+    let header =
+        toml::from_str::<toml::Table>(&text).map_err(|e| format!("读取筹码算法版本失败: {e}"))?;
+    let algorithm = match header.get("version").and_then(toml::Value::as_integer) {
+        Some(2) => "s6-v1:",
+        _ => "",
+    };
     Ok((|text: &str| -> String {
         let mut hash = 0xcbf2_9ce4_8422_2325_u64;
         for byte in text.as_bytes() {
             hash ^= u64::from(*byte);
             hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
         }
-        format!("{CYQ_CHEN_SCHEMA_VERSION}:{hash:016x}:{:016x}", text.len())
+        format!(
+            "{algorithm}{CYQ_CHEN_SCHEMA_VERSION}:{hash:016x}:{:016x}",
+            text.len()
+        )
     })(&text))
 }
 
@@ -450,10 +515,16 @@ pub fn query_cyq_chen_rebuild_status(
         IgnoredAny,
         IgnoredAny,
     ) = serde_json::from_str(&signature).map_err(|e| format!("解析新筹码重建参数失败: {e}"))?;
+    let has_unverified: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name = 'cyq_chen_rebuild_unverified')",
+        [], |row| row.get(0),
+    ).map_err(|e| format!("检查新筹码待校验进度失败:{e}"))?;
     let completed_stocks = conn
-        .query_row("SELECT count(*) FROM cyq_chen_rebuild_done", [], |row| {
-            row.get(0)
-        })
+        .query_row(if has_unverified {
+            "SELECT count(*) FROM cyq_chen_rebuild_done WHERE ts_code NOT IN (SELECT ts_code FROM cyq_chen_rebuild_unverified)"
+        } else {
+            "SELECT count(*) FROM cyq_chen_rebuild_done"
+        }, [], |row| row.get(0))
         .map_err(|e| format!("读取新筹码已提交进度失败: {e}"))?;
     Ok(Some(super::CyqChenRebuildStatus {
         start_date,
@@ -571,6 +642,56 @@ mod tests {
     use crate::data::cyq_chen_db_path;
     use duckdb::Connection;
     use std::fs;
+
+    #[test]
+    fn cyq_readback_verification_rejects_corrupt_persisted_block() {
+        use std::io::{Read, Seek, SeekFrom, Write};
+
+        let source_dir = unique_temp_source_dir();
+        let db_path = source_dir.join("verify.db");
+        super::init_cyq_chen_db(&db_path).unwrap();
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "INSERT INTO cyq_chen_bin SELECT '000001.SZ', '20261029', 'qfq', i::INTEGER,
+             (hash(i) % 100000)::DOUBLE, 1, 2, 3, 4, 7 FROM range(10000) t(i);
+             CHECKPOINT;",
+        )
+        .unwrap();
+        let block_id: u64 = conn
+            .query_row(
+                "SELECT block_id FROM pragma_storage_info('cyq_chen_bin')
+             WHERE column_name = 'price' AND segment_type = 'DOUBLE' AND block_id >= 0 LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let block_size: u64 = conn
+            .query_row("PRAGMA database_size", [], |row| row.get(2))
+            .unwrap();
+        drop(conn);
+        super::verify_cyq_chen_db(&db_path, None).unwrap();
+
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&db_path)
+            .unwrap();
+        let offset = 3 * 4096 + block_id * block_size + 128;
+        file.seek(SeekFrom::Start(offset)).unwrap();
+        let mut byte = [0];
+        file.read_exact(&mut byte).unwrap();
+        byte[0] ^= 1;
+        file.seek(SeekFrom::Start(offset)).unwrap();
+        file.write_all(&byte).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        let corrupted = fs::read(&db_path).unwrap();
+        let error = super::verify_cyq_chen_db(&db_path, None).unwrap_err();
+        assert!(error.contains("computed checksum"), "{error}");
+        assert!(error.contains("正式库未替换"), "{error}");
+        assert_eq!(fs::read(&db_path).unwrap(), corrupted);
+        fs::remove_dir_all(source_dir).unwrap();
+    }
 
     #[test]
     fn maintenance_status_does_not_initialize_or_clean_rebuild_files() {
