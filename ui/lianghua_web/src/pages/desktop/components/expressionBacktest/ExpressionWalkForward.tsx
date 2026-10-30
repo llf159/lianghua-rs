@@ -94,7 +94,10 @@ export function ExpressionWalkForward({ combo }: { combo: RuleValidationComboRes
         </div>
       </div>
       <p className="expression-backtest-caption">
-        训练区间末与样本外起点之间固定排除 holding period 个交易日（HAC lag 仍按 holding period - 1）；
+        训练区间末与样本外起点之间至少排除 holding period 个交易日（HAC lag 按 holding period - 1，保留缺失日期）；
+        {walkForward.label_boundaries_checked
+          ? `已按实际标签末日核对边界，各窗口额外排除训练日合计 ${walkForward.label_boundary_excluded_days ?? 0} 日。`
+          : "旧结果未核对实际标签末日，需重跑。"}
         IC 与 Spread 由分数符号/排序天然携带方向，负向规则不再额外翻转；回测指标是方向盲的均值，
         已按表达式方向调整符号。样本不足的 fold 计入分母但不计为正窗口
         {insufficientFolds > 0 ? `（本次 ${insufficientFolds} / ${foldCount}）` : ""}。

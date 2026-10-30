@@ -32,7 +32,7 @@ export function ExpressionSamplesCheck({
     <div className="expression-backtest-section">
       <h3>样本检查</h3>
       <p className="expression-backtest-caption">
-        正样本按残差收益从高到低、负样本从低到高展示。
+        正样本按残差收益从高到低、负样本从低到高展示。先按股票和触发次数保留绝对收益最大的样本，再从中固定抽取随机样本；因此图集不能代表全部触发股票日的成功率。
       </p>
       <div className="expression-backtest-tabs" role="tablist">
         <button

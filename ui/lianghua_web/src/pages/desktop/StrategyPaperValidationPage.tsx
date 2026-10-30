@@ -1,3 +1,4 @@
+import './css/ResearchWorkbench.css'
 import {
   memo,
   useCallback,
@@ -7,6 +8,9 @@ import {
   useState,
   type PointerEvent as ReactPointerEvent,
 } from 'react'
+import { ResearchExportButton } from './components/ResearchExportButton'
+import { useSearchParams } from 'react-router-dom'
+import { listResearchArchives, readResearchArchive, researchRunStatusLabel, type ResearchArchiveHeader } from '../../apis/strategyTrigger'
 import { ensureManagedSourcePath } from '../../apis/managedSource'
 import { listStockLookupRows, type StockLookupRow } from '../../apis/reader'
 import {
@@ -1709,19 +1713,16 @@ const StrategyPaperValidationStatusTradeModal = memo(
 )
 
 export default function StrategyPaperValidationPage() {
-  const persistedTemplates = useMemo(() => {
-    const parsed = readJsonStorage<unknown>(
-      typeof window === 'undefined' ? null : window.localStorage,
-      STRATEGY_PAPER_VALIDATION_TEMPLATE_STORAGE_KEY,
-    )
-    if (!Array.isArray(parsed)) {
-      return []
-    }
-    return parsed
-      .map(normalizeTemplate)
-      .filter((item): item is StrategyPaperValidationTemplate => item !== null)
-  }, [])
 
+  const [archives, setArchives] = useState<ResearchArchiveHeader[]>([])
+  const [searchParams] = useSearchParams()
+  const [researchRun, setResearchRun] = useState(() => searchParams.get('researchRun') ?? '')
+  const [researchSide, setResearchSide] = useState('candidate')
+  const [researchTopK, setResearchTopK] = useState(100)
+  const [initialCapital, setInitialCapital] = useState('100000')
+  const [commission, setCommission] = useState('0')
+  const [sellTax, setSellTax] = useState('0')
+  const [sellSlippage, setSellSlippage] = useState('0')
   const [sourcePath, setSourcePath] = useState('')
   const [stockLookupRows, setStockLookupRows] = useState<StockLookupRow[]>([])
   const [initializing, setInitializing] = useState(false)
@@ -1743,14 +1744,42 @@ export default function StrategyPaperValidationPage() {
   const [stockLookupFocused, setStockLookupFocused] = useState(false)
   const [buyExpression, setBuyExpression] = useState('RANK <= 100')
   const [sellExpression, setSellExpression] = useState('TIME >= 5 OR RATEH >= 8')
-  const [templates, setTemplates] = useState<StrategyPaperValidationTemplate[]>(
-    () => persistedTemplates,
-  )
+  useEffect(() => {
+    if (!sourcePath || !researchRun || initializing) return
+    let disposed = false
+    void readResearchArchive(sourcePath, researchRun).then((run) => {
+      if (disposed) return
+      const config = run.configuration as {settings?: {start_date?: string; end_date?: string}}
+      if (config.settings?.start_date) setStartDateInput(compactDateToInput(config.settings.start_date))
+      if (config.settings?.end_date) setEndDateInput(compactDateToInput(config.settings.end_date))
+      setBuyPriceBasis('next_open'); setBuySelectionMode('rank_top')
+      setNotice('已载入研究区间与冻结排名；买卖表达式和费用仍由当前表单决定。')
+    }).catch((failure) => {if (!disposed) setError(String(failure))})
+    return () => {disposed = true}
+  }, [sourcePath, researchRun, initializing])
+  const [templates, setTemplates] = useState<StrategyPaperValidationTemplate[]>(() => {
+    const parsed = readJsonStorage<unknown>(
+      typeof window === 'undefined' ? null : window.localStorage,
+      STRATEGY_PAPER_VALIDATION_TEMPLATE_STORAGE_KEY,
+    )
+    if (!Array.isArray(parsed)) {
+      return []
+    }
+    return parsed
+      .map(normalizeTemplate)
+      .filter((item): item is StrategyPaperValidationTemplate => item !== null)
+  })
   const [selectedTemplateId, setSelectedTemplateId] = useState('')
   const [templateModalOpen, setTemplateModalOpen] = useState(false)
   const [extremeModalOpen, setExtremeModalOpen] = useState(false)
   const [tradeDetailModalStatus, setTradeDetailModalStatus] =
     useState<TradeDetailModalStatus | null>(null)
+  useEffect(() => {
+    if (!sourcePath) return
+    let disposed = false
+    void listResearchArchives(sourcePath).then((items) => {if (!disposed) setArchives(items)}).catch((failure) => {if (!disposed) setNotice(`读取研究存档失败：${String(failure)}`)})
+    return () => {disposed = true}
+  }, [sourcePath])
   const deferredTestStockInput = useDeferredValue(testStockInput)
   const stockNameCandidates = useMemo(
     () =>
@@ -1816,10 +1845,7 @@ export default function StrategyPaperValidationPage() {
   }, [])
 
   useEffect(() => {
-    if (!sourcePath.trim()) {
-      setStockLookupRows([])
-      return
-    }
+    if (!sourcePath.trim()) return
 
     let cancelled = false
     const loadStockLookup = async () => {
@@ -1848,15 +1874,6 @@ export default function StrategyPaperValidationPage() {
       templates,
     )
   }, [templates])
-
-  useEffect(() => {
-    if (
-      selectedTemplateId !== '' &&
-      !templates.some((item) => item.id === selectedTemplateId)
-    ) {
-      setSelectedTemplateId('')
-    }
-  }, [selectedTemplateId, templates])
 
   function onSelectStockCandidate(row: StockLookupRow) {
     setStockLookupFocused(false)
@@ -1925,6 +1942,8 @@ export default function StrategyPaperValidationPage() {
     try {
       const data = await runStrategyPaperValidation({
         sourcePath,
+        researchSelection: researchRun ? {run_id: researchRun, side: researchSide, top_k: researchTopK} : undefined,
+        accountSettings: {initial_capital: Number(initialCapital), commission_pct: Number(commission), sell_tax_pct: Number(sellTax), sell_slippage_pct: Number(sellSlippage)},
         startDate: normalizedStart,
         endDate: normalizedEnd,
         minListedTradeDays: Math.max(0, Number(minListedTradeDays) || 0),
@@ -1939,6 +1958,7 @@ export default function StrategyPaperValidationPage() {
         sellExpression,
       })
       setResult(data)
+      void listResearchArchives(sourcePath).then(setArchives).catch((failure) => setNotice(`结果已保存，但刷新存档列表失败：${String(failure)}`))
       setStartDateInput(compactDateToInput(data.start_date))
       setEndDateInput(compactDateToInput(data.end_date))
       setMinListedTradeDays(String(data.min_listed_trade_days))
@@ -2087,17 +2107,34 @@ export default function StrategyPaperValidationPage() {
   }
 
   return (
-    <div className="strategy-paper-validation-page">
+    <div className="strategy-paper-validation-page research-workbench">
       <section className="strategy-paper-validation-card">
         <div className="strategy-paper-validation-head">
           <div>
             <h2 className="strategy-paper-validation-title">策略模拟盘验证</h2>
             <p className="strategy-paper-validation-note">
-              用买点、卖点方程回放历史交易，验证策略在指定区间内的持仓、收益和回撤表现；留空测试股票时扫描全市场，填写后仅验证单票。
+              按买卖条件回放交易，查看持仓、收益与回撤。
             </p>
           </div>
         </div>
 
+        <details><summary>研究候选池与交易成本</summary>
+          <p className="research-meta">选择研究候选池时，使用保存的排名并在次日开盘买入。</p>
+          <div className="research-form-grid">
+          <label className="research-field">研究候选池 <select value={researchRun} disabled={loading} onChange={(event) => {setResearchRun(event.target.value); if(event.target.value) {setBuyPriceBasis('next_open'); setBuySelectionMode('rank_top')}}}><option value="">当前评分库</option>{archives.filter((run) => run.kind === 'rank_comparison' && run.status === 'completed' && run.membership_saved).map((run) => <option key={run.run_id} value={run.run_id}>{run.question || run.run_id}</option>)}</select></label>{' '}
+          <label className="research-field">方案<select value={researchSide} onChange={(event) => setResearchSide(event.target.value)}><option value="baseline">基线</option><option value="candidate">候选</option></select></label>{' '}
+          <label className="research-field">固定席位<select value={researchTopK} onChange={(event) => setResearchTopK(Number(event.target.value))}>{[100,500,1000].map((k) => <option key={k} value={k}>Top{k}</option>)}</select></label>
+
+          <label className="research-field">初始资金 <input type="number" min={1} value={initialCapital} onChange={(event) => setInitialCapital(event.target.value)} /></label>{' '}
+          <label className="research-field">双边佣金 · % <input type="number" min={0} value={commission} onChange={(event) => setCommission(event.target.value)} /></label>{' '}
+          <label className="research-field">卖出税费 · % <input type="number" min={0} value={sellTax} onChange={(event) => setSellTax(event.target.value)} /></label>{' '}
+          <label className="research-field">卖出滑点 · % <input type="number" min={0} value={sellSlippage} onChange={(event) => setSellSlippage(event.target.value)} /></label>
+          </div>
+          <details><summary>资金与成交说明</summary><p>现金按剩余席位平分，开盘买入先占席，收盘卖出资金次日可用。行情与买卖表达式使用当前资料；涨跌停限制沿用原执行设置。</p><p>允许分数股，不模拟整手、盘口或成交量。费率0表示未模拟该成本；买入滑点沿用下方设置。请用成本账户核对净值，逐票曲线未扣这些额外费用。</p></details>
+        </details>
+        <details><summary>历史交易模拟</summary>{archives.filter((run) => run.kind === 'paper_validation').map((run) => <p key={run.run_id}>{new Date(run.created_ms).toLocaleString()} · {researchRunStatusLabel(run.status)} <button type="button" disabled={loading} onClick={() => {void readResearchArchive<StrategyPaperValidationData>(sourcePath,run.run_id).then((saved) => {if(saved.header.status !== 'completed') throw new Error(String((saved.result as unknown as {error?: string}).error ?? saved.header.status)); setResult(saved.result)}).catch((failure) => setError(String(failure)))}}>查看结果</button>{' '}<ResearchExportButton sourcePath={sourcePath} runId={run.run_id} disabled={loading} /></p>)}
+        </details>
+        {result?.account_points ? <details open><summary>成本账户</summary>{result.account_status === 'unbounded_position_count' ? <p>请设置大于0的持仓上限后计算成本账户。</p> : result.account_status === 'missing_price_path' ? <p>部分交易缺少完整收盘路径，账户净值不可计算。</p> : <p>初始 {result.account_settings?.initial_capital}；期末权益 {result.account_points.at(-1)?.equity.toFixed(2) ?? '—'}；期末净值 {result.account_points.at(-1)?.net_value.toFixed(4) ?? '—'}；最大回撤 {(Math.min(0,...result.account_points.map((point) => point.drawdown))*100).toFixed(2)}%。</p>}<div className="strategy-paper-validation-table-wrap" style={{maxHeight: 280, overflow: 'auto'}}><table className="strategy-paper-validation-table"><thead><tr><th>日期</th><th>现金</th><th>权益</th><th>净值</th><th>回撤</th></tr></thead><tbody>{result.account_points.map((point) => <tr key={point.trade_date}><td>{point.trade_date}</td><td>{point.cash.toFixed(2)}</td><td>{point.equity.toFixed(2)}</td><td>{point.net_value.toFixed(4)}</td><td>{(point.drawdown*100).toFixed(2)}%</td></tr>)}</tbody></table></div></details> : null}
         <div className="strategy-paper-validation-form-grid">
           <label className="strategy-paper-validation-field strategy-paper-validation-field-span-full">
             <span>测试股票，预览代码：{resolvedTestTsCode || '--'}</span>

@@ -8,9 +8,9 @@ export function ExpressionIncremental({ combo }: { combo: RuleValidationComboRes
   if (coreRuleNames.length === 0) {
     return (
       <div className="expression-backtest-section">
-        <h3>对核心策略组合新增价值</h3>
+        <h3>控制核心策略后的收益诊断</h3>
         <div className="expression-backtest-empty">
-          尚未选择核心策略。选择核心策略并重新运行后可查看样本外增量。
+          尚未选择核心策略。选择核心策略并重新运行后可查看控制后的样本外收益。
         </div>
       </div>
     );
@@ -21,9 +21,12 @@ export function ExpressionIncremental({ combo }: { combo: RuleValidationComboRes
 
   return (
     <div className="expression-backtest-section">
-      <h3>对核心策略组合新增价值</h3>
+      <h3>控制核心策略后的收益诊断</h3>
       <p className="expression-backtest-caption">
-        核心策略：{coreRuleNames.join(" / ")}
+        核心策略：{coreRuleNames.join(" / ")}。此回归未重新评分或重排，不能代表真实排名增量。
+        {incremental?.label_boundaries_checked
+          ? `已核对实际标签末日，额外排除训练日合计 ${incremental.label_boundary_excluded_days ?? 0} 日；HAC 保留缺失日期。`
+          : "旧结果未核对实际标签边界，需重跑。"}
       </p>
       {folds.length === 0 ? (
         <div className="expression-backtest-empty">样本不足，当前没有可用的样本外增量窗口。</div>

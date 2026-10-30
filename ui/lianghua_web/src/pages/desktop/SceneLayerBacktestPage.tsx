@@ -1,3 +1,4 @@
+import { RankComparisonPanel } from "./components/RankComparisonPanel";
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { ensureManagedSourcePath } from "../../apis/managedSource";
 import { getStrategyManagePage, type StrategyManageRuleItem } from "../../apis/strategyManage";
@@ -195,6 +196,13 @@ function formatMarketValueRange(value?: {
   return `${minText} ~ ${maxText}`;
 }
 
+function parseRankMarketValueBoundaries(raw: string): number[] | null {
+  if (!raw.trim()) return [];
+  const values = raw.trim().split(/[,，\s]+/).map(Number);
+  if (values.some((value, index) => !Number.isFinite(value) || value <= 0 || (index > 0 && value <= values[index - 1]))) return null;
+  return values;
+}
+
 export default function SceneLayerBacktestPage() {
   const { excludeStBoard } = useConceptExclusions();
   const storedCommonParams = useMemo(() => readStoredBacktestCommonParams(), []);
@@ -213,6 +221,9 @@ export default function SceneLayerBacktestPage() {
   const [parallelBatchSize, setParallelBatchSize] = useState(storedCommonParams.parallelBatchSize);
   const [totalMvMin, setTotalMvMin] = useState(storedCommonParams.totalMvMin);
   const [totalMvMax, setTotalMvMax] = useState(storedCommonParams.totalMvMax);
+  const [rankMarketValueBoundaries, setRankMarketValueBoundaries] = useState(() =>
+    typeof window === "undefined" ? "" : window.localStorage.getItem("lh_rank_market_value_boundaries") ?? "",
+  );
   const [rankLayerCount, setRankLayerCount] = useState(storedCommonParams.rankLayerCount);
   const [rankLayerMethod, setRankLayerMethod] = useState<RankLayerMethod>(
     storedCommonParams.rankLayerMethod,
@@ -225,6 +236,7 @@ export default function SceneLayerBacktestPage() {
   const [initializing, setInitializing] = useState(false);
   const [error, setError] = useState("");
   const [rankLoading, setRankLoading] = useState(false);
+  const [comparisonLoading, setComparisonLoading] = useState(false);
   const [rankTransientLoading, setRankTransientLoading] = useState(false);
   const [rankError, setRankError] = useState("");
   const [rankResult, setRankResult] = useState<RankLayerBacktestData | null>(null);
@@ -246,6 +258,7 @@ export default function SceneLayerBacktestPage() {
     loading ||
     transientLoading ||
     rankLoading ||
+    comparisonLoading ||
     rankTransientLoading ||
     ruleLoading ||
     ruleTransientLoading;
@@ -675,6 +688,10 @@ export default function SceneLayerBacktestPage() {
       setRankError("开始日期不能晚于结束日期。");
       return;
     }
+    if (parseRankMarketValueBoundaries(rankMarketValueBoundaries) === null) {
+      setRankError("市值分组边界必须是严格递增的正数，用逗号分隔。");
+      return;
+    }
     const normalizedLayerCount = Number(rankLayerCount);
     if (
       !Number.isFinite(normalizedLayerCount) ||
@@ -707,6 +724,7 @@ export default function SceneLayerBacktestPage() {
         layerMethod: rankLayerMethod,
         board: backtestBoardFilter === "全部" ? undefined : backtestBoardFilter,
         excludeStBoard: excludeStBoard || undefined,
+        marketValueBoundaries: parseRankMarketValueBoundaries(rankMarketValueBoundaries) ?? undefined,
       });
       setRankResult(data);
     } catch (runError) {
@@ -735,6 +753,10 @@ export default function SceneLayerBacktestPage() {
     }
     if (normalizedStart > normalizedEnd) {
       setRankError("开始日期不能晚于结束日期。");
+      return;
+    }
+    if (parseRankMarketValueBoundaries(rankMarketValueBoundaries) === null) {
+      setRankError("市值分组边界必须是严格递增的正数，用逗号分隔。");
       return;
     }
     const normalizedLayerCount = Number(rankLayerCount);
@@ -769,6 +791,7 @@ export default function SceneLayerBacktestPage() {
         layerMethod: rankLayerMethod,
         board: backtestBoardFilter === "全部" ? undefined : backtestBoardFilter,
         excludeStBoard: excludeStBoard || undefined,
+        marketValueBoundaries: parseRankMarketValueBoundaries(rankMarketValueBoundaries) ?? undefined,
       });
       setRankResult(data);
     } catch (runError) {
@@ -1126,12 +1149,32 @@ export default function SceneLayerBacktestPage() {
         </div>
       </section>
 
+      <RankComparisonPanel
+        key={sourcePath}
+        disabled={heavyTaskRunning || initializing}
+        onRunningChange={setComparisonLoading}
+        settings={{
+          source_path: sourcePath, stock_adj_type: stockAdjType.trim() || "qfq", index_ts_code: indexTsCode.trim(),
+          index_beta: Number(indexBeta), concept_beta: Number(conceptBeta), industry_beta: Number(industryBeta),
+          start_date: normalizeDateInput(startDateInput), end_date: normalizeDateInput(endDateInput),
+          min_listed_trade_days: Number(minListedTradeDays), backtest_period: Number(backtestPeriod), verify_inputs: false, task_id: "", research_question: "", research_notes: null, parent_run_id: null,
+        }}
+      />
+
       <section className="scene-layer-card">
         <h2 className="scene-layer-title">排名整体回测</h2>
         <p className="scene-layer-caption">
-          使用 score_summary 中的总分检验后续残差收益，除分层与 IC 外，直接展示每日等权 Top-K、持有期重叠修正后的 HAC t值及年度稳定性。
+          使用 score_summary 中的总分检验后续残差收益，除分层与 IC 外，展示原榜固定席位覆盖，以及原有有效后验样本的 Top-K 和年度统计。
         </p>
 
+        <label className="scene-layer-field">
+          <span>市值分组边界（亿，留空不分组）</span>
+          <input value={rankMarketValueBoundaries} placeholder="例如 50, 200" onChange={(event) => {
+            setRankMarketValueBoundaries(event.target.value);
+            window.localStorage.setItem("lh_rank_market_value_boundaries", event.target.value);
+          }} />
+        </label>
+        <p className="scene-layer-caption">边界由本次研究预先确定并保存在本机；市值缺失单列。分组仍使用旧的有效后验分层口径。</p>
         <div className="scene-layer-actions">
           <button type="button" className="scene-layer-primary-btn" onClick={() => void onRunRankBacktest()} disabled={heavyTaskRunning || initializing}>
             {rankLoading ? "回测中..." : "执行排名整体回测"}
@@ -1177,7 +1220,7 @@ export default function SceneLayerBacktestPage() {
                       <td>{rankResult.index_ts_code}</td>
                       <td>{formatNumber(rankResult.index_beta, 2)} / {formatNumber(rankResult.concept_beta, 2)} / {formatNumber(rankResult.industry_beta, 2)}</td>
                       <td>{formatBacktestBoardLabel(rankResult)}</td>
-                      <td>{rankResult.market_value_grouping ? "默认分组聚合" : "不区分"}</td>
+                      <td>{rankResult.market_value_grouping ? "自定义边界" : "不区分"}</td>
                       <td>{rankResult.point_count}</td>
                       <td>{rankResult.sample_count}</td>
                       <td>{rankResult.min_samples_per_rank_day}</td>
@@ -1217,9 +1260,40 @@ export default function SceneLayerBacktestPage() {
             </div>
           </div>
 
+          {(rankResult.fixed_top_k_summaries?.length ?? 0) > 0 ? (
+            <div className="scene-layer-layer-summary">
+              <h3>原榜固定席位与季度覆盖</h3>
+              <p className="scene-layer-caption">
+                在所选股票范围内先按已保存的原榜名次取前 K，再读取后验，不用后排补位。
+                统计只包含有有效名次且上市天数资格已知并满足条件的评分记录；资格不满足及未知数是所选范围的全部评分记录数量，未知者可能影响前 K 成员。
+                后验缺失的具体原因尚未区分，因此这只是覆盖诊断，不能作为当前配置验收。
+                收益是有标签成员的每日均值再按日等权，缺标签不能视为零；无可用标签的日期不参与收益均值。
+                季度区间状态按交易日历核对；范围完整仅表示评分日覆盖，并不保证标签成熟或输入有效。
+              </p>
+              <div className="scene-layer-contrib-table-wrap">
+                <table className="scene-layer-contrib-table">
+                  <thead><tr><th>期间</th><th>区间状态</th><th>组合</th><th>排名日 / 季度交易日</th><th>有标签日</th><th>资格不满足 / 未知</th><th>有标签 / 成员席位</th><th>覆盖率</th><th>可观察日均收益</th></tr></thead>
+                  <tbody>
+                    {rankResult.fixed_top_k_summaries?.map((item) => (
+                      <tr key={`${item.top_k}-${item.period_label}`}>
+                        <td>{item.period_label}</td>
+                        <td>{item.period_label === "全部" ? "—" : item.quarter_status === "partial" ? "区间截断" : item.quarter_status === "missing_rank_days" ? "缺少排名日" : item.quarter_status === "range_covered" ? "范围完整" : "日历不足"}</td>
+                        <td>Top {item.top_k}</td><td>{item.ranking_days} / {item.calendar_days ?? "—"}</td><td>{item.observed_days}</td>
+                        <td>{item.ineligible_count} / {item.unknown_eligibility_count}</td>
+                        <td>{item.label_count} / {item.member_count}</td>
+                        <td>{formatRate(item.member_count ? item.label_count / item.member_count : null)}</td>
+                        <td>{formatBacktestValue(item.avg_daily_return, rankResult.return_metric)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : null}
+
           {rankTopKSummaries.length > 0 ? (
             <div className="scene-layer-layer-summary">
-              <h3>Top-K 直接组合检验（每日等权）</h3>
+              <h3>旧口径：有效后验样本 Top-K（每日等权）</h3>
               <p className="scene-layer-caption">
                 在有效后验样本中按原排名取前 K 只，缺数据时可能补入原榜更靠后的股票；这是等权收益统计，未模拟连续持仓。HAC t值按持有期重叠修正标准误。
               </p>
@@ -1260,7 +1334,7 @@ export default function SceneLayerBacktestPage() {
 
           {rankTopKPeriodSummaries.length > 0 ? (
             <div className="scene-layer-layer-summary">
-              <h3>Top-K 年度稳定性</h3>
+              <h3>旧口径：有效后验样本 Top-K 年度统计</h3>
               <div className="scene-layer-contrib-table-wrap">
                 <table className="scene-layer-contrib-table">
                   <thead>
@@ -1355,13 +1429,16 @@ export default function SceneLayerBacktestPage() {
           {rankResult.market_value_summaries && rankResult.market_value_summaries.length > 0 ? (
             <div className="scene-layer-layer-summary">
               <h3>推测市值分组回测表现</h3>
+              <p className="scene-layer-caption">成员数包含评分记录；标签数只覆盖整体排名达到每日最少样本条件的日期。分组统计另有每日样本门槛，因此统计样本可能更少。</p>
               <div className="scene-layer-contrib-table-wrap">
                 <table className="scene-layer-contrib-table">
                   <thead>
                     <tr>
                       <th>市值分组</th>
+                      <th>评分成员</th>
+                      <th>整体合格日有标签</th>
                       <th>有效交易日</th>
-                      <th>总样本数</th>
+                      <th>统计样本</th>
                       <th title="收益统计区间最后一天 ER(20) 减触发日 ER(20)">ΔER(20)</th>
                       <th>分层差均值</th>
                       <th>IC 均值</th>
@@ -1373,6 +1450,8 @@ export default function SceneLayerBacktestPage() {
                     {rankResult.market_value_summaries.map((item) => (
                       <tr key={item.group_label}>
                         <td>{item.group_label}</td>
+                        <td>{item.member_count}</td>
+                        <td>{item.label_count}</td>
                         <td>{item.point_count}</td>
                         <td>{item.sample_count}</td>
                         <td>{formatNumber(item.avg_er_change, 4)}</td>

@@ -293,6 +293,8 @@
   margin-top: 14px;
   display: flex;
   gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
 }
 
 .expression-backtest-primary-btn {
@@ -669,4 +671,27 @@
 .expression-backtest-distribution-label {
   color: #64748b;
   font-size: 11px;
+}
+
+/* Keep saved research controls usable on the 777–1164 dp tablet layouts. */
+.expression-backtest-section > details,
+.expression-backtest-section > div[hidden] {
+  min-width: 0;
+}
+.expression-backtest-section input,
+.expression-backtest-section select {
+  max-width: 100%;
+  box-sizing: border-box;
+}
+.expression-backtest-section summary,
+.expression-backtest-section button,
+.scene-layer-card summary {
+  min-height: 36px;
+}
+.expression-backtest-section > details p,
+.expression-backtest-section li {
+  overflow-wrap: anywhere;
+}
+.expression-backtest-section [role="alert"] {
+  color: #b91c1c;
 }

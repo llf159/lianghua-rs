@@ -54,7 +54,14 @@ export type StrategyPaperValidationIndexDailyReturn = {
   pct_chg: number
 }
 
+export type PaperResearchSelection = {run_id: string; side: string; top_k: number}
+export type PaperAccountSettings = {initial_capital: number; commission_pct: number; sell_tax_pct: number; sell_slippage_pct: number}
 export type StrategyPaperValidationData = {
+  research_selection?: PaperResearchSelection | null
+  archive_run_id?: string | null
+  account_settings?: PaperAccountSettings
+  account_status?: string
+  account_points?: {trade_date: string; cash: number; equity: number; net_value: number; drawdown: number}[]
   latest_trade_date?: string | null
   start_date: string
   end_date: string
@@ -84,6 +91,8 @@ export type StrategyPaperValidationTemplateValidationData = {
 }
 
 export type StrategyPaperValidationQuery = {
+  researchSelection?: PaperResearchSelection
+  accountSettings?: PaperAccountSettings
   sourcePath: string
   startDate?: string
   endDate?: string

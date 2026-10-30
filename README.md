@@ -12,6 +12,8 @@
 - [市场环境分析：原始行情、覆盖口径与十个维度](docs/market-environment-analysis.md)
 - [筹码单股测试：生成机制对照与未知成本](docs/chip-mechanism-comparison.md)
 
+- [研究回测：实验存档、条件对照、排名增量与交易模拟](docs/research-backtest.md)
+
 ## 工程维护
 
 - [项目工程约束](AGENTS.md)

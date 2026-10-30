@@ -32,10 +32,14 @@ export function ExpressionCoreSummary({
       <p className="expression-backtest-caption">回测指标：{combo.backtest.return_metric === "rise_amount" ? "上涨金额（亿）" : "残差收益率（%）"}</p>
       <div className="expression-backtest-summary-grid">
         <div className="expression-backtest-summary-item">
-          <span>触发样本</span>
+          <span>有后验的触发股票日</span>
           <strong>
             {combo.trigger_samples} / {combo.triggered_days} 日
           </strong>
+        </div>
+        <div className="expression-backtest-summary-item">
+          <span>原始相对全市场差</span>
+          <strong>{formatBacktestValue(combo.backtest.avg_excess_residual_mean, combo.backtest.return_metric)}</strong>
         </div>
         <div className="expression-backtest-summary-item">
           <span>IC</span>
@@ -95,7 +99,7 @@ export function ExpressionCoreSummary({
           className="expression-backtest-summary-item"
           title={formatValidationInsufficientHint(combo, "incremental")}
         >
-          <span>增量正窗口</span>
+          <span>控制后收益正窗口</span>
           <strong>
             {incremental && incremental.core_rule_names.length > 0
               ? formatValidationWindowRatio(combo, "incremental")
@@ -109,7 +113,7 @@ export function ExpressionCoreSummary({
       </div>
       <p className="expression-backtest-caption">
         这里只展示事实指标，不产出综合得分、评级或推荐。IC 与 Spread 保持原始值；
-        回测指标是方向盲的均值，主摘要按表达式方向换算为方向残差（悬停可看原始值），
+        回测指标是方向盲的均值，主摘要同时展示原始值与按表达式方向换算后的读数；触发股票日仅包含已取得有效后验的样本，
         与 walk-forward 的残差口径保持一致。
         {walkForward && walkForward.folds.length > 0
           ? ` walk-forward 共 ${walkForward.folds.length} 个窗口，样本不足的窗口计入分母但不计为正窗口。`

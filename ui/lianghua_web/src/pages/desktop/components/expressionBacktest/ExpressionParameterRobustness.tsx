@@ -104,7 +104,7 @@ export function ExpressionParameterRobustness({
               {renderSortHeader("spread_mean", "Spread", "按分层差均值排序")}
               {renderSortHeader("oos_ic", "OOS IC", "按样本外 IC 正窗口数量排序")}
               {renderSortHeader("oos_residual", "OOS Residual", "按样本外残差正窗口数量排序")}
-              {renderSortHeader("incremental", "Incremental", "按样本外增量正窗口数量排序")}
+              {renderSortHeader("incremental", "控制后收益", "按控制核心策略后的样本外正窗口数量排序")}
             </tr>
           </thead>
           <tbody>

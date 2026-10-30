@@ -28,6 +28,7 @@ market*
 # 本地研究脚本、报告和实验结果
 /src/bin/
 /research/
+research_runs_v1/
 /scripts/
 /crates/lianghua-app-strategy/src/bin/structure_cycle_research.rs
 /crates/lianghua-scoring/src/bin/tracking_research.rs
@@ -36,6 +37,8 @@ market*
 /RESEARCH_SUMMARY.md
 /STRATEGY_CONFIRMATION_HANDOFF.md
 /STRATEGY_SYSTEM_DESIGN.md
+
+!/docs/research-backtest.md
 
 !/docs/chip-s6.toml
 

@@ -508,6 +508,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
   const [sceneDraft, setSceneDraft] = useState<StrategyManageSceneDraft | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<StrategyManageRuleItem | null>(null)
   const [deleteSceneTarget, setDeleteSceneTarget] = useState<DeleteSceneTarget | null>(null)
+  const [chipVersion, setChipVersion] = useState(1)
   const [chipStrategies, setChipStrategies] = useState<CyqChenStrategyDraft[]>([])
   const [chipStrategyFilePath, setChipStrategyFilePath] = useState('')
   const [chipStrategyFileExists, setChipStrategyFileExists] = useState(false)
@@ -754,6 +755,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
   const draftUsesConsec = draft?.scope_way.trim().toUpperCase().startsWith('CONSEC>=') ?? false
 
   function applyChipStrategyPage(page: CyqChenStrategyPageData) {
+    setChipVersion(page.version)
     setChipStrategies(page.strategies ?? [])
     setChipStrategyFilePath(page.filePath)
     setChipStrategyFileExists(page.exists)
@@ -1206,7 +1208,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
   async function onCheckChipStrategyDraft() {
     try {
       const preparedDraft = buildPreparedChipStrategyDraft()
-      const message = await checkCyqChenStrategyFileDraft(buildNextChipStrategies(preparedDraft))
+      const message = await checkCyqChenStrategyFileDraft(buildNextChipStrategies(preparedDraft), chipVersion)
       setChipStrategyNotice(message)
       setChipStrategyError('')
     } catch (checkError) {
@@ -1223,7 +1225,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
     setChipStrategySaving(true)
     setChipStrategyError('')
     try {
-      const page = await saveCyqChenStrategyFile(sourcePath, nextStrategies)
+      const page = await saveCyqChenStrategyFile(sourcePath, nextStrategies, chipVersion)
       applyChipStrategyPage(page)
       setChipStrategyDraft(null)
       setChipStrategyEditingIndex(null)
@@ -1240,7 +1242,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
     try {
       const preparedDraft = buildPreparedChipStrategyDraft()
       const nextStrategies = buildNextChipStrategies(preparedDraft)
-      await checkCyqChenStrategyFileDraft(nextStrategies)
+      await checkCyqChenStrategyFileDraft(nextStrategies, chipVersion)
       await saveChipStrategies(
         nextStrategies,
         chipStrategyEditorMode === 'create' ? '筹码策略已新增。' : '筹码策略已更新。',
@@ -1670,7 +1672,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
           {isChipView ? (
             <>
               <div className="strategy-manage-summary-item">
-                <span>筹码策略</span>
+                <span>{chipVersion === 2 ? 'S6 库存记忆策略' : '筹码策略'}</span>
                 <strong>{chipStrategies.length}</strong>
               </div>
               <div className="strategy-manage-summary-item">

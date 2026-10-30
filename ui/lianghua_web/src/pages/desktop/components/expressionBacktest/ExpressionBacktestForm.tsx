@@ -77,8 +77,8 @@ export function ExpressionBacktestForm({
     .sort((left, right) => {
       const leftOption = coreRuleOptionByName.get(left.name);
       const rightOption = coreRuleOptionByName.get(right.name);
-      const leftUsable = Boolean(leftOption && leftOption.valid_trigger_count > 0);
-      const rightUsable = Boolean(rightOption && rightOption.valid_trigger_count > 0);
+      const leftUsable = Boolean(leftOption && (leftOption.native_recompute || leftOption.valid_trigger_count > 0));
+      const rightUsable = Boolean(rightOption && (rightOption.native_recompute || rightOption.valid_trigger_count > 0));
       return (
         Number(!leftUsable) - Number(!rightUsable) ||
         (rightOption?.trigger_count ?? 0) - (leftOption?.trigger_count ?? 0) ||
@@ -90,6 +90,7 @@ export function ExpressionBacktestForm({
     if (!option) {
       return "结果库没有该策略的触发记录，需先执行排名计算";
     }
+    if (option.native_recompute) return "运行时隔离重算当前策略，不依赖历史评分库";
     if (option.valid_trigger_count === 0) {
       return `结果库中 ${option.trigger_count} 次触发的分数全部为 0，需重跑排名计算`;
     }
@@ -120,7 +121,7 @@ export function ExpressionBacktestForm({
       <h3 className="expression-backtest-form-title">常用设置</h3>
       <div className="expression-backtest-form-row">
         <label className="expression-backtest-field">
-          <span>策略（来自策略编辑，可带入表达式）</span>
+          <span>导入策略</span>
           <select value={values.importRuleName} onChange={(event) => onApplyRule(event.target.value)}>
             <option value="">手动表达式</option>
             {strategyOptions.map((item) => (
@@ -141,7 +142,7 @@ export function ExpressionBacktestForm({
           </select>
         </label>
         <label className="expression-backtest-field">
-          <span>scope_way</span>
+          <span>触发方式</span>
           <select
             value={values.scopeWay}
             onChange={(event) =>
@@ -157,7 +158,7 @@ export function ExpressionBacktestForm({
         </label>
         {values.scopeWay === "CONSEC" ? (
           <label className="expression-backtest-field">
-            <span>CONSEC 阈值</span>
+            <span>连续触发阈值</span>
             <input
               type="number"
               min={1}
@@ -168,7 +169,7 @@ export function ExpressionBacktestForm({
           </label>
         ) : null}
         <label className="expression-backtest-field">
-          <span>scope_windows</span>
+          <span>观察窗口</span>
           <input
             type="number"
             min={1}
@@ -179,7 +180,7 @@ export function ExpressionBacktestForm({
         </label>
         <label className="expression-backtest-field">
           <span title="holding period：回测持有期，同时是 walk-forward 的 purge 交易日数">
-            holding period（天）
+            持有期 · 交易日
           </span>
           <input
             type="number"
@@ -190,6 +191,8 @@ export function ExpressionBacktestForm({
           />
         </label>
       </div>
+
+      <div className="research-check-row research-meta">快捷周期：{[3, 5, 10].map((days) => <button type="button" key={days} disabled={loading} aria-pressed={values.holdingPeriodText === String(days)} onClick={() => onChange({ holdingPeriodText: String(days) })}>{days} 日</button>)}</div>
 
       <label className="expression-backtest-field expression-backtest-field-full">
         <span>表达式</span>
@@ -208,7 +211,7 @@ export function ExpressionBacktestForm({
           <option value="residual_return">残差收益率（%）</option>
           <option value="rise_amount">上涨金额（亿）</option>
         </select>
-        <span>上涨金额 = 残差收益率 ÷ 100 × 当日推测市值；推测流通市值（亿） = 成交额（千元） ÷ 换手率（%） ÷ 1000。</span>
+        {values.returnMetric === "rise_amount" ? <span>上涨金额按残差收益率与当日估算市值计算。</span> : null}
       </label>
       <div className="expression-backtest-form-row">
         <label className="expression-backtest-field">
@@ -276,7 +279,7 @@ export function ExpressionBacktestForm({
         </label>
         <label className="expression-backtest-field">
           <span title="expanding walk-forward 的样本外窗口数量；train 与 test 之间按 holding period 做 purge">
-            Walk-forward folds
+            样本外窗口数
           </span>
           <input
             type="number"
@@ -467,14 +470,9 @@ export function ExpressionBacktestForm({
         </div>
       ) : null}
 
-      <div className="expression-backtest-core-picker">
-        <div className="expression-backtest-core-picker-head">
-          <strong>核心策略（用于增量验证）</strong>
-          <span>最多 {CORE_RULE_LIMIT} 个，作为样本外增量回归的 predictors</span>
-          <span>
-            只有结果库里存在非零分数的策略才能作为 predictor；灰掉的策略需要先重跑排名计算。
-          </span>
-        </div>
+      <details className="expression-backtest-core-picker">
+        <summary>核心策略对照 · 已选 {values.coreRuleNames.length}</summary>
+        <p className="research-meta">最多选 {CORE_RULE_LIMIT} 个，运行时共同重算当前基线。</p>
         <input
           className="expression-backtest-core-search"
           value={coreRuleKeyword}
@@ -486,7 +484,7 @@ export function ExpressionBacktestForm({
             visibleCoreRules.map((item) => {
               const checked = values.coreRuleNames.includes(item.name);
               const option = coreRuleOptionByName.get(item.name);
-              const unusable = !option || option.valid_trigger_count === 0;
+              const unusable = !option || (!option.native_recompute && option.valid_trigger_count === 0);
               return (
                 <label
                   key={`core-rule-${item.name}`}
@@ -502,13 +500,13 @@ export function ExpressionBacktestForm({
                     onChange={(event) => toggleCoreRule(item.name, event.target.checked)}
                   />
                   <span>{item.name}</span>
-                  <span className="expression-backtest-core-option-meta">
+                  {!option?.native_recompute ? <span className="expression-backtest-core-option-meta">
                     {unusable
                       ? option
                         ? `分数 0 / ${option.trigger_count}`
                         : "结果库无记录"
                       : `触发 ${option.trigger_count}`}
-                  </span>
+                  </span> : null}
                 </label>
               );
             })
@@ -534,7 +532,7 @@ export function ExpressionBacktestForm({
             <span className="expression-backtest-core-empty">未选择</span>
           )}
         </div>
-      </div>
+      </details>
 
       <div className="expression-backtest-actions">
         <button

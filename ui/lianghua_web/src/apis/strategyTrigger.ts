@@ -326,9 +326,24 @@ export type RankLayerBacktestData = {
   ic_t_value?: number | null
   top_k_summaries?: RankTopKSummary[]
   top_k_period_summaries?: RankTopKPeriodSummary[]
+  fixed_top_k_summaries?: FixedRankTopKSummary[]
   layer_summaries: RankLayerBucketSummary[]
   layer_sample_groups?: RankLayerSampleGroup[]
   market_value_summaries?: RankLayerMarketValueSummary[]
+}
+
+export type FixedRankTopKSummary = {
+  period_label: string
+  top_k: number
+  ranking_days: number
+  calendar_days?: number | null
+  quarter_status?: string
+  observed_days: number
+  member_count: number
+  ineligible_count: number
+  unknown_eligibility_count: number
+  label_count: number
+  avg_daily_return?: number | null
 }
 
 export type RankTopKSummary = {
@@ -361,6 +376,8 @@ export type RankLayerMarketValueSummary = {
   group_label: string
   total_mv_min?: number | null
   total_mv_max?: number | null
+  member_count: number
+  label_count: number
   point_count: number
   sample_count: number
   avg_er_change?: number | null
@@ -385,6 +402,11 @@ export type RuleValidationUnknownValue = {
 }
 
 export type RuleValidationSimilarityRow = {
+  period?: string
+  universe_samples?: number | null
+  candidate_available_samples?: number | null
+  baseline_available_samples?: number | null
+  shared_score_samples?: number | null
   rule_name: string
   explain?: string | null
   overlap_samples: number
@@ -416,6 +438,8 @@ export type RuleValidationWalkForwardFold = {
 export type RuleValidationWalkForwardData = {
   fold_count: number
   purge_days: number
+  label_boundaries_checked?: boolean
+  label_boundary_excluded_days?: number
   folds: RuleValidationWalkForwardFold[]
   ic_positive_folds: number
   residual_positive_folds: number
@@ -439,6 +463,8 @@ export type RuleValidationIncrementalFold = {
 export type RuleValidationIncrementalData = {
   core_rule_names: string[]
   purge_days: number
+  label_boundaries_checked?: boolean
+  label_boundary_excluded_days?: number
   folds: RuleValidationIncrementalFold[]
   positive_folds: number
 }
@@ -503,17 +529,27 @@ export type RuleValidationComboResult = {
 }
 
 export type RuleExpressionValidationData = {
+  horizon?: number
+  label_algorithm?: string
+  archive_run_id?: string | null
+  membership_saved?: boolean
+  input_identity?: string
+  input_manifest?: unknown
+  baseline_origin?: string
+  additional_periods?: RuleExpressionValidationData[]
   import_rule_name: string
   import_rule_explain: string
   scope_way: string
   scope_windows: number
   sample_limit_per_group: number
+  random_sample_method?: string
   walk_forward_folds: number
   core_rule_names: string[]
   combo_results: RuleValidationComboResult[]
 }
 
 export type ValidationCoreRuleOption = {
+  native_recompute?: boolean
   name: string
   trigger_count: number
   valid_trigger_count: number
@@ -812,9 +848,18 @@ export type RankLayerBacktestQuery = {
   layerMethod?: RankLayerMethod
   board?: string
   excludeStBoard?: boolean
+  marketValueBoundaries?: number[]
 }
 
 export type RuleExpressionValidationQuery = {
+  additionalPeriods?: number[]
+  researchGrouping?: ResearchGrouping
+  researchStatistics?: ResearchStatisticsSettings
+  researchQuestion?: string
+  researchConfiguration?: unknown
+  parentRunId?: string | null
+  verifyInputs?: boolean
+  taskId?: string
   sourcePath: string
   importRuleName: string
   manualStrategy?: {
@@ -896,6 +941,10 @@ export async function runRuleExpressionValidation(query: RuleExpressionValidatio
   return invoke<RuleExpressionValidationData>('run_rule_expression_validation', query)
 }
 
+export async function cancelRuleExpressionValidation(taskId: string) {
+  return invoke<void>('cancel_rule_expression_validation', { taskId })
+}
+
 export async function getValidationCoreRuleOptions(sourcePath: string) {
   return invoke<ValidationCoreRuleOption[]>('get_validation_core_rule_options', { sourcePath })
 }
@@ -945,4 +994,183 @@ export async function getMarketContribution(query: {
   referenceTradeDate?: string
 }) {
   return invoke<MarketContributionData>('get_market_contribution', query)
+}
+
+export type ResearchArchiveHeader = {
+  version: number
+  run_id: string
+  parent_run_id?: string | null
+  created_ms: number
+  question: string
+  kind: string
+  status?: string
+  membership_saved?: boolean
+  input_identity: string
+}
+
+export async function listResearchArchives(sourcePath: string) {
+  return invoke<ResearchArchiveHeader[]>('list_research_archives', { sourcePath })
+}
+
+export async function saveResearchArchive(sourcePath: string, parentRunId: string | null, question: string, configuration: unknown, result: unknown, kind = "expression_validation", membershipSourceRunId: string | null = null, status = "completed") {
+  return invoke<ResearchArchiveHeader>('save_research_archive', { sourcePath, parentRunId, question, configuration, result, kind, membershipSourceRunId, status })
+}
+
+export async function readResearchArchive<T = RuleExpressionValidationData>(sourcePath: string, runId: string) {
+  return invoke<{ header: ResearchArchiveHeader; configuration: unknown; result: T }>('read_research_archive', { sourcePath, runId })
+}
+
+export async function deleteResearchArchive(sourcePath: string, runId: string) {
+  return invoke<void>('delete_research_archive', { sourcePath, runId })
+}
+
+export type RankComparisonRequest = {
+  grouping?: ResearchGrouping
+  statistics?: ResearchStatisticsSettings
+  source_path: string
+  candidate_config: string
+  stock_adj_type: string
+  index_ts_code: string
+  index_beta: number
+  concept_beta: number
+  industry_beta: number
+  start_date: string
+  end_date: string
+  min_listed_trade_days: number
+  backtest_period: number
+  verify_inputs?: boolean
+  task_id?: string
+  research_question?: string
+  research_notes?: unknown
+  parent_run_id?: string | null
+}
+
+export type RankComparisonSummary = {
+  dimension?: string
+  bucket?: string
+  statistics?: ResearchSeriesStatistics | null
+  period: string
+  pool_kind: string
+  top_k: number
+  common_ranking_days: number
+  calendar_days: number | null
+  quarter_status: string
+  paired_return_days: number
+  baseline_members: number
+  baseline_scored_members: number
+  baseline_labels: number
+  candidate_members: number
+  candidate_scored_members: number
+  candidate_labels: number
+  unknown_eligibility: number
+  added: number
+  removed: number
+  added_labels: number
+  removed_labels: number
+  added_return_mean: number | null
+  removed_return_mean: number | null
+  baseline_paired_daily_mean: number | null
+  candidate_paired_daily_mean: number | null
+  paired_daily_difference: number | null
+  common_score_label_members: number
+  paired_ic_days: number
+  baseline_ic_mean: number | null
+  candidate_ic_mean: number | null
+  ic_difference: number | null
+  baseline_icir: number | null
+  candidate_icir: number | null
+  icir_difference?: number | null
+  paired_spread_days: number
+  baseline_spread_mean: number | null
+  candidate_spread_mean: number | null
+  spread_difference: number | null
+  net_contribution_days: number
+  net_contribution_mean: number | null
+}
+
+export type RankComparisonResult = {
+  baseline_config: string
+  candidate_config: string
+  baseline_rule_names: string[]
+  candidate_rule_names: string[]
+  baseline_warnings: string[]
+  candidate_warnings: string[]
+  scoring_start_date: string
+  baseline_ranking_days: number
+  candidate_ranking_days: number
+  input_identity: string
+  label_algorithm: string
+  ranking_algorithm: string
+  input_digests: Array<{ file: string; bytes: number | null; sha256: string | null }>
+  archive_run_id?: string | null
+  archive_error?: string | null
+  membership_saved?: boolean
+  summaries: RankComparisonSummary[]
+}
+
+export async function readRankComparisonBaseline(sourcePath: string) {
+  return invoke<string>('read_rank_comparison_baseline', { sourcePath })
+}
+
+export async function cancelRankComparison(taskId: string) {
+  return invoke<void>('cancel_rank_comparison', { taskId })
+}
+
+export async function runRankComparison(request: RankComparisonRequest) {
+  return invoke<RankComparisonResult>('run_rank_comparison', { request })
+}
+
+export type RankComparisonMember = {
+  trade_date: string
+  ts_code: string
+  membership: "added" | "removed" | "shared"
+  baseline_score: number | null
+  baseline_rank: number | null
+  candidate_score: number | null
+  candidate_rank: number | null
+  residual_return: number | null
+  entry_date?: string | null
+  label_end_date?: string | null
+  missing_reason: string | null
+}
+
+export async function listRankComparisonMembers(query: {
+  dimension?: string
+  bucket?: string
+  sourcePath: string
+  runId: string
+  startDate: string
+  endDate: string
+  poolKind: string
+  topK: number
+  membership: string
+  offset: number
+  limit: number
+}) {
+  return invoke<{ total: number; offset: number; items: RankComparisonMember[] }>('list_rank_comparison_members', query)
+}
+
+export type ResearchGrouping = { baseline_score_boundaries?: number[]; market_cap_boundaries: number[]; market_metric: string; market_boundaries: number[] }
+export type ResearchEvidenceQuery = {run_id: string; combo_key: string; horizon: number; start_date: string; end_date: string; dimension: string; bucket: string | null; state: string; offset: number; limit: number}
+export type ResearchEvidenceSample = {baseline_score: number | null; baseline_rank: number | null; ts_code: string; trade_date: string; board: string; market_cap: number | null; bucket: string; score: number | null; residual_return: number | null; entry_date: string | null; label_end_date: string | null; missing_reason: string | null}
+export type ResearchEvidenceSummary = {market_status: string; statistics: ResearchSeriesStatistics;period: string; bucket: string; observations: number; triggered: number; labeled: number; different_stocks: number; unknown_eligibility: number; ineligible: number; unavailable: number; missing_history: number; missing_label: number; immature_label: number; insufficient_quote_label: number; missing_factor_label: number; matched_triggered: number; matched_days: number; raw_mean: number | null; stock_day_mean: number | null; control_mean: number | null; matched_difference: number | null; label_end_date: string | null}
+export async function listResearchEvidence(sourcePath: string, query: ResearchEvidenceQuery) {
+  return invoke<{total: number; items: ResearchEvidenceSample[]}>('list_research_evidence', {sourcePath, query})
+}
+export async function summarizeResearchEvidence(sourcePath: string, query: ResearchEvidenceQuery, frequency: string) {
+  return invoke<ResearchEvidenceSummary[]>('summarize_research_evidence', {sourcePath, query, frequency})
+}
+export async function exportResearchArchive(sourcePath: string, runId: string, destinationFile?: string) {
+  return invoke<string>('export_research_archive', {sourcePath, runId, destinationFile})
+}
+
+export type ResearchStatisticsSettings = {block_length: number; resamples: number; seed: number}
+export type ResearchSeriesStatistics = {valid_days: number; calendar_days: number; mean: number | null; hac_t: number | null; normal_approx_p: number | null; family_adjusted_p: number | null; lower: number | null; upper: number | null; bootstrap_valid: number; status: string}
+
+export async function importResearchArchive(sourcePath: string, packagePath: string) {
+  return invoke<ResearchArchiveHeader>('import_research_archive', {sourcePath, packagePath})
+}
+
+export function researchRunStatusLabel(status?: string) {
+  return (({draft: "草稿", running: "运行中", completed: "完成", failed: "失败", cancelled: "已取消", interrupted: "异常中断"} as Record<string,string>)[status ?? ""] ?? status) || "旧存档（未记录状态）"
 }
