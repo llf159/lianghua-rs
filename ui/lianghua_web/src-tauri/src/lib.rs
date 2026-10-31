@@ -1944,6 +1944,7 @@ async fn run_rule_expression_validation(
     walk_forward_folds: Option<usize>,
     core_rule_names: Option<Vec<String>>,
     additional_periods: Option<Vec<usize>>,
+    baseline_diagnostics: Option<bool>,
     research_grouping: Option<lianghua_app_strategy::research_evidence::ResearchGrouping>,
     research_statistics: Option<
         lianghua_backtest::simulate::research_statistics::ResearchStatisticsSettings,
@@ -2024,6 +2025,13 @@ async fn run_rule_expression_validation(
             run_id: journal.run_id.clone(),
         };
         let output = lianghua_app_strategy::research_evidence::ValidationResearchOutput {
+            baseline_diagnostics: baseline_diagnostics.unwrap_or(true)
+                || core_rule_names
+                    .as_ref()
+                    .is_some_and(|names| names.iter().any(|name| !name.trim().is_empty()))
+                || research_grouping
+                    .as_ref()
+                    .is_some_and(|grouping| !grouping.baseline_score_boundaries.is_empty()),
             path: research_artifact_path(&source_path, &journal.run_id, "evidence.db")?,
             grouping: research_grouping.unwrap_or_default(),
             statistics: research_statistics.unwrap_or_default(),
@@ -3437,9 +3445,11 @@ pub fn run() {
             run_rule_expression_validation,
             cancel_rule_expression_validation,
             rank_comparison_bridge::read_rank_comparison_baseline,
+            rank_comparison_bridge::edit_strategy_backtest_config,
             rank_comparison_bridge::run_rank_comparison,
             rank_comparison_bridge::cancel_rank_comparison,
             research_archive_bridge::list_research_archives,
+            research_archive_bridge::update_research_archive_metadata,
             research_archive_bridge::list_research_evidence,
             research_archive_bridge::summarize_research_evidence,
             research_archive_bridge::export_research_archive,

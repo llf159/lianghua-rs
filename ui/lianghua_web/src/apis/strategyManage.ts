@@ -191,3 +191,15 @@ export async function saveStrategyManageRefactorFile(
     draft,
   })
 }
+
+export type StrategyBacktestEdit =
+  | { action: 'rule'; original_name?: string; draft: StrategyManageRuleDraft }
+  | { action: 'rule_enabled'; name: string; enabled: boolean }
+  | { action: 'remove_rules'; names: string[] }
+  | { action: 'scene'; original_name?: string; draft: StrategyManageSceneDraft }
+  | { action: 'scene_enabled'; name: string; enabled: boolean }
+  | { action: 'remove_scene'; name: string }
+
+export async function editStrategyBacktestConfig(configuration: string, edit?: StrategyBacktestEdit) {
+  return invoke<{ configuration: string; page: StrategyManagePageData }>('edit_strategy_backtest_config', { configuration, edit })
+}

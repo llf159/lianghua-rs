@@ -61,6 +61,7 @@ pub struct ValidationResearchOutput {
     pub path: PathBuf,
     pub grouping: ResearchGrouping,
     pub statistics: crate::simulate::research_statistics::ResearchStatisticsSettings,
+    pub baseline_diagnostics: bool,
 }
 
 impl ValidationResearchOutput {
@@ -251,7 +252,20 @@ impl ValidationResearchOutput {
         writer.flush().map_err(|e| e.to_string())?;
         drop(writer);
         let baseline_status = if !snapshot_baseline_scores {
-            "排名基线采用本次隔离评分，未复用历史评分".into()
+            conn.execute(
+                "INSERT INTO metadata VALUES ('baseline_origin', ?)",
+                [if self.baseline_diagnostics {
+                    "external_isolated_scoring"
+                } else {
+                    "not_requested"
+                }],
+            )
+            .map_err(|e| e.to_string())?;
+            if self.baseline_diagnostics {
+                "排名基线采用本次隔离评分，未复用历史评分".into()
+            } else {
+                "本次未计算完整策略基线；同类对照不控制原榜分数".into()
+            }
         } else {
             let configuration = std::fs::read_to_string(crate::data::score_rule_path(source))
                 .map_err(|e| e.to_string())?;
@@ -1039,6 +1053,7 @@ mod tests {
         )
         .unwrap();
         let output = ValidationResearchOutput {
+            baseline_diagnostics: true,
             path: research_artifact_path(source, &header.run_id, "evidence.db").unwrap(),
             grouping: Default::default(),
             statistics: Default::default(),

@@ -203,7 +203,7 @@ function AppRoutes() {
             <Route path="backtest" element={<pages.Backtest />}>
               <Route
                 index
-                element={<Navigate to="/backtest/strategy-trigger" replace />}
+                element={<Navigate to="/backtest/expression-backtest" replace />}
               />
               <Route
                 path="strategy-trigger"

@@ -1,5 +1,6 @@
 import "./css/ResearchWorkbench.css";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { listen } from "@tauri-apps/api/event";
 import { getIndicatorManagePage } from "../../apis/dataDownload";
 import { ensureManagedSourcePath } from "../../apis/managedSource";
@@ -32,6 +33,7 @@ import {
   parseOptionalNumberInput,
 } from "../../shared/backtestFormat";
 import {
+  INDEX_OPTIONS,
   readStoredBacktestCommonParams,
   writeStoredBacktestCommonParams,
 } from "../../shared/backtestCommonParams";
@@ -55,8 +57,9 @@ import { ResearchStatisticsFields } from "./components/ResearchStatisticsFields"
 import { ResearchGroupingFields } from "./components/ResearchGroupingFields";
 import { ResearchEvidencePanel } from "./components/ResearchEvidencePanel";
 import { RankComparisonPanel } from "./components/RankComparisonPanel";
+import { ResearchHistoryComparison } from "./components/ResearchHistoryComparison";
 import { ExpressionCoreSummary } from "./components/expressionBacktest/ExpressionCoreSummary";
-import { ResearchNotesFields, type ResearchNotes } from "./components/ResearchNotesFields";
+import { type ResearchNotes } from "./components/ResearchNotesFields";
 import { ExpressionQuarterSummary } from "./components/expressionBacktest/ExpressionQuarterSummary";
 import { ExpressionDailyDetail } from "./components/expressionBacktest/ExpressionDailyDetail";
 import { ExpressionIncremental } from "./components/expressionBacktest/ExpressionIncremental";
@@ -68,6 +71,9 @@ import { ExpressionWalkForward } from "./components/expressionBacktest/Expressio
 import "./css/ExpressionBacktestPage.css";
 
 export default function ExpressionBacktestPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const initialRule = useRef(searchParams.get("rule"));
+  const feedbackRef = useRef<HTMLDivElement>(null);
   const { excludeStBoard } = useConceptExclusions();
   const storedCommonParams = useMemo(() => readStoredBacktestCommonParams(), []);
   const [sourcePath, setSourcePath] = useState(() => readStoredSourcePath());
@@ -109,6 +115,7 @@ export default function ExpressionBacktestPage() {
   const [error, setError] = useState("");
   const [result, setResult] = useState<RuleExpressionValidationData | null>(null);
   const [selectedComboKey, setSelectedComboKey] = useState("");
+  const [resultView, setResultView] = useState("overview");
   const [runForm, setRunForm] = useState<ExpressionBacktestFormValues | null>(null);
   const [runQuery, setRunQuery] = useState<RuleExpressionValidationQuery | null>(null);
   const [archiveParent, setArchiveParent] = useState<string | null>(null);
@@ -119,11 +126,15 @@ export default function ExpressionBacktestPage() {
   const [archiveBusy, setArchiveBusy] = useState(false);
   const [grouping, setGrouping] = useState<ResearchGrouping>({market_cap_boundaries: [], market_metric: "", market_boundaries: []});
   const [statistics, setStatistics] = useState<ResearchStatisticsSettings>({block_length: 10, resamples: 500, seed: 0});
-  const [multiPeriod, setMultiPeriod] = useState(true);
+  const [multiPeriod, setMultiPeriod] = useState(false);
+  const [baselineDiagnostics, setBaselineDiagnostics] = useState(false);
   const [exploratoryFilter, setExploratoryFilter] = useState<Partial<ResearchEvidenceQuery> | undefined>();
   const [selectedHorizon, setSelectedHorizon] = useState<number | null>(null);
   const [verifyInputs, setVerifyInputs] = useState(false);
-  const [researchTab, setResearchTab] = useState("expression");
+  const researchTab = searchParams.get("mode") === "ranking" ? "ranking" : "expression";
+  function setResearchTab(mode: string) {
+    setSearchParams((current) => { current.set("mode", mode); return current; });
+  }
   const [rankingRunning, setRankingRunning] = useState(false);
 
   useEffect(() => {
@@ -195,6 +206,10 @@ export default function ExpressionBacktestPage() {
           const managePage = await getStrategyManagePage(resolved);
           if (!cancelled) {
             setStrategyOptions(managePage.rules ?? []);
+            const original = managePage.rules?.find((rule) => rule.name === initialRule.current);
+            if (original) {
+              setForm((current) => ({...current, importRuleName: original.name, expression: original.when ?? "", direction: original.points < 0 ? "negative" : "positive", scopeWay: resolveValidationScopeWay(original.scope_way).scopeWay, scopeWindowsText: String(Math.max(1, original.scope_windows ?? 1)), consecThresholdText: String(resolveValidationScopeWay(original.scope_way).consecThreshold)}));
+            }
           }
         } catch (strategyError) {
           if (!cancelled) {
@@ -282,7 +297,6 @@ export default function ExpressionBacktestPage() {
 
   function applyRule(ruleName: string) {
     const matched = strategyOptions.find((item) => item.name === ruleName);
-    setResult(null);
     setError("");
     if (!matched) {
       updateForm({ importRuleName: "", unknownConfigs: [] });
@@ -304,6 +318,7 @@ export default function ExpressionBacktestPage() {
   }
 
   async function onRunValidation() {
+    if (loading || rankingRunning || initializing || archiveBusy) return;
     const normalizedStart = normalizeDateInput(form.startDateInput);
     const normalizedEnd = normalizeDateInput(form.endDateInput);
     if (!sourcePath.trim()) {
@@ -423,7 +438,6 @@ export default function ExpressionBacktestPage() {
     const manualStrategyName = resolvedRuleName || "manual_expression_strategy";
     const normalizedManualPoints = form.direction === "negative" ? -1 : 1;
 
-    setResult(null);
     setError("");
     setLoading(true);
     setCancelling(false);
@@ -433,6 +447,7 @@ export default function ExpressionBacktestPage() {
     try {
       const query: RuleExpressionValidationQuery = {
         taskId: activeTask.current,
+        baselineDiagnostics: baselineDiagnostics || form.coreRuleNames.length > 0 || Boolean(grouping.baseline_score_boundaries?.length),
         additionalPeriods: multiPeriod ? [3, 5, 10] : [],
         researchGrouping: grouping,
         researchStatistics: statistics,
@@ -473,7 +488,7 @@ export default function ExpressionBacktestPage() {
         totalMvMax,
       };
       runQuerySnapshot = query;
-      const data = await runRuleExpressionValidation({...query, researchQuestion, researchConfiguration: {form: {...form, boardFilter: effectiveBoardFilter}, query, notes: researchNotes}, parentRunId: archiveParent});
+      const data = await runRuleExpressionValidation({...query, researchQuestion: "", researchConfiguration: {form: {...form, boardFilter: effectiveBoardFilter}, query, notes: researchNotes}, parentRunId: archiveParent});
       activeTask.current = "";
       setPhase("正在保存结果");
       setRunForm({...form, boardFilter: effectiveBoardFilter});
@@ -481,6 +496,8 @@ export default function ExpressionBacktestPage() {
       setRunQuery(query);
       const compacted = compactRuleExpressionValidationData(data);
       setResult(compacted);
+      setResearchQuestion("");
+      requestAnimationFrame(() => feedbackRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
       updateForm({ sampleLimitText: String(compacted.sample_limit_per_group) });
       setExploratoryFilter(undefined);
       setSelectedHorizon(data.horizon ?? query.backtestPeriod ?? null);
@@ -493,7 +510,6 @@ export default function ExpressionBacktestPage() {
     } catch (runError) {
       activeTask.current = "";
       setPhase("正在保存运行记录");
-      setResult(null);
       setError(`执行表达式回测失败: ${String(runError)}`);
       if (runQuerySnapshot) {
         try {setArchives((await listResearchArchives(sourcePath)).filter((item) => item.kind === "expression_validation"));}
@@ -511,7 +527,7 @@ export default function ExpressionBacktestPage() {
     if (archiveBusy || loading || rankingRunning || !sourcePath) return;
     setArchiveBusy(true);
     try {
-      const query = {sourcePath, importRuleName: form.importRuleName, indexTsCode: form.indexTsCode, startDate: normalizeDateInput(form.startDateInput) ?? "", endDate: normalizeDateInput(form.endDateInput) ?? "", researchGrouping: grouping, researchStatistics: statistics, additionalPeriods: multiPeriod ? [3,5,10] : [], verifyInputs};
+      const query = {sourcePath, importRuleName: form.importRuleName, indexTsCode: form.indexTsCode, startDate: normalizeDateInput(form.startDateInput) ?? "", endDate: normalizeDateInput(form.endDateInput) ?? "", researchGrouping: grouping, researchStatistics: statistics, additionalPeriods: multiPeriod ? [3,5,10] : [], baselineDiagnostics: baselineDiagnostics || form.coreRuleNames.length > 0 || Boolean(grouping.baseline_score_boundaries?.length), verifyInputs};
       const header = await saveResearchArchive(sourcePath, archiveParent, researchQuestion, {form, query, notes: researchNotes}, {}, "expression_validation", null, "draft");
       setArchiveParent(header.run_id);
       setArchives((await listResearchArchives(sourcePath)).filter((run) => run.kind === "expression_validation"));
@@ -549,6 +565,7 @@ export default function ExpressionBacktestPage() {
       setGrouping(config.query.researchGrouping ?? {market_cap_boundaries: [], market_metric: "", market_boundaries: []});
       setStatistics(config.query.researchStatistics ?? {block_length: 10, resamples: 500, seed: 0});
       setMultiPeriod(Boolean(config.query.additionalPeriods?.length));
+      setBaselineDiagnostics(config.query.baselineDiagnostics ?? true);
       setVerifyInputs(Boolean(config.query.verifyInputs));
       setExploratoryFilter(config.exploratory_filter);
       setSelectedHorizon(config.exploratory_filter?.horizon ?? null);
@@ -579,6 +596,7 @@ export default function ExpressionBacktestPage() {
       await deleteResearchArchive(sourcePath, runId);
       setArchives((await listResearchArchives(sourcePath)).filter((item) => item.kind === "expression_validation"));
       if (archiveParent === runId) setArchiveParent(null);
+      if (result?.archive_run_id === runId) {setResult(null); setRunForm(null); setRunQuery(null);}
       setArchiveMessage("研究存档已删除。");
     } catch (failure) { setArchiveMessage(`删除研究存档失败：${String(failure)}`); }
     finally { setArchiveBusy(false); }
@@ -588,37 +606,23 @@ export default function ExpressionBacktestPage() {
     <div className="expression-backtest-page research-workbench">
       <header className="expression-backtest-header">
         <h2 className="expression-backtest-title">研究回测</h2>
-        <p className="expression-backtest-caption">研究信号表现、适用范围与真实排名变化。</p>
       </header>
 
       <div className="research-mode-tabs" aria-label="研究模式">
         <button type="button" aria-pressed={researchTab === "expression"} disabled={loading || rankingRunning} onClick={() => setResearchTab("expression")}>策略研究</button>
         <button type="button" aria-pressed={researchTab === "ranking"} disabled={loading || rankingRunning} onClick={() => setResearchTab("ranking")}>排名对照</button>
       </div>
-      <details className="expression-backtest-section research-archive" hidden={researchTab !== "expression"}>
-        <summary>实验记录与存档{archives.length ? ` · ${archives.length}` : ""}</summary>
+      <div className="research-toolbar research-file-actions" hidden={researchTab !== "expression"}>
         <ResearchImportButton sourcePath={sourcePath} disabled={loading || rankingRunning} onImported={() => {void listResearchArchives(sourcePath).then((items) => setArchives(items.filter((item) => item.kind === "expression_validation"))).catch((failure) => setArchiveMessage(String(failure)));}} />
 
-        <div className="research-toolbar"><label className="research-field">研究问题<input placeholder="选填，便于查找这次实验" value={researchQuestion} onChange={(event) => setResearchQuestion(event.target.value)} /></label>{" "}
         <button type="button" disabled={!sourcePath || archiveBusy || loading || rankingRunning} onClick={() => void saveDraft()}>保存草稿</button>{" "}
-        <button type="button" disabled={!result || !runQuery || archiveBusy || loading} onClick={() => void saveArchive()}>另存结论</button></div>
-        <ResearchNotesFields value={researchNotes} onChange={setResearchNotes} />
-        {archiveParent ? <p className="expression-backtest-caption">下次保存的来源：{archiveParent}</p> : null}
-        {archiveMessage ? <p className="expression-backtest-caption" role="status">{archiveMessage}</p> : null}
-        {archives.length ? <details><summary>查看已保存的 {archives.length} 次运行</summary>
-          <ul className="research-archive-list">{archives.map((item) => <li key={item.run_id}>
-            <span className="research-archive-name" title={item.run_id}>{item.question || "未命名实验"} · {researchRunStatusLabel(item.status)}<br />{new Date(item.created_ms).toLocaleString()}</span>
-            <button type="button" disabled={archiveBusy || loading} onClick={() => void openArchive(item.run_id)}>查看</button>{" "}
-            <button type="button" disabled={archiveBusy || loading} onClick={() => void removeArchive(item.run_id)}>删除</button>
-          </li>)}</ul>
-        </details> : null}
-      </details>
+        <button type="button" disabled={!result || !runQuery || archiveBusy || loading} onClick={() => void saveArchive()}>另存结果</button>
+      </div>
 
       <div hidden={researchTab !== "expression"}>
-      <div className="research-settings-grid"><ResearchGroupingFields showBaselineControl value={grouping} onChange={setGrouping} disabled={loading} />
-      <ResearchStatisticsFields value={statistics} onChange={setStatistics} disabled={loading} /></div>
-      <div className="research-check-row"><label className="research-checkbox"><input type="checkbox" checked={multiPeriod} disabled={loading} onChange={(event) => setMultiPeriod(event.target.checked)} />同时计算3 / 5 / 10日</label>{" "}
-      <label className="research-checkbox" title="运行前后两次读取完整数据库。文件变化时丢弃结果，不代表一致快照。"><input type="checkbox" checked={verifyInputs} disabled={loading} onChange={(event) => setVerifyInputs(event.target.checked)} />校验输入内容</label></div>
+      <ResearchHistoryComparison kind="expression_validation" sourcePath={sourcePath} archives={archives} disabled={loading || archiveBusy} onOpen={(runId) => void openArchive(runId)} onUpdated={(header) => {setArchives((items) => items.map((item) => item.run_id === header.run_id ? header : item)); if (result?.archive_run_id === header.run_id) setResearchQuestion(header.question);}} result={result} settings={runQuery} combo={selectedCombo} horizon={displayedResult?.horizon ?? runQuery?.backtestPeriod ?? null} direction={displayedForm.direction} />
+      {archiveMessage ? <p className="expression-backtest-caption" role="status">{archiveMessage}</p> : null}
+      <div>
       <ExpressionBacktestForm
         values={{...form, boardFilter: effectiveBoardFilter}}
         strategyOptions={strategyOptions}
@@ -631,22 +635,39 @@ export default function ExpressionBacktestPage() {
         onChange={updateForm}
         onApplyRule={applyRule}
         onRun={() => void onRunValidation()}
+        extraParameters={<>
+
+      <div className="research-settings-grid"><ResearchGroupingFields showBaselineControl value={grouping} onChange={setGrouping} disabled={loading} />
+      <ResearchStatisticsFields value={statistics} onChange={setStatistics} disabled={loading} /></div>
+      <div className="research-check-row"><label className="research-checkbox"><input type="checkbox" checked={multiPeriod} disabled={loading} onChange={(event) => setMultiPeriod(event.target.checked)} />额外计算3 / 5 / 10日（增加耗时）</label>{" "}
+      <label className="research-checkbox" title="运行前后两次读取完整数据库。文件变化时丢弃结果，不代表一致快照。"><input type="checkbox" checked={verifyInputs} disabled={loading} onChange={(event) => setVerifyInputs(event.target.checked)} />校验输入内容</label>
+      <label className="research-checkbox"><input type="checkbox" checked={baselineDiagnostics} disabled={loading} onChange={(event) => setBaselineDiagnostics(event.target.checked)} />完整策略基线诊断（增加耗时）</label></div>
+
+        </>}
       />
+      </div>
 
       {loading ? <p className="expression-backtest-caption" role="status">{phase} <button type="button" disabled={cancelling || phase.startsWith("正在保存")} onClick={() => {
         setCancelling(true);
         void cancelRuleExpressionValidation(activeTask.current).then(() => setPhase("已请求取消，等待当前读取或计算阶段结束")).catch((failure) => { setError(`取消请求失败：${String(failure)}`); setCancelling(false); });
       }}>取消</button></p> : null}
 
+      <div ref={feedbackRef} className="research-feedback-target">
+      {result?.archive_run_id ? <button type="button" className="research-history-delete" disabled={loading || archiveBusy} onClick={() => void removeArchive(result.archive_run_id!)}>删除当前记录</button> : null}
+      {result && runForm ? <p className="research-meta">{runForm.importRuleName || "表达式"} · {runForm.startDateInput} ~ {runForm.endDateInput}{JSON.stringify(form) !== JSON.stringify(runForm) ? " · 参数已修改，结果尚未重算" : ""}</p> : null}
       {result ? <div className="expression-backtest-actions">
         <label>评价周期 <select value={displayedResult?.horizon ?? ""} onChange={(event) => setSelectedHorizon(Number(event.target.value))}>{[result, ...(result.additional_periods ?? [])].map((period, index) => <option key={period.horizon ?? index} value={period.horizon}>{period.horizon ?? runQuery?.backtestPeriod ?? "旧运行"}日</option>)}</select></label>{" "}
         {result.archive_run_id ? <ResearchExportButton sourcePath={sourcePath} runId={result.archive_run_id} disabled={loading} /> : null}
-        <details><summary>配置、输入与标签版本</summary><p>本次分组：{JSON.stringify(runQuery?.researchGrouping ?? {})}；统计设置：{JSON.stringify(runQuery?.researchStatistics ?? {})}。</p><p>{displayedResult?.label_algorithm ?? "旧结果未记录"}；{displayedResult?.input_identity === "content_checked_not_snapshot" ? "所列文件运行前后内容一致，非一致快照" : "输入同源和运行期间一致性未认证"}。{displayedResult?.baseline_origin === "isolated_native_scoring_v1" ? "相关性、收益回归及分数档来自本次隔离重算基线。" : "旧结果的相关性及收益回归来自历史评分，同源未认证。"}</p><pre style={{whiteSpace: "pre-wrap", overflowWrap: "anywhere"}}>{JSON.stringify(displayedResult?.input_manifest ?? {}, null, 2)}</pre></details>
+        <details><summary>配置、输入与标签版本</summary><p>本次分组：{JSON.stringify(runQuery?.researchGrouping ?? {})}；统计设置：{JSON.stringify(runQuery?.researchStatistics ?? {})}。</p><p>{displayedResult?.label_algorithm ?? "旧结果未记录"}；{displayedResult?.input_identity === "content_checked_not_snapshot" ? "所列文件运行前后内容一致，非一致快照" : "输入同源和运行期间一致性未认证"}。{displayedResult?.baseline_origin === "isolated_native_scoring_v1" ? "相关性、收益回归及分数档来自本次隔离重算基线。" : displayedResult?.baseline_origin === "not_requested" ? "本次未计算完整基线诊断。" : "旧结果的相关性及收益回归来自历史评分，同源未认证。"}</p><pre style={{whiteSpace: "pre-wrap", overflowWrap: "anywhere"}}>{JSON.stringify(displayedResult?.input_manifest ?? {}, null, 2)}</pre></details>
       </div> : null}
       {selectedCombo ? (
         <>
 
           <ExpressionCoreSummary combo={selectedCombo} direction={displayedForm.direction} />
+          <nav className="research-result-tabs" aria-label="结果内容">
+            {[{value: "overview", label: "适用范围"}, {value: "periods", label: "季度表现"}, {value: "diagnostics", label: "诊断"}, {value: "samples", label: "样本"}].map((item) => <button type="button" key={item.value} aria-pressed={resultView === item.value} onClick={() => setResultView(item.value)}>{item.label}</button>)}
+          </nav>
+          {resultView === "overview" ? <>
           {hasUnknownCombo ? (
             <ExpressionParameterRobustness
               combos={comboRows}
@@ -654,25 +675,32 @@ export default function ExpressionBacktestPage() {
               onSelectCombo={setSelectedComboKey}
             />
           ) : null}
-          <ExpressionQuarterSummary combo={selectedCombo} startDate={displayedForm.startDateInput} endDate={displayedForm.endDateInput} />
-          <details className="expression-backtest-section"><summary>高级诊断</summary>
+          {result?.membership_saved && result.archive_run_id && runQuery ? <ResearchEvidencePanel key={`${result.archive_run_id}-${selectedCombo.combo_key}-${displayedResult?.horizon}`} sourcePath={sourcePath} runId={result.archive_run_id} comboKey={selectedCombo.combo_key} horizon={displayedResult?.horizon ?? runQuery.backtestPeriod ?? 1} startDate={runQuery.startDate} endDate={runQuery.endDate} direction={displayedForm.direction === "negative" ? -1 : 1} initialQuery={exploratoryFilter} onBranchSaved={() => {void listResearchArchives(sourcePath).then((runs) => setArchives(runs.filter((run) => run.kind === "expression_validation"))).catch((failure) => setArchiveMessage(String(failure)));}} /> : null}
+          </> : null}
+          {resultView === "periods" ? <ExpressionQuarterSummary combo={selectedCombo} startDate={displayedForm.startDateInput} endDate={displayedForm.endDateInput} /> : null}
+          {resultView === "diagnostics" ? <>
           <ExpressionWalkForward combo={selectedCombo} />
           <ExpressionLayerResult combo={selectedCombo} />
-          <ExpressionSimilarity combo={selectedCombo} baselineOrigin={displayedResult?.baseline_origin} />
+          {displayedResult?.baseline_origin !== "not_requested" ? <ExpressionSimilarity combo={selectedCombo} baselineOrigin={displayedResult?.baseline_origin} /> : <p className="research-meta">本次未计算规则相关性；需要时在“更多参数”启用完整策略基线诊断。</p>}
           <ExpressionIncremental combo={selectedCombo} />
-          </details>
-          {result?.membership_saved && result.archive_run_id && runQuery ? <ResearchEvidencePanel key={`${result.archive_run_id}-${selectedCombo.combo_key}-${displayedResult?.horizon}`} sourcePath={sourcePath} runId={result.archive_run_id} comboKey={selectedCombo.combo_key} horizon={displayedResult?.horizon ?? runQuery.backtestPeriod ?? 1} startDate={runQuery.startDate} endDate={runQuery.endDate} direction={displayedForm.direction === "negative" ? -1 : 1} initialQuery={exploratoryFilter} onBranchSaved={() => {void listResearchArchives(sourcePath).then((runs) => setArchives(runs.filter((run) => run.kind === "expression_validation"))).catch((failure) => setArchiveMessage(String(failure)));}} /> : null}
-          <details className="expression-backtest-section"><summary>样本复核与日度明细</summary>
+          </> : null}
+          {resultView === "samples" ? <>
           <p className="research-meta">抽样方法：{result?.random_sample_method || "旧运行未记录"}</p>
           <ExpressionSamplesCheck combo={selectedCombo} context={validationContext} />
           <ExpressionDailyDetail combo={selectedCombo} />
-          </details>
+          </> : null}
         </>
       ) : null}
       </div>
+      </div>
       <div hidden={researchTab !== "ranking"}>
-        <div className="research-toolbar"><label className="research-field">开始日期 <input type="date" value={form.startDateInput} disabled={rankingRunning} onChange={(event) => updateForm({startDateInput: event.target.value})} /></label><label className="research-field">结束日期 <input type="date" value={form.endDateInput} disabled={rankingRunning} onChange={(event) => updateForm({endDateInput: event.target.value})} /></label><label className="research-field">持有期 <input type="number" min={1} max={252} value={form.holdingPeriodText} disabled={rankingRunning} onChange={(event) => updateForm({holdingPeriodText: event.target.value})} /></label><button type="button" disabled={rankingRunning} onClick={() => setResearchTab("expression")}>其他共用评价设置</button></div>
-        <RankComparisonPanel key={sourcePath} settings={{source_path: sourcePath, stock_adj_type: form.stockAdjType, index_ts_code: form.indexTsCode, index_beta: Number(form.indexBetaText), concept_beta: Number(form.conceptBetaText), industry_beta: Number(form.industryBetaText), start_date: normalizeDateInput(form.startDateInput) ?? "", end_date: normalizeDateInput(form.endDateInput) ?? "", min_listed_trade_days: Number(form.minListedTradeDaysText), backtest_period: Number(form.holdingPeriodText)}} disabled={loading || initializing} onRunningChange={setRankingRunning} onRestoreSettings={(saved) => updateForm({startDateInput: compactDateToInput(saved.start_date), endDateInput: compactDateToInput(saved.end_date), holdingPeriodText: String(saved.backtest_period), minListedTradeDaysText: String(saved.min_listed_trade_days), stockAdjType: saved.stock_adj_type, indexTsCode: saved.index_ts_code, indexBetaText: String(saved.index_beta), conceptBetaText: String(saved.concept_beta), industryBetaText: String(saved.industry_beta)})} /></div>
+        <div className="research-toolbar"><label className="research-field">开始日期 <input type="date" value={form.startDateInput} disabled={rankingRunning} onChange={(event) => updateForm({startDateInput: event.target.value})} /></label><label className="research-field">结束日期 <input type="date" value={form.endDateInput} disabled={rankingRunning} onChange={(event) => updateForm({endDateInput: event.target.value})} /></label><label className="research-field">持有期 <input type="number" min={1} max={252} value={form.holdingPeriodText} disabled={rankingRunning} onChange={(event) => updateForm({holdingPeriodText: event.target.value})} /></label></div>
+        <RankComparisonPanel key={sourcePath} active={researchTab === "ranking"} evaluationFields={<div className="research-form-grid">
+          <label className="research-field">股票复权<input value={form.stockAdjType} disabled={rankingRunning} onChange={(event) => updateForm({stockAdjType: event.target.value})} /></label>
+          <label className="research-field">指数<select value={form.indexTsCode} disabled={rankingRunning} onChange={(event) => updateForm({indexTsCode: event.target.value})}>{INDEX_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
+          {([{key: "indexBetaText", label: "指数 Beta"}, {key: "conceptBetaText", label: "概念 Beta"}, {key: "industryBetaText", label: "行业 Beta"}] as const).map((item) => <label className="research-field" key={item.key}>{item.label}<input type="number" step="0.01" value={form[item.key]} disabled={rankingRunning} onChange={(event) => updateForm({[item.key]: event.target.value})} /></label>)}
+          <label className="research-field">最少上市交易日<input type="number" min={0} value={form.minListedTradeDaysText} disabled={rankingRunning} onChange={(event) => updateForm({minListedTradeDaysText: event.target.value})} /></label>
+        </div>} settings={{source_path: sourcePath, stock_adj_type: form.stockAdjType, index_ts_code: form.indexTsCode, index_beta: Number(form.indexBetaText), concept_beta: Number(form.conceptBetaText), industry_beta: Number(form.industryBetaText), start_date: normalizeDateInput(form.startDateInput) ?? "", end_date: normalizeDateInput(form.endDateInput) ?? "", min_listed_trade_days: Number(form.minListedTradeDaysText), backtest_period: Number(form.holdingPeriodText)}} disabled={loading || initializing} onRunningChange={setRankingRunning} onRestoreSettings={(saved) => updateForm({startDateInput: compactDateToInput(saved.start_date), endDateInput: compactDateToInput(saved.end_date), holdingPeriodText: String(saved.backtest_period), minListedTradeDaysText: String(saved.min_listed_trade_days), stockAdjType: saved.stock_adj_type, indexTsCode: saved.index_ts_code, indexBetaText: String(saved.index_beta), conceptBetaText: String(saved.concept_beta), industryBetaText: String(saved.industry_beta)})} /></div>
     </div>
   );
 }

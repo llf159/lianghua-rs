@@ -834,7 +834,13 @@ pub fn run_rule_expression_validation(
             .retain(|ts_code| ts_code_allowed_by_filter(Some(allowed_ts_codes), ts_code));
     }
     if let Some(progress) = progress {
-        progress("并行准备后验与股票日证据、隔离基线评分")?;
+        progress(
+            if research.is_some_and(|output| !output.baseline_diagnostics) {
+                "准备后验与股票日证据（不重算完整策略基线）"
+            } else {
+                "并行准备后验与股票日证据、隔离基线评分"
+            },
+        )?;
     }
     let preparation_started = std::time::Instant::now();
     let runtime_cache = std::thread::scope(|scope| -> Result<_, String> {
@@ -848,7 +854,7 @@ pub fn run_rule_expression_validation(
                     &params.end_date,
                     params.min_listed_trade_days,
                     &validation_ts_codes,
-                    true,
+                    research.baseline_diagnostics,
                 );
                 log::info!(
                     "表达式研究：隔离基线准备耗时 {:.3}s",
@@ -1319,7 +1325,9 @@ pub fn run_rule_expression_validation(
     Ok(RuleExpressionValidationData {
         horizon: params.backtest_period,
         input_identity: "unverified".into(),
-        baseline_origin: if research.is_some() {
+        baseline_origin: if research.is_some_and(|output| !output.baseline_diagnostics) {
+            "not_requested"
+        } else if research.is_some() {
             "isolated_native_scoring_v1"
         } else {
             "historical_scoring_unverified"
@@ -1456,7 +1464,8 @@ mod tests {
         let conn = duckdb::Connection::open(crate::data::source_db_path(source_dir_str)).unwrap();
         conn.execute("INSERT INTO stock_data SELECT '000001.SH',trade_date,'ind',open,high,low,close,vol,amount,pre_close,change,pct_chg FROM stock_data WHERE adj_type='qfq'",[]).unwrap();
         drop(conn);
-        let output = crate::research_evidence::ValidationResearchOutput {
+        let mut output = crate::research_evidence::ValidationResearchOutput {
+            baseline_diagnostics: true,
             path: source_dir.join("evidence.db"),
             grouping: Default::default(),
             statistics: Default::default(),
@@ -1467,7 +1476,13 @@ mod tests {
             Ok(())
         };
         let mut outputs = Vec::new();
-        for horizon in [1, 2] {
+        for (horizon, baseline_diagnostics) in [(1, true), (2, true), (1, false)] {
+            output.baseline_diagnostics = baseline_diagnostics;
+            output.path = source_dir.join(if baseline_diagnostics {
+                "evidence.db"
+            } else {
+                "quick-evidence.db"
+            });
             let data = super::run_rule_expression_validation(
                 source_dir_str.to_string(),
                 String::new(),
@@ -1507,7 +1522,54 @@ mod tests {
             .expect("rule expression validation");
             outputs.push(data);
         }
+        let quick = outputs.pop().unwrap();
+        assert_eq!(quick.baseline_origin, "not_requested");
+        assert!(
+            quick
+                .combo_results
+                .iter()
+                .all(|combo| combo.similarity_rows.is_empty())
+        );
+        let db = output.open().unwrap();
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM baseline_scores", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM baseline_rule_scores", [], |row| row
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT value FROM metadata WHERE key='baseline_origin'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            "not_requested"
+        );
+        drop(db);
+        output.baseline_diagnostics = true;
+        output.path = source_dir.join("evidence.db");
         let data = outputs.remove(0);
+        for (full_combo, quick_combo) in data.combo_results.iter().zip(&quick.combo_results) {
+            assert_eq!(
+                serde_json::to_value(&full_combo.backtest).unwrap(),
+                serde_json::to_value(&quick_combo.backtest).unwrap()
+            );
+            assert_eq!(
+                serde_json::to_value(&full_combo.walk_forward).unwrap(),
+                serde_json::to_value(&quick_combo.walk_forward).unwrap()
+            );
+            assert_eq!(full_combo.trigger_samples, quick_combo.trigger_samples);
+            assert_eq!(full_combo.triggered_days, quick_combo.triggered_days);
+        }
         let db = output.open().unwrap();
         assert_eq!(data.baseline_origin, "isolated_native_scoring_v1");
         assert_eq!(

@@ -29,7 +29,13 @@ export function ExpressionCoreSummary({
         核心结果
         <span className="expression-backtest-section-note">· {combo.combo_label}</span>
       </h3>
-      <p className="expression-backtest-caption">回测指标：{combo.backtest.return_metric === "rise_amount" ? "上涨金额（亿）" : "残差收益率（%）"}</p>
+      <div className="research-feedback-grid">
+        <div><span>方向回测指标</span><strong>{formatBacktestValue(directionResidual, combo.backtest.return_metric)}</strong><small>超额残差按{direction === "negative" ? "负向" : "正向"}换算</small></div>
+        <div><span>有后验的触发股票日</span><strong>{combo.trigger_samples.toLocaleString()}</strong><small>{combo.triggered_days} 个有效触发日</small></div>
+        <div><span>OOS 残差正窗口</span><strong>{walkForward?.folds.length ? formatValidationWindowRatio(combo, "residual") : "—"}</strong></div>
+        <div><span>最近衰减（20日）</span><strong>{formatBacktestValue(decay20?.decay_change, combo.backtest.return_metric)}</strong><small>近期减此前</small></div>
+      </div>
+      <details><summary>查看排序指标与完整统计</summary>
       <div className="expression-backtest-summary-grid">
         <div className="expression-backtest-summary-item">
           <span>有后验的触发股票日</span>
@@ -119,6 +125,7 @@ export function ExpressionCoreSummary({
           ? ` walk-forward 共 ${walkForward.folds.length} 个窗口，样本不足的窗口计入分母但不计为正窗口。`
           : ""}
       </p>
+      </details>
     </div>
   );
 }

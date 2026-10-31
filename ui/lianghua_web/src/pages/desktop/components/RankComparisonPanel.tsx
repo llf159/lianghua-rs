@@ -3,7 +3,7 @@ import "../css/ResearchWorkbench.css";
 import { Link } from "react-router-dom";
 import { ResearchExportButton } from "./ResearchExportButton";
 import { ResearchImportButton } from "./ResearchImportButton";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
   readRankComparisonBaseline,
@@ -24,22 +24,32 @@ import {
 import { ResearchGroupingFields } from "./ResearchGroupingFields";
 import { ResearchStatisticsFields } from "./ResearchStatisticsFields";
 import { RankComparisonSamples } from "./RankComparisonSamples";
-import { ResearchNotesFields, type ResearchNotes } from "./ResearchNotesFields";
+import StrategyManagePage from "../StrategyManagePage";
+import { ResearchHistoryComparison } from "./ResearchHistoryComparison";
+import { type ResearchNotes } from "./ResearchNotesFields";
 import { formatBacktestValue, formatDateLabel, formatNumber } from "../../../shared/backtestFormat";
 
 type RequestSettings = Omit<RankComparisonRequest, "candidate_config">;
 
-export function RankComparisonPanel({ settings, disabled, onRunningChange, onRestoreSettings }: {
+export function RankComparisonPanel({ settings, disabled, onRunningChange, onRestoreSettings, active = true, evaluationFields }: {
   settings: RequestSettings;
+  active?: boolean;
+  evaluationFields?: ReactNode;
   disabled: boolean;
   onRunningChange: (running: boolean) => void;
   onRestoreSettings?: (settings: RequestSettings) => void;
 }) {
   const [candidate, setCandidate] = useState("");
+  const [loadingBaseline, setLoadingBaseline] = useState(false);
+  const [feedbackPool, setFeedbackPool] = useState("daily-100");
+  const feedbackRef = useRef<HTMLDivElement>(null);
   const [grouping, setGrouping] = useState<ResearchGrouping>({market_cap_boundaries: [], market_metric: "", market_boundaries: []});
   const [statistics, setStatistics] = useState<ResearchStatisticsSettings>({block_length: 10, resamples: 500, seed: 0});
   const [slice, setSlice] = useState("all::全部");
   const [editing, setEditing] = useState(false);
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editorRevision, setEditorRevision] = useState(0);
+  const initializedSource = useRef("");
   const [verifyInputs, setVerifyInputs] = useState(false);
   const [result, setResult] = useState<RankComparisonResult | null>(null);
   const [selectedSamples, setSelectedSamples] = useState<RankComparisonSummary | null>(null);
@@ -77,15 +87,29 @@ export function RankComparisonPanel({ settings, disabled, onRunningChange, onRes
     return () => { cancelled = true; activeSource.current = ""; };
   }, [settings.source_path]);
 
+  useEffect(() => {
+    if (!active || !settings.source_path || initializedSource.current === settings.source_path) return;
+    let cancelled = false;
+    void readRankComparisonBaseline(settings.source_path).then((configuration) => {
+      if (!cancelled) { initializedSource.current = settings.source_path; setCandidate(configuration); setEditing(true); setEditorRevision((value) => value + 1); }
+    }).catch((failure) => {if (!cancelled) setError(`读取策略配置失败：${String(failure)}`);});
+    return () => {cancelled = true;};
+  }, [active, settings.source_path]);
+
   async function loadBaseline() {
+    if (loadingBaseline || loading || archiveBusy || disabled) return;
+    setLoadingBaseline(true);
     try {
       setCandidate(await readRankComparisonBaseline(settings.source_path));
       setEditing(true);
+      setEditorRevision((value) => value + 1);
       setError("");
     } catch (failure) { setError(`读取策略配置失败：${String(failure)}`); }
+    finally { setLoadingBaseline(false); }
   }
 
   async function run() {
+    if (loading || loadingBaseline || archiveBusy || disabled) return;
     if (!settings.source_path || !settings.index_ts_code || !candidate.trim() || !settings.start_date || !settings.end_date || settings.start_date > settings.end_date ||
       !Number.isInteger(settings.backtest_period) || settings.backtest_period < 1 || !Number.isInteger(settings.min_listed_trade_days) || settings.min_listed_trade_days < 0 ||
       ![settings.index_beta, settings.concept_beta, settings.industry_beta].every(Number.isFinite)) {
@@ -98,12 +122,13 @@ export function RankComparisonPanel({ settings, disabled, onRunningChange, onRes
     setPhase("等待仓库可用");
     onRunningChange(true);
     setError("");
-    setResult(null);
     setSelectedSamples(null);
     try {
-      const response = await runRankComparison({ ...settings, grouping, statistics, verify_inputs: verifyInputs, task_id: activeTask.current, research_question: question, research_notes: notes, parent_run_id: archiveParent, candidate_config: candidate });
+      const response = await runRankComparison({ ...settings, grouping, statistics, verify_inputs: verifyInputs, task_id: activeTask.current, research_question: "", research_notes: notes, parent_run_id: archiveParent, candidate_config: candidate });
       if (activeSource.current === settings.source_path) {
         setResult(response);
+        setQuestion("");
+        requestAnimationFrame(() => feedbackRef.current?.scrollIntoView({behavior: "smooth", block: "start"}));
         setRunSettings({ ...settings, grouping, statistics, verify_inputs: verifyInputs, task_id: activeTask.current, research_question: question, research_notes: notes, parent_run_id: archiveParent });
         if (response.archive_run_id) {
           setArchiveParent(response.archive_run_id);
@@ -167,6 +192,7 @@ export function RankComparisonPanel({ settings, disabled, onRunningChange, onRes
       const config = saved.configuration as { settings?: RequestSettings & { candidate_config?: string }; notes?: ResearchNotes };
       if (!config?.settings) throw new Error("存档缺少排名对照配置");
       onRestoreSettings?.(config.settings);
+      setEditorRevision((value) => value + 1);
       if (saved.header.status && saved.header.status !== "completed") {
         setCandidate(config.settings.candidate_config ?? "");
         setEditing(Boolean(config.settings.candidate_config));
@@ -206,6 +232,7 @@ export function RankComparisonPanel({ settings, disabled, onRunningChange, onRes
       await deleteResearchArchive(settings.source_path, runId);
       setArchives((await listResearchArchives(settings.source_path)).filter((item) => item.kind === "rank_comparison"));
       if (archiveParent === runId) setArchiveParent(null);
+      if (result?.archive_run_id === runId) {setResult(null); setRunSettings(null); setSelectedSamples(null);}
       setArchiveMessage("排名对照存档已删除。");
     } catch (failure) { setArchiveMessage(`删除存档失败：${String(failure)}`); }
     finally { setArchiveBusy(false); }
@@ -213,51 +240,57 @@ export function RankComparisonPanel({ settings, disabled, onRunningChange, onRes
 
   const visibleSummaries = result?.summaries.filter((item) => `${item.dimension || "all"}::${item.bucket || "全部"}` === slice) ?? [];
   const sliceOptions = Array.from(new Set(result?.summaries.map((item) => `${item.dimension || "all"}::${item.bucket || "全部"}`) ?? []));
+  const feedbackOptions = visibleSummaries.filter((item) => item.period === "全部");
+  const feedback = feedbackOptions.find((item) => `${item.pool_kind}-${item.top_k}` === feedbackPool) ?? feedbackOptions[0];
   return <section className="scene-layer-card research-workbench">
     <h2 className="scene-layer-title">排名对照</h2>
-
-    <p className="scene-layer-caption">先复制当前策略，在候选框修改表达式、分值或规则，再重算对照。</p>
-    <details><summary>实验记录与存档{archives.length ? ` · ${archives.length}` : ""}</summary>
-    <ResearchImportButton sourcePath={settings.source_path} disabled={loading} onImported={() => {void listResearchArchives(settings.source_path).then((items) => setArchives(items.filter((item) => item.kind === "rank_comparison"))).catch((failure) => setArchiveMessage(String(failure)));}} />
-    <div className="research-toolbar">
-      <label className="research-field">研究问题<input placeholder="选填，便于查找这次实验" value={question} onChange={(event) => setQuestion(event.target.value)} /></label>
-      <button type="button" disabled={archiveBusy || loading || !settings.source_path} onClick={() => void saveDraft()}>保存候选草稿</button>
-      <button type="button" className="scene-layer-secondary-btn" disabled={!result || !runSettings || archiveBusy || loading} onClick={() => void saveArchive()}>另存结论</button>
-    </div>
-    <ResearchNotesFields value={notes} onChange={setNotes} />
+    <ResearchHistoryComparison kind="rank_comparison" sourcePath={settings.source_path} archives={archives} disabled={loading || archiveBusy} onOpen={(runId) => void openArchive(runId)} onUpdated={(header) => {setArchives((items) => items.map((item) => item.run_id === header.run_id ? header : item)); if (result?.archive_run_id === header.run_id) setQuestion(header.question);}} result={result} settings={runSettings} summary={feedback ?? null} />
     {archiveMessage ? <p className="scene-layer-caption" role="status">{archiveMessage}</p> : null}
-    {archives.length ? <details><summary>已保存的 {archives.length} 次排名对照</summary>
-      <ul className="research-archive-list">{archives.map((item) => <li key={item.run_id}>
-        <span className="research-archive-name" title={item.run_id}>{item.question || "未命名实验"} · {researchRunStatusLabel(item.status)}<br />{new Date(item.created_ms).toLocaleString()}</span>
-        <button type="button" disabled={archiveBusy || loading} onClick={() => void openArchive(item.run_id)}>查看</button>{" "}
-        <button type="button" disabled={archiveBusy || loading} onClick={() => void removeArchive(item.run_id)}>删除</button>
-      </li>)}</ul>
-    </details> : null}
-    </details>
+
+    <div className="research-toolbar research-file-actions">
+    <ResearchImportButton sourcePath={settings.source_path} disabled={loading} onImported={() => {void listResearchArchives(settings.source_path).then((items) => setArchives(items.filter((item) => item.kind === "rank_comparison"))).catch((failure) => setArchiveMessage(String(failure)));}} />
+      <button type="button" disabled={archiveBusy || loading || !settings.source_path} onClick={() => void saveDraft()}>保存候选草稿</button>
+      <button type="button" className="scene-layer-secondary-btn" disabled={!result || !runSettings || archiveBusy || loading} onClick={() => void saveArchive()}>另存结果</button>
+    </div>
+    <details className="research-advanced"><summary>更多参数</summary>
+    {evaluationFields}
     <div className="research-settings-grid"><ResearchGroupingFields value={grouping} onChange={setGrouping} disabled={loading} />
     <ResearchStatisticsFields value={statistics} onChange={setStatistics} disabled={loading} /></div>
-    <label className="research-checkbox" title="运行前后两次读取完整数据库。文件变化时丢弃结果，不代表一致快照。"><input type="checkbox" checked={verifyInputs} disabled={loading} onChange={(event) => setVerifyInputs(event.target.checked)} />校验输入内容</label>
-    <details><summary>计算口径</summary><p>先按完整榜单确定席位，再读取标签和切片，缺标签不补位。三日池取最近三个评分日的TopK并集；收益按共同有效日期成对比较，净贡献保留原基线池分母。</p><p>历史ST、行业和概念资料覆盖有限。输入校验不等于数据库一致快照；长区间会增加内存占用。</p></details>
-    <div className="scene-layer-actions">
-      <button type="button" className="scene-layer-secondary-btn" disabled={disabled || loading} onClick={() => void loadBaseline()}>复制当前策略到候选</button>
-      <button type="button" className="scene-layer-primary-btn" disabled={disabled || loading || !candidate.trim()} onClick={() => void run()}>{loading ? "计算中…" : "重算基线与候选"}</button>
+    <label className="research-checkbox" title="运行前后两次读取完整数据库。文件变化时丢弃结果，不代表一致快照。"><input type="checkbox" checked={verifyInputs} disabled={loading} onChange={(event) => setVerifyInputs(event.target.checked)} />校验输入内容</label></details>
+    <details className="research-editor" open={editorOpen} onToggle={(event) => setEditorOpen(event.currentTarget.open)}>
+      <summary>编辑策略</summary>
+      {editing && active && editorOpen ? <div inert={loading || disabled || archiveBusy} className="research-strategy-editor">
+        <StrategyManagePage key={editorRevision} backtest={{configuration: candidate, sourcePath: settings.source_path, onChange: setCandidate}} />
+      </div> : null}
+    </details>
+    <div className="scene-layer-actions research-run-actions">
+      <button type="button" className="scene-layer-primary-btn" disabled={disabled || loading || loadingBaseline || archiveBusy || !candidate.trim()} onClick={() => void run()}>{loading ? "计算中…" : "运行排名对照"}</button>
+      <button type="button" className="scene-layer-secondary-btn" disabled={disabled || loading || archiveBusy || loadingBaseline} onClick={() => void loadBaseline()}>{loadingBaseline ? "读取中…" : "恢复当前策略"}</button>
     </div>
-    {editing ? <label className="research-field">候选方案 · TOML
-      <textarea aria-label="候选策略 TOML" value={candidate} onChange={(event) => setCandidate(event.target.value)} rows={10} style={{ display: "block", width: "100%", boxSizing: "border-box", fontFamily: "monospace" }} />
-    </label> : null}
     {loading && phase ? <p className="scene-layer-caption" role="status">{phase} {" "}<button type="button" disabled={cancelling} onClick={() => void cancel()}>取消</button></p> : null}
     {error ? <p role="alert">{error}</p> : null}
-    {runSettings ? <details><summary>查看已记录的运行参数</summary>
-      <p className="scene-layer-caption">区间 {formatDateLabel(runSettings.start_date)} ~ {formatDateLabel(runSettings.end_date)}；持有 {runSettings.backtest_period} 个交易日；最少上市 {runSettings.min_listed_trade_days} 个交易日；复权方式 {runSettings.stock_adj_type}；基准 {runSettings.index_ts_code}；指数、概念、行业扣减系数分别为 {runSettings.index_beta}、{runSettings.concept_beta}、{runSettings.industry_beta}；{runSettings.verify_inputs ? "开启" : "未开启"}输入内容校验。重新运行使用当前页面参数。</p>
-    </details> : null}
+    <div ref={feedbackRef} className="research-feedback-target">
+    {result?.archive_run_id ? <button type="button" className="research-history-delete" disabled={loading || archiveBusy} onClick={() => void removeArchive(result.archive_run_id!)}>删除当前记录</button> : null}
     {result && runSettings ? <>
+      <h3>排名对照结果</h3>
       <label className="research-field">查看范围<select value={slice} onChange={(event) => {setSlice(event.target.value); setSelectedSamples(null);}}>{sliceOptions.map((value) => <option key={value} value={value}>{value.replace("::", " / ")}</option>)}</select></label>{" "}
       {result.archive_run_id ? <Link to={`/backtest/strategy-paper-validation?researchRun=${encodeURIComponent(result.archive_run_id)}`} className="research-button">验证交易</Link> : null}{" "}
       {result.archive_run_id ? <ResearchExportButton sourcePath={settings.source_path} runId={result.archive_run_id} disabled={loading} /> : null}
       {!result.summaries.some((item) => item.common_ranking_days > 0) ? <p className="scene-layer-caption">没有共同有效排名日，无法计算对照。</p> : null}
-      <details><summary>结果来源与覆盖</summary><p className="scene-layer-caption">当前结果使用运行时的配置快照，修改上方草稿不会改变它。{result.input_identity === "content_checked_not_snapshot" ? "所列文件运行前后内容一致（非一致快照）。" : "未进行输入内容校验。"} 运行区间 {formatDateLabel(runSettings.start_date)} ~ {formatDateLabel(runSettings.end_date)}，评分从 {formatDateLabel(result.scoring_start_date || runSettings.start_date)} 开始准备，持有 {runSettings.backtest_period} 日；基线 {result.baseline_ranking_days} 个排名日，候选 {result.candidate_ranking_days} 个排名日。资格未知数按统计日逐窗口累计；三日池的重叠历史会重复计数，资格未知可能改变席位。</p>
-      </details>
+      <p className="research-meta">{formatDateLabel(runSettings.start_date)} ~ {formatDateLabel(runSettings.end_date)} · 持有 {runSettings.backtest_period} 日 · 基线 {result.baseline_ranking_days} / 候选 {result.candidate_ranking_days} 个排名日</p>
       {result.baseline_warnings.concat(result.candidate_warnings).map((warning, index) => <p className="scene-layer-caption" key={`${index}-${warning}`}>{warning}</p>)}
+      {feedback ? <>
+        <label className="research-field">成员池<select value={`${feedback.pool_kind}-${feedback.top_k}`} onChange={(event) => setFeedbackPool(event.target.value)}>{feedbackOptions.map((item) => <option key={`${item.pool_kind}-${item.top_k}`} value={`${item.pool_kind}-${item.top_k}`}>{item.pool_kind === "three_day" ? "最近三日入选并集" : "当日入选"} · {item.top_k ? `前${item.top_k}名` : "全市场"}</option>)}</select></label>
+        <div className="research-feedback-grid">
+          <div><span>基线日均残差</span><strong>{formatBacktestValue(feedback.baseline_paired_daily_mean, "residual_return")}</strong></div>
+          <div><span>候选日均残差</span><strong>{formatBacktestValue(feedback.candidate_paired_daily_mean, "residual_return")}</strong></div>
+          <div><span>成对差</span><strong>{formatBacktestValue(feedback.paired_daily_difference, "residual_return")}</strong><small>正值更好，负值更差；单位为百分点</small></div>
+          <div><span>成对收益日</span><strong>{feedback.paired_return_days} / {feedback.common_ranking_days}</strong><small>共同排名日中，双方收益都可观察的日期</small></div>
+        </div>
+        <p className="research-meta">持有{runSettings.backtest_period}个交易日的残差，按双方共同可观察信号日等权，不是账户净值。{feedback.statistics?.lower != null && feedback.statistics?.upper != null ? `差值的描述性95%区间为 ${formatNumber(feedback.statistics.lower)} ~ ${formatNumber(feedback.statistics.upper)} 个百分点。${feedback.statistics.lower <= 0 && feedback.statistics.upper >= 0 ? "区间包含0，优势方向尚不明确。" : "这是本次样本的区间估计。"}` : "有效日期不足或区间不可计算，暂不判断稳定性。"}</p>
+        <button type="button" disabled={!result.membership_saved || !result.archive_run_id} onClick={() => setSelectedSamples(feedback)}>成员明细</button>
+      </> : null}
+      <details><summary>查看各季度与全部组合的完整对照</summary>
       <div className="scene-layer-contrib-table-wrap"><table className="scene-layer-contrib-table">
         <thead><tr><th>期间</th><th>区间状态</th><th>成员池</th><th>组合</th><th>成对收益日</th><th>基线日均</th><th>候选日均</th><th>成对差</th><th>95%区间 / HAC t / 家族p</th><th>样本</th></tr></thead>
         <tbody>{visibleSummaries.map((item) => <tr key={`${item.pool_kind}-${item.top_k}-${item.period}`}>
@@ -269,6 +302,7 @@ export function RankComparisonPanel({ settings, disabled, onRunningChange, onRes
           <td><button type="button" disabled={!result.membership_saved || !result.archive_run_id} onClick={() => setSelectedSamples(item)}>查看成员</button></td>
         </tr>)}</tbody>
       </table></div>
+      </details>
       {selectedSamples && result.archive_run_id && result.membership_saved ? <RankComparisonSamples
         key={`${result.archive_run_id}-${selectedSamples.pool_kind}-${selectedSamples.top_k}-${selectedSamples.period}`}
         sourcePath={settings.source_path} runId={result.archive_run_id} startDate={runSettings.start_date} endDate={runSettings.end_date}
@@ -302,5 +336,6 @@ export function RankComparisonPanel({ settings, disabled, onRunningChange, onRes
       {result.input_digests?.length ? <details><summary>查看输入文件摘要</summary><ul>{result.input_digests.map((item) => <li key={item.file}>{item.file}：{item.sha256 ? `${item.bytes} 字节 · ${item.sha256}` : "不存在"}</li>)}</ul></details> : null}
       <details><summary>查看本次配置快照</summary><h4>基线</h4><pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{result.baseline_config}</pre><h4>候选</h4><pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{result.candidate_config}</pre></details>
     </> : null}
+    </div>
   </section>;
 }

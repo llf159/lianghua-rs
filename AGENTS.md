@@ -28,12 +28,12 @@
 
 ## 工程取舍
 
-- 问题：手动测试与编辑器全工作区检查叠加时，多路 Rust 编译会造成内存峰值，重复关联 workspace 根和已在成员列表中的 Tauri crate 还会启动两组检查；解决方案选择：Cargo 默认 `build.jobs = 1`，rust-analyzer 只关联根 `Cargo.toml`；解释：以编译吞吐换取桌面可用性，根工作区已包含 Tauri，无需重复关联；确有内存余量时可单次执行 `cargo check -j 2` 覆盖默认值，避免另启并行 Cargo 任务。
+- 问题：重复关联 workspace 根和已在成员列表中的 Tauri crate 会启动重复检查，手动编译与编辑器检查叠加也可能造成内存峰值；解决方案选择：rust-analyzer 只关联根 `Cargo.toml`，Cargo 并发数使用默认值，内存不足时按需以 `cargo check -j 1` 限制单次检查；解释：根工作区已包含 Tauri，无需重复关联；保留默认并发以利用可用 CPU，限制并发可降低内存占用，但会延长编译时间。
 
-- 问题：开发构建仅优化业务 crate 时，DuckDB 的 Rust Arrow 转换和追加桥接仍按未优化代码执行，放大数据库写入耗时；解决方案选择：`profile.dev.package.duckdb.opt-level = 3`；解释：只提高数据库桥接包的编译成本，保留其余开发调试配置；原生 DuckDB 动态库已单独编译，这个设置优化的是 Rust 桥接，不代表重新优化原生引擎或改变 release 配置。
+- 问题：release 单个 crate 使用一个代码生成单元限制了并行编译；解决方案选择：设置 `codegen-units = 16`，保留 fat LTO；解释：增加代码生成阶段的并行机会，以可能增加内存占用和影响优化效果为代价，实际加速受依赖关系和 LTO 阶段限制。
+
+- 问题：开发构建优化计算和数据库桥接组件可以加快回测及写入，但会延长编译时间；解决方案选择：dev 默认不单独启用优化，运行耗时任务时按需临时调整，例如 `cargo --config 'profile.dev.package.lianghua-core.opt-level=3' build`，也可对 `lianghua-app-strategy`、`lianghua-backtest`、`lianghua-data`、`lianghua-download`、`lianghua-scoring` 或 `duckdb` 使用同样的配置；解释：日常开发优先缩短编译时间，临时优化仅影响指定包的 dev 构建；DuckDB 配置优化的是 Rust 桥接，不改变原生引擎或 release 配置。
 
 - 问题：duckdb-rs 从引擎1.5起更换版本编码，普通 caret 约束会跨引擎版本升级，而本机系统动态库仍可能停留在旧版；解决方案选择：各组件统一使用 `~1.20000.0`（DuckDB 2.0.0），同步 Cargo.lock 与 CI 原生库，Linux 沿用新版绑定默认的匹配原生库下载，Android/Windows 保留 bundled；解释：只允许同引擎下的绑定补丁升级，避免 Rust 绑定和原生库版本错配；`DUCKDB_LIB_DIR` 会覆盖默认下载，手动指定时必须提供2.0.0库。此次只更新依赖、未编译或迁移数据库；2.0能继续读写旧格式，但新建数据库默认采用2.0格式，旧引擎不能读取，跨设备共享新库时必须同步更新。
 
 - 问题：Reqwest 的未启用 HTTP/3 可选依赖在锁文件中也会引入较新的 quinn，并间接引入与应用 rand 0.9 不兼容的 rand 0.10；解决方案选择：锁定 quinn 0.11.9 和 quinn-proto 0.11.15，应用与通知插件统一使用 rand 0.9.5；解释：HTTP/3 当前未启用，这些版本只约束锁文件解析，不改变运行中的传输方式；后续全量更新依赖时检查锁文件，必要时依次执行 `cargo update -p quinn --precise 0.11.9` 和 `cargo update -p quinn-proto --precise 0.11.15`。
-
-- 问题：解释器与研究统计迁入lianghua-core、lianghua-app-strategy后，开发构建的既有定向优化未覆盖这两个热路径组件，真实多年回测仍执行未优化的表达式和哈希聚合循环；解决方案选择：两包沿用其他计算组件的dev opt-level=3，保留调试信息；解释：以这两个包更长的构建时间和优化后调试步进精度换取开发时实际计算吞吐，release配置不变，不能用这项配置解释发布构建的加速。

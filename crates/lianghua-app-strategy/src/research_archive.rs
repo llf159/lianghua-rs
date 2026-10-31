@@ -130,6 +130,10 @@ pub struct ResearchArchiveHeader {
     pub parent_run_id: Option<String>,
     pub created_ms: u128,
     pub question: String,
+    #[serde(default)]
+    pub note: Option<String>,
+    #[serde(default)]
+    pub summary: String,
     pub kind: String,
     #[serde(default)]
     pub status: String,
@@ -169,6 +173,109 @@ fn archive_run_path(source_path: &str, run_id: &str) -> Result<PathBuf, String> 
     Ok(archive_root(source_path)?.join(run_id))
 }
 
+fn describe_research_archive(header: &mut ResearchArchiveHeader, configuration: &Value) {
+    if header.summary.is_empty() {
+        let query = configuration
+            .get("query")
+            .or_else(|| configuration.get("settings"))
+            .unwrap_or(configuration);
+        let form = configuration.get("form").unwrap_or(query);
+        let mut parts = vec![
+            form.get("importRuleName")
+                .and_then(Value::as_str)
+                .filter(|name| !name.is_empty())
+                .unwrap_or(match header.kind.as_str() {
+                    "rank_comparison" => "排名对照",
+                    "paper_validation" => "模拟盘",
+                    _ => "表达式",
+                })
+                .to_string(),
+        ];
+        if let (Some(start), Some(end)) = (
+            query
+                .get("startDate")
+                .or_else(|| query.get("start_date"))
+                .and_then(Value::as_str),
+            query
+                .get("endDate")
+                .or_else(|| query.get("end_date"))
+                .and_then(Value::as_str),
+        ) {
+            parts.push(format!("{start} ~ {end}"));
+        }
+        if let Some(period) = query
+            .get("backtestPeriod")
+            .or_else(|| query.get("backtest_period"))
+            .and_then(Value::as_u64)
+        {
+            parts.push(format!("{period}日"));
+        }
+        if let Some(formula) = form
+            .get("expression")
+            .or_else(|| query.get("when"))
+            .and_then(Value::as_str)
+            .filter(|text| !text.trim().is_empty())
+        {
+            let formula = formula.split_whitespace().collect::<Vec<_>>().join(" ");
+            parts.push(if formula.chars().count() > 80 {
+                format!("{}…", formula.chars().take(80).collect::<String>())
+            } else {
+                formula
+            });
+        }
+        header.summary = parts.join(" · ");
+    }
+    if header.note.is_none() {
+        header.note = Some(
+            configuration
+                .get("notes")
+                .map(|notes| {
+                    if let Some(text) = notes.as_str() {
+                        return text.to_string();
+                    }
+                    [
+                        ("hypothesis", "假设"),
+                        ("scope", "范围"),
+                        ("conclusion", "结论"),
+                    ]
+                    .into_iter()
+                    .filter_map(|(key, label)| {
+                        notes
+                            .get(key)
+                            .and_then(Value::as_str)
+                            .filter(|text| !text.trim().is_empty())
+                            .map(|text| format!("{label}：{text}"))
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                })
+                .unwrap_or_default(),
+        );
+    }
+}
+
+pub fn update_research_archive_metadata(
+    source_path: &str,
+    run_id: &str,
+    name: String,
+    note: String,
+) -> Result<ResearchArchiveHeader, String> {
+    let _access = research_archive_lock(source_path, false)?;
+    let mut header = read_research_archive_header(source_path, run_id)?;
+    if header.status == "running" {
+        return Err("运行中的记录尚未完成，请完成后编辑备注".into());
+    }
+    header.question = name.trim().to_string();
+    header.note = Some(note.trim().to_string());
+    let path = archive_run_path(source_path, run_id)?;
+    let mut file = File::create(path.join(".header.json.pending")).map_err(|e| e.to_string())?;
+    serde_json::to_writer(&mut file, &header).map_err(|e| e.to_string())?;
+    file.sync_all().map_err(|e| e.to_string())?;
+    fs::rename(path.join(".header.json.pending"), path.join("header.json"))
+        .map_err(|e| e.to_string())?;
+    Ok(header)
+}
+
 pub fn save_research_archive(
     source_path: &str,
     parent_run_id: Option<String>,
@@ -196,6 +303,7 @@ pub fn save_research_archive(
     if !configuration.is_object() || !result.is_object() {
         return Err("研究配置和结果必须是对象".to_string());
     }
+    let mut note = Some(String::new());
     let membership_source = if let Some(run_id) = membership_source_run_id {
         if status != "completed" || membership_staging.is_some() {
             return Err("不能从该运行复制排名成员".to_string());
@@ -207,6 +315,7 @@ pub fn save_research_archive(
         {
             return Err("来源运行不包含排名成员明细".to_string());
         }
+        note = source.header.note.clone();
         let notes = configuration.get("notes").cloned();
         let exploratory_filter = configuration.get("exploratory_filter").cloned();
         configuration = source.configuration;
@@ -249,12 +358,14 @@ pub fn save_research_archive(
     fs::create_dir_all(&root).map_err(|e| format!("创建研究存档目录失败: {e}"))?;
     let temporary = root.join(format!(".pending-{run_id}"));
     fs::create_dir(&temporary).map_err(|e| format!("创建研究存档失败: {e}"))?;
-    let header = ResearchArchiveHeader {
+    let mut header = ResearchArchiveHeader {
         version: 1,
         run_id: run_id.clone(),
         parent_run_id,
         created_ms,
         question: question.trim().to_string(),
+        note,
+        summary: String::new(),
         kind: kind.to_string(),
         status: status.to_string(),
         membership_saved: membership_staging.is_some() || membership_source.is_some(),
@@ -266,6 +377,7 @@ pub fn save_research_archive(
         owner_session: archive_session().to_string(),
         cleanup_lock: true,
     };
+    describe_research_archive(&mut header, &configuration);
     let write_result = (|| -> Result<(), String> {
         for (name, value) in [
             (
@@ -431,6 +543,14 @@ pub fn list_research_archives(source_path: &str) -> Result<Vec<ResearchArchiveHe
         if cleanup.is_some() && header.status != "running" {
             cleanup_research_run(&entry.path(), header.status != "completed");
         }
+        if header.summary.is_empty() || header.note.is_none() {
+            if let Ok(file) = File::open(entry.path().join("configuration.json")) {
+                if let Ok(configuration) = serde_json::from_reader::<_, Value>(BufReader::new(file))
+                {
+                    describe_research_archive(&mut header, &configuration);
+                }
+            }
+        }
         out.push(header);
     }
     out.sort_by(|a, b| {
@@ -447,10 +567,17 @@ pub fn read_research_archive_header(
 ) -> Result<ResearchArchiveHeader, String> {
     let file = File::open(archive_run_path(source_path, run_id)?.join("header.json"))
         .map_err(|e| e.to_string())?;
-    let header: ResearchArchiveHeader =
+    let mut header: ResearchArchiveHeader =
         serde_json::from_reader(BufReader::new(file)).map_err(|e| e.to_string())?;
     if header.run_id != run_id || header.version != 1 {
         return Err("研究存档编号或版本不匹配".into());
+    }
+    if header.summary.is_empty() || header.note.is_none() {
+        let file = File::open(archive_run_path(source_path, run_id)?.join("configuration.json"))
+            .map_err(|e| e.to_string())?;
+        let configuration: Value =
+            serde_json::from_reader(BufReader::new(file)).map_err(|e| e.to_string())?;
+        describe_research_archive(&mut header, &configuration);
     }
     Ok(header)
 }
@@ -464,11 +591,7 @@ pub fn read_research_archive(
         let file = File::open(path.join(name)).map_err(|e| format!("读取{name}失败: {e}"))?;
         serde_json::from_reader(BufReader::new(file)).map_err(|e| format!("解析{name}失败: {e}"))
     };
-    let header: ResearchArchiveHeader =
-        serde_json::from_value(read("header.json")?).map_err(|e| e.to_string())?;
-    if header.run_id != run_id || header.version != 1 {
-        return Err("研究存档编号或版本不匹配".to_string());
-    }
+    let header = read_research_archive_header(source_path, run_id)?;
     Ok(ResearchArchiveRun {
         header,
         configuration: read("configuration.json")?,
@@ -721,11 +844,13 @@ pub fn export_research_archive(source_path: &str, run_id: &str) -> Result<String
     serde_json::to_writer_pretty(&mut file, &run).map_err(|e| e.to_string())?;
     file.flush().map_err(|e| e.to_string())?;
     let text = format!(
-        "# {}\n\n运行：{}\n\n状态：{}；输入身份：{}\n\n本报告只使用存档配置和结果。详情图如需打开，读取当前行情，不认证为历史输入。成员与标签在同目录数据库中，复制整个运行目录可一并保留。\n\n## 配置\n\n```json\n{}\n```\n\n## 结果\n\n```json\n{}\n```\n",
+        "# {}\n\n运行：{}\n\n状态：{}；输入身份：{}\n\n摘要：{}\n\n备注：{}\n\n本报告只使用存档配置和结果。详情图如需打开，读取当前行情，不认证为历史输入。成员与标签在同目录数据库中，复制整个运行目录可一并保留。\n\n## 配置\n\n```json\n{}\n```\n\n## 结果\n\n```json\n{}\n```\n",
         run.header.question,
         run_id,
         run.header.status,
         run.header.input_identity,
+        run.header.summary,
+        run.header.note.as_deref().unwrap_or(""),
         serde_json::to_string_pretty(&run.configuration).map_err(|e| e.to_string())?,
         serde_json::to_string_pretty(&run.result).map_err(|e| e.to_string())?
     );
@@ -871,7 +996,7 @@ pub fn import_research_archive(
         if reader.read(&mut trailing).map_err(|e| e.to_string())? != 0 {
             return Err("结果包存在多余内容".into());
         }
-        let original: ResearchArchiveHeader = serde_json::from_reader(
+        let mut original: ResearchArchiveHeader = serde_json::from_reader(
             File::open(pending.join("header.json")).map_err(|e| e.to_string())?,
         )
         .map_err(|e| e.to_string())?;
@@ -887,6 +1012,7 @@ pub fn import_research_archive(
             File::open(pending.join("configuration.json")).map_err(|e| e.to_string())?,
         )
         .map_err(|e| e.to_string())?;
+        describe_research_archive(&mut original, &configuration);
         configuration["imported_original_header"] =
             serde_json::to_value(&original).map_err(|e| e.to_string())?;
         let mut payload: Value = serde_json::from_reader(
@@ -929,6 +1055,12 @@ pub fn import_research_archive(
                 &original.status,
                 None,
                 payload,
+            )?;
+            update_research_archive_metadata(
+                source_path,
+                &journal.run_id,
+                original.question.clone(),
+                original.note.clone().unwrap_or_default(),
             )
         })();
         if submitted.is_err() {
@@ -1082,7 +1214,7 @@ mod tests {
             source,
             None,
             "研究".into(),
-            json!({"period": 3}),
+            json!({"query":{"startDate":"20240101","endDate":"20241231","backtestPeriod":3},"form":{"importRuleName":"规则A","expression":"C > O"},"notes":{"conclusion":"旧备注"}}),
             json!({"mean": 1.0}),
             "expression_validation",
             "completed",
@@ -1130,9 +1262,53 @@ mod tests {
             )
             .is_err()
         );
+        let directory = archive_run_path(source, &first.run_id).unwrap();
+        let configuration_before = fs::read(directory.join("configuration.json")).unwrap();
+        let result_before = fs::read(directory.join("result.json")).unwrap();
+        let mut legacy: Value =
+            serde_json::from_reader(File::open(directory.join("header.json")).unwrap()).unwrap();
+        legacy.as_object_mut().unwrap().remove("note");
+        legacy.as_object_mut().unwrap().remove("summary");
+        fs::write(
+            directory.join("header.json"),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        let record = read_research_archive_header(source, &first.run_id).unwrap();
+        assert!(record.summary.contains("规则A · 20240101 ~ 20241231 · 3日"));
+        assert_eq!(record.note.as_deref(), Some("结论：旧备注"));
+        update_research_archive_metadata(source, &first.run_id, "阈值调整".into(), String::new())
+            .unwrap();
+        assert_eq!(
+            read_research_archive_header(source, &first.run_id)
+                .unwrap()
+                .note
+                .as_deref(),
+            Some("")
+        );
+        let updated = update_research_archive_metadata(
+            source,
+            &first.run_id,
+            "阈值调整".into(),
+            "阈值改成5，留作对比".into(),
+        )
+        .unwrap();
+        assert_eq!(updated.run_id, first.run_id);
+        assert_eq!(updated.created_ms, first.created_ms);
+        assert_eq!(list_research_archives(source).unwrap().len(), 2);
+        assert_eq!(
+            fs::read(directory.join("configuration.json")).unwrap(),
+            configuration_before
+        );
+        assert_eq!(
+            fs::read(directory.join("result.json")).unwrap(),
+            result_before
+        );
         let bundle = export_research_archive(source, &first.run_id).unwrap();
         let imported = import_research_archive(source, File::open(&bundle).unwrap()).unwrap();
         assert_ne!(imported.run_id, first.run_id);
+        assert_eq!(imported.question, "阈值调整");
+        assert_eq!(imported.note.as_deref(), Some("阈值改成5，留作对比"));
         assert_eq!(
             read_research_archive(source, &imported.run_id)
                 .unwrap()

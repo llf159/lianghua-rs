@@ -852,6 +852,7 @@ export type RankLayerBacktestQuery = {
 }
 
 export type RuleExpressionValidationQuery = {
+  baselineDiagnostics?: boolean
   additionalPeriods?: number[]
   researchGrouping?: ResearchGrouping
   researchStatistics?: ResearchStatisticsSettings
@@ -1002,6 +1003,8 @@ export type ResearchArchiveHeader = {
   parent_run_id?: string | null
   created_ms: number
   question: string
+  note?: string | null
+  summary?: string
   kind: string
   status?: string
   membership_saved?: boolean
@@ -1018,6 +1021,10 @@ export async function saveResearchArchive(sourcePath: string, parentRunId: strin
 
 export async function readResearchArchive<T = RuleExpressionValidationData>(sourcePath: string, runId: string) {
   return invoke<{ header: ResearchArchiveHeader; configuration: unknown; result: T }>('read_research_archive', { sourcePath, runId })
+}
+
+export async function updateResearchArchiveMetadata(sourcePath: string, runId: string, name: string, note: string) {
+  return invoke<ResearchArchiveHeader>('update_research_archive_metadata', { sourcePath, runId, name, note })
 }
 
 export async function deleteResearchArchive(sourcePath: string, runId: string) {

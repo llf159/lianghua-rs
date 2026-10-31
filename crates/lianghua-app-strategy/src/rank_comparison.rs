@@ -279,6 +279,7 @@ pub fn run_rank_comparison(
         )?;
         progress("计算板块、市值和MKT切片")?;
         let evidence = crate::research_evidence::ValidationResearchOutput {
+            baseline_diagnostics: true,
             path: evidence_path.clone(),
             grouping: request.grouping.clone(),
             statistics: request.statistics.clone(),

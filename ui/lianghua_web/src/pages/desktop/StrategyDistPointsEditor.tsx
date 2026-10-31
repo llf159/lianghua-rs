@@ -10,11 +10,13 @@ export default function StrategyDistPointsEditor({
   onChange,
   scopeWay,
   windowText,
+  showHelp = true,
 }: {
   rows: DistPointRow[]
   onChange: (rows: DistPointRow[]) => void
   scopeWay: string
   windowText: string
+  showHelp?: boolean
 }) {
   const id = useId()
   const { points, errors } = validateDistPointRows(rows)
@@ -212,7 +214,7 @@ export default function StrategyDistPointsEditor({
           </p>
         )}
       </div>
-      <details className="strategy-rule-editor-help">
+      {showHelp ? <details className="strategy-rule-editor-help">
         <summary>计分说明</summary>
         <p>
           {scopeWay.toUpperCase() === 'EACH'
@@ -220,7 +222,7 @@ export default function StrategyDistPointsEditor({
             : 'RECENT：只按最近一次命中的距今报价日查表。'}
           未命中或未配置的报价日计 0 分。分值支持负数和小数。
         </p>
-      </details>
+      </details> : null}
     </div>
   )
 }

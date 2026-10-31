@@ -27,12 +27,14 @@ function TrackingPointsInput({ value = 0, onChange }: { value?: number; onChange
 
 export default function StrategyRuleTrackingEditor({
   ruleName,
+  showHelp = true,
   tracking,
   onChange,
   captureTexts,
   onCaptureTextsChange,
 }: {
   ruleName: string
+  showHelp?: boolean
   tracking: TrackDefinition[]
   onChange: (value: TrackDefinition[]) => void
   captureTexts: Record<string, string>
@@ -383,7 +385,7 @@ export default function StrategyRuleTrackingEditor({
                       </p>
                     </div>
                   </details>
-                  <details className="strategy-rule-editor-help">
+                  {showHelp ? <details className="strategy-rule-editor-help">
                     <summary>跟踪说明与变量</summary>
                     <ul>
                       <li>起点当天为第 0 日，之后按市场交易日观察；原条件不再满足仍可跟踪。只在最近的跟踪总期限内选择起点，窗口内重复发现不换起点、不续期。</li>
@@ -394,7 +396,7 @@ export default function StrategyRuleTrackingEditor({
                       <li>AGE：距起点日数；SCORE_AGE：首次得分后日数；SIGNAL_AGE：首次确认后日数。尚未得分或确认时对应值为 -1。COMPLETED_STEPS：已完成步骤数；TRIGGER_SCORE：起点分值。</li>
                       <li>跟踪独立计分，在规则明细与回测中以「跟踪·名称」单列；与原策略分一起计入总分。保存后计算排名会更新结果，也可单独回放。分值可填负数，填 0 只观察。</li>
                     </ul>
-                  </details>
+                  </details> : null}
                 </>
               )}
             </div>

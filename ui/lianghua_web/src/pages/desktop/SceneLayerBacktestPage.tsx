@@ -1,4 +1,3 @@
-import { RankComparisonPanel } from "./components/RankComparisonPanel";
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { ensureManagedSourcePath } from "../../apis/managedSource";
 import { getStrategyManagePage, type StrategyManageRuleItem } from "../../apis/strategyManage";
@@ -228,7 +227,7 @@ export default function SceneLayerBacktestPage() {
   const [rankLayerMethod, setRankLayerMethod] = useState<RankLayerMethod>(
     storedCommonParams.rankLayerMethod,
   );
-  const [backtestBoardFilter, setBacktestBoardFilter] = useState<
+  const [requestedBoardFilter, setBacktestBoardFilter] = useState<
     (typeof STOCK_PICK_BOARD_OPTIONS)[number]
   >(storedCommonParams.backtestBoardFilter);
 
@@ -236,7 +235,6 @@ export default function SceneLayerBacktestPage() {
   const [initializing, setInitializing] = useState(false);
   const [error, setError] = useState("");
   const [rankLoading, setRankLoading] = useState(false);
-  const [comparisonLoading, setComparisonLoading] = useState(false);
   const [rankTransientLoading, setRankTransientLoading] = useState(false);
   const [rankError, setRankError] = useState("");
   const [rankResult, setRankResult] = useState<RankLayerBacktestData | null>(null);
@@ -258,7 +256,6 @@ export default function SceneLayerBacktestPage() {
     loading ||
     transientLoading ||
     rankLoading ||
-    comparisonLoading ||
     rankTransientLoading ||
     ruleLoading ||
     ruleTransientLoading;
@@ -266,6 +263,8 @@ export default function SceneLayerBacktestPage() {
     () => buildBoardFilterOptions(STOCK_PICK_BOARD_OPTIONS, excludeStBoard),
     [excludeStBoard],
   );
+
+  const backtestBoardFilter = backtestBoardOptions.includes(requestedBoardFilter) ? requestedBoardFilter : "全部";
 
   useEffect(() => {
     writeStoredBacktestCommonParams({
@@ -306,12 +305,6 @@ export default function SceneLayerBacktestPage() {
     rankLayerMethod,
     backtestBoardFilter,
   ]);
-
-  useEffect(() => {
-    if (!backtestBoardOptions.includes(backtestBoardFilter)) {
-      setBacktestBoardFilter("全部");
-    }
-  }, [backtestBoardFilter, backtestBoardOptions]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1148,18 +1141,6 @@ export default function SceneLayerBacktestPage() {
           </label>
         </div>
       </section>
-
-      <RankComparisonPanel
-        key={sourcePath}
-        disabled={heavyTaskRunning || initializing}
-        onRunningChange={setComparisonLoading}
-        settings={{
-          source_path: sourcePath, stock_adj_type: stockAdjType.trim() || "qfq", index_ts_code: indexTsCode.trim(),
-          index_beta: Number(indexBeta), concept_beta: Number(conceptBeta), industry_beta: Number(industryBeta),
-          start_date: normalizeDateInput(startDateInput), end_date: normalizeDateInput(endDateInput),
-          min_listed_trade_days: Number(minListedTradeDays), backtest_period: Number(backtestPeriod), verify_inputs: false, task_id: "", research_question: "", research_notes: null, parent_run_id: null,
-        }}
-      />
 
       <section className="scene-layer-card">
         <h2 className="scene-layer-title">排名整体回测</h2>

@@ -759,78 +759,231 @@ fn scene_draft_to_file(draft: StrategyManageSceneDraft) -> Result<StrategyRuleFi
 
 pub fn get_strategy_manage_page(source_path: &str) -> Result<StrategyManagePageData, String> {
     let config = load_rule_file(source_path)?;
-    Ok((|config: &StrategyRuleFile| -> StrategyManagePageData {
-        let mut rule_count_map: HashMap<&str, usize> = HashMap::new();
-        for rule in &config.rule {
-            *rule_count_map.entry(rule.scene_name.trim()).or_default() += 1;
+    Ok(strategy_manage_page_from_config(&config))
+}
+
+fn strategy_manage_page_from_config(config: &StrategyRuleFile) -> StrategyManagePageData {
+    let mut rule_count_map: HashMap<&str, usize> = HashMap::new();
+    for rule in &config.rule {
+        *rule_count_map.entry(rule.scene_name.trim()).or_default() += 1;
+    }
+
+    let scenes = config
+        .scene
+        .iter()
+        .enumerate()
+        .map(|(index, scene)| StrategyManageSceneItem {
+            index,
+            name: scene.name.clone(),
+            enabled: scene.enabled,
+            direction: scene.direction.as_str().to_string(),
+            observe_threshold: scene.observe_threshold,
+            trigger_threshold: scene.trigger_threshold,
+            confirm_threshold: scene.confirm_threshold,
+            fail_threshold: scene.fail_threshold,
+            rule_count: rule_count_map.get(scene.name.trim()).copied().unwrap_or(0),
+        })
+        .collect();
+
+    let rules = config
+        .rule
+        .iter()
+        .enumerate()
+        .map(|(index, rule)| StrategyManageRuleItem {
+            index,
+            name: rule.name.clone(),
+            enabled: rule.enabled,
+            scene_name: rule.scene_name.clone(),
+            kind: rule.kind,
+            stage: (|stage: RuleStage| -> String {
+                match stage {
+                    RuleStage::Base => "base",
+                    RuleStage::Trigger => "trigger",
+                    RuleStage::Confirm => "confirm",
+                    RuleStage::Risk => "risk",
+                    RuleStage::Fail => "fail",
+                }
+                .to_string()
+            })(rule.stage),
+            scope_way: rule.scope_way.clone(),
+            scope_windows: rule.scope_windows,
+            points: rule.points,
+            explain: rule.explain.clone(),
+            when: rule.when.clone(),
+            dist_points: rule.dist_points.clone(),
+            conditions: rule
+                .conditions
+                .iter()
+                .map(|condition| StrategyManageRuleCondition {
+                    name: condition.name.clone(),
+                    when: condition.when.clone(),
+                    bonus_points: condition.bonus_points,
+                })
+                .collect(),
+            points_by_hits: rule.points_by_hits.clone(),
+            max_points: rule.max_points,
+            max_bonus_points: rule.max_bonus_points,
+            tracking: config
+                .track
+                .iter()
+                .filter(|track| rule.id.is_some() && track.source == rule.id)
+                .cloned()
+                .collect(),
+        })
+        .collect();
+
+    StrategyManagePageData { scenes, rules }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum StrategyBacktestEdit {
+    Rule {
+        original_name: Option<String>,
+        draft: StrategyManageRuleDraft,
+    },
+    RuleEnabled {
+        name: String,
+        enabled: bool,
+    },
+    RemoveRules {
+        names: Vec<String>,
+    },
+    Scene {
+        original_name: Option<String>,
+        draft: StrategyManageSceneDraft,
+    },
+    SceneEnabled {
+        name: String,
+        enabled: bool,
+    },
+    RemoveScene {
+        name: String,
+    },
+}
+
+#[derive(Serialize)]
+pub struct StrategyBacktestConfig {
+    pub configuration: String,
+    pub page: StrategyManagePageData,
+}
+
+pub fn edit_strategy_backtest_config(
+    configuration: &str,
+    edit: Option<StrategyBacktestEdit>,
+) -> Result<StrategyBacktestConfig, String> {
+    let mut config =
+        parse_rule_file_text(configuration).map_err(|e| format!("解析策略配置失败: {e}"))?;
+    if config
+        .rule
+        .iter()
+        .any(|rule| !rule.unbound_bonuses.is_empty())
+    {
+        return Err("旧版独立 bonus 请改为 condition.bonus_points".into());
+    }
+    let changed = edit.is_some();
+    match edit {
+        Some(StrategyBacktestEdit::Rule {
+            original_name,
+            draft,
+        }) => {
+            let tracking = draft.tracking.clone();
+            let mut rule = draft_to_rule(draft)?;
+            if config.rule.iter().any(|item| {
+                item.name.trim() == rule.name && original_name.as_deref() != Some(item.name.trim())
+            }) {
+                return Err(format!("规则名称重复: {}", rule.name));
+            }
+            validate_rule_definition("", None, None, None, None, None, &rule, &config.scene)?;
+            let name = rule.name.clone();
+            if let Some(original_name) = original_name {
+                let old = config
+                    .rule
+                    .iter_mut()
+                    .find(|item| item.name.trim() == original_name.trim())
+                    .ok_or_else(|| format!("规则不存在: {original_name}"))?;
+                rule.id = old.id.clone();
+                *old = rule;
+            } else {
+                config.rule.push(rule);
+            }
+            apply_rule_tracking(&mut config, &name, tracking)?;
         }
-
-        let scenes = config
-            .scene
-            .iter()
-            .enumerate()
-            .map(|(index, scene)| StrategyManageSceneItem {
-                index,
-                name: scene.name.clone(),
-                enabled: scene.enabled,
-                direction: scene.direction.as_str().to_string(),
-                observe_threshold: scene.observe_threshold,
-                trigger_threshold: scene.trigger_threshold,
-                confirm_threshold: scene.confirm_threshold,
-                fail_threshold: scene.fail_threshold,
-                rule_count: rule_count_map.get(scene.name.trim()).copied().unwrap_or(0),
-            })
-            .collect();
-
-        let rules = config
-            .rule
-            .iter()
-            .enumerate()
-            .map(|(index, rule)| StrategyManageRuleItem {
-                index,
-                name: rule.name.clone(),
-                enabled: rule.enabled,
-                scene_name: rule.scene_name.clone(),
-                kind: rule.kind,
-                stage: (|stage: RuleStage| -> String {
-                    match stage {
-                        RuleStage::Base => "base",
-                        RuleStage::Trigger => "trigger",
-                        RuleStage::Confirm => "confirm",
-                        RuleStage::Risk => "risk",
-                        RuleStage::Fail => "fail",
+        Some(StrategyBacktestEdit::RuleEnabled { name, enabled }) => {
+            config
+                .rule
+                .iter_mut()
+                .find(|item| item.name == name)
+                .ok_or_else(|| format!("规则不存在: {name}"))?
+                .enabled = enabled;
+        }
+        Some(StrategyBacktestEdit::RemoveRules { names }) => {
+            let removed: HashSet<_> = config
+                .rule
+                .iter()
+                .filter(|rule| names.contains(&rule.name))
+                .filter_map(|rule| rule.id.clone())
+                .collect();
+            config.rule.retain(|rule| !names.contains(&rule.name));
+            config
+                .track
+                .retain(|track| track.source.as_ref().is_none_or(|id| !removed.contains(id)));
+        }
+        Some(StrategyBacktestEdit::Scene {
+            original_name,
+            draft,
+        }) => {
+            validate_scene_values(&draft)?;
+            if config.scene.iter().any(|item| {
+                item.name.trim() == draft.name.trim()
+                    && original_name.as_deref() != Some(item.name.trim())
+            }) {
+                return Err(format!("scene 名称重复: {}", draft.name));
+            }
+            let scene = scene_draft_to_file(draft)?;
+            if let Some(original_name) = original_name {
+                let old = config
+                    .scene
+                    .iter_mut()
+                    .find(|item| item.name == original_name)
+                    .ok_or_else(|| format!("scene 不存在: {original_name}"))?;
+                for rule in &mut config.rule {
+                    if rule.scene_name == original_name {
+                        rule.scene_name = scene.name.clone();
                     }
-                    .to_string()
-                })(rule.stage),
-                scope_way: rule.scope_way.clone(),
-                scope_windows: rule.scope_windows,
-                points: rule.points,
-                explain: rule.explain.clone(),
-                when: rule.when.clone(),
-                dist_points: rule.dist_points.clone(),
-                conditions: rule
-                    .conditions
-                    .iter()
-                    .map(|condition| StrategyManageRuleCondition {
-                        name: condition.name.clone(),
-                        when: condition.when.clone(),
-                        bonus_points: condition.bonus_points,
-                    })
-                    .collect(),
-                points_by_hits: rule.points_by_hits.clone(),
-                max_points: rule.max_points,
-                max_bonus_points: rule.max_bonus_points,
-                tracking: config
-                    .track
-                    .iter()
-                    .filter(|track| rule.id.is_some() && track.source == rule.id)
-                    .cloned()
-                    .collect(),
-            })
-            .collect();
-
-        StrategyManagePageData { scenes, rules }
-    })(&config))
+                }
+                *old = scene;
+            } else {
+                config.scene.push(scene);
+            }
+        }
+        Some(StrategyBacktestEdit::SceneEnabled { name, enabled }) => {
+            config
+                .scene
+                .iter_mut()
+                .find(|item| item.name == name)
+                .ok_or_else(|| format!("scene 不存在: {name}"))?
+                .enabled = enabled;
+        }
+        Some(StrategyBacktestEdit::RemoveScene { name }) => {
+            if config.rule.iter().any(|rule| rule.scene_name == name) {
+                return Err(format!("scene 仍被 rule 引用，不能删除: {name}"));
+            }
+            config.scene.retain(|scene| scene.name != name);
+        }
+        None => {}
+    }
+    let text = if changed {
+        toml::to_string_pretty(&config).map_err(|e| e.to_string())?
+    } else {
+        configuration.to_string()
+    };
+    let parsed: ScoreConfig = toml::from_str(&text).map_err(|e| format!("策略配置错误：{e}"))?;
+    ScoreConfig::validate(&parsed)?;
+    Ok(StrategyBacktestConfig {
+        configuration: text,
+        page: strategy_manage_page_from_config(&config),
+    })
 }
 
 pub fn set_strategy_manage_scene_enabled(
@@ -1185,6 +1338,89 @@ mod tests {
             .expect("clock")
             .as_nanos();
         std::env::temp_dir().join(format!("lianghua_strategy_manage_{unique}"))
+    }
+
+    #[test]
+    fn backtest_editor_changes_configuration_without_losing_rule_identity() {
+        let original = r#"
+version = 1
+[[scene]]
+name = "趋势"
+direction = "long"
+observe_threshold = 1.0
+trigger_threshold = 2.0
+confirm_threshold = 3.0
+fail_threshold = 1.0
+[[rule]]
+id = "discovery"
+name = "发现"
+scene = "趋势"
+kind = "single"
+stage = "base"
+scope_windows = 1
+scope_way = "LAST"
+when = "C > O"
+points = 2.0
+explain = "测试"
+[[track]]
+id = "confirmation"
+name = "确认"
+source = "discovery"
+start = "C > O"
+ttl = 20
+points = 3.0
+"#;
+        let preview = super::edit_strategy_backtest_config(original, None).unwrap();
+        assert_eq!(preview.configuration, original);
+        let mut draft: StrategyManageRuleDraft =
+            serde_json::from_value(serde_json::to_value(&preview.page.rules[0]).unwrap()).unwrap();
+        draft.name = "调整后".into();
+        draft.when = "C > REF(C, 3)".into();
+        draft.points = 5.0;
+        let edited = super::edit_strategy_backtest_config(
+            original,
+            Some(super::StrategyBacktestEdit::Rule {
+                original_name: Some("发现".into()),
+                draft: draft.clone(),
+            }),
+        )
+        .unwrap();
+        assert_eq!(edited.page.rules[0].points, 5.0);
+        assert_eq!(edited.page.rules[0].name, "调整后");
+        assert_eq!(
+            edited.page.rules[0].tracking[0].source.as_deref(),
+            Some("discovery")
+        );
+        assert_eq!(
+            edited.page.rules[0].tracking[0].start.as_deref(),
+            Some("C > O")
+        );
+        assert_eq!(parse_rule_file_text(original).unwrap().rule[0].points, 2.0);
+        draft.when = "C > (".into();
+        assert!(
+            super::edit_strategy_backtest_config(
+                original,
+                Some(super::StrategyBacktestEdit::Rule {
+                    original_name: Some("发现".into()),
+                    draft
+                })
+            )
+            .is_err()
+        );
+        let removed = super::edit_strategy_backtest_config(
+            &edited.configuration,
+            Some(super::StrategyBacktestEdit::RemoveRules {
+                names: vec!["调整后".into()],
+            }),
+        )
+        .unwrap();
+        assert!(removed.page.rules.is_empty());
+        assert!(
+            parse_rule_file_text(&removed.configuration)
+                .unwrap()
+                .track
+                .is_empty()
+        );
     }
 
     #[test]

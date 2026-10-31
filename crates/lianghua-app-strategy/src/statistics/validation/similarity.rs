@@ -363,6 +363,9 @@ pub(in crate::statistics) fn load_validation_existing_rule_score_index(
     universe: &ValidationUniverseIndex,
     research: Option<&crate::research_evidence::ValidationResearchOutput>,
 ) -> Result<ValidationExistingRuleScoreIndex, String> {
+    if research.is_some_and(|output| !output.baseline_diagnostics) {
+        return Ok(ValidationExistingRuleScoreIndex::default());
+    }
     let result_conn = if let Some(research) = research {
         research.open()?
     } else {

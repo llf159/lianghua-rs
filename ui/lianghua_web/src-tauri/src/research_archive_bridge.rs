@@ -6,6 +6,28 @@ use lianghua_app_strategy::research_archive::{
 use serde_json::Value;
 
 #[tauri::command]
+pub async fn update_research_archive_metadata(
+    source_path: String,
+    run_id: String,
+    name: String,
+    note: String,
+) -> Result<ResearchArchiveHeader, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        lianghua_app_strategy::research_archive::update_research_archive_metadata(
+            &source_path,
+            &run_id,
+            name,
+            note,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 pub fn list_research_archives(source_path: String) -> Result<Vec<ResearchArchiveHeader>, String> {
     let _guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
         .read()

@@ -53,25 +53,4 @@ toml = "1.1.8"
 [profile.release]
 opt-level = 3
 lto = "fat"
-codegen-units = 1
-
-[profile.dev.package.lianghua-data]
-opt-level = 3
-
-[profile.dev.package.duckdb]
-opt-level = 3
-
-[profile.dev.package.lianghua-download]
-opt-level = 3
-
-[profile.dev.package.lianghua-scoring]
-opt-level = 3
-
-[profile.dev.package.lianghua-backtest]
-opt-level = 3
-
-[profile.dev.package.lianghua-core]
-opt-level = 3
-
-[profile.dev.package.lianghua-app-strategy]
-opt-level = 3
+codegen-units = 16

@@ -9,6 +9,8 @@ import {
   type CyqChenStrategyPageData,
 } from '../../apis/cyqChen'
 import {
+  editStrategyBacktestConfig,
+  type StrategyBacktestEdit,
   checkStrategyManageSceneDraft,
   checkStrategyManageRuleDraft,
   createStrategyManageScene,
@@ -483,7 +485,10 @@ function formatChipDirection(direction: CyqChenStrategyDraft['direction']) {
   return direction === 'buy' ? '买入' : '卖出'
 }
 
-export default function StrategyManagePage({ view = 'rules' }: { view?: StrategyManageView }) {
+export default function StrategyManagePage({ view = 'rules', backtest }: {
+  view?: StrategyManageView
+  backtest?: { configuration: string; sourcePath: string; onChange: (configuration: string) => void }
+}) {
   const bulkModalRef = useRef<HTMLDivElement | null>(null)
   const bulkBoardRef = useRef<HTMLDivElement | null>(null)
   const bulkSceneStripRef = useRef<HTMLDivElement | null>(null)
@@ -762,9 +767,15 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
   }
 
   async function loadPage() {
-    setBusyAction('loading')
-    setError('')
     try {
+      if (backtest) {
+        const data = (await editStrategyBacktestConfig(backtest.configuration)).page
+        setSourcePath(backtest.sourcePath)
+        setScenes(data.scenes)
+        setRules(data.rules)
+        setSelectedSceneName('')
+        return
+      }
       const resolvedSourcePath = await ensureManagedSourcePath()
       const data = await getStrategyManagePage(resolvedSourcePath)
       setSourcePath(resolvedSourcePath)
@@ -812,7 +823,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
   }
 
   useEffect(() => {
-    void loadPage()
+    void Promise.resolve().then(loadPage)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -820,19 +831,26 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
     setScenes(data.scenes ?? [])
     setRules(data.rules ?? [])
     setSelectedSceneName((current) => {
-      const nextName = preferSceneName || current || ''
+      const nextName = backtest ? current : preferSceneName || current || ''
       return data.scenes.some((item) => item.name === nextName)
         ? nextName
         : ''
     })
   }
 
+  async function updateBacktest(edit: StrategyBacktestEdit, apply = true) {
+    if (!backtest) throw new Error('回测策略未载入')
+    const next = await editStrategyBacktestConfig(backtest.configuration, edit)
+    if (apply) backtest.onChange(next.configuration)
+    return next.page
+  }
+
   async function onToggleScene(scene: StrategyManageSceneItem) {
     setBusyAction('saving')
     setError('')
     try {
-      applyPageData(await setStrategyManageSceneEnabled(sourcePath, scene.name, !scene.enabled))
-      setNotice(`${scene.name}已${scene.enabled ? '暂停' : '启用'}；历史榜单和回测请重新运行 Ranking Compute。`)
+      applyPageData(backtest ? await updateBacktest({action: 'scene_enabled', name: scene.name, enabled: !scene.enabled}) : await setStrategyManageSceneEnabled(sourcePath, scene.name, !scene.enabled))
+      setNotice(backtest ? '回测策略已更新。' : `${scene.name}已${scene.enabled ? '暂停' : '启用'}；历史榜单和回测请重新运行 Ranking Compute。`)
     } catch (toggleError) {
       setError(`切换场景失败: ${String(toggleError)}`)
     } finally {
@@ -844,9 +862,9 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
     setBusyAction('saving')
     setError('')
     try {
-      applyPageData(await setStrategyManageRuleEnabled(sourcePath, rule.name, !rule.enabled))
+      applyPageData(backtest ? await updateBacktest({action: 'rule_enabled', name: rule.name, enabled: !rule.enabled}) : await setStrategyManageRuleEnabled(sourcePath, rule.name, !rule.enabled))
       const parentEnabled = scenes.find((scene) => scene.name === rule.scene_name)?.enabled
-      setNotice(`${rule.name}已${rule.enabled ? '暂停' : '设为启用'}${!rule.enabled && !parentEnabled ? '，当前仍随场景暂停' : ''}；历史榜单和回测请重新运行 Ranking Compute。`)
+      setNotice(backtest ? '回测策略已更新。' : `${rule.name}已${rule.enabled ? '暂停' : '设为启用'}${!rule.enabled && !parentEnabled ? '，当前仍随场景暂停' : ''}；历史榜单和回测请重新运行 Ranking Compute。`)
     } catch (toggleError) {
       setError(`切换策略失败: ${String(toggleError)}`)
     } finally {
@@ -1013,6 +1031,9 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
   }
 
   function closeBulkEditor() {
+    setBulkBoardWidth(0)
+    setBulkSceneStripHeight(0)
+    setBulkStackRulePoolMaxHeight(0)
     setIsBulkEditorOpen(false)
     setBulkError('')
     setBulkRuleKeyword('')
@@ -1289,8 +1310,9 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
         combinationHitPointTexts,
         trackingCaptureTexts,
       )
-      const data =
-        editorMode === 'create'
+      const data = backtest
+        ? await updateBacktest({action: 'rule', original_name: editorMode === 'edit' ? editingOriginalName : undefined, draft: preparedDraft})
+        : editorMode === 'create'
           ? await createStrategyManageRule(sourcePath, preparedDraft)
           : await updateStrategyManageRule(sourcePath, editingOriginalName, preparedDraft)
       applyPageData(data, preparedDraft.scene_name)
@@ -1331,11 +1353,9 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
         combinationHitPointTexts,
         trackingCaptureTexts,
       )
-      const message = await checkStrategyManageRuleDraft(
-        sourcePath,
-        preparedDraft,
-        editorMode === 'edit' ? editingOriginalName : undefined,
-      )
+      const message = backtest
+        ? (await updateBacktest({action: 'rule', original_name: editorMode === 'edit' ? editingOriginalName : undefined, draft: preparedDraft}, false), 'rule 草稿检查通过')
+        : await checkStrategyManageRuleDraft(sourcePath, preparedDraft, editorMode === 'edit' ? editingOriginalName : undefined)
       setCheckNotice(message)
       setEditorError('')
     } catch (checkError) {
@@ -1370,11 +1390,9 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
       return
     }
     try {
-      const message = await checkStrategyManageSceneDraft(
-        sourcePath,
-        preparedSceneDraft,
-        sceneEditorMode === 'edit' ? editingSceneOriginalName : undefined,
-      )
+      const message = backtest
+        ? (await updateBacktest({action: 'scene', original_name: sceneEditorMode === 'edit' ? editingSceneOriginalName : undefined, draft: preparedSceneDraft}, false), 'scene 草稿检查通过')
+        : await checkStrategyManageSceneDraft(sourcePath, preparedSceneDraft, sceneEditorMode === 'edit' ? editingSceneOriginalName : undefined)
       setNotice(message)
       setSceneEditorError('')
     } catch (checkError) {
@@ -1384,8 +1402,9 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
 
     setBusyAction('saving')
     try {
-      const data =
-        sceneEditorMode === 'create'
+      const data = backtest
+        ? await updateBacktest({action: 'scene', original_name: sceneEditorMode === 'edit' ? editingSceneOriginalName : undefined, draft: preparedSceneDraft})
+        : sceneEditorMode === 'create'
           ? await createStrategyManageScene(sourcePath, preparedSceneDraft)
           : await updateStrategyManageScene(sourcePath, editingSceneOriginalName, preparedSceneDraft)
       applyPageData(data)
@@ -1463,7 +1482,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
     setBusyAction('deleting')
     setError('')
     try {
-      const data = await removeStrategyManageScene(sourcePath, deleteSceneTarget.name)
+      const data = backtest ? await updateBacktest({action: 'remove_scene', name: deleteSceneTarget.name}) : await removeStrategyManageScene(sourcePath, deleteSceneTarget.name)
       applyPageData(data)
       if (editingSceneOriginalName === deleteSceneTarget.name) {
         setSceneDraft(null)
@@ -1493,7 +1512,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
     setBusyAction('deleting')
     setError('')
     try {
-      const data = await removeStrategyManageRules(sourcePath, [deleteTarget.name])
+      const data = backtest ? await updateBacktest({action: 'remove_rules', names: [deleteTarget.name]}) : await removeStrategyManageRules(sourcePath, [deleteTarget.name])
       applyPageData(data, deleteTarget.scene_name)
       if (editingOriginalName === deleteTarget.name) {
         setDraft(null)
@@ -1545,12 +1564,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
   )
 
   useEffect(() => {
-    if (!isBulkEditorOpen) {
-      setBulkBoardWidth(0)
-      setBulkSceneStripHeight(0)
-      setBulkStackRulePoolMaxHeight(0)
-      return
-    }
+    if (!isBulkEditorOpen) return
 
     const modalElement = bulkModalRef.current
     const boardElement = bulkBoardRef.current
@@ -1610,9 +1624,9 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
   }, [isBulkEditorOpen, refactorScenes.length, refactorRules.length, bulkNewSceneId])
 
   return (
-    <div className="strategy-manage-page">
+    <div className={`strategy-manage-page${backtest ? ' is-backtest' : ''}`}>
       <section className="strategy-manage-card">
-        <div className="strategy-manage-section-head">
+        {!backtest ? <div className="strategy-manage-section-head">
           <div>
             <h2 className="strategy-manage-title">{isChipView ? '筹码变动策略' : '打分策略管理'}</h2>
             <p className="strategy-manage-note">
@@ -1626,17 +1640,17 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
               ? (chipStrategyFileExists ? chipStrategyFilePath : 'chip_change_rule.toml 未落盘')
               : `当前共 ${rules.length} 条 rule`}
           </span>
-        </div>
+        </div> : null}
 
         <div className="strategy-manage-toolbar">
           <div className="strategy-manage-toolbar-left">
-            <button
+            {!backtest ? <button
               className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-accent"
               type="button"
               onClick={() => setIsAssetModalOpen(true)}
             >
               策略资产中心
-            </button>
+            </button> : null}
             {isChipView ? (
               <button
                 className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-primary"
@@ -1655,20 +1669,20 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
                 >
                   新建 Scene
                 </button>
-                <button
+                {!backtest ? <button
                   className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-secondary"
                   type="button"
                   onClick={openBulkEditor}
                 >
                   策略整体编辑
-                </button>
+                </button> : null}
               </>
             )}
             {isEditing || chipStrategyDraft ? <span className="strategy-manage-tip">当前有未提交草稿</span> : null}
           </div>
         </div>
 
-        <div className="strategy-manage-summary">
+        {!backtest ? <div className="strategy-manage-summary">
           {isChipView ? (
             <>
               <div className="strategy-manage-summary-item">
@@ -1706,7 +1720,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
               </div>
             </>
           )}
-        </div>
+        </div> : null}
 
         <div className="strategy-manage-filter-grid">
           <label className="strategy-manage-field strategy-manage-field-span-full">
@@ -1826,7 +1840,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
         )}
       </section>
 
-      <section className="strategy-manage-card">
+      {!backtest ? <section className="strategy-manage-card">
         <div className="strategy-manage-list-head">
           <strong>近期新增</strong>
           <span>策略文件末尾 {recentRules.length} 条 rule</span>
@@ -1904,7 +1918,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
             })}
           </div>
         )}
-      </section>
+      </section> : null}
         </>
       ) : null}
 
@@ -2402,17 +2416,15 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
                         ))}
                       </select>
                     </label>
-                    <details className="strategy-rule-editor-help strategy-manage-field-span-full">
-                      <summary>策略说明（可选）{draft.explain.trim() ? ' · 已填写' : ''}</summary>
-                      <label className="strategy-manage-field">
+                    <label className="strategy-manage-field strategy-manage-field-span-full">
+                      <span>策略说明</span>
                         <textarea
                           aria-label="策略说明"
                           rows={3}
                           value={draft.explain}
                           onChange={(event) => setDraft({ ...draft, explain: event.target.value })}
                         />
-                      </label>
-                    </details>
+                    </label>
                   </div>
                 </section>
                 <section className="strategy-rule-editor-section">
@@ -2530,6 +2542,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
                             onChange={setDistPointRows}
                             scopeWay={draft.scope_way}
                             windowText={scopeWindowsText}
+                            showHelp={!backtest}
                           />
                         )}
                         {draft.scope_way.toUpperCase() === 'EACH' ? (
@@ -2701,6 +2714,7 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
                 </section>
                 <StrategyRuleTrackingEditor
                   ruleName={draft.name}
+                  showHelp={!backtest}
                   tracking={draft.tracking ?? []}
                   onChange={(tracking) => setDraft({ ...draft, tracking })}
                   captureTexts={trackingCaptureTexts}
@@ -3050,15 +3064,17 @@ export default function StrategyManagePage({ view = 'rules' }: { view?: Strategy
         </div>
       ) : null}
 
-      <StrategyAssetModal
+      {!backtest ? <StrategyAssetModal
         open={isAssetModalOpen}
         sourcePath={sourcePath}
         initialAssetKind={isChipView ? 'chip' : 'rank'}
         onClose={() => setIsAssetModalOpen(false)}
         onActivated={() => {
+          setBusyAction('loading')
+          setError('')
           void loadPage()
         }}
-      />
+      /> : null}
     </div>
   )
 }

@@ -13,6 +13,14 @@ use tauri::Emitter;
 static RANK_COMPARISON_TASKS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
 
 #[tauri::command]
+pub fn edit_strategy_backtest_config(
+    configuration: String,
+    edit: Option<lianghua_app_strategy::manage::StrategyBacktestEdit>,
+) -> Result<lianghua_app_strategy::manage::StrategyBacktestConfig, String> {
+    lianghua_app_strategy::manage::edit_strategy_backtest_config(&configuration, edit)
+}
+
+#[tauri::command]
 pub fn read_rank_comparison_baseline(source_path: String) -> Result<String, String> {
     let _guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
         .read()

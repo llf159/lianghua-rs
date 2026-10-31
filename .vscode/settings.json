@@ -1,7 +1,6 @@
 {
   "rust-analyzer.linkedProjects": [
-    "Cargo.toml",
-    "ui/lianghua_web/src-tauri/Cargo.toml"
+    "Cargo.toml"
   ],
   "rust-analyzer.procMacro.enable": true,
   "rust-analyzer.cargo.buildScripts.enable": true,
