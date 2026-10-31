@@ -965,7 +965,7 @@ bias = 1.0
         assert_close(retail_total, 40.0);
     }
     #[test]
-    fn s6_migration_preserves_neutral_inventory_and_obeys_trade_limits() {
+    fn inventory_migration_preserves_neutral_inventory_and_obeys_trade_limits() {
         for (evidence, main_sell, retail_sell, expected_first) in [
             (0.0, 1.0, 2.0, 50.0),
             (0.12, 1.0, 1.0, 51.68),
@@ -1035,7 +1035,7 @@ bias = {retail_sell}
     }
 
     #[test]
-    fn s6_checkpoint_continuation_matches_full_replay() {
+    fn inventory_checkpoint_continuation_matches_full_replay() {
         use crate::data::cyq_chen::{
             ChenChipFeatureState,
             compute_chen_chip_snapshots_from_initial_bins_with_compiled_config_with_features,

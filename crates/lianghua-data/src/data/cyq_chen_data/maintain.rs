@@ -9,8 +9,9 @@ use crate::data::cyq_chen_data::compute::{
 };
 use crate::data::cyq_chen_data::store::replace_cyq_chen_db;
 use crate::data::cyq_chen_data::store::{
-    current_chip_change_strategy_hash, init_cyq_chen_db, query_cyq_chen_meta_value,
-    query_latest_cyq_chen_metadata, remove_cyq_chen_db_artifacts, remove_cyq_chen_db_sidecars,
+    chip_strategy_hash_matches, current_chip_change_strategy_hash, init_cyq_chen_db,
+    query_cyq_chen_meta_value, query_latest_cyq_chen_metadata, remove_cyq_chen_db_artifacts,
+    remove_cyq_chen_db_sidecars,
 };
 use crate::data::cyq_chen_data::{
     CYQ_CHEN_QUEUE_BOUND, CYQ_CHEN_SNAPSHOT_TABLE, CyqChenCheckpointRecovery,
@@ -109,8 +110,9 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
     }
     let chip_config = load_compiled_chip_change_config(source_dir)?;
     let strategy_hash = current_chip_change_strategy_hash(source_dir)?;
-    let strategy_changed = query_cyq_chen_meta_value(&cyq_chen_db, "strategy_hash")?.as_deref()
-        != Some(strategy_hash.as_str());
+    let stored_strategy_hash = query_cyq_chen_meta_value(&cyq_chen_db, "strategy_hash")?;
+    let strategy_changed =
+        !chip_strategy_hash_matches(stored_strategy_hash.as_deref(), &strategy_hash);
     if latest_metadata.is_some() && strategy_changed {
         if !allow_strategy_rebuild {
             return Ok(Some(CyqChenRebuildSummary {
@@ -440,9 +442,8 @@ pub fn repair_cyq_chen_stocks_if_db_exists(
 
     let chip_config = load_compiled_chip_change_config(source_dir)?;
     let strategy_hash = current_chip_change_strategy_hash(source_dir)?;
-    if query_cyq_chen_meta_value(&cyq_chen_db, "strategy_hash")?.as_deref()
-        != Some(strategy_hash.as_str())
-    {
+    let stored_strategy_hash = query_cyq_chen_meta_value(&cyq_chen_db, "strategy_hash")?;
+    if !chip_strategy_hash_matches(stored_strategy_hash.as_deref(), &strategy_hash) {
         if !allow_strategy_rebuild {
             return Ok(Some(CyqChenRebuildSummary {
                 snapshot_rows: 0,
@@ -2376,7 +2377,7 @@ bias = 0.5
         fs::remove_dir_all(source_dir).expect("cleanup temp dir");
     }
     #[test]
-    fn s6_switch_blocks_old_checkpoint_then_rebuilds_from_history() {
+    fn inventory_switch_blocks_old_checkpoint_then_rebuilds_from_history() {
         let source_dir = unique_temp_source_dir();
         prepare_source_db(&source_dir);
         let source_path = source_dir.to_str().unwrap();
@@ -2390,7 +2391,7 @@ bias = 0.5
             chip_change_rule_path(source_path),
             include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../../docs/chip-s6.toml"
+                "/../../docs/chip-inventory-memory.toml"
             )),
         )
         .unwrap();
@@ -2424,7 +2425,7 @@ bias = 0.5
                 |r| r.get(0),
             )
             .unwrap();
-        assert!(hash.starts_with("s6-v1:"));
+        assert!(hash.starts_with("inventory-memory-v1:"));
         drop(conn);
         fs::remove_dir_all(source_dir).unwrap();
     }

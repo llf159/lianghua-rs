@@ -20,6 +20,7 @@ __pycache__
 market*
 !/docs/market-environment-analysis.md
 !/docs/chip-testing.md
+!/docs/chip-inventory-memory.toml
 !crates/lianghua-app-strategy/src/statistics/market_activity.rs
 !crates/lianghua-app-strategy/src/statistics/market_activity_model.json
 !crates/lianghua-app-strategy/src/statistics/market_environment.rs

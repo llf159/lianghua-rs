@@ -1,4 +1,4 @@
-# S6 inventory memory, medium strength. Requires chip engine version 2.
+# Inventory memory, medium strength. Requires chip engine version 2.
 # Buy bias is signed direction evidence; sell bias retains the version 1 semantics.
 version = 2
 

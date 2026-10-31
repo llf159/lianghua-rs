@@ -464,6 +464,11 @@ function formatChipDirection(direction: CyqChenStrategyDraft['direction']) {
   return direction === 'buy' ? '买入' : '卖出'
 }
 
+function splitStrategyCardColumns<T>(items: T[]) {
+  const splitAt = Math.ceil(items.length / 2)
+  return [items.slice(0, splitAt), items.slice(splitAt)]
+}
+
 export default function StrategyManagePage({ view = 'rules', backtest }: {
   view?: StrategyManageView
   backtest?: { configuration: string; sourcePath: string; onChange: (configuration: string) => void }
@@ -497,6 +502,7 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
   const [chipStrategyFilePath, setChipStrategyFilePath] = useState('')
   const [chipStrategyFileExists, setChipStrategyFileExists] = useState(false)
   const [chipStrategySearchKeyword, setChipStrategySearchKeyword] = useState('')
+  const [selectedChipStrategyGroupKey, setSelectedChipStrategyGroupKey] = useState('')
   const [chipStrategyDraft, setChipStrategyDraft] = useState<ChipStrategyEditorDraft | null>(null)
   const [chipStrategyEditorMode, setChipStrategyEditorMode] = useState<EditorMode>('create')
   const [chipStrategyEditingIndex, setChipStrategyEditingIndex] = useState<number | null>(null)
@@ -580,15 +586,25 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
   }, [chipStrategies, normalizedChipStrategySearchKeyword])
   const groupedChipStrategies = useMemo(
     () =>
-      CHIP_STRATEGY_GROUPS.map((group) => ({
+      CHIP_STRATEGY_GROUPS.filter(
+        (group) => chipVersion !== 2 || group.key !== 'retail-buy',
+      ).map((group) => ({
         ...group,
         items: filteredChipStrategies.filter(
           ({ strategy }) =>
             strategy.holder === group.holder && strategy.direction === group.direction,
         ),
       })),
-    [filteredChipStrategies],
+    [chipVersion, filteredChipStrategies],
   )
+  const visibleChipStrategyGroups = groupedChipStrategies.filter(
+    (group) => !normalizedChipStrategySearchKeyword || group.items.length > 0,
+  )
+  const selectedChipStrategyGroup =
+    visibleChipStrategyGroups.find((group) => group.key === selectedChipStrategyGroupKey) ??
+    visibleChipStrategyGroups.find((group) => group.items.length > 0) ??
+    visibleChipStrategyGroups[0] ??
+    null
   const bulkFilteredRules = useMemo(() => {
     const chosenRuleNames = new Set(refactorRules.map((item) => item.name))
     const sceneFiltered =
@@ -1174,13 +1190,19 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
     }
     const biasText = chipStrategyDraft.bias.trim()
     const confirmAfterText = chipStrategyDraft.confirmAfterText.trim()
+    const direction = chipStrategyDraft.direction
+    const holder =
+      chipVersion === 2 && direction === 'buy' ? 'main' : chipStrategyDraft.holder
     const prepared: CyqChenStrategyDraft = {
       name: chipStrategyDraft.name.trim(),
-      holder: chipStrategyDraft.holder,
-      direction: chipStrategyDraft.direction,
+      holder,
+      direction,
       when: chipStrategyDraft.when.trim(),
       bias: biasText === '' ? Number.NaN : Number(biasText),
-      confirm_after: confirmAfterText === '' ? undefined : Number(confirmAfterText),
+      confirm_after:
+        chipVersion === 2 || confirmAfterText === ''
+          ? undefined
+          : Number(confirmAfterText),
     }
     if (!prepared.name) {
       throw new Error('策略名称不能为空')
@@ -1613,7 +1635,9 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
             <h2 className="strategy-manage-title">{isChipView ? '筹码变动策略' : '打分策略管理'}</h2>
             <p className="strategy-manage-note">
               {isChipView
-                ? '管理筹码变动策略，供筹码计算和筹码测试使用。'
+                ? (chipVersion === 2
+                  ? '库存记忆：主力买入系数表示正负有向证据，散户成交余量自动形成。'
+                  : '管理筹码变动策略，供筹码计算和筹码测试使用。')
                 : '管理当前生效的打分策略，导入和备份可在策略资产中心处理。'}
             </p>
           </div>
@@ -1668,16 +1692,28 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
           {isChipView ? (
             <>
               <div className="strategy-manage-summary-item">
-                <span>{chipVersion === 2 ? 'S6 库存记忆策略' : '筹码策略'}</span>
+                <span>{chipVersion === 2 ? '库存记忆策略' : '筹码策略'}</span>
                 <strong>{chipStrategies.length}</strong>
               </div>
               <div className="strategy-manage-summary-item">
-                <span>主力策略</span>
-                <strong>{chipStrategies.filter((item) => item.holder === 'main').length}</strong>
+                <span>{chipVersion === 2 ? '主力方向证据' : '主力策略'}</span>
+                <strong>
+                  {chipStrategies.filter((item) =>
+                    chipVersion === 2
+                      ? item.direction === 'buy'
+                      : item.holder === 'main',
+                  ).length}
+                </strong>
               </div>
               <div className="strategy-manage-summary-item">
-                <span>散户策略</span>
-                <strong>{chipStrategies.filter((item) => item.holder === 'retail').length}</strong>
+                <span>{chipVersion === 2 ? '卖出规则' : '散户策略'}</span>
+                <strong>
+                  {chipStrategies.filter((item) =>
+                    chipVersion === 2
+                      ? item.direction === 'sell'
+                      : item.holder === 'retail',
+                  ).length}
+                </strong>
               </div>
             </>
           ) : (
@@ -1831,11 +1867,13 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
           <div className="strategy-manage-empty">当前规则文件里没有 rule。</div>
         ) : (
           <div className="strategy-manage-recent-rule-grid">
-            {recentRules.map((rule) => {
-              const distScoreSummary = buildDistScoreSummary(rule.dist_points)
-              const isCombination = (rule.kind ?? 'single') === 'combination'
+            {splitStrategyCardColumns(recentRules).map((column, columnIndex) => (
+              <div className="strategy-manage-rule-card-column" key={`recent-${columnIndex}`}>
+                {column.map((rule) => {
+                  const distScoreSummary = buildDistScoreSummary(rule.dist_points)
+                  const isCombination = (rule.kind ?? 'single') === 'combination'
 
-              return (
+                  return (
                 <article className={`strategy-manage-rule-card strategy-manage-rule-card-compact strategy-manage-rule-card-recent${rule.enabled && scenes.find((scene) => scene.name === rule.scene_name)?.enabled ? '' : ' is-excluded'}`} key={rule.name}>
                   <div className="strategy-manage-rule-card-head">
                     <div>
@@ -1896,8 +1934,10 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
                   </div>
                   <RuleExpressionPreview rule={rule} />
                 </article>
-              )
-            })}
+                  )
+                })}
+              </div>
+            ))}
           </div>
         )}
       </section> : null}
@@ -1920,41 +1960,66 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
         {filteredChipStrategies.length === 0 ? (
           <div className="strategy-manage-empty">没有匹配当前搜索条件的筹码策略。</div>
         ) : (
-          <div className="strategy-manage-chip-group-grid">
-            {groupedChipStrategies.map((group) => (
-              <section className="strategy-manage-chip-group" key={group.key}>
-                <div className="strategy-manage-chip-group-head">
-                  <strong>{group.title}</strong>
-                  <span>{group.items.length} 条</span>
-                </div>
-                {group.items.length === 0 ? (
-                  <div className="strategy-manage-chip-group-empty">暂无策略</div>
-                ) : (
-                  <div className="strategy-manage-chip-rule-grid">
-                    {group.items.map(({ strategy, index }) => (
+          <div className="strategy-manage-chip-browser">
+            <div className="strategy-manage-chip-tabs" role="tablist" aria-label="筹码策略分类">
+              {visibleChipStrategyGroups.map((group) => (
+                <button
+                  className={`strategy-manage-chip-tab${group.key === selectedChipStrategyGroup?.key ? ' is-active' : ''}`}
+                  key={group.key}
+                  type="button"
+                  role="tab"
+                  aria-selected={group.key === selectedChipStrategyGroup?.key}
+                  onClick={() => setSelectedChipStrategyGroupKey(group.key)}
+                >
+                  <span>
+                    {chipVersion === 2 && group.key === 'main-buy'
+                      ? '主力方向证据'
+                      : group.title}
+                  </span>
+                  <strong>{group.items.length}</strong>
+                </button>
+              ))}
+            </div>
+
+            {selectedChipStrategyGroup?.items.length === 0 ? (
+              <div className="strategy-manage-empty">当前分类暂无策略。</div>
+            ) : selectedChipStrategyGroup ? (
+              <div className="strategy-manage-chip-rule-grid">
+                {splitStrategyCardColumns(selectedChipStrategyGroup.items).map((column, columnIndex) => (
+                  <div className="strategy-manage-rule-card-column" key={`chip-${columnIndex}`}>
+                    {column.map(({ strategy, index }) => (
                       <article className="strategy-manage-rule-card strategy-manage-rule-card-compact" key={`${index}-${strategy.name}`}>
-                        <div className="strategy-manage-rule-card-head">
-                          <div>
-                            <div className="strategy-manage-rule-card-name">{strategy.name}</div>
-                            <div className="strategy-manage-rule-card-source">
-                              #{index + 1} · {formatChipHolder(strategy.holder)} · {formatChipDirection(strategy.direction)}
-                            </div>
-                          </div>
-                          <div className="strategy-manage-rule-card-actions">
-                            <button className="strategy-manage-inline-btn" type="button" onClick={() => openEditChipStrategy(index)}>
-                              编辑
-                            </button>
-                            <button
-                              className="strategy-manage-inline-btn is-danger"
-                              type="button"
-                              onClick={() => setChipStrategyDeleteTarget({ index, name: strategy.name })}
-                              disabled={chipStrategySaving}
-                            >
-                              删除
-                            </button>
-                          </div>
+                    <div className="strategy-manage-rule-card-head">
+                      <div>
+                        <div className="strategy-manage-rule-card-name">{strategy.name}</div>
+                        <div className="strategy-manage-rule-card-source">
+                          #{index + 1} · {chipVersion === 2 && strategy.direction === 'buy'
+                            ? '主力方向证据'
+                            : `${formatChipHolder(strategy.holder)} · ${formatChipDirection(strategy.direction)}`}
                         </div>
-                        <div className="strategy-manage-rule-metrics strategy-manage-rule-metrics-recent">
+                      </div>
+                      <div className="strategy-manage-rule-card-actions">
+                        <button className="strategy-manage-inline-btn" type="button" onClick={() => openEditChipStrategy(index)}>
+                          编辑
+                        </button>
+                        <button
+                          className="strategy-manage-inline-btn is-danger"
+                          type="button"
+                          onClick={() => setChipStrategyDeleteTarget({ index, name: strategy.name })}
+                          disabled={chipStrategySaving}
+                        >
+                          删除
+                        </button>
+                      </div>
+                    </div>
+                    <div className={`strategy-manage-rule-metrics strategy-manage-rule-metrics-recent${chipVersion === 2 && strategy.direction === 'buy' ? ' is-direction' : ''}`}>
+                      {chipVersion === 2 && strategy.direction === 'buy' ? (
+                        <div className="strategy-manage-summary-item">
+                          <span>主力/散户方向</span>
+                          <strong>{`${strategy.bias > 0 ? '+' : ''}${formatNumber(Number(strategy.bias))}`}</strong>
+                        </div>
+                      ) : (
+                        <>
                           <div className="strategy-manage-summary-item">
                             <span>持有人</span>
                             <strong>{formatChipHolder(strategy.holder)}</strong>
@@ -1964,17 +2029,23 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
                             <strong>{formatChipDirection(strategy.direction)}</strong>
                           </div>
                           <div className="strategy-manage-summary-item">
-                            <span>{strategy.confirm_after ? `后验修正（${strategy.confirm_after} 根后）` : 'Bias'}</span>
+                            <span>
+                              {strategy.confirm_after
+                                ? `后验修正（${strategy.confirm_after} 根后）`
+                                : 'Bias'}
+                            </span>
                             <strong>{formatNumber(Number(strategy.bias))}</strong>
                           </div>
-                        </div>
+                        </>
+                      )}
+                    </div>
                         <StrategyExpressionPreview expression={strategy.when} />
                       </article>
                     ))}
                   </div>
-                )}
-              </section>
-            ))}
+                ))}
+              </div>
+            ) : null}
           </div>
         )}
 
@@ -2019,7 +2090,11 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
                   ? '新建筹码策略'
                   : `编辑筹码策略 · ${chipStrategyDraft.name}`}
               </strong>
-              <span>{chipStrategyDraft.holder} · {chipStrategyDraft.direction}</span>
+              <span>
+                {chipVersion === 2 && chipStrategyDraft.direction === 'buy'
+                  ? '主力方向证据'
+                  : `${formatChipHolder(chipStrategyDraft.holder)} · ${formatChipDirection(chipStrategyDraft.direction)}`}
+              </span>
             </div>
             {chipStrategyError ? <div className="strategy-manage-message strategy-manage-message-error">{chipStrategyError}</div> : null}
             {chipStrategyNotice ? <div className="strategy-manage-message strategy-manage-message-notice">{chipStrategyNotice}</div> : null}
@@ -2035,47 +2110,79 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
                   }
                 />
               </label>
+              {chipVersion === 2 ? (
+                <label className="strategy-manage-field">
+                  <span>规则类型</span>
+                  <select
+                    value={`${chipStrategyDraft.holder}-${chipStrategyDraft.direction}`}
+                    onChange={(event) => {
+                      const [holder, direction] = event.target.value.split('-') as [
+                        CyqChenStrategyDraft['holder'],
+                        CyqChenStrategyDraft['direction'],
+                      ]
+                      setChipStrategyDraft((current) =>
+                        current ? { ...current, holder, direction } : current,
+                      )
+                    }}
+                  >
+                    <option value="main-buy">主力方向证据</option>
+                    <option value="main-sell">主力卖出</option>
+                    <option value="retail-sell">散户卖出</option>
+                  </select>
+                </label>
+              ) : (
+                <>
+                  <label className="strategy-manage-field">
+                    <span>持有人</span>
+                    <select
+                      value={chipStrategyDraft.holder}
+                      onChange={(event) =>
+                        setChipStrategyDraft((current) =>
+                          current ? { ...current, holder: event.target.value as CyqChenStrategyDraft['holder'] } : current,
+                        )
+                      }
+                    >
+                      {CHIP_HOLDER_OPTIONS.map((item) => (
+                        <option key={item} value={item}>
+                          {item === 'main' ? '主力' : '散户'}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="strategy-manage-field">
+                    <span>方向</span>
+                    <select
+                      value={chipStrategyDraft.direction}
+                      onChange={(event) =>
+                        setChipStrategyDraft((current) =>
+                          current ? { ...current, direction: event.target.value as CyqChenStrategyDraft['direction'] } : current,
+                        )
+                      }
+                    >
+                      {CHIP_DIRECTION_OPTIONS.map((item) => (
+                        <option key={item} value={item}>
+                          {item === 'buy' ? '买入' : '卖出'}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </>
+              )}
+              {chipVersion !== 2 ? (
+                <label className="strategy-manage-field">
+                  <span>确认延迟（0 为当天规则）</span>
+                  <input type="number" min={0} step={1} value={chipStrategyDraft.confirmAfterText} placeholder="0"
+                    onChange={(event) => setChipStrategyDraft((current) => current ? { ...current, confirmAfterText: event.target.value } : current)} />
+                </label>
+              ) : null}
               <label className="strategy-manage-field">
-                <span>持有人</span>
-                <select
-                  value={chipStrategyDraft.holder}
-                  onChange={(event) =>
-                    setChipStrategyDraft((current) =>
-                      current ? { ...current, holder: event.target.value as CyqChenStrategyDraft['holder'] } : current,
-                    )
-                  }
-                >
-                  {CHIP_HOLDER_OPTIONS.map((item) => (
-                    <option key={item} value={item}>
-                      {item === 'main' ? '主力' : '散户'}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="strategy-manage-field">
-                <span>方向</span>
-                <select
-                  value={chipStrategyDraft.direction}
-                  onChange={(event) =>
-                    setChipStrategyDraft((current) =>
-                      current ? { ...current, direction: event.target.value as CyqChenStrategyDraft['direction'] } : current,
-                    )
-                  }
-                >
-                  {CHIP_DIRECTION_OPTIONS.map((item) => (
-                    <option key={item} value={item}>
-                      {item === 'buy' ? '买入' : '卖出'}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="strategy-manage-field">
-                <span>确认延迟（0 为当天规则）</span>
-                <input type="number" min={0} step={1} value={chipStrategyDraft.confirmAfterText} placeholder="0"
-                  onChange={(event) => setChipStrategyDraft((current) => current ? { ...current, confirmAfterText: event.target.value } : current)} />
-              </label>
-              <label className="strategy-manage-field">
-                <span>{Number(chipStrategyDraft.confirmAfterText) > 0 ? '归属修正比例（0～1，仅买入方向）' : 'Bias'}</span>
+                <span>
+                  {chipVersion === 2 && chipStrategyDraft.direction === 'buy'
+                    ? '主力/散户方向'
+                    : Number(chipStrategyDraft.confirmAfterText) > 0
+                      ? '归属修正比例（0～1，仅买入方向）'
+                      : 'Bias'}
+                </span>
                 <input
                   type="text"
                   inputMode="decimal"
@@ -2086,6 +2193,24 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
                     )
                   }
                 />
+                {chipVersion === 2 &&
+                  chipStrategyDraft.direction === 'buy' &&
+                  Number.isFinite(Number(chipStrategyDraft.bias)) &&
+                  chipStrategyDraft.bias.trim() !== '' ? (
+                    <small className="strategy-manage-field-help">
+                      {Number(chipStrategyDraft.bias) === 0
+                        ? '中性：不改变买方结构。'
+                        : `${Number(chipStrategyDraft.bias) > 0 ? '偏主力' : '偏散户'}；单独命中时移动强度为 ${formatNumber(
+                            Math.min(
+                              Math.abs(Number(chipStrategyDraft.bias)) *
+                                4 *
+                                (Number(chipStrategyDraft.bias) < 0 ? 3 : 1),
+                              1,
+                            ) * 100,
+                            1,
+                          )}%，同日还会与其他命中项相加。`}
+                    </small>
+                  ) : null}
               </label>
               <label className="strategy-manage-field strategy-manage-field-span-full">
                 <span>表达式</span>
@@ -2238,11 +2363,13 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
                 <div className="strategy-manage-empty">当前 scene 下还没有规则。</div>
               ) : (
                 <div className="strategy-manage-scene-rule-list">
-                  {selectedSceneFilteredRules.map((rule) => {
-                    const distScoreSummary = buildDistScoreSummary(rule.dist_points)
-                    const isCombination = (rule.kind ?? 'single') === 'combination'
+                  {splitStrategyCardColumns(selectedSceneFilteredRules).map((column, columnIndex) => (
+                    <div className="strategy-manage-rule-card-column" key={`scene-${columnIndex}`}>
+                      {column.map((rule) => {
+                        const distScoreSummary = buildDistScoreSummary(rule.dist_points)
+                        const isCombination = (rule.kind ?? 'single') === 'combination'
 
-                    return (
+                        return (
                       <article className={`strategy-manage-rule-card strategy-manage-rule-card-compact${rule.enabled && selectedScene.enabled ? '' : ' is-excluded'}`} key={rule.name}>
                         <div className="strategy-manage-rule-card-head">
                           <div>
@@ -2305,8 +2432,10 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
                         </div>
                         <RuleExpressionPreview rule={rule} />
                       </article>
-                    )
-                  })}
+                        )
+                      })}
+                    </div>
+                  ))}
                 </div>
               )}
             </div>

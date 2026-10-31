@@ -1434,13 +1434,13 @@ mod tests {
         fs::remove_dir_all(source_dir).expect("cleanup temp dir");
     }
     #[test]
-    fn s6_save_and_single_stock_test_preserve_model_version() {
+    fn inventory_memory_save_and_single_stock_test_preserve_model_version() {
         let source_dir = unique_temp_source_dir();
         prepare_source_db(&source_dir);
         let source_path = source_dir.to_str().unwrap();
         let config = crate::data::cyq_chen::ChipChangeConfig::from_toml_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../docs/chip-s6.toml"
+            "/../../docs/chip-inventory-memory.toml"
         )))
         .unwrap();
         let page = super::save_cyq_chen_strategy_file(
@@ -1452,7 +1452,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(page.version, 2);
-        // A client without the new field must not downgrade an existing S6 file on save.
+        // A client without the new field must not downgrade an existing version 2 file on save.
         let page = super::save_cyq_chen_strategy_file(
             source_path,
             super::CyqChenStrategyFileDraft {

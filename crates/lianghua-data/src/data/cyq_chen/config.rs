@@ -644,10 +644,10 @@ mod tests {
         assert!(error.contains("表达式解析错误"));
     }
     #[test]
-    fn s6_config_validates_production_rules_and_rejects_unsupported_identity_updates() {
+    fn inventory_config_validates_production_rules_and_rejects_unsupported_identity_updates() {
         let mut config = ChipChangeConfig::from_toml_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../docs/chip-s6.toml"
+            "/../../docs/chip-inventory-memory.toml"
         )))
         .unwrap();
         assert_eq!(config.version, 2);

@@ -1,368 +1,432 @@
-import { useEffect } from 'react'
-import '../css/AlgorithmGuideModal.css'
+import { useEffect, useRef, useState } from "react";
+import "../css/AlgorithmGuideModal.css";
+
+type AlgorithmSectionId = "score" | "similarity" | "chip" | "backtest";
 
 type AlgorithmSection = {
-  title: string
-  items: {
-    heading: string
-    description: string
-    formula?: string
-    interpretation?: string
-  }[]
-}
+  id: AlgorithmSectionId;
+  number: string;
+  title: string;
+  navHint: string;
+  summary: string;
+  inputs: string[];
+  outputs: string[];
+  steps: {
+    heading: string;
+    description: string;
+  }[];
+  designs: {
+    heading: string;
+    description: string;
+    formula?: string;
+  }[];
+  reading: string[];
+  boundary: string;
+};
+
 const ALGORITHM_SECTIONS: AlgorithmSection[] = [
   {
-    title: '1. 评分 / 排名算法',
-    items: [
+    id: "score",
+    number: "01",
+    title: "打分计算",
+    navHint: "当日评分、场景与后续跟踪",
+    summary:
+      "打分计算回答：在某个交易日，一只股票符合当前策略编排的程度有多高；对于已经捕捉到的形态，后续跟踪还会继续观察它是否按预期推进。",
+    inputs: [
+      "个股行情与日期",
+      "策略规则和分值",
+      "指标、资金流、筹码等表达式字段",
+      "场景方向与阈值",
+      "后续跟踪配置",
+    ],
+    outputs: [
+      "total_score",
+      "每条规则及跟踪得分",
+      "跟踪事件状态",
+      "场景阶段与强度",
+      "当日排名",
+    ],
+    steps: [
       {
-        heading: '总分计算',
-        description: '每只股票在每个交易日的总分从 50 分开始，逐条累加命中规则的得分。规则得分取决于命中距离、命中次数和组合 bonus。',
-        formula: 'total_score = 50 + Σ(各规则当日得分)',
-        interpretation: '分数越高表示越符合策略选股条件。同一天不同股票可以比较总分大小。',
+        heading: "对齐日期",
+        description:
+          "按“股票 × 交易日”准备数据，所有表达式只使用参考日及以前可见的信息，保证同一天可以公平比较。",
       },
       {
-        heading: 'scope_way 命中判定',
-        description: '每条规则的 scope_way 决定"窗口内满足条件"的统计方式：',
-        formula: 'LAST：当天表达式为真即命中\nANY：窗口内任意一天为真即命中\nEACH：窗口内每天单独计分，命中次数 × 单次得分\nRECENT：取最近一次命中距当前的天数\nCONSEC：窗口内连续命中次数 ≥ 阈值才命中',
-        interpretation: 'LAST 适合捕捉当天状态；EACH 适合"多次出现加分"；CONSEC 适合趋势确认。',
+        heading: "判断规则",
+        description:
+          "逐条计算规则表达式。比较所需数据缺失时结果为“未知”；只要统计窗口含未知值，本次规则就不计分、不触发。",
       },
       {
-        heading: '场景状态机',
-        description: '每个场景由 trigger / confirm / observe / fail 四条规则线组成，从下到上逐级判定：',
-        formula: 'fail：有 fail 规则命中且 risk_score 超过阈值\nconfirm：有 confirm 规则命中且 stage_score 超过阈值\ntrigger / observe：有 trigger 规则命中且超过对应阈值',
-        interpretation: 'confirm 是最强信号，fail 代表风险信号。场景状态越靠上，信号越强。',
+        heading: "汇总窗口",
+        description:
+          "LAST 看当天，ANY 看窗口内是否发生过，EACH 按窗口内命中次数累加，RECENT 取最近一次命中距离，CONSEC 要求连续命中达到阈值。",
       },
       {
-        heading: '强度指标',
-        description: 'confirm_strength 和 risk_intensity 分别衡量确认强度和风险强度：',
-        formula: 'confirm_strength = |stage_score| / confirm_threshold\nrisk_intensity = |risk_score| / fail_threshold',
-        interpretation: '数值 > 1 表示超过阈值，越大表示信号越强。',
+        heading: "形成总分",
+        description:
+          "单条规则按命中方式得到正分或负分。组合规则先按命中条件数取基础分，再叠加条件 bonus，并可受单条规则上限约束。",
       },
       {
-        heading: '总榜排名',
-        description: '所有股票按 total_score 降序排列，同分时按 ts_code 字典序打破平局。',
-        interpretation: 'rank = 1 表示总分最高。排名每天重新计算，会随分数变化而变动。',
+        heading: "推进跟踪与计分",
+        description:
+          "默认在关联规则取得正贡献后建立事件，也可使用自定义起点；起点参考值只冻结一次。之后按市场交易日逐步检查，每日最多完成一步。步骤分和确认分首次取得后每天保留，不重复累加，并以“跟踪·名称”单独记入原规则所属场景和阶段。",
       },
       {
-        heading: 'H30-L50 卷积排名',
-        description: '对一只股票最近 30 个完整评分交易日做时间加权：一半权重关注最近 3 日，一半权重取 30 日等权均值，再按平滑后的分数重新排名。',
-        formula: 'fast_3d = normalize([1, 0.7, 0.49])\nconvolution_score = 50% × fast_3d_score + 50% × mean(score[t-29…t])\nrank_change = raw_rank - convolution_rank',
-        interpretation: 'rank_change > 0 表示平滑后名次上升。该榜偏好近期仍强、且中期评分稳定的股票；它是固定核的时间平滑，不是神经网络预测，也不等于“走势相似排名”。',
+        heading: "解析场景",
+        description:
+          "场景先判断风险，再依次判断确认、触发和观察。最终阶段表示该场景在当日走到哪一步，强度表示分数相对阈值有多高。",
+      },
+      {
+        heading: "生成名次",
+        description:
+          "当日股票按总分从高到低排列，同分时使用股票代码稳定排序，形成可以直接横向比较的当日榜。",
       },
     ],
+    designs: [
+      {
+        heading: "总分从 50 起步",
+        description:
+          "50 是中性基准，原规则贡献可正可负，已取得的跟踪分再单独累加。这样既保留当日策略判断，也让后续确认在有效期内持续参与排名。",
+        formula: "total_score = 50 + Σ(原规则得分) + Σ(跟踪得分)",
+      },
+      {
+        heading: "场景有明确优先级",
+        description:
+          "同一场景中，风险信号优先；没有风险时再确认、触发、观察。阶段和高强度只表示策略状态，不直接等于上涨概率。",
+        formula: "fail → confirm → trigger → observe",
+      },
+      {
+        heading: "后续跟踪是持续事件",
+        description:
+          "跟踪不是每天重新判断一次原规则。事件建立后，原规则当天是否继续命中、已有步骤条件是否回落，都不会撤回已取得的跟踪分；只有失效、额外结束条件或期限到达才清零。",
+        formula:
+          "规则正贡献 → 建立事件并冻结起点值\n→ 每日最多完成一个步骤 → 最终确认\n→ 保留已得分至事件结束",
+      },
+      {
+        heading: "观察期和保分期分开",
+        description:
+          "ttl 只限制还能完成新步骤和最终确认的时间；max_age 是事件从起点开始可以保留的总期限。invalidate 或 score_until 一旦成立立即停止并清零，不必等到总期限。",
+        formula:
+          "观察步骤：在 ttl 内推进\n保分：不超过 max_age\n提前结束：invalidate / score_until 命中",
+      },
+      {
+        heading: "名次只在同一交易日内比较",
+        description:
+          "不同交易日的市场环境和可用股票可能变化，因此排名用于排出当天的相对顺序；跨日期观察应比较同一股票的评分变化或使用回测。",
+        formula: "当日排名 = total_score 降序；同分时按 ts_code",
+      },
+    ],
+    reading: [
+      "total_score 越高，表示越符合当前策略；同一天、同一批规则和场景下的股票可以直接比较。",
+      "rank = 1 是当日最高分，名次只表示当天在股票池中的相对位置。",
+      "规则明细中，原规则分与“跟踪·名称”分分别列出；跟踪分不会把场景阶段自动升级为 confirm。",
+      "跟踪事件可分观察、保分和停止三种状态。已得分在有效期内保持，但失效、结束条件或总期限到达后会清零。",
+    ],
+    boundary:
+      "分数、跟踪分和名次都不包含未来收益，也不是概率。规则与跟踪分值由策略配置决定；“未知”不能当作 0 分或利空，关键当前证据缺失时跟踪会停止。",
   },
   {
-    title: '2. 定制相似算法',
-    items: [
+    id: "similarity",
+    number: "02",
+    title: "相似榜计算",
+    navHint: "历史形态与条件表现",
+    summary:
+      "相似榜计算回答：当前股票近期的策略触发、量价、指标和市场环境，在历史上有没有出现过得像的窗口；那些窗口后来表现如何。",
+    inputs: [
+      "参考日与目标窗口",
+      "策略触发记录",
+      "量价和指标序列",
+      "全市场环境",
+      "历史后续行情",
+    ],
+    outputs: [
+      "综合相似度",
+      "相似历史窗口",
+      "加权收益与超额",
+      "有效样本数",
+      "相似榜名次与预测信号",
+    ],
+    steps: [
       {
-        heading: '先区分三种“相似”',
-        description: '程序中的相似分为三个独立用途：策略相似度检查比较规则是否经常共同触发；相似股票比较同一天的静态业务标签；走势相似比较当前窗口与历史事件窗口。三者的数据源、分母和分数范围不同，不能横向比较。',
-        formula: '策略相似度检查：同股 + 同日的触发集合\n相似股票：概念 + 行业 + trigger/confirm 场景\n走势相似：策略触发 + 量价 + 指标 + 市场环境的历史指纹',
-        interpretation: '这些分数表示“按本算法定义有多像”，不是上涨概率，也不是收益预测的置信概率。',
+        heading: "截取目标窗口",
+        description:
+          "以参考日为终点，取最近一段交易日作为目标形态。默认窗口 20 日、评价期 5 日，页面参数可以调整。",
       },
       {
-        heading: '策略相似度检查：重叠率与 Lift',
-        description: '表达式验证时，把当前待验证组合和每条现有策略在验证区间内的触发样本按“股票代码 + 交易日”求交集。结果按同时触发样本数降序展示，并排除当前导入策略自身。',
-        formula: 'A = 当前组合触发样本，B = 现有策略触发样本，N = 区间内总评分样本\n同时触发 = |A ∩ B|\n占当前组合 = |A ∩ B| / |A|\n占现有策略 = |A ∩ B| / |B|\nLift = |A ∩ B| × N / (|A| × |B|)',
-        interpretation: 'Lift = 1 表示共同触发程度接近独立随机基线；> 1 表示正关联；< 1 表示共同触发偏少。重叠率高但 Lift 接近 1，可能只是现有策略本身触发很频繁。Lift 只描述共现，不证明两条策略逻辑等价或存在因果关系。',
+        heading: "隔离未来信息",
+        description:
+          "候选结束日必须早于历史截止日，给后续评价和样本间隔留出时间。候选只有恰好也触发过目标窗口中的至少一种规则，才进入比较。",
       },
       {
-        heading: '相似股票：同日标签加权匹配',
-        description: '候选股只要与目标股共享至少一个行业、概念或有效场景即可进入候选池。概念和场景按“目标股被覆盖的比例”计分，行业完全相同则得固定分；场景仅使用 trigger / confirm 状态。',
-        formula: '概念分 = 40 × 共同概念数 / 目标股概念数\n行业分 = 同行业 ? 40 : 0\n场景分 = 30 × 共同场景数 / 目标股 trigger/confirm 场景数\nsimilarity_score = 概念分 + 行业分 + 场景分',
-        interpretation: '满信息理论上限为 110 分，不是百分制。目标股缺少某一类信息时，该类不参与可用满分，但结果不会把剩余维度重新归一化；应结合 available_score 和各分项解读。并列时依次比较场景分、概念分、行业分、原总榜排名和股票代码。',
+        heading: "建立多通道指纹",
+        description:
+          "分别描述策略触发、量价、指标和市场环境。数值序列会保留窗口分段、短中期变化、趋势和拐点信息，而不是只比较最后一个值。",
       },
       {
-        heading: '走势相似：历史候选与防前视',
-        description: '以目标股票参考日之前的一段交易日作为目标窗口。历史候选必须至少命中过目标窗口中的一种策略规则，并且候选结束日不晚于“参考日减去未来评价天数”，确保候选的后验收益在参考日当时已经完整可见。单股查询还会排除目标股票自身的历史窗口。',
-        formula: 'target_window = [t-window+1, t]\nhistorical_cutoff = t 向前 outcome_trade_days 个交易日\n候选锚点：结束日 ≤ historical_cutoff 且至少共享一种触发规则',
-        interpretation: '候选全集过大时最多保留 50,000 个锚点：近期与分散历史样本（单股查询）；全市场榜按股票和日期确定性哈希抽样，最多 50,000 个，不依据未来收益筛选。candidate_pool_truncated 为 true 表示发生截断，因此结果是受控候选池内的近邻，不保证遍历全部历史。',
+        heading: "挑选近邻",
+        description:
+          "先用低成本通道缩小范围，再计算精确相似度，保留最接近的候选。评级样本最多 30 个，并控制同股和评价区间重叠。",
       },
       {
-        heading: '走势相似：策略触发指纹',
-        description: '触发指纹同时比较“触发了哪些规则”“同一规则何时、以多大强度触发”和“整个窗口的触发数量/得分节奏”。历史上越少见的规则权重越大，额外规则会通过加权 Jaccard 的并集受到惩罚。',
-        formula: '规则权重 idf = clamp(ln(1 + 全部触发数 / 该规则触发数), 1, 6)\n规则集合相似 = Σidf(交集) / Σidf(并集)\n单次匹配 = exp(-|日期位置差| / 3) × clamp(1 - |分数差| / (|分数A|+|分数B|), 0, 1)\n触发相似 = 100 × (45% × 规则集合 + 35% × 时序匹配 + 20% × 聚合节奏)',
-        interpretation: '同名规则在相近窗口位置、以相近正负方向和强度触发时得分更高。时序匹配保持先后顺序且每次触发最多匹配一次；聚合节奏比较每日触发总数与总得分的形状。',
+        heading: "统计后续表现",
+        description:
+          "每个历史窗口从后一交易日开盘持有到评价期结束，计算收益、超额、最大有利波动 MFE 和最大不利波动 MAE。",
       },
       {
-        heading: '走势相似：量价、指标与市场环境指纹',
-        description: '每条数值序列先按窗口分段池化，再提取均匀、短期指数、中期指数、近期增强、前中/中后/前后趋势和拐点共 8 类响应。量价还包含收益、振幅、收盘位置、量额、换手、资金流、跳空、上下影线、市值与板块类别；行情库中的其他数值列按指标族汇总相似度；全市场横截面形成市场环境通道，形状用余弦比较，水平与强度用统一尺度下的数值距离比较；绝对涨跌与换手率先做log1p变换，成交额水平比较窗口之前最多252日的基线。',
-        formula: '形状相似 = 50 × (1 + cosine(目标形状, 候选形状))\n市场状态相似 = 100 / (1 + 状态数值的欧氏距离)\n市场对有效形状与状态相似度求均值\n指标通道先求各指标族内均值，再对有效族求均值\n最终相似 = 40% × 触发 + 25% × 市场环境 + 20% × 量价 + 15% × 指标',
-        interpretation: '余弦值会从 [-1, 1] 映射到 [0, 100]，所以 50 分表示近似正交/无明显同向，不能简单理解为“一半相似”。某通道无有效数据时会跳过，并按仍可用通道的权重和重新归一化；缺失不会自动记 0 分。',
-      },
-      {
-        heading: '历史后验汇总与有效样本数',
-        description: '相似历史按 similarity² 加权，最多选择 30 个评级样本；同一股票的邻近窗口会去重，候选与已选样本的实际后验区间重叠达到3个时跳过，同股后验重叠也跳过，降低重叠行情造成的伪样本量。未来收益从候选结束后的第一个交易日开盘买入，到评价窗口末日收盘卖出。',
-        formula: 'wᵢ = (similarityᵢ / 100)²\n加权均值 = Σ(wᵢ × outcomeᵢ) / Σwᵢ\n有效样本数 N_eff = (Σwᵢ)² / Σ(wᵢ²)\n收缩超额 = 加权超额 × N_eff / (N_eff + 8)',
-        interpretation: 'N_eff 越接近样本数，说明权重越均匀；明显更小说明结论被少数高相似样本主导。收缩超额会在样本少时主动靠近 0。MFE/MAE 分别是持有期最大有利/不利变动；历史后验仍是条件统计，不保证未来复现。',
-      },
-      {
-        heading: '走势相似排行榜：收益排序、匹配程度与样本支持',
-        description: '全市场榜按评分资格及窗口内策略触发抽样，不依据未来收益筛选，不平衡上涨/下跌配额；最多保留50,000个历史窗口。全局检索最相似的256个，去重后最多取30个评级样本。案例中的跑赢/跑输仅按后验超额正负标注，不决定入池或近邻选择。',
-        formula: 'prediction_signal = 加权超额 × N_eff / (N_eff + 8)\n样本支持系数 = √(N_eff / (N_eff + 8))\n匹配提升 = 评级样本平均相似度 − 背景候选相似度90分位\nranking_score = 按 prediction_signal 排名后的 0~100 线性名次分',
-        interpretation: 'N_eff≥8才产生排名；匹配提升仅作诊断，不参与排名门槛，也不表示绝对接近或收益有效。背景来自至多128个确定性抽取的同规则重叠候选。支持系数只反映权重集中程度，不是置信概率；后验段数按实际起止日期取最多不重叠区间，不等于独立样本数，超额分歧为近邻收益加权标准差。收益从次日开盘至后验末日收盘，未扣交易成本。MFE/MAE仅描述路径，不参与榜单主排序。历史指纹按输入内容校验后复用，算法升级需重算旧榜。',
+        heading: "形成相似榜",
+        description:
+          "以相似度的平方加权历史超额收益，再按有效样本数收缩。只有有效样本足够时产生预测信号，并按信号形成榜内名次分。",
       },
     ],
+    designs: [
+      {
+        heading: "四个通道各有侧重",
+        description:
+          "策略触发最重要，其次看当时市场环境，再看个股量价和指标。某通道双方都没有有效数据时，会跳过并重新归一化其余权重。",
+        formula: "综合相似度 = 40% 触发 + 25% 市场 + 20% 量价 + 15% 指标",
+      },
+      {
+        heading: "触发不仅比“像不像规则”",
+        description:
+          "还要比较同一规则在窗口中的位置、强度和整体触发节奏。少见规则权重更高，额外规则会降低规则集合的相似度。",
+        formula: "触发相似度 = 45% 规则集合 + 35% 时序 + 20% 节奏",
+      },
+      {
+        heading: "减少重叠样本造成的虚假证据",
+        description:
+          "一个历史窗口只算一次；同一股票相邻窗口、后验区间高度重叠的样本会受限。最多 3 个样本共享同一后验区间。",
+        formula: "样本上限 30；同股同时段与高重叠窗口去重",
+      },
+      {
+        heading: "小样本主动向中性收缩",
+        description:
+          "相似度越高权重越大，但样本少或权重过度集中时，收缩后的超额不会给出过度自信的结论。",
+        formula:
+          "wᵢ = (相似度ᵢ / 100)²\nN_eff = (Σwᵢ)² / Σwᵢ²\n收缩超额 = 加权超额 × N_eff / (N_eff + 8)",
+      },
+    ],
+    reading: [
+      "similarity_score 表示在本算法定义下“有多像”，不是未来上涨概率，也不是置信度百分比。",
+      "N_eff 是有效样本数；它明显低于样本数时，说明结论主要由少数高相似窗口贡献。N_eff 至少达到 8，才生成预测排名。",
+      "prediction_signal 是相似历史的条件超额估计。ranking_score 是本次榜单内部的 0—100 名次分，不是预期收益。",
+      "MFE / MAE 只描述历史路径；匹配提升是近邻相对背景候选的诊断值，不参与排名门槛。",
+    ],
+    boundary:
+      "历史后验仍是条件统计，不保证未来复现。默认收益从次日开盘算起，但未扣交易成本；相似度也不能跨不同窗口、参数或算法版本直接比较。",
   },
   {
-    title: '3. 回测指标算法',
-    items: [
+    id: "chip",
+    number: "03",
+    title: "筹码计算",
+    navHint: "成本分布与主散库存",
+    summary:
+      "筹码计算回答：按历史成交和换手，股票的成本分布在哪里，哪些库存仍被套牢，以及主力与散户的身份库存如何逐日变化。",
+    inputs: ["前复权开高低收", "换手率", "筹码变化策略", "价格分桶与预热参数"],
+    outputs: [
+      "成本分桶",
+      "主力/散户库存",
+      "获利盘与套牢盘",
+      "平均成本和 70/90 成本区间",
+      "库存年龄与留存",
+    ],
+    steps: [
       {
-        heading: '残差收益率',
-        description: '先用指数 / 概念 / 行业 beta 估算股票"应有收益"，再用实际收益减去它，得到剔除市场影响后的纯选股能力。',
-        formula: 'expected_pct = index_beta × index_pct + concept_beta × concept_pct + industry_beta × industry_pct\nresidual_pct = stock_pct - expected_pct',
-        interpretation: '正值表示跑赢基准，负值表示跑输基准。形态在评分日收盘后确认，收益从下一交易日开盘开始，到持有期末收盘结束；各收益腿先复合，再按配置 Beta 扣减。',
+        heading: "向前预热",
+        description:
+          "从可重放的历史起点连续计算，默认先预热 120 个报价日；需要更长窗口的表达式还会自动增加预热。不能从最新检查点倒推历史。",
       },
       {
-        heading: '上涨金额与推测市值',
-        description: '回测可选择残差收益率或上涨金额；金额模式下，IC、分层差、均值与样本排序都使用上涨金额。历史市值筛选、分组和市值序列使用推测市值。',
-        formula: '推测流通市值（亿） = 成交额（千元） / 换手率（%） / 1000\n上涨金额（亿） = 持有期残差收益率 / 100 × 评分日推测市值（亿）',
-        interpretation: '成交额除以换手率得到按成交均价计价的流通市值，无需当前市值或复权价格锚点；成交额或换手率缺失、非正时无法换算金额。',
+        heading: "建立成本网格",
+        description:
+          "使用前复权价格和几何价格桶，默认相邻边界相差 1%。新价格区间出现时向外扩展，已有桶的库存不会凭空搬家。",
       },
       {
-        heading: 'IC（信息系数）',
-        description: '每天把股票的评分排名和所选回测指标排名做 Pearson 相关系数，衡量"评分高低"与"未来收益"是否同向。',
-        formula: 'IC = PearsonCorr(平均排名(评分), 平均排名(回测指标))',
-        interpretation: 'IC ∈ [-1, 1]。正值越大说明评分越准；0.03 以上可视为有一定预测力，0.05 以上较好。',
+        heading: "先处理卖出",
+        description:
+          "换手率决定当日移动的库存比例。卖出策略给成本桶和持有人加权，先出卖出倾向高的库存；不足时逐级扩大到其他库存。",
       },
       {
-        heading: 'ICIR（信息比率）',
-        description: 'IC 的均值除以标准差，反映预测能力的稳定性。',
-        formula: 'ICIR = mean(IC) / std(IC)',
-        interpretation: '绝对值越大表示 IC 相对自身波动越稳定，正负号表示预测方向。常见经验阈值只能作筛选参考；ICIR > 1 不等同于已经证明可稳定盈利，还需结合样本量、交易成本和样本外检验。',
+        heading: "再分配新买方",
+        description:
+          "当日成交按开高低收形成的价格密度放入成本桶。当前筹码策略先用“主力卖出量 / 总换手”保持中性买卖平衡，再叠加方向证据。",
       },
       {
-        heading: 't 统计量',
-        description: '检验 IC 均值是否显著不为零，并修正多日持有造成的相邻前瞻收益重叠。',
-        formula: 't = IC_mean / Newey-West_HAC_SE，滞后阶数 = 持有期 - 1',
-        interpretation: '|t| > 2 可作约 95% 显著性的初步参考。HAC 会计入异方差和相邻日期相关性，但仍需结合样本外与多重检验。',
+        heading: "约束身份变化",
+        description:
+          "方向证据只改变当天新增成交的主散分配，不直接改总持仓。正证据把新成交中的主力比例往 85% 推，负证据往 10% 推；最终仍受中性卖出平衡和当天换手规模约束。",
       },
       {
-        heading: '残差均值',
-        description: '所有触发样本在回测窗口内的日均残差收益率。',
-        formula: 'avg_residual_mean = mean(每日触发样本残差收益率)',
-        interpretation: '正值表示策略整体跑赢基准；结合 IC 一起看，IC 高 + 残差为正是最优组合。',
-      },
-      {
-        heading: '超额残差均值',
-        description: '触发样本残差减去全市场残差后的日均值。',
-        formula: '每日超额 = mean(触发样本残差) - mean(全市场残差)\navg_excess = mean(每日超额)',
-        interpretation: '剔除了市场整体涨跌后的相对优势，更能反映策略本身能力。',
-      },
-      {
-        heading: '样本利润因子（Profit Factor）',
-        description: '所有触发股票样本中，正残差总和与负残差绝对值总和的比值；它不是按盈利日统计的盈亏比。',
-        formula: 'profit_loss_ratio = Σ(正残差) / Σ(|负残差|)',
-        interpretation: '> 1 表示样本盈利总额大于亏损总额。全部策略汇总则先形成等权策略日度组合，再从组合日收益重新计算，避免平均各规则比率。',
-      },
-      {
-        heading: '效率比率 (ER) 变化',
-        description: '衡量价格走势的"方向效率"，即净位移占总波动的比例。',
-        formula: 'ER = (close[t] - close[t-period]) / Σ|close[i] - close[i-1]|   (i 从 t-period+1 到 t)\nER_change = ER(窗口结束) - ER(窗口开始)',
-        interpretation: 'ER_change > 0 表示走势变得更有方向性；< 0 表示震荡加剧。',
-      },
-      {
-        heading: '分层回测',
-        description: '按评分把股票分成若干层（组），观察每层平均残差收益率是否随分数单调递增。',
-        formula: '方法一（Score 分层）：分数范围等距分组\n方法二（SampleCount 分层）：每组样本数相等（等分位数）\n方法三（Rank 分层）：按数据库排名分组',
-        interpretation: '高分组残差 > 低分组残差 = 策略有效。top-bottom spread 越大，分层效果越好。',
+        heading: "生成快照",
+        description:
+          "每天归一为 100 份模型库存，计算收益状态、成本区间、年龄和套牢指标，再写入连续检查点供下一次计算续算。",
       },
     ],
+    designs: [
+      {
+        heading: "库存守恒",
+        description:
+          "模型库存始终按 100 份归一化：卖出减少库存，新增买方补回同等换手量。主散标签可以变化，但不能在没有成交时直接重分类。",
+        formula: "主力库存 + 散户库存 = 100（模型份额）",
+      },
+      {
+        heading: "方向证据先累加",
+        description:
+          "当天命中的主力买入规则会把 bias 相加，得到总方向证据 E。E 的正负表示方向，数值大小决定迁移强度；它不是概率，也不是某笔成交直接归主力的百分比。",
+        formula:
+          "E = Σ(当日命中的主力买入规则 bias)\nE > 0：向主力方向偏移\nE < 0：向散户方向偏移\nE = 0：保持中性",
+      },
+      {
+        heading: "85% 与 10% 只影响新增成交",
+        description:
+          "正证据让当天新成交中的主力比例从卖出平衡值向 85% 靠近，负证据向 10% 靠近。它们是软目标，不是总持仓硬边界，也不会在没有证据时自动漂移。以主力占 50%、换手 8% 为例：中性卖出 4 份且 E=+0.12 时，新成交中主力约占 66.8%，当天总主力仅约升至 51.3%，不会直接变成 66.8% 或 85%。",
+        formula:
+          "E > 0：距离 = max(85% − 卖出前主力占比, 0)\nE < 0：距离 = min(10% − 卖出前主力占比, 0)\n强度 = min(1, |E| × 4 × 负向倍率)；负向倍率：正证据 1，负证据 3\n主力新增占比 = clamp(主力卖出量 / 总换手 + 强度 × 距离, 0, 1)",
+      },
+      {
+        heading: "价格成本与库存年龄分开",
+        description:
+          "成本桶记录“买在哪里”，年龄账本记录“这部分库存形成多久”。初始库存年龄未知，不能被伪装成新成交。",
+        formula: "库存年龄：0—4 / 5—19 / 20—59 / 60—119 / 120+ / 初始未知",
+      },
+      {
+        heading: "留存查询冻结区间",
+        description:
+          "固定成本区留存查询会冻结锚点价格桶，再在评价日区分原批次剩余与后续补入，避免价格桶扩张后把不同库存混在一起。",
+        formula:
+          "留存率 = 锚点旧库存剩余 / 锚点原库存\n补入占比 = 锚点后新增库存 / 评价日区间总量",
+      },
+    ],
+    reading: [
+      "分桶图和 70/90 成本区间描述模型认为的持仓成本位置；收盘价以下为获利盘，以上为套牢盘。",
+      "主力占比是行为推断，不是交易所披露的真实持仓。低换手股票可能长期保留初始 50/50 假设的影响。",
+      "85% 与 10% 是新增成交的迁移参照，不是总持仓上下限；系数再大，也只能在当天换手和可卖库存范围内改变身份。",
+      "年龄分布需要足够观察日才显示对应字段；留存率区分“原库存还在”和“卖出后又买回”，两者总量可能相同，但库存年龄不同。",
+    ],
+    boundary:
+      "结果是日线成交下的条件估计，不是账户真实成本、主力身份真相或未来涨跌预测。改变复权坐标、模拟起点、分桶、预热或策略后，必须从历史重算，不能拼接旧结果。",
   },
   {
-    title: '4. 股票遴选算法',
-    items: [
+    id: "backtest",
+    number: "04",
+    title: "回测计算",
+    navHint: "预测力、收益与稳定性",
+    summary:
+      "回测计算回答：评分高低与未来表现是否同向，高分组的收益是否更高，以及这种关系有没有足够的稳定性和统计支持。",
+    inputs: [
+      "评分结果",
+      "后续行情和基准",
+      "持有期与 Beta",
+      "样本过滤条件",
+      "收益口径",
+    ],
+    outputs: [
+      "IC / ICIR / HAC t",
+      "平均残差与超额",
+      "高低分组差",
+      "分层单调性",
+      "样本利润因子",
+    ],
+    steps: [
       {
-        heading: '表达式选股',
-        description: '对全市场股票逐只求值用户表达式，按 scope_way 判定是否命中，再经过版块、概念、市值等过滤后输出候选列表。',
-        formula: '命中判定 → 过滤条件 → 按 rank 升序排列',
-        interpretation: '结果列表按排名从优到劣排列；排名靠前 = 综合评分更高。',
+        heading: "确定样本",
+        description:
+          "只保留回测区间内有评分、有后续行情并满足上市天数、股票池和市值等过滤条件的“股票 × 日期”样本。",
       },
       {
-        heading: '概念选股',
-        description: '不写表达式，直接按概念 / 行业 / 地区 / 市值范围筛选股票。支持 AND（同时满足）和 OR（满足任一）两种概念匹配模式。',
-        formula: '过滤链：ST 排除 → 版块 → 地区 → 行业 → 市值 → 概念匹配 → 概念排除',
-        interpretation: '适合快速筛选特定主题的股票池。',
+        heading: "按真实时点进入",
+        description:
+          "评分在当日完成后确认，收益从下一交易日开盘开始，持有到评价期最后一个完整交易日收盘，避免把收盘信息当成开盘可成交。",
+      },
+      {
+        heading: "计算残差收益",
+        description:
+          "先用指数、概念和行业收益估计股票应有表现，再与实际收益相减，得到尽量剥离市场和风格后的选股结果。",
+      },
+      {
+        heading: "逐日比较",
+        description:
+          "每天比较评分排名与未来收益排名，计算 IC；同时比较高分组与低分组、不同分数层以及触发样本的收益分布。",
+      },
+      {
+        heading: "汇总稳定性",
+        description:
+          "把每日 IC 汇总为均值、ICIR 和 HAC t。相邻持有期会共享未来行情，因此 t 值使用持有期减 1 的滞后修正。",
+      },
+      {
+        heading: "输出结果",
+        description:
+          "同时展示预测方向、收益幅度、分层形态和样本质量，避免仅凭一个指标判断策略有效。",
       },
     ],
-  },
-  {
-    title: '5. 实时监控算法',
-    items: [
+    designs: [
       {
-        heading: '模板表达式求值',
-        description: '盘中实时获取最新价、今开、最高、最低、成交量，合并到历史 K 线序列后，逐只股票求值用户定义的监控模板。',
-        formula: 'RT_OP = (当前价 - 今开) / 昨收 × 100%\nRT_FH = (最高 - 当前价) / 最高 × 100%\nRT_VR = 实时量比\nRT_AVG = 实时均价',
-        interpretation: 'RT_OP > 0 表示股价在今日开盘价之上；RT_FH 越大表示距高点回落越多；RT_VR > 1 表示成交量高于近期平均。',
+        heading: "残差收益剔除共同风格",
+        description:
+          "Beta 越大，扣除的对应市场因素越多。残差为正表示股票跑赢它按配置应承担的那部分市场、概念和行业表现。",
+        formula:
+          "应有收益 = β指数 × 指数收益 + β概念 × 概念收益 + β行业 × 行业收益\n残差收益 = 股票收益 − 应有收益",
       },
       {
-        heading: '5 日涨跌幅',
-        description: '以当日实时价相对于 5 个交易日前收盘价的变动百分比。',
-        formula: 'return_5d = (realtime_price - close[5天前]) / close[5天前] × 100%',
-        interpretation: '正值表示近 5 日上涨，负值表示下跌。',
-      },
-    ],
-  },
-  {
-    title: '6. 相关性与正交研究',
-    items: [
-      {
-        heading: '共同触发：Jaccard / Phi',
-        description: 'Jaccard 只看至少一方触发的集合；Phi 把共同不触发也纳入二元关联。覆盖率悬殊时，两者出现差异是正常现象。',
-        formula: 'Jaccard = |A ∩ B| / |A ∪ B|\nPhi = 二元触发变量的相关系数',
-        interpretation: '它们回答的是规则是否共同选中，不回答分数方向，也不能单独证明策略逻辑等价。',
+        heading: "IC 看排序，不看绝对分数",
+        description:
+          "每日先转成排名再求相关，所以分数整体放大或平移不会改变 IC。正值表示评分越高，未来表现通常越好。",
+        formula: "IC = 评分排名与未来收益排名的相关系数",
       },
       {
-        heading: '线性关系：Pearson',
-        description: '在完整股票日宇宙上计算规则分数的线性相关，未触发规则按 0 分进入统计。',
-        formula: 'Pearson = Corr(score_A_with_zeros, score_B_with_zeros)',
-        interpretation: '接近 0 只表示直线关系弱，不能推出两个策略独立。',
+        heading: "ICIR 与 HAC t 看稳定性",
+        description:
+          "ICIR 衡量 IC 相对自身波动有多大；HAC t 进一步处理相邻日期收益重叠，避免把同一次行情重复当成大量独立证据。",
+        formula: "ICIR = mean(IC) / std(IC)\nHAC 滞后阶数 = max(0, 持有期 − 1)",
       },
       {
-        heading: '日度单调关系：Spearman',
-        description: '先按交易日聚合每条规则的横截面平均分，再比较交易日之间的排序关系。',
-        formula: 'daily_mean_score = 当日规则总分 / 当日股票数\nSpearman = Corr(rank(daily_mean_A), rank(daily_mean_B))',
-        interpretation: '用于观察两条策略是否随市场环境共同增强或减弱，不要求分数之间存在线性比例。',
-      },
-      {
-        heading: '一般依赖：距离相关',
-        description: '距离相关可以捕捉 U 形、阈值和分群关系。受 O(n²) 成本限制，页面使用确定性日期抽样。',
-        formula: 'distance_correlation ∈ [0, 1]',
-        interpretation: '它能判断一般依赖强弱，但不提供方向，也不是显著性概率。',
-      },
-      {
-        heading: '正交残差：核心策略组是研究基准',
-        description: '页面可选择一个或多个代表性核心策略，系统将核心组放在内部序列前面；第 N 条规则仍由前 N−1 条规则解释。',
-        formula: 'score_N = 前序规则线性拟合值 + residual_N\nresidual_variance_ratio = Var(residual_N) / Var(score_N)',
-        interpretation: '核心组用于对齐已有代表能力，非核心规则用于寻找新增信息。残差比例越高，当前规则在线性层面留下的增量越多；组内使用稳定顺序。',
-      },
-      {
-        heading: '可交易收益路径与收益相关',
-        description: '对每条规则用真实分数构造有方向的日收益：正分做多、负分反向、绝对分数代表权重；使用次日开盘到持有期末收盘的残差收益，再比较策略日收益的 Pearson 相关。',
-        formula: 'strategy_return = Σ(rule_score × residual_return) / Σ|rule_score|\nreturn_correlation = Corr(规则 A 日收益, 规则 B 日收益)',
-        interpretation: '收益相关回答按生产评分方向执行时实际赚亏是否同步。只有两条策略都有有效收益的共同日期才进入计算。',
-      },
-      {
-        heading: '相对核心组的样本外收益增量',
-        description: '按时间将有效日期前 70% 作为训练期，只在训练期拟合候选规则对核心组及此前规则的岭回归系数；后 30% 固定系数并检验候选的未解释收益。',
-        formula: 'incremental_return_test = candidate_return - Σ(训练期系数ᵢ × prior_returnᵢ)\nridge λ = 0.1；训练 ≥ max(30, 5 × 已有规则数)；检验 ≥ 20；HAC lag = holding_period - 1',
-        interpretation: '样本不足时不输出增量，避免用少量共同日期拟合大量规则导致系数爆炸。正的样本外未解释收益仍需结合 HAC t 值和多次研究造成的数据窥探。',
-      },
-      {
-        heading: '结论边界',
-        description: '研究页同时检查信号结构、风格暴露和毛收益路径，但尚未扣除换手、冲击成本，也不生成容量结论。',
-        interpretation: '线性残差高仍可能存在强距离相关；收益增量也只有在样本外稳定、计入交易成本后仍成立，才可称为可交易的独立策略维度。',
+        heading: "分层和分组检查单调性",
+        description:
+          "按分数范围、样本分位数或数据库排名分组，比较高分组与低分组收益。有效策略通常应表现为中间层较平滑、首尾差方向稳定。",
+        formula: "top_bottom_spread = 高分组平均收益 − 低分组平均收益",
       },
     ],
-  },
-  {
-    title: '7. 策略风格维度',
-    items: [
-      {
-        heading: '方向反应',
-        description: '用评分日相对 5 个交易日前收益的横截面百分位，与规则分数做有方向加权。',
-        formula: 'direction_day = Σ(score × return_percentile) / Σ|score|；最终对日期等权平均',
-        interpretation: '接近 1 表示规则加分偏近期上涨、扣分偏近期下跌，接近 -1 表示规则加分偏近期下跌、扣分偏近期上涨。',
-      },
-      {
-        heading: '入场形态',
-        description: '用收盘价相对前 20 个交易日最高价的位置做横截面百分位，再按规则分数有方向加权。',
-        formula: 'entry_day = Σ(score × entry_percentile) / Σ|score|；最终对日期等权平均',
-        interpretation: '接近 1 表示规则更奖励接近或越过前高，接近 -1 表示规则更奖励高点下方的回撤。',
-      },
-      {
-        heading: '时间尺度',
-        description: '在完整股票日宇宙中将无评分记为 0，计算同股相邻评分日规则分数的相关性。',
-        formula: 'time_scale = Corr(score[t-1], score[t])',
-        interpretation: '接近 1 表示分数方向和强度延续、偏慢变量；接近 0 表示线性延续较弱，负值表示更常反向切换。',
-      },
-      {
-        heading: '价格位置',
-        description: '计算收盘价在近 60 个交易日最高最低区间的位置，做当日横截面百分位后按规则分数有方向加权。',
-        formula: 'position = percentile( (close - low_60) / (high_60 - low_60) ) × 2 - 1',
-        interpretation: '接近 1 表示规则更奖励 60 日高位，接近 -1 表示规则更奖励低位。',
-      },
-      {
-        heading: '波动与跳跃',
-        description: '比较评分日绝对涨跌幅与此前 20 日平均绝对涨跌幅，做横截面百分位后按规则分数有方向加权。',
-        formula: 'volatility = percentile( |return[t]| / mean(|return[t-20..t-1]|) ) × 2 - 1',
-        interpretation: '接近 1 表示规则更奖励波动突然放大，接近 -1 表示规则更奖励平稳状态。',
-      },
-      {
-        heading: '量能与流动性',
-        description: '用成交额对数的当日横截面百分位描述流动性，再按规则分数有方向加权。',
-        formula: 'liquidity = percentile( ln(amount) ) × 2 - 1',
-        interpretation: '接近 1 表示规则更奖励高成交额股票，接近 -1 表示规则更奖励低流动性；它是流动性代理，不是实际冲击成本。',
-      },
-      {
-        heading: '市场状态依赖',
-        description: '比较每日全市场平均规则分数与沪深 300 当日涨跌幅的相关性。',
-        formula: 'market_regime = Corr(Σscore / 每日评分股票数, 沪深300日收益)',
-        interpretation: '正值表示上涨日规则整体更偏加分，负值表示下跌日整体更偏加分；接近 0 只表示线性依赖较弱。',
-      },
-      {
-        heading: '收益形态',
-        description: '使用日度分数加权残差收益的正负总额平衡，描述生产评分方向的收益由正侧还是负侧主导。',
-        formula: 'return_shape = (Σ正收益 - Σ|负收益|) / (Σ正收益 + Σ|负收益|)',
-        interpretation: '接近 1 表示正残差总额占优，接近 -1 表示负残差总额占优；它不区分高胜率小盈和低胜率右尾。',
-      },
+    reading: [
+      "先看 IC 是否长期为正、t 是否足够大，再看分层是否单调，最后检查平均残差和超额是否支持实际收益方向。",
+      "ICIR 绝对值越大，说明 IC 相对波动越稳定；但单一阈值不是盈利保证，要结合样本长度和样本外结果。",
+      "收益金额模式用评分日推测流通市值把残差收益率换成金额；它按同一口径参与 IC、均值和分层，不改变时间顺序。",
+      "样本利润因子是正残差总额除以负残差绝对值总额。它衡量样本盈亏总额，不是按天计算的盈亏比。",
     ],
+    boundary:
+      "这是因子与评分效果回测，不是完整账户模拟，默认不建模手续费、滑点和冲击成本。显著结果仍需样本外验证，频繁调参也会放大偶然发现。",
   },
-  {
-    title: '8. 关键数据表解读',
-    items: [
-      {
-        heading: 'score_summary 表',
-        description: '每只股票每个交易日的评分汇总。',
-        formula: '字段：ts_code, trade_date, total_score, rank',
-        interpretation: 'total_score 越高越好；rank = 1 是当日第一。按 trade_date + rank 查询可得每日榜单。',
-      },
-      {
-        heading: 'rule_details 表',
-        description: '每条规则对每只股票每个交易日的单独得分。',
-        formula: '字段：rule_name, ts_code, trade_date, rule_score',
-        interpretation: '用于查看某只股票"为什么得分高"——哪些规则贡献了正分，哪些拖了后腿。',
-      },
-      {
-        heading: 'scene_details 表',
-        description: '每个场景对每只股票每个交易日的状态和指标。',
-        formula: '字段：scene_name, direction, stage, stage_score, risk_score, confirm_strength, risk_intensity, scene_rank',
-        interpretation: 'stage 排序 confirm > trigger > observe > fail；scene_rank 是该场景内排名；confirm_strength > 1 表示超过确认阈值。',
-      },
-      {
-        heading: '回测结果表（rule_backtest / scene_backtest / rank_layer）',
-        description: '规则层 / 场景层 / 排名分层的回测统计结果。',
-        formula: '规则层：IC, ICIR, t_value, avg_residual_mean, avg_excess_residual_mean, profit_loss_ratio, avg_er_change\n场景层：spread_mean, ic_mean, icir, ic_t_value\n分层：每层 avg_residual, top_bottom_spread',
-        interpretation: '看策略是否有效，先看 IC 是否 > 0 且 t 是否显著，再看残差均值是否为正，最后看分层是否单调。',
-      },
-    ],
-  },
-]
+];
 
 type AlgorithmGuideModalProps = {
-  open: boolean
-  onClose: () => void
-}
+  open: boolean;
+  onClose: () => void;
+};
 
 export default function AlgorithmGuideModal({
   open,
   onClose,
 }: AlgorithmGuideModalProps) {
+  const [activeId, setActiveId] = useState<AlgorithmSectionId>("score");
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const activeSection =
+    ALGORITHM_SECTIONS.find((section) => section.id === activeId) ??
+    ALGORITHM_SECTIONS[0];
+
   useEffect(() => {
     if (!open) {
-      return
+      return;
     }
     function onKeyDown(event: KeyboardEvent) {
-      if (event.key === 'Escape') {
-        onClose()
+      if (event.key === "Escape") {
+        onClose();
       }
     }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [onClose, open])
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose, open]);
 
   if (!open) {
-    return null
+    return null;
   }
 
   return (
@@ -371,46 +435,150 @@ export default function AlgorithmGuideModal({
       role="presentation"
       onClick={(event) => {
         if (event.target === event.currentTarget) {
-          onClose()
+          onClose();
         }
       }}
     >
       <div className="algorithm-guide-modal" role="dialog" aria-modal="true">
-        <div className="algorithm-guide-head">
+        <header className="algorithm-guide-head">
           <div>
+            <span className="algorithm-guide-kicker">
+              计算口径 · 当前生产实现
+            </span>
             <h3>算法说明</h3>
             <p>
-              以下口径与当前生产实现保持一致，重点说明分数如何得到、适合比较什么，以及不应如何解读。
+              四套算法回答不同问题：当天强不强、历史像不像、成本在哪里、这种信号是否真的有效。每块只解释自己的输入、计算过程和结果边界。
             </p>
           </div>
-          <button type="button" className="settings-secondary-btn" onClick={onClose}>
+          <button
+            type="button"
+            className="settings-secondary-btn"
+            onClick={onClose}
+          >
             关闭
           </button>
-        </div>
+        </header>
 
-        {ALGORITHM_SECTIONS.map((section) => (
-          <section key={section.title} className="algorithm-guide-section">
-            <h4>{section.title}</h4>
-            <div className="algorithm-guide-items">
-              {section.items.map((item) => (
-                <div key={item.heading} className="algorithm-guide-item">
-                  <h5>{item.heading}</h5>
-                  <p>{item.description}</p>
-                  {item.formula ? (
-                    <pre className="algorithm-guide-code">{item.formula}</pre>
-                  ) : null}
-                  {item.interpretation ? (
-                    <div className="algorithm-guide-interpretation">
-                      <strong>数据解读：</strong>
-                      <span>{item.interpretation}</span>
-                    </div>
-                  ) : null}
+        <nav
+          className="algorithm-guide-tabs"
+          role="tablist"
+          aria-label="算法说明分类"
+        >
+          {ALGORITHM_SECTIONS.map((section) => (
+            <button
+              key={section.id}
+              type="button"
+              role="tab"
+              id={`algorithm-tab-${section.id}`}
+              aria-selected={section.id === activeSection.id}
+              aria-controls={`algorithm-panel-${section.id}`}
+              className={`algorithm-guide-tab algorithm-guide-tab-${section.id}`}
+              onClick={() => {
+                setActiveId(section.id);
+                bodyRef.current?.scrollTo({ top: 0 });
+              }}
+            >
+              <span className="algorithm-guide-tab-number">
+                {section.number}
+              </span>
+              <span>
+                <strong>{section.title}</strong>
+                <small>{section.navHint}</small>
+              </span>
+            </button>
+          ))}
+        </nav>
+
+        <div
+          ref={bodyRef}
+          className={`algorithm-guide-body algorithm-guide-theme-${activeSection.id}`}
+          role="tabpanel"
+          id={`algorithm-panel-${activeSection.id}`}
+          aria-labelledby={`algorithm-tab-${activeSection.id}`}
+        >
+          <section className="algorithm-guide-summary">
+            <div className="algorithm-guide-title-row">
+              <span>{activeSection.number}</span>
+              <div>
+                <h4>{activeSection.title}</h4>
+                <p>{activeSection.summary}</p>
+              </div>
+            </div>
+            <div className="algorithm-guide-io">
+              <div>
+                <strong>它读取什么</strong>
+                <div className="algorithm-guide-tags">
+                  {activeSection.inputs.map((input) => (
+                    <span key={input}>{input}</span>
+                  ))}
                 </div>
+              </div>
+              <div>
+                <strong>它产出什么</strong>
+                <div className="algorithm-guide-tags">
+                  {activeSection.outputs.map((output) => (
+                    <span key={output}>{output}</span>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section className="algorithm-guide-block">
+            <div className="algorithm-guide-block-head">
+              <span>计算路径</span>
+              <p>从原始数据到页面结果，按这个顺序执行。</p>
+            </div>
+            <ol className="algorithm-guide-steps">
+              {activeSection.steps.map((step, index) => (
+                <li key={step.heading}>
+                  <span>{String(index + 1).padStart(2, "0")}</span>
+                  <div>
+                    <strong>{step.heading}</strong>
+                    <p>{step.description}</p>
+                  </div>
+                </li>
+              ))}
+            </ol>
+          </section>
+
+          <section className="algorithm-guide-block">
+            <div className="algorithm-guide-block-head">
+              <span>设计重点</span>
+              <p>这些选择决定了算法为什么这样算，以及数值应该怎样理解。</p>
+            </div>
+            <div className="algorithm-guide-designs">
+              {activeSection.designs.map((design) => (
+                <article
+                  key={design.heading}
+                  className="algorithm-guide-design"
+                >
+                  <h5>{design.heading}</h5>
+                  <p>{design.description}</p>
+                  {design.formula ? (
+                    <pre className="algorithm-guide-code">{design.formula}</pre>
+                  ) : null}
+                </article>
               ))}
             </div>
           </section>
-        ))}
+
+          <section className="algorithm-guide-reading">
+            <div>
+              <strong>怎么读结果</strong>
+              <ul>
+                {activeSection.reading.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </div>
+            <div className="algorithm-guide-boundary">
+              <strong>算法边界</strong>
+              <p>{activeSection.boundary}</p>
+            </div>
+          </section>
+        </div>
       </div>
     </div>
-  )
+  );
 }

@@ -39,7 +39,7 @@ pub(super) const EPS: f64 = 1e-10;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChipChangeConfig {
-    /// 1: fixed buyer weights; 2: S6 inventory-neutral directional migration.
+    /// 1: fixed buyer weights; 2: inventory-neutral directional migration.
     pub version: u32,
     pub strategy: Vec<ChipChangeStrategy>,
 }

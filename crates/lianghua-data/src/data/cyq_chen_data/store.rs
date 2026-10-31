@@ -348,7 +348,7 @@ pub(super) fn current_chip_change_strategy_hash(source_dir: &str) -> Result<Stri
     let header =
         toml::from_str::<toml::Table>(&text).map_err(|e| format!("读取筹码算法版本失败: {e}"))?;
     let algorithm = match header.get("version").and_then(toml::Value::as_integer) {
-        Some(2) => "s6-v1:",
+        Some(2) => "inventory-memory-v1:",
         _ => "",
     };
     Ok((|text: &str| -> String {
@@ -362,6 +362,20 @@ pub(super) fn current_chip_change_strategy_hash(source_dir: &str) -> Result<Stri
             text.len()
         )
     })(&text))
+}
+
+pub(super) fn chip_strategy_hash_matches(stored: Option<&str>, current: &str) -> bool {
+    let Some(stored) = stored else {
+        return false;
+    };
+    stored == current
+        || chip_strategy_hash_payload(stored) == chip_strategy_hash_payload(current)
+}
+
+fn chip_strategy_hash_payload(hash: &str) -> Option<(&str, &str)> {
+    let (head, length) = hash.rsplit_once(':')?;
+    let (_, digest) = head.rsplit_once(':')?;
+    Some((digest, length))
 }
 
 pub(super) fn query_cyq_chen_meta_value(
@@ -615,7 +629,7 @@ pub fn query_cyq_chen_strategy_maintenance_status(
             });
         }
     };
-    let strategy_changed = stored_hash.as_deref() != Some(current_hash.as_str());
+    let strategy_changed = !chip_strategy_hash_matches(stored_hash.as_deref(), &current_hash);
     let feature_changed = query_cyq_chen_meta_value(&cyq_chen_db, "feature_version")?.as_deref()
         != Some(
             crate::data::cyq_chen::CYQ_CHEN_FEATURE_VERSION
