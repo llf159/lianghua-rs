@@ -7,84 +7,60 @@
   border-radius: 8px;
 }
 
-/* Follow-up settings live inside the ordinary rule editor. */
-.strategy-rule-tracking .strategy-rule-editor-section-head {
-  align-items: flex-start;
+/* Creating a track enables it; each row owns its enabled state. */
+.strategy-rule-tracking {
+  padding: 12px 14px;
 }
-.strategy-rule-tracking .strategy-rule-editor-section-head > div {
-  flex: 1;
-  min-width: 180px;
-}
-.strategy-rule-tracking-toggle {
-  position: relative;
+.strategy-rule-tracking-header,
+.strategy-rule-tracking-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  min-height: 44px;
-  color: #526173;
-  font-size: 13px;
-  cursor: pointer;
+  gap: 10px;
 }
-.strategy-rule-tracking-toggle > input {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
+.strategy-rule-tracking-header {
+  justify-content: space-between;
 }
-.strategy-rule-tracking-switch {
-  position: relative;
-  width: 40px;
-  height: 24px;
-  border-radius: 20px;
-  background: #bec9d6;
-  transition: background 150ms;
+.strategy-rule-tracking-header h4 {
+  margin: 0;
+  color: #243247;
+  font-size: 16px;
 }
-.strategy-rule-tracking-switch::after {
-  content: '';
-  position: absolute;
-  width: 18px;
-  height: 18px;
-  top: 3px;
-  left: 3px;
-  border-radius: 50%;
-  background: #fff;
-  box-shadow: 0 1px 3px #0002;
-  transition: transform 150ms;
+.strategy-rule-tracking-row {
+  min-width: 0;
 }
-.strategy-rule-tracking-toggle > input:checked + span {
-  background: var(--theme-orange-600);
-}
-.strategy-rule-tracking-toggle > input:checked + span::after {
-  transform: translateX(16px);
-}
-.strategy-rule-tracking-toggle > input:focus-visible + span {
-  outline: 2px solid var(--theme-orange-600);
-  outline-offset: 3px;
-}
-.strategy-rule-tracking-toggle > input:disabled + span {
-  opacity: 0.55;
+.strategy-rule-tracking-row .strategy-rule-tracking-name {
+  flex: 1;
+  min-width: 0;
+  width: 0;
 }
 .strategy-rule-tracking .strategy-tracking-check {
   display: flex;
+  flex: 0 0 auto;
   flex-direction: row;
   align-items: center;
-  gap: 0.6rem;
+  gap: 6px;
   min-height: 44px;
+  cursor: pointer;
+  white-space: nowrap;
 }
 .strategy-rule-tracking .strategy-tracking-check input {
-  width: 20px;
-  height: 20px;
-  min-height: 20px;
+  width: 18px;
+  height: 18px;
+  min-height: 18px;
+  flex: 0 0 auto;
+  accent-color: var(--theme-orange-600);
+}
+.strategy-rule-tracking-row > button {
   flex: 0 0 auto;
 }
 .strategy-rule-tracking-settings {
   display: grid;
   gap: 10px;
+  margin-top: 10px;
 }
 .strategy-rule-tracking-settings + .strategy-rule-tracking-settings {
-  margin-top: 18px;
-  padding-top: 18px;
+  margin-top: 12px;
+  padding-top: 12px;
   border-top: 1px solid #e1e7ef;
 }
 .strategy-rule-tracking-duration {

@@ -10,7 +10,7 @@ export function ExpressionWalkForward({ combo }: { combo: RuleValidationComboRes
   if (!walkForward || walkForward.folds.length === 0) {
     return (
       <div className="expression-backtest-section">
-        <h3>Walk-forward 稳定性</h3>
+        <h3>滚动样本外检验（Walk-forward）</h3>
         <div className="expression-backtest-empty">当前组合没有可用的样本外窗口。</div>
       </div>
     );
@@ -21,18 +21,19 @@ export function ExpressionWalkForward({ combo }: { combo: RuleValidationComboRes
 
   return (
     <div className="expression-backtest-section">
-      <h3>Walk-forward 稳定性</h3>
+      <h3>滚动样本外检验（Walk-forward）</h3>
+      <p className="research-meta">按时间顺序扩展训练期，在之后互不重叠的检验期评价表现。OOS 指样本外；IC 衡量排序能力，t统计量表示均值相对估计误差的大小。</p>
       <div className="expression-backtest-table-wrap">
         <table className="expression-backtest-table">
           <thead>
             <tr>
-              <th>Fold</th>
-              <th>Train</th>
-              <th>Test</th>
+              <th>窗口</th>
+              <th>训练期</th>
+              <th>检验期</th>
               <th>IC</th>
-              <th>IC t</th>
-              <th>回测指标（方向）</th>
-              <th>Spread</th>
+              <th>IC t统计量</th>
+              <th>超额收益</th>
+              <th>分层收益差</th>
               <th>样本</th>
             </tr>
           </thead>

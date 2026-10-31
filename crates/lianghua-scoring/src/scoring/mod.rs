@@ -342,7 +342,11 @@ fn scoring_rule_cache(
                         ));
                     }
                 }
-                if missing_prefix[index + 1] != missing_prefix[start] {
+                let complete = missing_prefix[index + 1] == missing_prefix[start];
+                if let Some(availability) = availability.as_deref_mut() {
+                    availability.push(complete);
+                }
+                if !complete {
                     best_days.clear();
                     scores.push(0.0);
                     triggered.push(false);
@@ -519,9 +523,6 @@ pub fn evaluate_cached_rule_scores_with_availability(
     rule: &CachedRule,
     rt: &mut Runtime,
 ) -> Result<(Vec<f64>, Vec<bool>, Vec<bool>), String> {
-    if rule.combination.is_some() {
-        return Err("单表达式研究不支持组合规则".into());
-    }
     let mut available = Vec::new();
     let (scores, triggered) = scoring_rule_cache(rule, rt, Some(&mut available))?;
     Ok((scores, triggered, available))

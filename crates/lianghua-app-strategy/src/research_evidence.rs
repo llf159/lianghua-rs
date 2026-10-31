@@ -82,6 +82,14 @@ impl ValidationResearchOutput {
         Ok(conn)
     }
 
+    pub fn summarize(
+        &self,
+        query: &ResearchEvidenceQuery,
+    ) -> Result<Vec<ResearchEvidenceSummary>, String> {
+        let (conn, sql) = query.sql_on(self.open()?)?;
+        summarize_evidence(conn, sql, query, "all")
+    }
+
     pub fn prepare(
         &self,
         source: &str,
@@ -695,6 +703,10 @@ impl ResearchEvidenceQuery {
             return Err("旧运行未保存全部样本，请重新运行".into());
         }
         let conn = crate::data::open_db_readonly(path).map_err(|e| e.to_string())?;
+        self.sql_on(conn)
+    }
+
+    fn sql_on(&self, conn: Connection) -> Result<(Connection, String), String> {
         let combo_known: bool = conn
             .query_row(
                 "SELECT count(*)>0 FROM metadata WHERE key=?",
@@ -880,6 +892,15 @@ pub fn summarize_research_evidence(
     frequency: &str,
 ) -> Result<Vec<ResearchEvidenceSummary>, String> {
     let (conn, sql) = query.sql(source)?;
+    summarize_evidence(conn, sql, query, frequency)
+}
+
+fn summarize_evidence(
+    conn: Connection,
+    sql: String,
+    query: &ResearchEvidenceQuery,
+    frequency: &str,
+) -> Result<Vec<ResearchEvidenceSummary>, String> {
     let period = match frequency {
         "all" => "'全部'",
         "quarter" => {
@@ -1108,6 +1129,11 @@ mod tests {
         assert_eq!(row.matched_difference, Some(4.));
         assert_eq!(row.raw_mean, Some(6.));
         assert_eq!(row.statistics.status, "insufficient");
+        assert_eq!(
+            serde_json::to_value(output.summarize(&query).unwrap()).unwrap(),
+            serde_json::to_value(summarize_research_evidence(source, &query, "all").unwrap())
+                .unwrap()
+        );
         let db = output.open().unwrap();
         db.execute_batch("INSERT INTO observations VALUES ('E','20260105','主板',NULL,'缺失',1,true); INSERT INTO labels VALUES (3,'E','20260105','20260106','20260108',3); INSERT INTO signals VALUES ('c','E','20260105',0);").unwrap();
         drop(db);

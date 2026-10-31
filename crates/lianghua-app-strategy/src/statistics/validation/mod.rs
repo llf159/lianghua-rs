@@ -46,6 +46,7 @@ use crate::statistics::validation::walk_forward::{
     ValidationFoldPlan, build_validation_fold_plan, build_validation_incremental,
     build_validation_walk_forward, sort_validation_points, validation_axis_direction_sign,
 };
+use lianghua_core::tracking::{TrackDefinition, TrackProgram};
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -131,7 +132,24 @@ pub struct RuleValidationReturnDistributionBucket {
 }
 
 #[derive(Debug, Serialize)]
+pub struct RuleValidationQuarterSummary {
+    pub period: String,
+    pub return_days: usize,
+    pub mean_return: Option<f64>,
+    pub ic_days: usize,
+    pub mean_ic: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RuleValidationEvidenceSummary {
+    pub dimension: String,
+    pub rows: Vec<crate::research_evidence::ResearchEvidenceSummary>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct RuleValidationComboResult {
+    pub component: String,
+    pub component_label: String,
     pub combo_key: String,
     pub combo_label: String,
     pub formula: String,
@@ -145,6 +163,9 @@ pub struct RuleValidationComboResult {
     pub return_distribution: Vec<RuleValidationReturnDistributionBucket>,
     pub backtest: RuleLayerBacktestData,
     pub daily_metrics: Vec<RuleValidationDailyMetric>,
+    pub quarter_summaries: Vec<RuleValidationQuarterSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence_summaries: Option<Vec<RuleValidationEvidenceSummary>>,
     pub walk_forward: RuleValidationWalkForwardData,
     pub incremental: RuleValidationIncrementalData,
     pub similarity_rows: Vec<RuleValidationSimilarityRow>,
@@ -267,10 +288,15 @@ pub struct RuleExpressionValidationManualStrategy {
     pub dist_points: Option<Vec<crate::data::DistPoint>>,
     pub explain: Option<String>,
     pub tag: Option<String>,
+    pub native_rule: Option<ScoreRule>,
+    #[serde(default)]
+    pub tracking: Vec<TrackDefinition>,
 }
 
 #[derive(Debug)]
 pub(super) struct ValidationVariant {
+    pub(in crate::statistics) component: String,
+    pub(in crate::statistics) component_label: String,
     pub(in crate::statistics) combo_key: String,
     pub(in crate::statistics) combo_label: String,
     pub(in crate::statistics) formula: String,
@@ -280,9 +306,33 @@ pub(super) struct ValidationVariant {
 pub(super) type ValidationTriggeredScoreMap = HashMap<String, HashMap<String, f64>>;
 
 pub(super) struct PreparedValidationCombo {
+    pub(in crate::statistics) tracking: Option<Arc<ValidationTrackingPlan>>,
+    pub(in crate::statistics) score_component: usize,
     pub(in crate::statistics) variant: ValidationVariant,
     pub(in crate::statistics) cached_rule: CachedRule,
     pub(in crate::statistics) assigned_names: Vec<String>,
+}
+
+pub(super) struct ValidationTrackingPlan {
+    pub(in crate::statistics) tracks: Vec<(TrackDefinition, TrackProgram)>,
+    pub(in crate::statistics) calendar: Vec<String>,
+    pub(in crate::statistics) runtime_keys: HashSet<String>,
+}
+
+impl PreparedValidationCombo {
+    pub(in crate::statistics) fn expression_programs(&self) -> Vec<&crate::expr::parser::Stmts> {
+        let mut programs = self.cached_rule.expression_programs();
+        if let Some(tracking) = &self.tracking {
+            programs.extend(
+                tracking
+                    .tracks
+                    .iter()
+                    .flat_map(|(_, program)| program.expressions())
+                    .map(|expression| expression.program()),
+            );
+        }
+        programs
+    }
 }
 
 pub(super) struct ValidationExecutionPlan {
@@ -307,6 +357,7 @@ pub(super) struct ValidationSeedRule {
     dist_points: Option<Vec<crate::data::DistPoint>>,
     tag: RuleTag,
     exclude_rule_name: Option<String>,
+    native_rule: Option<ScoreRule>,
 }
 
 pub(super) fn read_non_empty_owned(raw: Option<&str>) -> Option<String> {
@@ -392,14 +443,18 @@ pub fn run_rule_expression_validation(
             .and_then(|strategy| strategy.dist_points.clone())
             .and_then(|items| if items.is_empty() { None } else { Some(items) });
 
-        if import_rule
-            .as_ref()
-            .is_some_and(|rule| rule.kind == RuleKind::Combination)
-            && top_formula.is_none()
-            && manual_formula.is_none()
-        {
-            return Err("组合策略不能导入到单表达式验证，请直接在“策略回测”中验证".to_string());
-        }
+        let native_rule = manual_strategy
+            .and_then(|strategy| strategy.native_rule.clone())
+            .or_else(|| {
+                import_rule
+                    .as_ref()
+                    .filter(|rule| {
+                        rule.kind == RuleKind::Combination
+                            && top_formula.is_none()
+                            && manual_formula.is_none()
+                    })
+                    .cloned()
+            });
 
         let manual_scope_way = match manual_strategy
             .and_then(|strategy| read_non_empty_owned(strategy.scope_way.as_deref()))
@@ -441,7 +496,8 @@ pub fn run_rule_expression_validation(
             }
         }
 
-        let has_manual_override = manual_name.is_some()
+        let has_manual_override = native_rule.is_some()
+            || manual_name.is_some()
             || manual_formula.is_some()
             || manual_scope_way.is_some()
             || manual_scope_windows.is_some()
@@ -461,7 +517,20 @@ pub fn run_rule_expression_validation(
             return Err(format!("未找到策略: {import_rule_name}"));
         }
 
-        let formula = top_formula
+        let formula = native_rule
+            .as_ref()
+            .map(|rule| {
+                if rule.kind == RuleKind::Combination {
+                    rule.conditions
+                        .iter()
+                        .map(|condition| format!("{}:\n{}", condition.name, condition.when))
+                        .collect::<Vec<_>>()
+                        .join("\n\n")
+                } else {
+                    rule.when.clone()
+                }
+            })
+            .or(top_formula)
             .or(manual_formula)
             .or_else(|| {
                 import_rule
@@ -474,7 +543,7 @@ pub fn run_rule_expression_validation(
             parse_scope_way_input(&raw)?
         } else if let Some(value) = manual_scope_way {
             value
-        } else if let Some(rule) = import_rule.as_ref() {
+        } else if let Some(rule) = native_rule.as_ref().or(import_rule.as_ref()) {
             rule.scope_way
         } else {
             ScopeWay::Any
@@ -482,7 +551,12 @@ pub fn run_rule_expression_validation(
 
         let resolved_scope_windows = scope_windows
             .or(manual_scope_windows)
-            .or_else(|| import_rule.as_ref().map(|rule| rule.scope_windows))
+            .or_else(|| {
+                native_rule
+                    .as_ref()
+                    .or(import_rule.as_ref())
+                    .map(|rule| rule.scope_windows)
+            })
             .unwrap_or(1)
             .max(1);
 
@@ -495,6 +569,7 @@ pub fn run_rule_expression_validation(
         }
 
         let rule_name = manual_name
+            .or_else(|| native_rule.as_ref().map(|rule| rule.name.clone()))
             .or_else(|| {
                 import_rule
                     .as_ref()
@@ -540,6 +615,7 @@ pub fn run_rule_expression_validation(
             dist_points,
             tag,
             exclude_rule_name,
+            native_rule,
         })
     })(
         &import_rule_name,
@@ -551,6 +627,22 @@ pub fn run_rule_expression_validation(
     )?;
     let start_date = start_date.trim().to_string();
     let end_date = end_date.trim().to_string();
+    let tracking = manual_strategy
+        .as_ref()
+        .map(|strategy| strategy.tracking.clone())
+        .unwrap_or_default();
+    let unknown_configs = unknown_configs.unwrap_or_default();
+    if tracking.iter().any(|track| track.enabled) && !unknown_configs.is_empty() {
+        return Err("启用跟踪时请直接修改条件后重跑，不能同时进行 UNKNOWN 参数扫描".into());
+    }
+    if seed_rule
+        .native_rule
+        .as_ref()
+        .is_some_and(|rule| rule.kind == RuleKind::Combination)
+        && !unknown_configs.is_empty()
+    {
+        return Err("组合策略请直接修改条件参数后重跑；UNKNOWN 参数扫描用于单条表达式".into());
+    }
     let variants = (|formula: &str,
                      unknown_configs: &[RuleValidationUnknownConfig]|
      -> Result<Vec<ValidationVariant>, String> {
@@ -694,6 +786,8 @@ pub fn run_rule_expression_validation(
                 };
 
                 out.push(ValidationVariant {
+                    component: "base".into(),
+                    component_label: "原始信号".into(),
                     combo_key,
                     combo_label,
                     formula: replaced_formula,
@@ -714,6 +808,8 @@ pub fn run_rule_expression_validation(
 
         if out.is_empty() {
             out.push(ValidationVariant {
+                component: "base".into(),
+                component_label: "原始信号".into(),
                 combo_key: "validation_combo_001".to_string(),
                 combo_label: "默认参数".to_string(),
                 formula: formula.to_string(),
@@ -722,7 +818,54 @@ pub fn run_rule_expression_validation(
         }
 
         Ok(out)
-    })(&seed_rule.formula, &unknown_configs.unwrap_or_default())?;
+    })(&seed_rule.formula, &unknown_configs)?;
+    let tracking_plan = if tracking.iter().any(|track| track.enabled) {
+        let mut tracks = Vec::new();
+        let mut ids = HashSet::new();
+        let mut names = HashSet::new();
+        let mut runtime_keys = HashSet::new();
+        for mut definition in tracking.into_iter().filter(|track| track.enabled) {
+            definition.source = Some("self".into());
+            if !ids.insert(definition.id.clone())
+                || !names.insert(definition.name.trim().to_string())
+            {
+                return Err("跟踪ID和名称不能重复".into());
+            }
+            let program = TrackProgram::compile(&definition)
+                .map_err(|error| format!("跟踪 {}：{error}", definition.name))?;
+            let mut injected = crate::scoring::tools::cyq_chen_runtime_key_names()
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            injected
+                .extend(["RANK", "SCORE", "S_RANK", "ZHANG", "TOTAL_MV_YI"].map(str::to_string));
+            injected.extend(program.context.iter().cloned());
+            runtime_keys.extend(crate::data::collect_runtime_keys_from_expr_programs(
+                &program
+                    .expressions()
+                    .iter()
+                    .map(|expression| expression.program())
+                    .collect::<Vec<_>>(),
+                crate::data::RuntimeKeyCollectOptions {
+                    always_keys: &["C"],
+                    injected_keys: &injected.iter().map(String::as_str).collect::<Vec<_>>(),
+                    aliases: &[],
+                },
+            ));
+            tracks.push((definition, program));
+        }
+        let mut calendar = crate::data::load_trade_date_list(&source_path)?;
+        calendar.retain(|date| date <= &end_date);
+        calendar.sort_unstable();
+        calendar.dedup();
+        Some(Arc::new(ValidationTrackingPlan {
+            tracks,
+            calendar,
+            runtime_keys,
+        }))
+    } else {
+        None
+    };
     let execution_plan = (|source_path: &str,
                            start_date: &str,
                            end_date: &str,
@@ -736,28 +879,110 @@ pub fn run_rule_expression_validation(
             let combo = (|seed_rule: &ValidationSeedRule,
                           variant: ValidationVariant|
              -> Result<PreparedValidationCombo, String> {
-                let cached_rule = build_validation_cached_rule(
-                    variant.combo_key.clone(),
-                    seed_rule.scope_way,
-                    seed_rule.scope_windows,
-                    seed_rule.points,
-                    seed_rule.dist_points.clone(),
-                    seed_rule.tag,
-                    &variant.formula,
-                )?;
-                let assigned_names = collect_validation_assigned_names(&cached_rule.when_ast);
+                let cached_rule = if let Some(rule) = &seed_rule.native_rule {
+                    let mut rule = rule.clone();
+                    rule.name = variant.combo_key.clone();
+                    rule.scope_way = seed_rule.scope_way;
+                    rule.scope_windows = seed_rule.scope_windows;
+                    rule.tag = seed_rule.tag;
+                    if rule.kind == RuleKind::Single {
+                        rule.when = variant.formula.clone();
+                    }
+                    crate::scoring::rule_cache::cache_rules(vec![rule])?.remove(0)
+                } else {
+                    build_validation_cached_rule(
+                        variant.combo_key.clone(),
+                        seed_rule.scope_way,
+                        seed_rule.scope_windows,
+                        seed_rule.points,
+                        seed_rule.dist_points.clone(),
+                        seed_rule.tag,
+                        &variant.formula,
+                    )?
+                };
+                let assigned_names = cached_rule
+                    .expression_programs()
+                    .into_iter()
+                    .flat_map(collect_validation_assigned_names)
+                    .collect::<HashSet<_>>()
+                    .into_iter()
+                    .collect();
 
                 Ok(PreparedValidationCombo {
+                    tracking: tracking_plan.clone(),
+                    score_component: 0,
                     variant,
                     cached_rule,
                     assigned_names,
                 })
             })(seed_rule, variant)?;
-            max_warmup_need = max_warmup_need.max(estimate_rule_warmup(
-                &combo.cached_rule.when_ast,
-                combo.cached_rule.scope_way,
-                combo.cached_rule.scope_windows,
-            )?);
+            for program in combo.cached_rule.expression_programs() {
+                max_warmup_need = max_warmup_need.max(estimate_rule_warmup(
+                    program,
+                    combo.cached_rule.scope_way,
+                    combo.cached_rule.scope_windows,
+                )?);
+            }
+            if let Some(plan) = &combo.tracking {
+                let base_warmup = max_warmup_need;
+                for (definition, program) in &plan.tracks {
+                    let expression_need = program
+                        .expressions()
+                        .iter()
+                        .map(|expression| {
+                            crate::expr::validation::estimate_expression_warmup(
+                                expression.program(),
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?
+                        .into_iter()
+                        .max()
+                        .unwrap_or(0);
+                    max_warmup_need = max_warmup_need.max(
+                        definition
+                            .max_age()
+                            .saturating_add(base_warmup.max(expression_need)),
+                    );
+                }
+                for (index, (definition, _)) in plan.tracks.iter().enumerate() {
+                    combos.push(PreparedValidationCombo {
+                        tracking: Some(plan.clone()),
+                        score_component: index + 1,
+                        cached_rule: combo.cached_rule.clone(),
+                        assigned_names: combo.assigned_names.clone(),
+                        variant: ValidationVariant {
+                            component: format!("track:{}", definition.id),
+                            component_label: definition.score_name(),
+                            combo_key: format!(
+                                "{}_track_{}",
+                                combo.variant.combo_key, definition.id
+                            ),
+                            combo_label: format!(
+                                "{} · {}",
+                                combo.variant.combo_label,
+                                definition.score_name()
+                            ),
+                            formula: serde_json::to_string_pretty(definition)
+                                .map_err(|error| error.to_string())?,
+                            unknown_values: Vec::new(),
+                        },
+                    });
+                }
+                combos.push(PreparedValidationCombo {
+                    tracking: Some(plan.clone()),
+                    score_component: plan.tracks.len() + 1,
+                    cached_rule: combo.cached_rule.clone(),
+                    assigned_names: combo.assigned_names.clone(),
+                    variant: ValidationVariant {
+                        component: "combined".into(),
+                        component_label: "原始＋全部跟踪".into(),
+                        combo_key: format!("{}_combined", combo.variant.combo_key),
+                        combo_label: format!("{} · 原始＋全部跟踪", combo.variant.combo_label),
+                        formula: combo.variant.formula.clone(),
+                        unknown_values: Vec::new(),
+                    },
+                });
+            }
             combos.push(combo);
         }
 
@@ -1120,16 +1345,19 @@ pub fn run_rule_expression_validation(
                     execution_plan.combos.len()
                 ))?;
             }
-            let candidate_available = research.map(|_| {
-                triggered_score_map
-                    .iter()
-                    .flat_map(|(code, days)| {
-                        days.iter()
-                            .filter(|(_, score)| score.is_finite())
-                            .map(move |(day, _)| validation_pair_hash(code, day))
-                    })
-                    .collect::<HashSet<_>>()
-            });
+            let candidate_available =
+                research
+                    .filter(|output| output.baseline_diagnostics)
+                    .map(|_| {
+                        triggered_score_map
+                            .iter()
+                            .flat_map(|(code, days)| {
+                                days.iter()
+                                    .filter(|(_, score)| score.is_finite())
+                                    .map(move |(day, _)| validation_pair_hash(code, day))
+                            })
+                            .collect::<HashSet<_>>()
+                    });
             if let Some(research) = research {
                 if !research.has_signals(&combo.variant.combo_key)? {
                     research.save_signals(&combo.variant.combo_key, &triggered_score_map)?;
@@ -1178,7 +1406,7 @@ pub fn run_rule_expression_validation(
                         None,
                         matches!(seed_rule.scope_way, ScopeWay::Each),
                         seed_rule.points,
-                        seed_rule.dist_points.is_some(),
+                        seed_rule.dist_points.is_some() || seed_rule.native_rule.is_some(),
                     );
                     visit_triggered_rule_samples_from_cache(
                         runtime_cache,
@@ -1197,7 +1425,11 @@ pub fn run_rule_expression_validation(
                         _,
                     ) = sample_accumulator.into_parts();
                     let axis = sort_validation_points(&metrics_with_samples.metrics.points);
-                    let direction_sign = validation_axis_direction_sign(&axis);
+                    let direction_sign = if seed_rule.native_rule.is_some() {
+                        seed_rule.points.signum()
+                    } else {
+                        validation_axis_direction_sign(&axis)
+                    };
                     let points_by_date = axis
                         .iter()
                         .map(|point| (point.trade_date.as_str(), *point))
@@ -1251,8 +1483,43 @@ pub fn run_rule_expression_validation(
                         &candidate_daily_returns,
                         core_series,
                     );
+                    let mut quarters =
+                        std::collections::BTreeMap::<String, (f64, usize, f64, usize)>::new();
+                    for point in &axis {
+                        let key = format!(
+                            "{} Q{}",
+                            &point.trade_date[..4],
+                            (point.trade_date[4..6].parse::<usize>().unwrap_or(1) - 1) / 3 + 1
+                        );
+                        let entry = quarters.entry(key).or_default();
+                        if let Some(value) = point
+                            .avg_excess_residual_return
+                            .filter(|value| value.is_finite())
+                        {
+                            entry.0 += value * direction_sign;
+                            entry.1 += 1;
+                        }
+                        if let Some(value) = point.ic.filter(|value| value.is_finite()) {
+                            entry.2 += value;
+                            entry.3 += 1;
+                        }
+                    }
+                    let quarter_summaries = quarters
+                        .into_iter()
+                        .map(|(period, (returns, return_days, ics, ic_days))| {
+                            RuleValidationQuarterSummary {
+                                period,
+                                return_days,
+                                mean_return: (return_days > 0)
+                                    .then(|| returns / return_days as f64),
+                                ic_days,
+                                mean_ic: (ic_days > 0).then(|| ics / ic_days as f64),
+                            }
+                        })
+                        .collect();
                     let daily_metrics = axis
                         .iter()
+                        .filter(|_| research.is_none())
                         .map(|point| RuleValidationDailyMetric {
                             trade_date: point.trade_date.clone(),
                             ic: point.ic,
@@ -1261,14 +1528,20 @@ pub fn run_rule_expression_validation(
                                 .map(|value| value * direction_sign),
                         })
                         .collect();
-                    let backtest = build_rule_backtest_payload(
+                    let mut backtest = build_rule_backtest_payload(
                         &combo.variant.combo_key,
                         params,
                         metrics_with_samples.metrics,
                         Some(validation_layer_details),
                     );
 
+                    if research.is_some() {
+                        backtest.points.clear();
+                    }
+
                     Ok(RuleValidationComboResult {
+                        component: combo.variant.component.clone(),
+                        component_label: combo.variant.component_label.clone(),
                         combo_key: combo.variant.combo_key.clone(),
                         combo_label: combo.variant.combo_label.clone(),
                         formula: combo.variant.formula.clone(),
@@ -1286,6 +1559,8 @@ pub fn run_rule_expression_validation(
                         return_distribution,
                         backtest,
                         daily_metrics,
+                        quarter_summaries,
+                        evidence_summaries: None,
                         walk_forward,
                         incremental,
                         similarity_rows,
@@ -1311,6 +1586,13 @@ pub fn run_rule_expression_validation(
                     candidate_available.as_ref(),
                 )?,
             );
+            if let Some(progress) = progress {
+                progress(&format!(
+                    "已完成参数组合 {}/{}",
+                    combo_results.len(),
+                    execution_plan.combos.len()
+                ))?;
+            }
         }
         log::info!(
             "表达式研究：{}组证据保存与统计耗时 {:.3}s",
@@ -1423,6 +1705,231 @@ mod tests {
 
         assert!(error.contains("表达式解析错误"), "{error}");
         assert!(!error.contains("stock_list.csv"), "{error}");
+    }
+
+    #[test]
+    fn rule_expression_validation_replays_tracking_with_frozen_anchor_and_score_expiry() {
+        let root = temp_source_dir();
+        let source = root.to_str().unwrap();
+        prepare_validation_source_files(source);
+        write(
+            root.join("stock_concepts.csv"),
+            "ts_code,c1,c2,c3,concept\n",
+        )
+        .unwrap();
+        write(
+            root.join("trade_calendar.csv"),
+            "cal_date\n20240102\n20240103\n20240104\n20240105\n20240108\n20240109\n",
+        )
+        .unwrap();
+        write(
+            root.join("score_rule.toml"),
+            r#"
+version=1
+[[scene]]
+name="研究"
+direction="long"
+observe_threshold=1.0
+trigger_threshold=2.0
+confirm_threshold=3.0
+fail_threshold=1.0
+[[rule]]
+name="原规则"
+scene="研究"
+stage="base"
+scope_way="LAST"
+scope_windows=1
+when="C > O"
+points=0.0
+explain="零基础分，使用自定义跟踪起点"
+"#,
+        )
+        .unwrap();
+        let conn = duckdb::Connection::open(crate::data::source_db_path(source)).unwrap();
+        conn.execute_batch("INSERT INTO stock_data VALUES ('000001.SZ','20240105','qfq',11.1,11.2,10.3,10.4,1300,13000,11.1,-0.7,-6.3),('000001.SZ','20240108','qfq',10.4,10.5,9.4,9.5,1400,14000,10.4,-0.9,-8.6),('000001.SZ','20240109','qfq',9.5,10.3,9.4,10.2,1500,15000,9.5,0.7,7.3);").unwrap();
+        conn.execute("INSERT INTO stock_data SELECT '000001.SH',trade_date,'ind',open,high,low,close,vol,amount,pre_close,change,pct_chg FROM stock_data WHERE adj_type='qfq'", []).unwrap();
+        drop(conn);
+        for enabled in [true, false] {
+            let output = crate::research_evidence::ValidationResearchOutput {
+                baseline_diagnostics: false,
+                path: root.join(format!("track-{enabled}.db")),
+                grouping: Default::default(),
+                statistics: Default::default(),
+            };
+            let manual = serde_json::from_value(serde_json::json!({"nativeRule":{"name":"原规则","scene":"研究","kind":"single","stage":"base","scope_way":"LAST","scope_windows":1,"when":"C > O","points":0,"explain":"观察"}, "tracking":[{"id":"follow-1","name":"观察确认","enabled":enabled,"source":"self","start":"C > O","ttl":3,"max_age":4,"capture":{"A_CLOSE":"C"},"invalidate":"C < A_CLOSE * 0.8","steps":[{"name":"观察完成","when":"AGE >= 1 AND C > A_CLOSE","points":2.5}],"signal":"AGE >= 2 AND C > A_CLOSE","points":-1.25,"score_until":"SCORE_AGE >= 3"}]})).unwrap();
+            let data = super::run_rule_expression_validation(
+                source.into(),
+                "原规则".into(),
+                None,
+                None,
+                None,
+                Some("qfq".into()),
+                "000001.SH".into(),
+                Some(0.0),
+                Some(0.0),
+                Some(0.0),
+                "20240103".into(),
+                "20240109".into(),
+                Some(1),
+                Some(0),
+                Some(1),
+                None,
+                Some(manual),
+                None,
+                Some(2),
+                None,
+                Some(false),
+                None,
+                None,
+                Some(2),
+                None,
+                None,
+                Some(&output),
+            )
+            .unwrap();
+            let base = data
+                .combo_results
+                .iter()
+                .find(|combo| combo.component == "base")
+                .unwrap();
+            assert!(
+                output.load_signals(&base.combo_key).unwrap().unwrap()["000001.SZ"]
+                    .values()
+                    .all(|score| *score == 0.0)
+            );
+            if !enabled {
+                assert_eq!(data.combo_results.len(), 1);
+                continue;
+            }
+            assert_eq!(data.combo_results.len(), 3);
+            let tracked = data
+                .combo_results
+                .iter()
+                .find(|combo| combo.component == "track:follow-1")
+                .unwrap();
+            let combined = data
+                .combo_results
+                .iter()
+                .find(|combo| combo.component == "combined")
+                .unwrap();
+            let scores = output.load_signals(&tracked.combo_key).unwrap().unwrap();
+            let total = output.load_signals(&combined.combo_key).unwrap().unwrap();
+            for (date, expected) in [
+                ("20240103", 2.5),
+                ("20240104", 1.25),
+                ("20240105", 1.25),
+                ("20240108", 0.0),
+                ("20240109", 0.0),
+            ] {
+                assert_eq!(scores["000001.SZ"][date], expected, "{date}");
+                assert_eq!(total["000001.SZ"][date], expected, "combined {date}");
+            }
+            assert!(tracked.trigger_samples > 0);
+            let samples = [
+                &tracked.sample_groups.positive,
+                &tracked.sample_groups.negative,
+                &tracked.sample_groups.random,
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+            assert!(!samples.is_empty());
+            for sample in samples {
+                assert_eq!(
+                    sample.rule_score,
+                    scores[&sample.ts_code][&sample.trade_date]
+                );
+            }
+        }
+        assert!(!crate::data::result_db_path(source).exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rule_expression_validation_imports_native_combination_and_distance_scores() {
+        let source_dir = temp_source_dir();
+        let source = source_dir.to_str().unwrap();
+        prepare_validation_source_files(source);
+        write(
+            source_dir.join("stock_concepts.csv"),
+            "ts_code,c1,c2,c3,concept\n",
+        )
+        .unwrap();
+        write(
+            source_dir.join("score_rule.toml"),
+            r#"
+version = 1
+[[scene]]
+name = "组合场景"
+direction = "long"
+observe_threshold = 1.0
+trigger_threshold = 2.0
+confirm_threshold = 3.0
+fail_threshold = 1.0
+[[rule]]
+name = "组合策略"
+scene = "组合场景"
+kind = "combination"
+stage = "base"
+scope_way = "LAST"
+scope_windows = 1
+points_by_hits = [0.0, 1.0, 3.0]
+max_points = 4.0
+explain = "组合导入"
+[[rule.condition]]
+name = "收红"
+when = "C > O"
+[[rule.condition]]
+name = "放量"
+when = "V > REF(V,1)"
+bonus_points = 2.0
+"#,
+        )
+        .unwrap();
+        let conn = duckdb::Connection::open(crate::data::source_db_path(source)).unwrap();
+        conn.execute("INSERT INTO stock_data SELECT '000001.SH',trade_date,'ind',open,high,low,close,vol,amount,pre_close,change,pct_chg FROM stock_data WHERE adj_type='qfq'", []).unwrap();
+        drop(conn);
+        for (index, (manual, expected)) in [
+            (None, 4.0),
+            (Some(serde_json::json!({"nativeRule": {
+                "name":"组合策略", "scene":"组合场景", "kind":"combination", "stage":"base",
+                "scope_way":"LAST", "scope_windows":1, "points_by_hits":[0,1,3], "max_points":4,
+                "condition":[{"name":"收红","when":"C > O"},{"name":"放量","when":"V > 1150","bonus_points":2}], "explain":"编辑后的组合"
+            }})), 1.0),
+            (Some(serde_json::json!({"nativeRule": {
+                "name":"区间策略", "scene":"组合场景", "kind":"single", "stage":"base", "scope_way":"EACH", "scope_windows":2,
+                "when":"C > O", "points":2, "max_points":8,
+                "dist_points":[{"min":0,"max":0,"points":7},{"min":1,"max":1,"points":3}], "explain":"区间及封顶"
+            }})), 8.0),
+            (Some(serde_json::json!({"nativeRule": {
+                "name":"自写普通策略", "scene":"研究策略", "kind":"single", "stage":"base", "scope_way":"LAST", "scope_windows":1,
+                "when":"C > O", "points":-2.75, "explain":"可编辑固定分"
+            }})), -2.75),
+            (Some(serde_json::json!({"nativeRule": {
+                "name":"自写三条件组合", "scene":"研究策略", "kind":"combination", "stage":"base", "scope_way":"LAST", "scope_windows":1,
+                "points_by_hits":[0,-1.25,-4.5,-8.75], "max_points":10, "max_bonus_points":0.5,
+                "condition":[{"name":"收红","when":"C > O"},{"name":"放量","when":"V > REF(V,1)","bonus_points":-1.25},{"name":"成交","when":"AMOUNT > 0"}], "explain":"新建及编辑计分"
+            }})), -9.25),
+        ].into_iter().enumerate() {
+            let output = crate::research_evidence::ValidationResearchOutput {
+                baseline_diagnostics: false, path: source_dir.join(format!("native-{index}.db")), grouping: Default::default(), statistics: Default::default(),
+            };
+            let data = super::run_rule_expression_validation(
+                source.to_string(), if index < 3 { "组合策略".into() } else { String::new() }, None, None, None, Some("qfq".into()), "000001.SH".into(),
+                Some(0.5), Some(0.0), Some(0.0), "20240102".into(), "20240104".into(), Some(1), Some(0), Some(1), None,
+                manual.map(|value| serde_json::from_value(value).unwrap()), None, Some(2), None, Some(false), None, None, Some(2), None, None, Some(&output),
+            ).unwrap();
+            assert!(!data.combo_results[0].formula.is_empty());
+            let signals = output.load_signals("validation_combo_001").unwrap().unwrap();
+            assert_eq!(signals["000001.SZ"]["20240103"], expected);
+            let samples = [&data.combo_results[0].sample_groups.positive, &data.combo_results[0].sample_groups.negative, &data.combo_results[0].sample_groups.random].into_iter().flatten().collect::<Vec<_>>();
+            assert!(!samples.is_empty());
+            for sample in samples {
+                assert_eq!(sample.rule_score, signals[&sample.ts_code][&sample.trade_date]);
+            }
+            if index == 0 { assert!(signals["000001.SZ"]["20240102"].is_nan()); }
+        }
+        std::fs::remove_dir_all(source_dir).unwrap();
     }
 
     #[test]
@@ -1569,6 +2076,16 @@ mod tests {
             );
             assert_eq!(full_combo.trigger_samples, quick_combo.trigger_samples);
             assert_eq!(full_combo.triggered_days, quick_combo.triggered_days);
+            assert!(full_combo.daily_metrics.is_empty());
+            assert!(full_combo.backtest.points.is_empty());
+            assert_eq!(
+                serde_json::to_value(&full_combo.quarter_summaries).unwrap(),
+                serde_json::to_value(&quick_combo.quarter_summaries).unwrap()
+            );
+            assert_eq!(
+                serde_json::to_value(&full_combo.sample_groups).unwrap(),
+                serde_json::to_value(&quick_combo.sample_groups).unwrap()
+            );
         }
         let db = output.open().unwrap();
         assert_eq!(data.baseline_origin, "isolated_native_scoring_v1");

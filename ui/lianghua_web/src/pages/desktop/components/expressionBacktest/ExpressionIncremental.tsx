@@ -8,7 +8,7 @@ export function ExpressionIncremental({ combo }: { combo: RuleValidationComboRes
   if (coreRuleNames.length === 0) {
     return (
       <div className="expression-backtest-section">
-        <h3>控制核心策略后的收益诊断</h3>
+        <h3>增量收益分析（Incremental Alpha）</h3>
         <div className="expression-backtest-empty">
           尚未选择核心策略。选择核心策略并重新运行后可查看控制后的样本外收益。
         </div>
@@ -21,9 +21,9 @@ export function ExpressionIncremental({ combo }: { combo: RuleValidationComboRes
 
   return (
     <div className="expression-backtest-section">
-      <h3>控制核心策略后的收益诊断</h3>
+      <h3>增量收益分析（Incremental Alpha）</h3>
       <p className="expression-backtest-caption">
-        核心策略：{coreRuleNames.join(" / ")}。此回归未重新评分或重排，不能代表真实排名增量。
+        通过岭回归控制核心策略的收益解释部分，评价剩余收益；HAC t统计量对异方差和自相关作调整。核心策略：{coreRuleNames.join(" / ")}。此回归未重新评分或重排，不能代表真实排名增量。
         {incremental?.label_boundaries_checked
           ? `已核对实际标签末日，额外排除训练日合计 ${incremental.label_boundary_excluded_days ?? 0} 日；HAC 保留缺失日期。`
           : "旧结果未核对实际标签边界，需重跑。"}
@@ -36,11 +36,11 @@ export function ExpressionIncremental({ combo }: { combo: RuleValidationComboRes
             <table className="expression-backtest-table">
               <thead>
                 <tr>
-                  <th>Fold</th>
-                  <th>Incremental</th>
-                  <th>HAC t</th>
-                  <th>Positive</th>
-                  <th>Test days</th>
+                  <th>窗口</th>
+                  <th>增量收益</th>
+                  <th>HAC t统计量</th>
+                  <th>正收益日占比</th>
+                  <th>检验天数</th>
                 </tr>
               </thead>
               <tbody>

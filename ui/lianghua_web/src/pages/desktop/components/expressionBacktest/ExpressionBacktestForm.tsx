@@ -15,12 +15,21 @@ import {
   type ValidationScopeWayOption,
   type ValidationUnknownConfigDraft,
 } from "../../../../shared/expressionValidation";
+import StrategyCombinationEditor from "../../StrategyCombinationEditor";
+import StrategyRuleTrackingEditor from "../../StrategyRuleTrackingEditor";
+import StrategyDistPointsEditor from "../../StrategyDistPointsEditor";
+import {
+  createResearchRuleDraft,
+  type ResearchRuleDraft,
+} from "../../../../shared/researchRuleDraft";
 import { STOCK_PICK_BOARD_OPTIONS } from "../../../../shared/stockPickShared";
 
 const CORE_RULE_LIMIT = 8;
 
 export type ExpressionBacktestFormValues = {
   importRuleName: string;
+  nativeRule?: StrategyManageRuleItem | null;
+  ruleDraft?: ResearchRuleDraft;
   direction: ValidationDirection;
   scopeWay: ValidationScopeWayOption;
   consecThresholdText: string;
@@ -74,7 +83,9 @@ export function ExpressionBacktestForm({
   onRun: () => void;
   extraParameters?: ReactNode;
 }) {
-  const [editorOpen, setEditorOpen] = useState(false);
+  const ruleDraft =
+    values.ruleDraft ?? createResearchRuleDraft(values.nativeRule ?? undefined);
+  const [editorOpen, setEditorOpen] = useState(true);
   const [coreRuleKeyword, setCoreRuleKeyword] = useState("");
   const coreRuleKeywordText = coreRuleKeyword.trim().toLowerCase();
   const coreRuleOptionByName = new Map(
@@ -116,6 +127,10 @@ export function ExpressionBacktestForm({
     return `结果库触发 ${option.trigger_count} 次，其中 ${option.valid_trigger_count} 次为非零分数`;
   };
 
+  function updateRuleDraft(patch: Partial<ResearchRuleDraft>) {
+    onChange({ ruleDraft: { ...ruleDraft, ...patch } });
+  }
+
   function toggleCoreRule(ruleName: string, checked: boolean) {
     if (checked) {
       if (
@@ -145,11 +160,6 @@ export function ExpressionBacktestForm({
 
   return (
     <section className="expression-backtest-card">
-      {error ? (
-        <div className="expression-backtest-error" role="alert">
-          {error}
-        </div>
-      ) : null}
       <div className="expression-backtest-form-row">
         <label className="expression-backtest-field expression-backtest-source">
           <span>导入策略</span>
@@ -161,6 +171,11 @@ export function ExpressionBacktestForm({
             {strategyOptions.map((item) => (
               <option key={item.name} value={item.name}>
                 {item.name}
+                {item.kind === "combination"
+                  ? "（组合）"
+                  : item.dist_points?.length
+                    ? "（区间计分）"
+                    : ""}
               </option>
             ))}
           </select>
@@ -224,6 +239,62 @@ export function ExpressionBacktestForm({
         <summary>编辑策略</summary>
         <div className="expression-backtest-form-row">
           <label className="expression-backtest-field">
+            <span>策略名称</span>
+            <input
+              value={ruleDraft.name}
+              placeholder="可选，便于区分回测记录"
+              onChange={(event) =>
+                updateRuleDraft({ name: event.target.value })
+              }
+            />
+          </label>
+          <label className="expression-backtest-field">
+            <span>策略类型</span>
+            <select
+              value={ruleDraft.kind}
+              onChange={(event) => {
+                if (event.target.value === "combination") {
+                  onChange({
+                    ruleDraft: {
+                      ...ruleDraft,
+                      kind: "combination",
+                      conditions: ruleDraft.conditions.length
+                        ? ruleDraft.conditions
+                        : [
+                            {
+                              name: "条件1",
+                              when: values.expression,
+                              bonus_points: 0,
+                            },
+                            { name: "条件2", when: "", bonus_points: 0 },
+                          ],
+                      bonusPointTexts: ruleDraft.conditions.length
+                        ? ruleDraft.bonusPointTexts
+                        : ["0", "0"],
+                      hitPointTexts: ruleDraft.conditions.length
+                        ? ruleDraft.hitPointTexts
+                        : ["", ""],
+                    },
+                    scopeWay:
+                      values.scopeWay === "RECENT" ? "LAST" : values.scopeWay,
+                    enableUnknown: false,
+                    unknownConfigs: [],
+                  });
+                } else {
+                  onChange({
+                    ruleDraft: { ...ruleDraft, kind: "single" },
+                    expression:
+                      values.expression || ruleDraft.conditions[0]?.when || "",
+                  });
+                }
+              }}
+            >
+              <option value="single">普通策略</option>
+              <option value="combination">组合策略</option>
+            </select>
+          </label>
+
+          <label className="expression-backtest-field">
             <span>方向</span>
             <select
               value={values.direction}
@@ -244,11 +315,27 @@ export function ExpressionBacktestForm({
               onChange={(event) =>
                 onChange({
                   scopeWay: event.target.value as ValidationScopeWayOption,
+                  ruleDraft: {
+                    ...ruleDraft,
+                    scoreMode:
+                      ruleDraft.scoreMode === "dist" &&
+                      event.target.value !== "EACH" &&
+                      event.target.value !== "RECENT"
+                        ? "fixed"
+                        : ruleDraft.scoreMode,
+                  },
                 })
               }
             >
               {VALIDATION_SCOPE_WAY_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
+                <option
+                  key={option.value}
+                  value={option.value}
+                  disabled={
+                    ruleDraft.kind === "combination" &&
+                    option.value === "RECENT"
+                  }
+                >
                   {option.label}
                 </option>
               ))}
@@ -281,15 +368,170 @@ export function ExpressionBacktestForm({
             />
           </label>
         </div>
-        <label className="expression-backtest-field expression-backtest-field-full">
-          <span>表达式</span>
-          <textarea
-            rows={4}
-            value={values.expression}
-            onChange={(event) => onChange({ expression: event.target.value })}
-            placeholder="例如: C > REF(C, N) and V > MA(V, M)"
+        {ruleDraft.kind === "combination" ? (
+          <StrategyCombinationEditor
+            conditions={ruleDraft.conditions}
+            combinationBonusPointTexts={ruleDraft.bonusPointTexts}
+            combinationHitPointTexts={ruleDraft.hitPointTexts}
+            maxPointsText={ruleDraft.maxPointsText}
+            maxBonusPointsText={ruleDraft.maxBonusPointsText}
+            addCombinationCondition={() => {
+              let next = ruleDraft.conditions.length + 1;
+              while (
+                ruleDraft.conditions.some(
+                  (condition) => condition.name === `条件${next}`,
+                )
+              )
+                next += 1;
+              updateRuleDraft({
+                conditions: [
+                  ...ruleDraft.conditions,
+                  { name: `条件${next}`, when: "", bonus_points: 0 },
+                ],
+                bonusPointTexts: [...ruleDraft.bonusPointTexts, "0"],
+                hitPointTexts: [...ruleDraft.hitPointTexts, ""],
+              });
+            }}
+            removeCombinationCondition={(index) =>
+              updateRuleDraft({
+                conditions: ruleDraft.conditions.filter(
+                  (_, itemIndex) => itemIndex !== index,
+                ),
+                bonusPointTexts: ruleDraft.bonusPointTexts.filter(
+                  (_, itemIndex) => itemIndex !== index,
+                ),
+                hitPointTexts: ruleDraft.hitPointTexts.slice(
+                  0,
+                  ruleDraft.conditions.length - 1,
+                ),
+              })
+            }
+            updateCombinationCondition={(index, field, value) => {
+              if (field === "bonus_points")
+                updateRuleDraft({
+                  bonusPointTexts: ruleDraft.bonusPointTexts.map(
+                    (text, itemIndex) => (itemIndex === index ? value : text),
+                  ),
+                });
+              else
+                updateRuleDraft({
+                  conditions: ruleDraft.conditions.map(
+                    (condition, itemIndex) =>
+                      itemIndex === index
+                        ? { ...condition, [field]: value }
+                        : condition,
+                  ),
+                });
+            }}
+            updateCombinationHitPoints={(hitCount, value) =>
+              updateRuleDraft({
+                hitPointTexts: ruleDraft.hitPointTexts.map((text, index) =>
+                  index === hitCount - 1 ? value : text,
+                ),
+              })
+            }
+            setMaxPointsText={(value) =>
+              updateRuleDraft({ maxPointsText: value })
+            }
+            setMaxBonusPointsText={(value) =>
+              updateRuleDraft({ maxBonusPointsText: value })
+            }
           />
-        </label>
+        ) : (
+          <>
+            <label className="expression-backtest-field expression-backtest-field-full">
+              <span>表达式</span>
+              <textarea
+                rows={4}
+                value={values.expression}
+                onChange={(event) =>
+                  onChange({ expression: event.target.value })
+                }
+                placeholder="例如: C > REF(C, N) and V > MA(V, M)"
+              />
+            </label>
+            <div className="expression-backtest-form-row">
+              <label className="expression-backtest-field">
+                <span>得分方式</span>
+                <select
+                  value={ruleDraft.scoreMode}
+                  onChange={(event) =>
+                    updateRuleDraft({
+                      scoreMode: event.target.value as "fixed" | "dist",
+                      distPointRows: ruleDraft.distPointRows.length
+                        ? ruleDraft.distPointRows
+                        : [
+                            {
+                              min: "0",
+                              max: "0",
+                              points: ruleDraft.fixedPointsText,
+                            },
+                          ],
+                    })
+                  }
+                >
+                  <option value="fixed">固定分</option>
+                  <option
+                    value="dist"
+                    disabled={
+                      values.scopeWay !== "EACH" && values.scopeWay !== "RECENT"
+                    }
+                  >
+                    区间字典（EACH / RECENT）
+                  </option>
+                </select>
+              </label>
+              {ruleDraft.scoreMode === "fixed" ? (
+                <label className="expression-backtest-field">
+                  <span>固定分值</span>
+                  <input
+                    type="number"
+                    step="any"
+                    value={ruleDraft.fixedPointsText}
+                    onChange={(event) =>
+                      updateRuleDraft({ fixedPointsText: event.target.value })
+                    }
+                  />
+                </label>
+              ) : null}
+              {values.scopeWay === "EACH" ? (
+                <label className="expression-backtest-field">
+                  <span>窗口累计得分的正负限制值</span>
+                  <input
+                    type="number"
+                    min={0}
+                    step="any"
+                    placeholder="留空不限"
+                    value={ruleDraft.maxPointsText}
+                    onChange={(event) =>
+                      updateRuleDraft({ maxPointsText: event.target.value })
+                    }
+                  />
+                </label>
+              ) : null}
+            </div>
+            {ruleDraft.scoreMode === "dist" ? (
+              <StrategyDistPointsEditor
+                rows={ruleDraft.distPointRows}
+                onChange={(rows) => updateRuleDraft({ distPointRows: rows })}
+                scopeWay={values.scopeWay}
+                windowText={values.scopeWindowsText}
+                showHelp={false}
+              />
+            ) : null}
+          </>
+        )}
+        <p className="research-meta">
+          回测使用上方填写的分值；方向仅用于收益符号换算。修改只作用于本次回测配置。
+        </p>
+        <StrategyRuleTrackingEditor
+          ruleName={ruleDraft.name || values.importRuleName}
+          showHelp={false}
+          tracking={ruleDraft.tracking ?? values.nativeRule?.tracking ?? []}
+          onChange={(tracking, captureTexts) => onChange({ruleDraft: {...ruleDraft, tracking, ...(captureTexts ? {captureTexts} : {})}, ...(tracking.some((track) => track.enabled) ? {enableUnknown: false, unknownConfigs: []} : {})})}
+          captureTexts={ruleDraft.captureTexts ?? {}}
+          onCaptureTextsChange={(captureTexts) => updateRuleDraft({captureTexts})}
+        />
       </details>
       {!editorOpen && values.expression.trim() ? (
         <p className="expression-backtest-expression-preview">
@@ -467,10 +709,11 @@ export function ExpressionBacktestForm({
         </fieldset>
         {extraParameters}
         <label className="expression-backtest-field expression-backtest-field-checkbox">
-          <span>参数研究（UNKNOWN）</span>
+          <span>参数研究（UNKNOWN，组合策略或开启跟踪时不可用）</span>
           <input
             type="checkbox"
             checked={values.enableUnknown}
+            disabled={ruleDraft.kind === "combination" || ruleDraft.tracking?.some((track) => track.enabled)}
             onChange={(event) => {
               const checked = event.target.checked;
               onChange({
@@ -672,13 +915,19 @@ export function ExpressionBacktestForm({
         </fieldset>
       </details>
 
+      {error ? (
+        <div className="expression-backtest-error" role="alert">
+          {error}
+        </div>
+      ) : null}
       <div className="expression-backtest-actions">
         <button
           type="button"
           className="expression-backtest-primary-btn"
           disabled={loading || disabled}
           onClick={() => {
-            if (!values.expression.trim()) setEditorOpen(true);
+            if (!values.expression.trim() && ruleDraft.kind !== "combination")
+              setEditorOpen(true);
             onRun();
           }}
         >

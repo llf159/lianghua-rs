@@ -26,6 +26,8 @@ pub struct RankComparisonRequest {
     #[serde(default)]
     pub verify_inputs: bool,
     #[serde(default)]
+    pub retain_membership: bool,
+    #[serde(default)]
     pub grouping: crate::research_evidence::ResearchGrouping,
     #[serde(default)]
     pub statistics: crate::simulate::research_statistics::ResearchStatisticsSettings,
@@ -393,91 +395,94 @@ pub fn run_rank_comparison(
                     family_size,
                 )?,
             );
+            summary.daily_differences.clear();
         }
-        progress("保存排名成员与标签")?;
-        let eligibility = crate::simulate::build_backtest_sample_eligibility(
-            source,
-            request.min_listed_trade_days,
-        )?;
-        {
-            let conn = duckdb::Connection::open(&membership_staging)
-                .map_err(|e| format!("创建成员存档失败: {e}"))?;
-            conn.execute_batch("CREATE TABLE ranking_members(side VARCHAR NOT NULL, trade_date VARCHAR NOT NULL, ts_code VARCHAR NOT NULL, score DOUBLE NOT NULL, rank BIGINT, eligibility SMALLINT NOT NULL); CREATE TABLE label_windows(ts_code VARCHAR,trade_date VARCHAR,entry_date VARCHAR,label_end_date VARCHAR); CREATE TABLE labels(trade_date VARCHAR NOT NULL, ts_code VARCHAR NOT NULL, residual_return DOUBLE NOT NULL, er_change DOUBLE)")
-                .map_err(|e| format!("创建成员存档表失败: {e}"))?;
+        if request.retain_membership {
+            progress("保存排名成员与标签")?;
+            let eligibility = crate::simulate::build_backtest_sample_eligibility(
+                source,
+                request.min_listed_trade_days,
+            )?;
             {
-                let mut writer = conn
-                    .appender("ranking_members")
-                    .map_err(|e| format!("准备成员存档失败: {e}"))?;
-                for (side, rows) in [
-                    ("baseline", &baseline.summary_rows),
-                    ("candidate", &candidate.summary_rows),
-                ] {
-                    for row in rows {
+                let conn = duckdb::Connection::open(&membership_staging)
+                    .map_err(|e| format!("创建成员存档失败: {e}"))?;
+                conn.execute_batch("CREATE TABLE ranking_members(side VARCHAR NOT NULL, trade_date VARCHAR NOT NULL, ts_code VARCHAR NOT NULL, score DOUBLE NOT NULL, rank BIGINT, eligibility SMALLINT NOT NULL); CREATE TABLE label_windows(ts_code VARCHAR,trade_date VARCHAR,entry_date VARCHAR,label_end_date VARCHAR); CREATE TABLE labels(trade_date VARCHAR NOT NULL, ts_code VARCHAR NOT NULL, residual_return DOUBLE NOT NULL, er_change DOUBLE)")
+                .map_err(|e| format!("创建成员存档表失败: {e}"))?;
+                {
+                    let mut writer = conn
+                        .appender("ranking_members")
+                        .map_err(|e| format!("准备成员存档失败: {e}"))?;
+                    for (side, rows) in [
+                        ("baseline", &baseline.summary_rows),
+                        ("candidate", &candidate.summary_rows),
+                    ] {
+                        for row in rows {
+                            if cancelled() {
+                                return Err("排名对照已取消".to_string());
+                            }
+                            let status =
+                                match eligibility.sample_status(&row.ts_code, &row.trade_date) {
+                                    Some(true) => 1i16,
+                                    Some(false) => 0i16,
+                                    None => -1i16,
+                                };
+                            writer
+                                .append_row(duckdb::params![
+                                    side,
+                                    row.trade_date,
+                                    row.ts_code,
+                                    row.total_score,
+                                    row.rank,
+                                    status
+                                ])
+                                .map_err(|e| format!("写入排名成员失败: {e}"))?;
+                        }
+                    }
+                    writer
+                        .flush()
+                        .map_err(|e| format!("刷新排名成员失败: {e}"))?;
+                }
+                {
+                    let mut writer = conn
+                        .appender("labels")
+                        .map_err(|e| format!("准备标签存档失败: {e}"))?;
+                    for row in &comparison.labels {
                         if cancelled() {
                             return Err("排名对照已取消".to_string());
                         }
-                        let status = match eligibility.sample_status(&row.ts_code, &row.trade_date)
-                        {
-                            Some(true) => 1i16,
-                            Some(false) => 0i16,
-                            None => -1i16,
-                        };
                         writer
                             .append_row(duckdb::params![
-                                side,
                                 row.trade_date,
                                 row.ts_code,
-                                row.total_score,
-                                row.rank,
-                                status
+                                row.residual_return,
+                                row.er_change.is_finite().then_some(row.er_change)
                             ])
-                            .map_err(|e| format!("写入排名成员失败: {e}"))?;
-                    }
-                }
-                writer
-                    .flush()
-                    .map_err(|e| format!("刷新排名成员失败: {e}"))?;
-            }
-            {
-                let mut writer = conn
-                    .appender("labels")
-                    .map_err(|e| format!("准备标签存档失败: {e}"))?;
-                for row in &comparison.labels {
-                    if cancelled() {
-                        return Err("排名对照已取消".to_string());
+                            .map_err(|e| format!("写入后验标签失败: {e}"))?;
                     }
                     writer
-                        .append_row(duckdb::params![
-                            row.trade_date,
-                            row.ts_code,
-                            row.residual_return,
-                            row.er_change.is_finite().then_some(row.er_change)
-                        ])
-                        .map_err(|e| format!("写入后验标签失败: {e}"))?;
+                        .flush()
+                        .map_err(|e| format!("刷新后验标签失败: {e}"))?;
                 }
-                writer
-                    .flush()
-                    .map_err(|e| format!("刷新后验标签失败: {e}"))?;
-            }
-            {
-                let mut writer = conn.appender("label_windows").map_err(|e| e.to_string())?;
-                for (code, day, entry, end) in &comparison.label_windows {
-                    writer
-                        .append_row(duckdb::params![
-                            code,
-                            day,
-                            (*entry > 0).then(|| format!("{entry:08}")),
-                            (*end > 0).then(|| format!("{end:08}"))
-                        ])
-                        .map_err(|e| e.to_string())?;
+                {
+                    let mut writer = conn.appender("label_windows").map_err(|e| e.to_string())?;
+                    for (code, day, entry, end) in &comparison.label_windows {
+                        writer
+                            .append_row(duckdb::params![
+                                code,
+                                day,
+                                (*entry > 0).then(|| format!("{entry:08}")),
+                                (*end > 0).then(|| format!("{end:08}"))
+                            ])
+                            .map_err(|e| e.to_string())?;
+                    }
+                    writer.flush().map_err(|e| e.to_string())?;
                 }
-                writer.flush().map_err(|e| e.to_string())?;
+                let evidence_filename = evidence_path.to_string_lossy().replace('\'', "''");
+                conn.execute_batch(&format!("ATTACH '{evidence_filename}' AS evidence (READ_ONLY); CREATE TABLE observations AS SELECT * FROM evidence.observations; CREATE TABLE market AS SELECT * FROM evidence.market; CREATE TABLE research_metadata AS SELECT * FROM evidence.metadata; CREATE TABLE calendar AS SELECT * FROM evidence.calendar; DETACH evidence;")).map_err(|e|e.to_string())?;
+                let _ = fs::remove_file(&evidence_path);
+                conn.execute_batch("CHECKPOINT")
+                    .map_err(|e| format!("写入成员存档失败: {e}"))?;
             }
-            let evidence_filename = evidence_path.to_string_lossy().replace('\'', "''");
-            conn.execute_batch(&format!("ATTACH '{evidence_filename}' AS evidence (READ_ONLY); CREATE TABLE observations AS SELECT * FROM evidence.observations; CREATE TABLE market AS SELECT * FROM evidence.market; CREATE TABLE research_metadata AS SELECT * FROM evidence.metadata; CREATE TABLE calendar AS SELECT * FROM evidence.calendar; DETACH evidence;")).map_err(|e|e.to_string())?;
-            let _ = fs::remove_file(&evidence_path);
-            conn.execute_batch("CHECKPOINT")
-                .map_err(|e| format!("写入成员存档失败: {e}"))?;
         }
         if request.verify_inputs {
             progress("复核输入文件")?;
@@ -520,7 +525,9 @@ pub fn run_rank_comparison(
             archive_run_id: None,
             archive_error: None,
             membership_saved: false,
-            membership_staging: Some(membership_staging.clone()),
+            membership_staging: request
+                .retain_membership
+                .then(|| membership_staging.clone()),
             summaries: comparison.summaries,
         })
     })();

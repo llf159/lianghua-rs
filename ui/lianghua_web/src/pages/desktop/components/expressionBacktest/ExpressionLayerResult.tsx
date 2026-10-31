@@ -1,5 +1,5 @@
 import type { RuleValidationComboResult } from "../../../../apis/strategyTrigger";
-import { formatNumber, formatBacktestValue } from "../../../../shared/backtestFormat";
+import { formatBacktestValue } from "../../../../shared/backtestFormat";
 
 export function ExpressionLayerResult({ combo }: { combo: RuleValidationComboResult }) {
   const layerSummaries = combo.backtest.layer_summaries ?? [];
@@ -55,35 +55,6 @@ export function ExpressionLayerResult({ combo }: { combo: RuleValidationComboRes
             Top-Bottom Spread {formatBacktestValue(combo.backtest.spread_mean, combo.backtest.return_metric)} 按每日最高分层减最低分层计算，
             由分数排序天然携带方向。
           </p>
-          <details className="expression-backtest-fold">
-            <summary className="expression-backtest-fold-summary">
-              <h4>展开分层明细</h4>
-            </summary>
-            <div className="expression-backtest-table-wrap">
-              <table className="expression-backtest-table">
-                <thead>
-                  <tr>
-                    <th>分层</th>
-                    <th>有效交易日</th>
-                    <th>样本数</th>
-                    <th>分值</th>
-                    <th>层级收益（原始指标均值）</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {layerSummaries.map((item) => (
-                    <tr key={`${combo.combo_key}-layer-detail-${item.layer_index}`}>
-                      <td>{item.layer_label}</td>
-                      <td>{item.point_count}</td>
-                      <td>{item.sample_count}</td>
-                      <td>{formatNumber(item.avg_score, 4)}</td>
-                      <td>{formatBacktestValue(item.avg_residual_return, combo.backtest.return_metric)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </details>
         </>
       )}
     </div>

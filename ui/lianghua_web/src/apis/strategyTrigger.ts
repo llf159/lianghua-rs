@@ -1,3 +1,4 @@
+import type { TrackDefinition } from "./strategyTracking"
 export type BacktestReturnMetric = "residual_return" | "rise_amount"
 
 import { invoke } from '@tauri-apps/api/core'
@@ -510,6 +511,8 @@ export type RuleValidationReturnDistributionBucket = {
 }
 
 export type RuleValidationComboResult = {
+  component?: string
+  component_label?: string
   combo_key: string
   combo_label: string
   formula: string
@@ -522,6 +525,8 @@ export type RuleValidationComboResult = {
   sample_groups: RuleValidationSampleGroups
   return_distribution: RuleValidationReturnDistributionBucket[]
   backtest: RuleLayerBacktestData
+  quarter_summaries?: Array<{period: string; return_days: number; mean_return: number | null; ic_days: number; mean_ic: number | null}>
+  evidence_summaries?: Array<{dimension: string; rows: ResearchEvidenceSummary[]}>
   daily_metrics?: RuleValidationDailyMetric[] | null
   walk_forward?: RuleValidationWalkForwardData | null
   incremental?: RuleValidationIncrementalData | null
@@ -864,6 +869,14 @@ export type RuleExpressionValidationQuery = {
   sourcePath: string
   importRuleName: string
   manualStrategy?: {
+    tracking?: TrackDefinition[]
+    nativeRule?: {
+      name: string; enabled: boolean; scene: string; kind: "single" | "combination"; stage: string;
+      scope_way: string; scope_windows: number; when: string; points: number; explain: string;
+      dist_points?: Array<{min: number; max: number; points: number}> | null;
+      condition: Array<{name: string; when: string; bonus_points: number}>;
+      points_by_hits?: number[] | null; max_points?: number | null; max_bonus_points?: number | null;
+    }
     name?: string
     sceneName?: string
     stage?: string
@@ -1036,6 +1049,7 @@ export type RankComparisonRequest = {
   statistics?: ResearchStatisticsSettings
   source_path: string
   candidate_config: string
+  retain_membership?: boolean
   stock_adj_type: string
   index_ts_code: string
   index_beta: number

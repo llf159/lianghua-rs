@@ -215,7 +215,7 @@
 
 .strategy-manage-score-mode-btn {
   border: 1px solid #cdd8e4;
-  border-radius: 999px;
+  border-radius: 6px;
   background: var(--theme-orange-50);
   color: #4e6277;
   padding: 7px 12px;
@@ -1044,7 +1044,7 @@
 
 .strategy-manage-inline-btn {
   border: 1px solid #d0d8e2;
-  border-radius: 999px;
+  border-radius: 6px;
   background: #fff;
   color: #526173;
   padding: 4px 10px;

@@ -952,6 +952,10 @@ pub(in crate::statistics) fn build_one_rule_backtest_summary_and_detail(
             );
 
             RuleValidationComboResult {
+                component: "base".into(),
+                component_label: "原始信号".into(),
+                quarter_summaries: Vec::new(),
+                evidence_summaries: None,
                 combo_key: rule_name.to_string(),
                 combo_label: rule_name.to_string(),
                 formula: rule_meta.when.clone(),

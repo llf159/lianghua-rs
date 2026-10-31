@@ -33,9 +33,11 @@ import {
 import { autoBackupManagedActiveStrategyOnEntry } from '../../apis/strategyAssets'
 import StrategyAssetModal from './StrategyAssetModal'
 import StrategyDistPointsEditor from './StrategyDistPointsEditor'
+import StrategyCombinationEditor from './StrategyCombinationEditor'
 import { validateDistPointRows, type DistPointRow } from '../../shared/strategyDistPoints'
 import StrategyExpressionPreview from './StrategyExpressionPreview'
 import StrategyRuleTrackingEditor from './StrategyRuleTrackingEditor'
+import { prepareTrackingDefinitions } from '../../shared/strategyTrackingDraft'
 import './css/StrategyManagePage.css'
 
 const SCOPE_OPTIONS = ['LAST', 'ANY', 'EACH', 'RECENT', 'CONSEC'] as const
@@ -301,38 +303,7 @@ function buildPreparedDraft(
     nextDraft.scope_way = `CONSEC>=${parseRequiredInteger(nextDraft.scope_way.slice(8), '连续命中日数', 1)}`
   }
 
-  nextDraft.tracking = nextDraft.tracking?.map((track) => {
-    if (!Number.isSafeInteger(track.ttl) || track.ttl <= 0) {
-      throw new Error('跟踪观察期限必须为大于 0 的整数')
-    }
-    if (!Number.isSafeInteger(track.max_age ?? track.ttl) || (track.max_age ?? track.ttl) < track.ttl) {
-      throw new Error('跟踪总期限必须为不小于观察期限的整数')
-    }
-    if (!Number.isFinite(track.points ?? 0) || track.steps?.some((step) => !Number.isFinite(step.points ?? 0))) {
-      throw new Error('请填写完整、有效的跟踪分值；只观察时填 0')
-    }
-    let capture = { ...track.capture }
-    if (Object.hasOwn(trackingCaptureTexts, track.id)) {
-      capture = {}
-      for (const line of trackingCaptureTexts[track.id].split('\n').filter((value) => value.trim())) {
-        const match = line.match(/^\s*(A_[A-Z0-9_]+)\s*=\s*(.+)$/)
-        if (!match || Object.hasOwn(capture, match[1])) {
-          throw new Error('冻结值每行填写一个不重复的 A_变量 = 表达式')
-        }
-        capture[match[1]] = match[2]
-      }
-    }
-    return {
-      ...track,
-      name: track.name.trim(),
-      capture,
-      start: track.start?.trim() || undefined,
-      invalidate: track.invalidate?.trim() || undefined,
-      eligible: track.eligible?.trim() || undefined,
-      signal: track.signal?.trim() || undefined,
-      score_until: track.score_until?.trim() || undefined,
-    }
-  })
+  nextDraft.tracking = prepareTrackingDefinitions(nextDraft.tracking ?? [], trackingCaptureTexts)
 
   if (nextDraft.kind === 'combination') {
     if (nextDraft.conditions.length === 0) {
@@ -2560,144 +2531,19 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
                         ) : null}
                       </>
                     ) : (
-                      <div className="strategy-manage-combination-editor strategy-manage-field-span-full">
-                        <div className="strategy-manage-combination-intro">
-                          <strong>组合计分</strong>
-                          <span>{draft.conditions.length} 条条件</span>
-                        </div>
-
-                        <section className="strategy-manage-combination-section">
-                          <div className="strategy-manage-combination-section-head">
-                            <div>
-                              <strong>基础条件</strong>
-                            </div>
-                            <button
-                              className="strategy-manage-inline-btn"
-                              type="button"
-                              onClick={addCombinationCondition}
-                            >
-                              添加条件
-                            </button>
-                          </div>
-                          <div className="strategy-manage-combination-list">
-                            {draft.conditions.map((condition, index) => (
-                              <article
-                                className="strategy-manage-combination-row"
-                                key={`condition-${index}`}
-                              >
-                                <div className="strategy-manage-combination-row-head">
-                                  <strong>条件 {index + 1}</strong>
-                                  <button
-                                    className="strategy-manage-inline-btn is-danger"
-                                    type="button"
-                                    onClick={() => removeCombinationCondition(index)}
-                                    disabled={draft.conditions.length <= 1}
-                                  >
-                                    删除
-                                  </button>
-                                </div>
-                                <label className="strategy-manage-field">
-                                  <span>条件名称</span>
-                                  <input
-                                    value={condition.name}
-                                    onChange={(event) =>
-                                      updateCombinationCondition(index, 'name', event.target.value)
-                                    }
-                                    placeholder="例如：价格突破"
-                                  />
-                                </label>
-                                <label className="strategy-manage-field">
-                                  <span>触发表达式</span>
-                                  <textarea
-                                    rows={4}
-                                    value={condition.when}
-                                    onChange={(event) =>
-                                      updateCombinationCondition(index, 'when', event.target.value)
-                                    }
-                                    placeholder="例如：C > HHV(REF(H, 1), 20)"
-                                  />
-                                </label>
-                                <label className="strategy-manage-field">
-                                  <span>满足此条件额外加分</span>
-                                  <input
-                                    type="number"
-                                    step="any"
-                                    value={combinationBonusPointTexts[index] ?? ''}
-                                    onChange={(event) =>
-                                      updateCombinationCondition(
-                                        index,
-                                        'bonus_points',
-                                        event.target.value,
-                                      )
-                                    }
-                                  />
-                                </label>
-                              </article>
-                            ))}
-                          </div>
-                        </section>
-
-                        <section className="strategy-manage-combination-section">
-                          <div className="strategy-manage-combination-section-head">
-                            <div>
-                              <strong>命中数得分</strong>
-                            </div>
-                          </div>
-                          <div className="strategy-manage-hit-score-grid">
-                            {combinationHitPointTexts.map((points, index) => {
-                              const hitCount = index + 1
-                              return (
-                                <label
-                                  className="strategy-manage-hit-score-item"
-                                  key={`hit-score-${hitCount}`}
-                                >
-                                  <span>命中 {hitCount} 条</span>
-                                  <input
-                                    type="number"
-                                    step="any"
-                                    value={points}
-                                    onChange={(event) =>
-                                      updateCombinationHitPoints(hitCount, event.target.value)
-                                    }
-                                  />
-                                </label>
-                              )
-                            })}
-                          </div>
-                        </section>
-
-                        <section className="strategy-manage-combination-section">
-                          <div className="strategy-manage-combination-section-head">
-                            <div>
-                              <strong>分数范围限制</strong>
-                            </div>
-                          </div>
-                          <div className="strategy-manage-combination-cap-grid">
-                            <label className="strategy-manage-field">
-                              <span>额外分的正负限制值</span>
-                              <input
-                                type="number"
-                                min="0"
-                                step="any"
-                                value={maxBonusPointsText}
-                                onChange={(event) => setMaxBonusPointsText(event.target.value)}
-                                placeholder="例如 5：限制在 -5～5"
-                              />
-                            </label>
-                            <label className="strategy-manage-field">
-                              <span>最终总分的正负限制值</span>
-                              <input
-                                type="number"
-                                min="0"
-                                step="any"
-                                value={maxPointsText}
-                                onChange={(event) => setMaxPointsText(event.target.value)}
-                                placeholder="例如 5：限制在 -5～5"
-                              />
-                            </label>
-                          </div>
-                        </section>
-                      </div>
+                      <StrategyCombinationEditor
+                        conditions={draft.conditions}
+                        combinationBonusPointTexts={combinationBonusPointTexts}
+                        combinationHitPointTexts={combinationHitPointTexts}
+                        maxPointsText={maxPointsText}
+                        maxBonusPointsText={maxBonusPointsText}
+                        addCombinationCondition={addCombinationCondition}
+                        removeCombinationCondition={removeCombinationCondition}
+                        updateCombinationCondition={updateCombinationCondition}
+                        updateCombinationHitPoints={updateCombinationHitPoints}
+                        setMaxPointsText={setMaxPointsText}
+                        setMaxBonusPointsText={setMaxBonusPointsText}
+                      />
                     )}
                     <details className="strategy-rule-editor-help strategy-manage-field-span-full">
                       <summary>配置说明</summary>
@@ -2716,7 +2562,7 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
                   ruleName={draft.name}
                   showHelp={!backtest}
                   tracking={draft.tracking ?? []}
-                  onChange={(tracking) => setDraft({ ...draft, tracking })}
+                  onChange={(tracking, captureTexts) => { setDraft({ ...draft, tracking }); if (captureTexts) setTrackingCaptureTexts(captureTexts) }}
                   captureTexts={trackingCaptureTexts}
                   onCaptureTextsChange={setTrackingCaptureTexts}
                 />

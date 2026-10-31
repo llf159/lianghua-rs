@@ -42,12 +42,13 @@ pub use page::{
 pub use structure_cycle::{MarketStructureData, StructureEngine, get_market_structure};
 pub use validation::{
     RuleExpressionValidationData, RuleExpressionValidationManualStrategy,
-    RuleValidationComboResult, RuleValidationDailyMetric, RuleValidationIncrementalData,
-    RuleValidationIncrementalFold, RuleValidationReturnDistributionBucket,
-    RuleValidationSampleGroups, RuleValidationSampleRow, RuleValidationSampleStats,
-    RuleValidationSimilarityRow, RuleValidationTriggerCountStats, RuleValidationUnknownConfig,
-    RuleValidationUnknownValue, RuleValidationWalkForwardData, RuleValidationWalkForwardFold,
-    ValidationCoreRuleOption, get_validation_core_rule_options, run_rule_expression_validation,
+    RuleValidationComboResult, RuleValidationDailyMetric, RuleValidationEvidenceSummary,
+    RuleValidationIncrementalData, RuleValidationIncrementalFold,
+    RuleValidationReturnDistributionBucket, RuleValidationSampleGroups, RuleValidationSampleRow,
+    RuleValidationSampleStats, RuleValidationSimilarityRow, RuleValidationTriggerCountStats,
+    RuleValidationUnknownConfig, RuleValidationUnknownValue, RuleValidationWalkForwardData,
+    RuleValidationWalkForwardFold, ValidationCoreRuleOption, get_validation_core_rule_options,
+    run_rule_expression_validation,
 };
 
 #[cfg(test)]

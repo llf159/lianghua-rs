@@ -81,16 +81,16 @@ export function ResearchHistoryComparison(props: Props) {
     const configuration = saved.configuration as {query?: RuleExpressionValidationQuery; form?: {direction?: "positive" | "negative"}};
     const result = saved.result as RuleExpressionValidationData;
     const period = [result, ...(result.additional_periods ?? [])].find((item) => (item.horizon ?? configuration.query?.backtestPeriod) === props.horizon);
-    const combo = period?.combo_results?.find((item) => JSON.stringify(item.unknown_values) === JSON.stringify(props.combo?.unknown_values));
+    const combo = period?.combo_results?.find((item) => (item.component ?? "base") === (props.combo?.component ?? "base") && JSON.stringify(item.unknown_values) === JSON.stringify(props.combo?.unknown_values));
     if (combo) {
       comparable = configuration.form?.direction === props.direction &&
         (["startDate", "endDate", "stockAdjType", "indexTsCode", "indexBeta", "conceptBeta", "industryBeta", "returnMetric", "minSamplesPerRuleDay", "minListedTradeDays", "board", "excludeStBoard", "totalMvMin", "totalMvMax"] as const)
           .every((key) => JSON.stringify(configuration.query?.[key]) === JSON.stringify(props.settings?.[key]));
       rows.push(
-        {label: "方向回测指标", current: props.combo.backtest.avg_excess_residual_mean == null ? null : props.combo.backtest.avg_excess_residual_mean * (props.direction === "negative" ? -1 : 1), saved: combo.backtest.avg_excess_residual_mean == null || !configuration.form?.direction ? null : combo.backtest.avg_excess_residual_mean * (configuration.form.direction === "negative" ? -1 : 1), unit: props.combo.backtest.return_metric, savedUnit: combo.backtest.return_metric},
-        {label: "IC", current: props.combo.backtest.ic_mean, saved: combo.backtest.ic_mean, unit: "number"},
-        {label: "ICIR", current: props.combo.backtest.icir, saved: combo.backtest.icir, unit: "number"},
-        {label: "触发股票日", current: props.combo.trigger_samples, saved: combo.trigger_samples, unit: "count"},
+        {label: "方向调整后超额收益", current: props.combo.backtest.avg_excess_residual_mean == null ? null : props.combo.backtest.avg_excess_residual_mean * (props.direction === "negative" ? -1 : 1), saved: combo.backtest.avg_excess_residual_mean == null || !configuration.form?.direction ? null : combo.backtest.avg_excess_residual_mean * (configuration.form.direction === "negative" ? -1 : 1), unit: props.combo.backtest.return_metric, savedUnit: combo.backtest.return_metric},
+        {label: "信息系数（IC）", current: props.combo.backtest.ic_mean, saved: combo.backtest.ic_mean, unit: "number"},
+        {label: "信息系数比率（ICIR）", current: props.combo.backtest.icir, saved: combo.backtest.icir, unit: "number"},
+        {label: "有效样本量（股票日）", current: props.combo.trigger_samples, saved: combo.trigger_samples, unit: "count"},
         {label: "有效触发日", current: props.combo.triggered_days, saved: combo.triggered_days, unit: "count"},
       );
       formulas = [props.combo.formula, combo.formula];
@@ -102,11 +102,11 @@ export function ResearchHistoryComparison(props: Props) {
     if (summary) {
       comparable = (["start_date", "end_date", "backtest_period", "stock_adj_type", "index_ts_code", "index_beta", "concept_beta", "industry_beta", "min_listed_trade_days", "grouping"] as const).every((key) => JSON.stringify(configuration.settings?.[key]) === JSON.stringify(props.settings?.[key]));
       rows.push(
-        {label: "候选日均残差", current: current.candidate_paired_daily_mean, saved: summary.candidate_paired_daily_mean, unit: "residual_return"},
-        {label: "相对基线成对差", current: current.paired_daily_difference, saved: summary.paired_daily_difference, unit: "residual_return"},
-        {label: "IC", current: current.candidate_ic_mean, saved: summary.candidate_ic_mean, unit: "number"},
-        {label: "ICIR", current: current.candidate_icir, saved: summary.candidate_icir, unit: "number"},
-        {label: "成对收益日", current: current.paired_return_days, saved: summary.paired_return_days, unit: "count"},
+        {label: "候选平均残差收益", current: current.candidate_paired_daily_mean, saved: summary.candidate_paired_daily_mean, unit: "residual_return"},
+        {label: "配对收益差", current: current.paired_daily_difference, saved: summary.paired_daily_difference, unit: "residual_return"},
+        {label: "信息系数（IC）", current: current.candidate_ic_mean, saved: summary.candidate_ic_mean, unit: "number"},
+        {label: "信息系数比率（ICIR）", current: current.candidate_icir, saved: summary.candidate_icir, unit: "number"},
+        {label: "配对有效日", current: current.paired_return_days, saved: summary.paired_return_days, unit: "count"},
       );
     }
   }
@@ -139,7 +139,7 @@ export function ResearchHistoryComparison(props: Props) {
     {selectedCompareId && props.result ?  <>
       {response.key !== responseKey ? <p role="status">读取对比结果…</p> : response.error ? <p role="alert">{response.error}</p> : !rows.length ? <p className="research-meta">该记录没有相同周期、参数组合或成员池的结果。</p> : <>
         <div className="expression-backtest-table-wrap"><table className="expression-backtest-table research-comparison-table"><thead><tr><th>指标</th><th>当前结果</th><th>对比结果</th><th>差值</th></tr></thead><tbody>{rows.map((row) => <tr key={row.label}><th>{row.label}</th><td>{formatComparisonValue(row.current, row.unit)}</td><td>{formatComparisonValue(row.saved, row.savedUnit ?? row.unit)}</td><td>{formatComparisonValue(comparable && row.current != null && row.saved != null ? row.current - row.saved : null, row.unit)}</td></tr>)}</tbody></table></div>
-        <p className="research-meta">{comparable ? "差值为当前结果减对比结果，使用各自保存的统计值。" : "评价设置或方向不同，仅并列展示，不计算差值。"}</p>
+        <p className="research-meta">{comparable ? "差值为当前结果减对比结果。IC 是信号与后验收益的秩相关，ICIR 是日度 IC 均值／标准差；样本量按股票日计数。" : "评价设置或方向不同，仅并列展示，不计算差值。"}</p>
         {formulas ? <details><summary>表达式对照</summary><div className="research-history-formulas"><div><span>当前结果</span><pre>{formulas[0]}</pre></div><div><span>对比结果</span><pre>{formulas[1]}</pre></div></div></details> : null}
       </>}
     </> : null}

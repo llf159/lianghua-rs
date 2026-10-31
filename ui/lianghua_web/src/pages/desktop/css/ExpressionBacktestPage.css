@@ -4,6 +4,10 @@
   min-width: 0;
 }
 
+.expression-backtest-page > div {
+  min-width: 0;
+}
+
 .expression-backtest-header {
   min-width: 0;
 }
@@ -298,7 +302,7 @@
   border: 1px solid var(--theme-orange-200);
   background: var(--theme-orange-50);
   color: var(--theme-orange-800);
-  border-radius: 999px;
+  border-radius: 6px;
   padding: 2px 10px;
   font-size: 12px;
   cursor: pointer;
@@ -590,7 +594,7 @@
   border: 1px solid #d2deed;
   background: #f8fbff;
   color: #334155;
-  border-radius: 999px;
+  border-radius: 6px;
   padding: 5px 14px;
   font-size: 13px;
   cursor: pointer;

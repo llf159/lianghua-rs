@@ -33,11 +33,13 @@ type ProgressTimingInput = {
 type ProgressTimingSample = {
   taskPhase: string
   phaseStartElapsedMs: number
-  phaseStartFinished: number
   sampledElapsedMs: number
   sampledAtMs: number
   finished: number
   total: number
+  rateElapsedMs: number
+  rateFinished: number
+  rate: number | null
 }
 
 export type ProgressTiming = {
@@ -272,24 +274,32 @@ export function useProgressTiming(
           : `${progress.action}::${progress.phase}`
         const phaseChanged = !current || current.taskPhase !== taskPhase
           || (current.total > 0 && progress.total > 0 && current.total !== progress.total)
+          || progress.finished < current.finished || progress.elapsedMs < current.sampledElapsedMs
         const valuesChanged =
           phaseChanged || current.finished !== progress.finished || current.total !== progress.total
         if (!valuesChanged) {
           return current
         }
 
+        const rateElapsed = phaseChanged ? 0 : progress.elapsedMs - current.rateElapsedMs
+        const rateFinished = phaseChanged ? 0 : progress.finished - current.rateFinished
+        const hasRateSample = rateElapsed > 0 && rateFinished > 0
+        const intervalRate = hasRateSample ? rateFinished / rateElapsed : null
+        const weight = 1 - Math.exp(-Math.LN2 * rateElapsed / 30000)
+
         return {
           taskPhase,
           phaseStartElapsedMs: phaseChanged
             ? progress.elapsedMs
             : (current as ProgressTimingSample).phaseStartElapsedMs,
-          phaseStartFinished: phaseChanged
-            ? progress.finished
-            : (current as ProgressTimingSample).phaseStartFinished,
           sampledElapsedMs: progress.elapsedMs,
           sampledAtMs,
           finished: progress.finished,
           total: progress.total,
+          rateElapsedMs: phaseChanged || hasRateSample ? progress.elapsedMs : current.rateElapsedMs,
+          rateFinished: phaseChanged || hasRateSample ? progress.finished : current.rateFinished,
+          rate: phaseChanged ? null : intervalRate === null ? current.rate
+            : current.rate === null ? intervalRate : current.rate * (1 - weight) + intervalRate * weight,
         }
       })
     })
@@ -308,11 +318,10 @@ export function useProgressTiming(
   const elapsedMs =
     sample.sampledElapsedMs + Math.max(0, Math.max(clockMs, sample.sampledAtMs) - sample.sampledAtMs)
   const phaseElapsedMs = Math.max(0, elapsedMs - sample.phaseStartElapsedMs)
-  const estimatedTotalMs =
-    sample.finished > sample.phaseStartFinished && sample.total > 0
-      ? Math.max(0, sample.sampledElapsedMs - sample.phaseStartElapsedMs) *
-        ((sample.total - sample.phaseStartFinished) / (sample.finished - sample.phaseStartFinished))
-      : null
+  const estimatedTotalMs = sample.rate !== null && sample.rate > 0 && sample.total > 0
+    ? Math.max(0, sample.sampledElapsedMs - sample.phaseStartElapsedMs)
+      + Math.max(0, sample.total - sample.finished) / sample.rate
+    : null
   const estimatedRemainingMs =
     estimatedTotalMs === null ? null : Math.max(0, estimatedTotalMs - phaseElapsedMs)
 

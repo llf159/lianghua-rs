@@ -2095,6 +2095,7 @@ async fn run_rule_expression_validation(
                         Some(&output),
                     )
                 })?;
+                data.membership_saved = false;
                 data.archive_run_id = Some(journal.run_id.clone());
                 data.input_manifest = configuration["input_manifest"].clone();
                 data.input_identity = if verify_inputs.unwrap_or(false) {
@@ -2114,9 +2115,55 @@ async fn run_rule_expression_validation(
             {
                 return Err("运行期间输入内容变化，结果不可提交，请重跑".into());
             }
+            for data in &mut results {
+                for combo in &mut data.combo_results {
+                    let mut dimensions = vec!["all", "board"];
+                    if !output.grouping.market_cap_boundaries.is_empty() {
+                        dimensions.push("market_cap");
+                    }
+                    if !output.grouping.baseline_score_boundaries.is_empty() {
+                        dimensions.push("baseline_score");
+                    }
+                    if !output.grouping.market_metric.is_empty() {
+                        dimensions.push(&output.grouping.market_metric);
+                    }
+                    let mut summaries = Vec::new();
+                    for dimension in dimensions {
+                        progress("汇总分组统计")?;
+                        let query =
+                            lianghua_app_strategy::research_evidence::ResearchEvidenceQuery {
+                                run_id: journal.run_id.clone(),
+                                combo_key: combo.combo_key.clone(),
+                                horizon: data.horizon,
+                                start_date: start_date.clone(),
+                                end_date: end_date.clone(),
+                                dimension: dimension.to_string(),
+                                bucket: None,
+                                state: "all".into(),
+                                offset: 0,
+                                limit: 50,
+                            };
+                        summaries.push(
+                            lianghua_app_strategy::statistics::RuleValidationEvidenceSummary {
+                                dimension: dimension.to_string(),
+                                rows: output.summarize(&query)?,
+                            },
+                        );
+                    }
+                    combo.evidence_summaries = Some(summaries);
+                    combo.daily_metrics.clear();
+                }
+            }
+            std::fs::remove_file(&output.path)
+                .map_err(|error| format!("清理研究中间数据失败: {error}"))?;
+            let wal = output.path.with_extension("db.wal");
+            if wal.is_file() {
+                std::fs::remove_file(wal)
+                    .map_err(|error| format!("清理研究中间日志失败: {error}"))?;
+            }
             let mut data = results.remove(0);
             data.additional_periods = results;
-            progress("提交完整研究结果")?;
+            progress("提交研究汇总与正负样本")?;
             Ok(data)
         })();
         let result = result.map_err(|error| {

@@ -62,7 +62,7 @@ import {
 } from "../../shared/expressionValidation";
 import { ExpressionValidationSamplesPanel } from "./ExpressionValidationSamplesPage";
 import { ExpressionCoreSummary } from "./components/expressionBacktest/ExpressionCoreSummary";
-import { ExpressionDailyDetail } from "./components/expressionBacktest/ExpressionDailyDetail";
+import { ExpressionReturnDistribution } from "./components/expressionBacktest/ExpressionReturnDistribution";
 import { ExpressionIncremental } from "./components/expressionBacktest/ExpressionIncremental";
 import { ExpressionLayerResult } from "./components/expressionBacktest/ExpressionLayerResult";
 import { ExpressionSamplesCheck } from "./components/expressionBacktest/ExpressionSamplesCheck";
@@ -1758,7 +1758,7 @@ export default function SceneLayerBacktestPage() {
               <ExpressionSimilarity combo={ruleDetailCombo} />
               <ExpressionIncremental combo={ruleDetailCombo} />
               <ExpressionSamplesCheck combo={ruleDetailCombo} context={ruleDetailContext} />
-              <ExpressionDailyDetail combo={ruleDetailCombo} />
+              <ExpressionReturnDistribution combo={ruleDetailCombo} />
             </div>
           </div>
         </div>

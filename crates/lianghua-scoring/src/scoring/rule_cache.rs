@@ -11,8 +11,49 @@ pub fn cache_rule_build(
     strategy_path: Option<&str>,
 ) -> Result<Vec<CachedRule>, String> {
     let rules = ScoreRule::load_rules_with_strategy_path(source_dir, strategy_path)?;
-    let mut out = Vec::with_capacity(128);
+    cache_rules(rules)
+}
+
+pub fn cache_rules(rules: Vec<ScoreRule>) -> Result<Vec<CachedRule>, String> {
+    let mut out = Vec::with_capacity(rules.len());
     for rule in rules {
+        if !rule.points.is_finite()
+            || [rule.max_points, rule.max_bonus_points]
+                .into_iter()
+                .flatten()
+                .any(|value| !value.is_finite() || value < 0.0)
+        {
+            return Err(format!(
+                "策略 {} 的分值必须有限，正负限制值必须为非负数",
+                rule.name
+            ));
+        }
+        if let Some(points) = rule
+            .dist_points
+            .as_ref()
+            .filter(|points| !points.is_empty())
+        {
+            if rule.kind != RuleKind::Single
+                || !matches!(
+                    rule.scope_way,
+                    crate::data::ScopeWay::Each | crate::data::ScopeWay::Recent
+                )
+            {
+                return Err(format!(
+                    "策略 {} 的区间字典仅支持普通规则 EACH/RECENT",
+                    rule.name
+                ));
+            }
+            let mut intervals = points.iter().collect::<Vec<_>>();
+            intervals.sort_by_key(|point| point.min);
+            if intervals
+                .iter()
+                .any(|point| point.min > point.max || !point.points.is_finite())
+                || intervals.windows(2).any(|pair| pair[0].max >= pair[1].min)
+            {
+                return Err(format!("策略 {} 的计分区间必须有效且不能重叠", rule.name));
+            }
+        }
         match rule.kind {
             RuleKind::Single => {
                 let expression = build_cached_rule_expression(&rule.name, rule.when)?;
@@ -31,6 +72,37 @@ pub fn cache_rule_build(
                 });
             }
             RuleKind::Combination => {
+                let names = rule
+                    .conditions
+                    .iter()
+                    .map(|condition| condition.name.trim())
+                    .collect::<std::collections::HashSet<_>>();
+                if names.len() != rule.conditions.len()
+                    || names.contains("")
+                    || rule.conditions.iter().any(|condition| {
+                        condition.when.trim().is_empty() || !condition.bonus_points.is_finite()
+                    })
+                {
+                    return Err(format!(
+                        "组合策略 {} 的条件名称须非空且唯一，表达式和附加分须有效",
+                        rule.name
+                    ));
+                }
+                if rule.conditions.is_empty()
+                    || rule.points_by_hits.as_ref().is_none_or(|points| {
+                        points.len() != rule.conditions.len() + 1
+                            || points.first() != Some(&0.0)
+                            || points.iter().any(|point| !point.is_finite())
+                    })
+                {
+                    return Err(format!(
+                        "组合策略 {} 的命中计分必须包含从0到全部条件命中的分值，且0命中为0分",
+                        rule.name
+                    ));
+                }
+                if matches!(rule.scope_way, crate::data::ScopeWay::Recent) {
+                    return Err(format!("组合策略 {} 不支持 RECENT 触发方式", rule.name));
+                }
                 let conditions = rule
                     .conditions
                     .into_iter()

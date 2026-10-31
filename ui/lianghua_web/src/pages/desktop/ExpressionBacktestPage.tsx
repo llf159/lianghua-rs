@@ -7,9 +7,9 @@ import { ensureManagedSourcePath } from "../../apis/managedSource";
 import { getStrategyManagePage, type StrategyManageRuleItem } from "../../apis/strategyManage";
 import {
   deleteResearchArchive,
+  type ResearchEvidenceQuery,
   type ResearchGrouping,
   type ResearchStatisticsSettings,
-  type ResearchEvidenceQuery,
   listResearchArchives,
   readResearchArchive,
   saveResearchArchive,
@@ -45,6 +45,9 @@ import {
   VALIDATION_MAX_SAMPLE_LIMIT,
   type ExpressionValidationContext,
 } from "../../shared/expressionValidation";
+import { createResearchRuleDraft } from "../../shared/researchRuleDraft";
+import { prepareTrackingDefinitions } from "../../shared/strategyTrackingDraft";
+import { validateDistPointRows } from "../../shared/strategyDistPoints";
 import { useConceptExclusions } from "../../shared/conceptExclusions";
 import { readStoredSourcePath } from "../../shared/storage";
 import {
@@ -58,10 +61,11 @@ import { ResearchGroupingFields } from "./components/ResearchGroupingFields";
 import { ResearchEvidencePanel } from "./components/ResearchEvidencePanel";
 import { RankComparisonPanel } from "./components/RankComparisonPanel";
 import { ResearchHistoryComparison } from "./components/ResearchHistoryComparison";
+import { ResearchRunProgress } from "./components/ResearchRunProgress";
 import { ExpressionCoreSummary } from "./components/expressionBacktest/ExpressionCoreSummary";
 import { type ResearchNotes } from "./components/ResearchNotesFields";
 import { ExpressionQuarterSummary } from "./components/expressionBacktest/ExpressionQuarterSummary";
-import { ExpressionDailyDetail } from "./components/expressionBacktest/ExpressionDailyDetail";
+import { ExpressionReturnDistribution } from "./components/expressionBacktest/ExpressionReturnDistribution";
 import { ExpressionIncremental } from "./components/expressionBacktest/ExpressionIncremental";
 import { ExpressionLayerResult } from "./components/expressionBacktest/ExpressionLayerResult";
 import { ExpressionParameterRobustness } from "./components/expressionBacktest/ExpressionParameterRobustness";
@@ -82,6 +86,8 @@ export default function ExpressionBacktestPage() {
   const [coreRuleOptions, setCoreRuleOptions] = useState<ValidationCoreRuleOption[]>([]);
   const [form, setForm] = useState<ExpressionBacktestFormValues>(() => ({
     importRuleName: "",
+    nativeRule: null,
+    ruleDraft: createResearchRuleDraft(),
     direction: "positive",
     scopeWay: "LAST",
     consecThresholdText: "2",
@@ -128,7 +134,6 @@ export default function ExpressionBacktestPage() {
   const [statistics, setStatistics] = useState<ResearchStatisticsSettings>({block_length: 10, resamples: 500, seed: 0});
   const [multiPeriod, setMultiPeriod] = useState(false);
   const [baselineDiagnostics, setBaselineDiagnostics] = useState(false);
-  const [exploratoryFilter, setExploratoryFilter] = useState<Partial<ResearchEvidenceQuery> | undefined>();
   const [selectedHorizon, setSelectedHorizon] = useState<number | null>(null);
   const [verifyInputs, setVerifyInputs] = useState(false);
   const researchTab = searchParams.get("mode") === "ranking" ? "ranking" : "expression";
@@ -153,7 +158,7 @@ export default function ExpressionBacktestPage() {
   const displayedResult = selectedHorizon === result?.horizon || selectedHorizon == null ? result : result?.additional_periods?.find((item) => item.horizon === selectedHorizon) ?? result;
   const comboRows = displayedResult?.combo_results ?? [];
   const selectedCombo =
-    comboRows.find((item) => item.combo_key === selectedComboKey) ?? comboRows[0] ?? null;
+    comboRows.find((item) => item.combo_key === selectedComboKey) ?? comboRows.find((item) => item.component === "combined") ?? comboRows[0] ?? null;
   const hasUnknownCombo = comboRows.some((item) => item.unknown_values.length > 0);
   const selectedRule = strategyOptions.find((item) => item.name === form.importRuleName.trim());
   const displayedForm = runForm ?? form;
@@ -208,7 +213,7 @@ export default function ExpressionBacktestPage() {
             setStrategyOptions(managePage.rules ?? []);
             const original = managePage.rules?.find((rule) => rule.name === initialRule.current);
             if (original) {
-              setForm((current) => ({...current, importRuleName: original.name, expression: original.when ?? "", direction: original.points < 0 ? "negative" : "positive", scopeWay: resolveValidationScopeWay(original.scope_way).scopeWay, scopeWindowsText: String(Math.max(1, original.scope_windows ?? 1)), consecThresholdText: String(resolveValidationScopeWay(original.scope_way).consecThreshold)}));
+              setForm((current) => ({...current, importRuleName: original.name, ruleDraft: createResearchRuleDraft(original), nativeRule: original.kind === "combination" || original.dist_points?.length || original.max_points != null || original.tracking.length ? structuredClone(original) : null, expression: original.when ?? "", direction: (original.points || original.points_by_hits?.find((point) => point !== 0) || original.dist_points?.find((item) => item.points !== 0)?.points || 1) < 0 ? "negative" : "positive", scopeWay: resolveValidationScopeWay(original.scope_way).scopeWay, scopeWindowsText: String(Math.max(1, original.scope_windows ?? 1)), consecThresholdText: String(resolveValidationScopeWay(original.scope_way).consecThreshold)}));
             }
           }
         } catch (strategyError) {
@@ -299,19 +304,22 @@ export default function ExpressionBacktestPage() {
     const matched = strategyOptions.find((item) => item.name === ruleName);
     setError("");
     if (!matched) {
-      updateForm({ importRuleName: "", unknownConfigs: [] });
+      updateForm({ importRuleName: "", nativeRule: null, ruleDraft: createResearchRuleDraft(), expression: "", direction: "positive", scopeWay: "LAST", scopeWindowsText: "1", enableUnknown: false, unknownConfigs: [] });
       return;
     }
 
     const parsedScopeWay = resolveValidationScopeWay(matched.scope_way);
     updateForm({
       importRuleName: ruleName,
+      ruleDraft: createResearchRuleDraft(matched),
+      nativeRule: matched.kind === "combination" || matched.dist_points?.length || matched.max_points != null || matched.tracking.length ? structuredClone(matched) : null,
+      enableUnknown: matched.kind === "combination" || matched.dist_points?.length || matched.max_points != null || matched.tracking.length ? false : form.enableUnknown,
       expression: matched.when ?? "",
-      direction: Number.isFinite(matched.points) && matched.points < 0 ? "negative" : "positive",
+      direction: (matched.points || matched.points_by_hits?.find((point) => point !== 0) || matched.dist_points?.find((item) => item.points !== 0)?.points || 1) < 0 ? "negative" : "positive",
       scopeWay: parsedScopeWay.scopeWay,
       consecThresholdText: String(parsedScopeWay.consecThreshold),
       scopeWindowsText: String(Math.max(1, matched.scope_windows ?? 1)),
-      unknownConfigs: form.enableUnknown
+      unknownConfigs: form.enableUnknown && matched.kind !== "combination" && !matched.dist_points?.length && matched.max_points == null && !matched.tracking.length
         ? inferUnknownConfigs(matched.when ?? "", indicatorNames)
         : [],
     });
@@ -319,6 +327,7 @@ export default function ExpressionBacktestPage() {
 
   async function onRunValidation() {
     if (loading || rankingRunning || initializing || archiveBusy) return;
+    const ruleDraft = form.ruleDraft ?? createResearchRuleDraft(form.nativeRule ?? undefined);
     const normalizedStart = normalizeDateInput(form.startDateInput);
     const normalizedEnd = normalizeDateInput(form.endDateInput);
     if (!sourcePath.trim()) {
@@ -351,7 +360,21 @@ export default function ExpressionBacktestPage() {
       setError("总市值最小值不能大于最大值。");
       return;
     }
-    if (!form.expression.trim()) {
+    if (ruleDraft.kind === "combination") {
+      if (!ruleDraft.conditions.length || ruleDraft.conditions.some((condition) => !condition.name.trim() || !condition.when.trim())) {
+        setError("请填写每个组合条件的名称和表达式。");
+        return;
+      }
+      if (new Set(ruleDraft.conditions.map((condition) => condition.name.trim())).size !== ruleDraft.conditions.length) {
+        setError("组合条件名称不能重复。");
+        return;
+      }
+      if (ruleDraft.hitPointTexts.length !== ruleDraft.conditions.length || ruleDraft.bonusPointTexts.length !== ruleDraft.conditions.length || [...ruleDraft.hitPointTexts, ...ruleDraft.bonusPointTexts].some((text) => !text.trim() || !Number.isFinite(Number(text)))) {
+        setError("请填写每种命中数量的分值和每个条件的附加分，支持负数和小数。");
+        return;
+      }
+    }
+    if (!form.expression.trim() && ruleDraft.kind === "single") {
       setError("表达式不能为空。");
       return;
     }
@@ -378,6 +401,31 @@ export default function ExpressionBacktestPage() {
       }
       normalizedScopeWay = `CONSEC>=${consecThreshold}`;
     }
+
+    const fixedPoints = Number(ruleDraft.fixedPointsText);
+    if (ruleDraft.kind === "single" && ruleDraft.scoreMode === "fixed" && (!ruleDraft.fixedPointsText.trim() || !Number.isFinite(fixedPoints))) {
+      setError("固定分值必须是有效数字，支持负数和小数。");
+      return;
+    }
+    const distPoints = ruleDraft.kind === "single" && ruleDraft.scoreMode === "dist" ? validateDistPointRows(ruleDraft.distPointRows) : null;
+    if (distPoints && (normalizedScopeWay !== "EACH" && normalizedScopeWay !== "RECENT")) {
+      setError("区间字典仅支持 EACH 或 RECENT 触发方式。");
+      return;
+    }
+    if (distPoints && Object.keys(distPoints.errors).length) {
+      setError(Object.values(distPoints.errors)[0]);
+      return;
+    }
+    const maxPoints = ruleDraft.kind === "combination" || normalizedScopeWay === "EACH" ? parseOptionalNumberInput(ruleDraft.maxPointsText) : undefined;
+    const maxBonusPoints = ruleDraft.kind === "combination" ? parseOptionalNumberInput(ruleDraft.maxBonusPointsText) : undefined;
+    if (((ruleDraft.kind === "combination" || normalizedScopeWay === "EACH") && ruleDraft.maxPointsText.trim() && maxPoints === undefined) || (maxPoints != null && maxPoints < 0) || (ruleDraft.kind === "combination" && ruleDraft.maxBonusPointsText.trim() && maxBonusPoints === undefined) || (maxBonusPoints != null && maxBonusPoints < 0)) {
+      setError("分数限制值必须为非负数；留空表示不限。");
+      return;
+    }
+
+    let tracking: ReturnType<typeof prepareTrackingDefinitions>;
+    try { tracking = prepareTrackingDefinitions(ruleDraft.tracking ?? form.nativeRule?.tracking ?? [], ruleDraft.captureTexts ?? {}); }
+    catch (failure) { setError(String(failure)); return; }
 
     const unknownConfigs = form.enableUnknown
       ? form.unknownConfigs
@@ -435,7 +483,7 @@ export default function ExpressionBacktestPage() {
     }
 
     const resolvedRuleName = form.importRuleName.trim();
-    const manualStrategyName = resolvedRuleName || "manual_expression_strategy";
+    const manualStrategyName = ruleDraft.name.trim() || resolvedRuleName || (ruleDraft.kind === "combination" ? "未命名组合策略" : "未命名策略");
     const normalizedManualPoints = form.direction === "negative" ? -1 : 1;
 
     setError("");
@@ -456,6 +504,20 @@ export default function ExpressionBacktestPage() {
         importRuleName: resolvedRuleName,
         manualStrategy: {
           name: manualStrategyName,
+          tracking,
+          nativeRule: {
+            name: manualStrategyName, enabled: true,
+            scene: form.nativeRule?.scene_name || selectedRule?.scene_name || "研究策略",
+            kind: ruleDraft.kind, stage: form.nativeRule?.stage || selectedRule?.stage || "base",
+            scope_way: normalizedScopeWay, scope_windows: scopeWindows,
+            when: ruleDraft.kind === "combination" ? "" : form.expression.trim(),
+            points: ruleDraft.kind === "combination" || distPoints ? 0 : fixedPoints,
+            dist_points: distPoints?.points ?? null,
+            condition: ruleDraft.kind === "combination" ? ruleDraft.conditions.map((condition, index) => ({name: condition.name.trim(), when: condition.when.trim(), bonus_points: Number(ruleDraft.bonusPointTexts[index])})) : [],
+            points_by_hits: ruleDraft.kind === "combination" ? [0, ...ruleDraft.hitPointTexts.map(Number)] : null,
+            max_points: maxPoints ?? null, max_bonus_points: maxBonusPoints ?? null,
+            explain: form.nativeRule?.explain || selectedRule?.explain || `${manualStrategyName}回测`,
+          },
           sceneName: selectedRule?.scene_name,
           stage: selectedRule?.stage,
           scopeWay: normalizedScopeWay,
@@ -492,18 +554,17 @@ export default function ExpressionBacktestPage() {
       activeTask.current = "";
       setPhase("正在保存结果");
       setRunForm({...form, boardFilter: effectiveBoardFilter});
-      setSelectedComboKey(data.combo_results[0]?.combo_key ?? "");
+      setSelectedComboKey((data.combo_results.find((item) => item.component === "combined") ?? data.combo_results[0])?.combo_key ?? "");
       setRunQuery(query);
       const compacted = compactRuleExpressionValidationData(data);
       setResult(compacted);
       setResearchQuestion("");
       requestAnimationFrame(() => feedbackRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
       updateForm({ sampleLimitText: String(compacted.sample_limit_per_group) });
-      setExploratoryFilter(undefined);
       setSelectedHorizon(data.horizon ?? query.backtestPeriod ?? null);
       if (data.archive_run_id) {
         setArchiveParent(data.archive_run_id);
-        setArchiveMessage("完整结果已保存。");
+        setArchiveMessage("统计与样本已保存。");
       }
       try { setArchives((await listResearchArchives(sourcePath)).filter((item) => item.kind === "expression_validation")); }
       catch (failure) { setArchiveMessage(`读取存档列表失败：${String(failure)}`); }
@@ -561,13 +622,13 @@ export default function ExpressionBacktestPage() {
       if (!config?.form || !config.query) {
         throw new Error("存档缺少表达式回测配置或结果");
       }
-      setForm(config.form);
+      const restoredForm = {...config.form, ruleDraft: config.form.ruleDraft ?? {...createResearchRuleDraft(config.form.nativeRule ?? undefined), ...(!config.form.nativeRule ? {name: config.form.importRuleName, fixedPointsText: config.form.direction === "negative" ? "-1" : "1"} : {})}};
+      setForm(restoredForm);
       setGrouping(config.query.researchGrouping ?? {market_cap_boundaries: [], market_metric: "", market_boundaries: []});
       setStatistics(config.query.researchStatistics ?? {block_length: 10, resamples: 500, seed: 0});
       setMultiPeriod(Boolean(config.query.additionalPeriods?.length));
       setBaselineDiagnostics(config.query.baselineDiagnostics ?? true);
       setVerifyInputs(Boolean(config.query.verifyInputs));
-      setExploratoryFilter(config.exploratory_filter);
       setSelectedHorizon(config.exploratory_filter?.horizon ?? null);
       setSelectedComboKey(config.exploratory_filter?.combo_key ?? saved.result.combo_results?.[0]?.combo_key ?? "");
       setArchiveParent(saved.header.run_id);
@@ -581,7 +642,7 @@ export default function ExpressionBacktestPage() {
         return;
       }
       if (!Array.isArray(saved.result?.combo_results)) throw new Error("存档缺少表达式回测结果");
-      setRunForm(config.form);
+      setRunForm(restoredForm);
       setRunQuery(config.query);
       setResult({...saved.result, archive_run_id: saved.header.run_id, membership_saved: Boolean(saved.header.membership_saved)});
       setArchiveMessage(`正在查看 ${saved.header.run_id}。图表读取当前行情和配置，可能与存档运行时不同。`);
@@ -647,35 +708,40 @@ export default function ExpressionBacktestPage() {
       />
       </div>
 
-      {loading ? <p className="expression-backtest-caption" role="status">{phase} <button type="button" disabled={cancelling || phase.startsWith("正在保存")} onClick={() => {
+      {loading ? <ResearchRunProgress phase={phase} cancelling={cancelling} onCancel={() => {
         setCancelling(true);
         void cancelRuleExpressionValidation(activeTask.current).then(() => setPhase("已请求取消，等待当前读取或计算阶段结束")).catch((failure) => { setError(`取消请求失败：${String(failure)}`); setCancelling(false); });
-      }}>取消</button></p> : null}
+      }} /> : null}
 
       <div ref={feedbackRef} className="research-feedback-target">
       {result?.archive_run_id ? <button type="button" className="research-history-delete" disabled={loading || archiveBusy} onClick={() => void removeArchive(result.archive_run_id!)}>删除当前记录</button> : null}
-      {result && runForm ? <p className="research-meta">{runForm.importRuleName || "表达式"} · {runForm.startDateInput} ~ {runForm.endDateInput}{JSON.stringify(form) !== JSON.stringify(runForm) ? " · 参数已修改，结果尚未重算" : ""}</p> : null}
+      {result && runForm ? <p className="research-meta">{runForm.ruleDraft?.name || runForm.importRuleName || (runForm.ruleDraft?.kind === "combination" ? "组合策略" : "表达式")} · {runForm.startDateInput} ~ {runForm.endDateInput}{JSON.stringify(form) !== JSON.stringify(runForm) ? " · 参数已修改，结果尚未重算" : ""}</p> : null}
       {result ? <div className="expression-backtest-actions">
+        {selectedCombo && new Set(comboRows.map((item) => item.component ?? "base")).size > 1 ? <label>信号组成 <select value={selectedCombo.component ?? "base"} onChange={(event) => {
+          const next = comboRows.find((item) => (item.component ?? "base") === event.target.value && JSON.stringify(item.unknown_values) === JSON.stringify(selectedCombo.unknown_values));
+          if (next) setSelectedComboKey(next.combo_key);
+        }}>{Array.from(new Map(comboRows.map((item) => [item.component ?? "base", item.component_label ?? "原始信号"]))).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label> : null}
         <label>评价周期 <select value={displayedResult?.horizon ?? ""} onChange={(event) => setSelectedHorizon(Number(event.target.value))}>{[result, ...(result.additional_periods ?? [])].map((period, index) => <option key={period.horizon ?? index} value={period.horizon}>{period.horizon ?? runQuery?.backtestPeriod ?? "旧运行"}日</option>)}</select></label>{" "}
         {result.archive_run_id ? <ResearchExportButton sourcePath={sourcePath} runId={result.archive_run_id} disabled={loading} /> : null}
-        <details><summary>配置、输入与标签版本</summary><p>本次分组：{JSON.stringify(runQuery?.researchGrouping ?? {})}；统计设置：{JSON.stringify(runQuery?.researchStatistics ?? {})}。</p><p>{displayedResult?.label_algorithm ?? "旧结果未记录"}；{displayedResult?.input_identity === "content_checked_not_snapshot" ? "所列文件运行前后内容一致，非一致快照" : "输入同源和运行期间一致性未认证"}。{displayedResult?.baseline_origin === "isolated_native_scoring_v1" ? "相关性、收益回归及分数档来自本次隔离重算基线。" : displayedResult?.baseline_origin === "not_requested" ? "本次未计算完整基线诊断。" : "旧结果的相关性及收益回归来自历史评分，同源未认证。"}</p><pre style={{whiteSpace: "pre-wrap", overflowWrap: "anywhere"}}>{JSON.stringify(displayedResult?.input_manifest ?? {}, null, 2)}</pre></details>
+
       </div> : null}
       {selectedCombo ? (
         <>
 
+          {selectedCombo.component && selectedCombo.component !== "base" ? <p className="research-meta">跟踪按每日有效得分统计，包含保分期；0 分不产生得分样本。各条跟踪独立回放，合并信号为原始分与全部有效跟踪分之和。</p> : null}
           <ExpressionCoreSummary combo={selectedCombo} direction={displayedForm.direction} />
           <nav className="research-result-tabs" aria-label="结果内容">
-            {[{value: "overview", label: "适用范围"}, {value: "periods", label: "季度表现"}, {value: "diagnostics", label: "诊断"}, {value: "samples", label: "样本"}].map((item) => <button type="button" key={item.value} aria-pressed={resultView === item.value} onClick={() => setResultView(item.value)}>{item.label}</button>)}
+            {[{value: "overview", label: "分组统计"}, {value: "periods", label: "季度表现"}, {value: "diagnostics", label: "稳健性诊断"}, {value: "samples", label: "正负样本"}].map((item) => <button type="button" key={item.value} aria-pressed={resultView === item.value} onClick={() => setResultView(item.value)}>{item.label}</button>)}
           </nav>
           {resultView === "overview" ? <>
           {hasUnknownCombo ? (
             <ExpressionParameterRobustness
-              combos={comboRows}
+              combos={comboRows.filter((item) => (item.component ?? "base") === (selectedCombo.component ?? "base"))}
               selectedComboKey={selectedCombo.combo_key}
               onSelectCombo={setSelectedComboKey}
             />
           ) : null}
-          {result?.membership_saved && result.archive_run_id && runQuery ? <ResearchEvidencePanel key={`${result.archive_run_id}-${selectedCombo.combo_key}-${displayedResult?.horizon}`} sourcePath={sourcePath} runId={result.archive_run_id} comboKey={selectedCombo.combo_key} horizon={displayedResult?.horizon ?? runQuery.backtestPeriod ?? 1} startDate={runQuery.startDate} endDate={runQuery.endDate} direction={displayedForm.direction === "negative" ? -1 : 1} initialQuery={exploratoryFilter} onBranchSaved={() => {void listResearchArchives(sourcePath).then((runs) => setArchives(runs.filter((run) => run.kind === "expression_validation"))).catch((failure) => setArchiveMessage(String(failure)));}} /> : null}
+          {result?.archive_run_id && runQuery && (selectedCombo.evidence_summaries || result.membership_saved) ? <ResearchEvidencePanel key={`${result.archive_run_id}-${selectedCombo.combo_key}-${displayedResult?.horizon}`} sourcePath={sourcePath} runId={result.archive_run_id} comboKey={selectedCombo.combo_key} horizon={displayedResult?.horizon ?? runQuery.backtestPeriod ?? 1} startDate={runQuery.startDate} endDate={runQuery.endDate} direction={displayedForm.direction === "negative" ? -1 : 1} savedSummaries={selectedCombo.evidence_summaries} /> : null}
           </> : null}
           {resultView === "periods" ? <ExpressionQuarterSummary combo={selectedCombo} startDate={displayedForm.startDateInput} endDate={displayedForm.endDateInput} /> : null}
           {resultView === "diagnostics" ? <>
@@ -685,9 +751,8 @@ export default function ExpressionBacktestPage() {
           <ExpressionIncremental combo={selectedCombo} />
           </> : null}
           {resultView === "samples" ? <>
-          <p className="research-meta">抽样方法：{result?.random_sample_method || "旧运行未记录"}</p>
           <ExpressionSamplesCheck combo={selectedCombo} context={validationContext} />
-          <ExpressionDailyDetail combo={selectedCombo} />
+          <ExpressionReturnDistribution combo={selectedCombo} />
           </> : null}
         </>
       ) : null}

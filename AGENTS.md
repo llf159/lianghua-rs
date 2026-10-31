@@ -34,6 +34,8 @@
 
 - 问题：开发构建优化计算和数据库桥接组件可以加快回测及写入，但会延长编译时间；解决方案选择：dev 默认不单独启用优化，运行耗时任务时按需临时调整，例如 `cargo --config 'profile.dev.package.lianghua-core.opt-level=3' build`，也可对 `lianghua-app-strategy`、`lianghua-backtest`、`lianghua-data`、`lianghua-download`、`lianghua-scoring` 或 `duckdb` 使用同样的配置；解释：日常开发优先缩短编译时间，临时优化仅影响指定包的 dev 构建；DuckDB 配置优化的是 Rust 桥接，不改变原生引擎或 release 配置。
 
+- 问题：dev 完整调试信息使 Tauri 及其依赖的构建产物庞大，链接耗时较长；解决方案选择：`profile.dev.debug = 1`；解释：保留回溯所需的行号等信息，减少类型和变量调试信息，以部分调试能力换取更小的产物和更快的构建；需要完整调试时可临时使用 `cargo --config 'profile.dev.debug=2' build`，release 配置不变。
+
 - 问题：duckdb-rs 从引擎1.5起更换版本编码，普通 caret 约束会跨引擎版本升级，而本机系统动态库仍可能停留在旧版；解决方案选择：各组件统一使用 `~1.20000.0`（DuckDB 2.0.0），同步 Cargo.lock 与 CI 原生库，Linux 沿用新版绑定默认的匹配原生库下载，Android/Windows 保留 bundled；解释：只允许同引擎下的绑定补丁升级，避免 Rust 绑定和原生库版本错配；`DUCKDB_LIB_DIR` 会覆盖默认下载，手动指定时必须提供2.0.0库。此次只更新依赖、未编译或迁移数据库；2.0能继续读写旧格式，但新建数据库默认采用2.0格式，旧引擎不能读取，跨设备共享新库时必须同步更新。
 
 - 问题：Reqwest 的未启用 HTTP/3 可选依赖在锁文件中也会引入较新的 quinn，并间接引入与应用 rand 0.9 不兼容的 rand 0.10；解决方案选择：锁定 quinn 0.11.9 和 quinn-proto 0.11.15，应用与通知插件统一使用 rand 0.9.5；解释：HTTP/3 当前未启用，这些版本只约束锁文件解析，不改变运行中的传输方式；后续全量更新依赖时检查锁文件，必要时依次执行 `cargo update -p quinn --precise 0.11.9` 和 `cargo update -p quinn-proto --precise 0.11.15`。

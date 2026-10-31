@@ -126,7 +126,7 @@ pub(in crate::statistics) fn collect_rule_validation_runtime_keys(
 ) -> HashSet<String> {
     let programs = combos
         .iter()
-        .map(|combo| &combo.cached_rule.when_ast)
+        .flat_map(|combo| combo.cached_rule.expression_programs())
         .collect::<Vec<_>>();
     let cyq_chen_keys = cyq_chen_runtime_key_names();
     let injected_keys = (["RANK", "SCORE", "S_RANK", "ZHANG", "TOTAL_MV_YI"])
@@ -135,14 +135,20 @@ pub(in crate::statistics) fn collect_rule_validation_runtime_keys(
         .chain(cyq_chen_keys)
         .collect::<Vec<_>>();
 
-    collect_runtime_keys_from_expr_programs(
+    let mut keys = collect_runtime_keys_from_expr_programs(
         &programs,
         RuntimeKeyCollectOptions {
             always_keys: &[],
             injected_keys: &injected_keys,
             aliases: &([]),
         },
-    )
+    );
+    for combo in combos {
+        if let Some(plan) = &combo.tracking {
+            keys.extend(plan.runtime_keys.iter().cloned());
+        }
+    }
+    keys
 }
 
 pub(in crate::statistics) fn snapshot_runtime_values(
@@ -196,20 +202,25 @@ pub(in crate::statistics) fn build_validation_triggered_scores_for_combos(
     let used_cyq_chen_keys = (|combos: &[PreparedValidationCombo]| -> HashSet<String> {
         let programs = combos
             .iter()
-            .map(|combo| &combo.cached_rule.when_ast)
+            .flat_map(|combo| combo.expression_programs())
             .collect::<Vec<_>>();
         collect_used_cyq_chen_runtime_keys(&programs)
     })(combos);
     let total_share_map = load_total_share_map(source_path).unwrap_or_default();
     let needs_rank_score = (|combos: &[PreparedValidationCombo]| -> bool {
         combos.iter().any(|combo| {
-            expr_program_uses_runtime_key(&combo.cached_rule.when_ast, "RANK")
-                || expr_program_uses_runtime_key(&combo.cached_rule.when_ast, "SCORE")
+            combo.expression_programs().iter().any(|program| {
+                expr_program_uses_runtime_key(program, "RANK")
+                    || expr_program_uses_runtime_key(program, "SCORE")
+            })
         })
     })(combos);
-    let needs_similarity_rank = combos
-        .iter()
-        .any(|combo| expr_program_uses_runtime_key(&combo.cached_rule.when_ast, "S_RANK"));
+    let needs_similarity_rank = combos.iter().any(|combo| {
+        combo
+            .expression_programs()
+            .iter()
+            .any(|program| expr_program_uses_runtime_key(program, "S_RANK"))
+    });
     let rank_score_series_map = if needs_rank_score {
         (|source_path: &str,
           start_date: &str,
@@ -358,6 +369,17 @@ pub(in crate::statistics) fn build_validation_triggered_scores_for_combos(
                         .binary_search_by(|date| date.as_str().cmp(start_date))
                         .unwrap_or_else(|index| index);
                     let mut runtime = row_into_rt(row_data)?;
+                    if combos.iter().any(|combo| combo.tracking.is_some()) {
+                        for value in runtime.vars.values_mut() {
+                            if let Value::NumSeries(series) = value {
+                                *value = Value::SharedNumSeries(std::sync::Arc::new(
+                                    std::mem::take(series),
+                                ));
+                            }
+                        }
+                    }
+                    let mut replayed =
+                        HashMap::<String, Vec<(Vec<f64>, Vec<bool>, Vec<bool>)>>::new();
                     let restore_values = combos
                         .iter()
                         .map(|combo| snapshot_runtime_values(&runtime, &combo.assigned_names))
@@ -369,11 +391,48 @@ pub(in crate::statistics) fn build_validation_triggered_scores_for_combos(
                             restore_runtime_values(&mut runtime, &restore_values[combo_index]);
                         }
 
+                        if !replayed.contains_key(&combo.cached_rule.name) {
+                            let (scores, triggered, available) =
+                                evaluate_cached_rule_scores_with_availability(
+                                    &combo.cached_rule,
+                                    &mut runtime,
+                                )?;
+                            let mut total = scores.clone();
+                            let base_available = available.clone();
+                            let mut channels = vec![(scores, triggered, available)];
+                            if let Some(plan) = &combo.tracking {
+                                for (definition, program) in &plan.tracks {
+                                    let (scores, _) = program.rolling_scores(
+                                        definition,
+                                        &runtime,
+                                        &trade_dates,
+                                        &plan.calendar,
+                                        start_date,
+                                        Some(&channels[0].0),
+                                    )?;
+                                    for (total, score) in total.iter_mut().zip(&scores) {
+                                        *total += score;
+                                    }
+                                    let triggered =
+                                        scores.iter().map(|score| *score != 0.0).collect();
+                                    channels.push((
+                                        scores,
+                                        triggered,
+                                        vec![true; trade_dates.len()],
+                                    ));
+                                }
+                                let available = total
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(index, score)| base_available[index] || *score != 0.0)
+                                    .collect();
+                                let triggered = total.iter().map(|score| *score != 0.0).collect();
+                                channels.push((total, triggered, available));
+                            }
+                            replayed.insert(combo.cached_rule.name.clone(), channels);
+                        }
                         let (scores, triggered_flags, available) =
-                            evaluate_cached_rule_scores_with_availability(
-                                &combo.cached_rule,
-                                &mut runtime,
-                            )?;
+                            &replayed[&combo.cached_rule.name][combo.score_component];
                         if include_non_hits {
                             let values = trade_dates
                                 .iter()
@@ -410,6 +469,13 @@ pub(in crate::statistics) fn build_validation_triggered_scores_for_combos(
 
                                 let mut date_score_map = HashMap::new();
                                 for index in keep_from..min_len {
+                                    if scores[index].abs() <= VALIDATION_EPS
+                                        && (combo.cached_rule.combination.is_some()
+                                            || combo.cached_rule.dist_points.is_some()
+                                            || combo.cached_rule.max_points.is_some())
+                                    {
+                                        continue;
+                                    }
                                     let Some(score) =
                                         (|score: f64,
                                           triggered: bool,
@@ -509,7 +575,11 @@ pub(in crate::statistics) fn build_validation_triggered_scores(
     cached_rule: &CachedRule,
 ) -> Result<HashMap<String, HashMap<String, f64>>, String> {
     let combo = PreparedValidationCombo {
+        tracking: None,
+        score_component: 0,
         variant: ValidationVariant {
+            component: "base".into(),
+            component_label: "原始信号".into(),
             combo_key: cached_rule.name.clone(),
             combo_label: cached_rule.name.clone(),
             formula: cached_rule.when_src.clone(),
@@ -1201,7 +1271,11 @@ mod tests {
         let st_list = load_st_list(source_dir_str).expect("load st list");
         let combos = vec![
             PreparedValidationCombo {
+                tracking: None,
+                score_component: 0,
                 variant: ValidationVariant {
+                    component: "base".into(),
+                    component_label: "原始信号".into(),
                     combo_key: first_rule.name.clone(),
                     combo_label: first_rule.name.clone(),
                     formula: first_rule.when_src.clone(),
@@ -1211,7 +1285,11 @@ mod tests {
                 assigned_names: collect_validation_assigned_names(&first_rule.when_ast),
             },
             PreparedValidationCombo {
+                tracking: None,
+                score_component: 0,
                 variant: ValidationVariant {
+                    component: "base".into(),
+                    component_label: "原始信号".into(),
                     combo_key: second_rule.name.clone(),
                     combo_label: second_rule.name.clone(),
                     formula: second_rule.when_src.clone(),
@@ -1254,7 +1332,11 @@ mod tests {
             )
             .expect("build cached rule");
         let combo = PreparedValidationCombo {
+            tracking: None,
+            score_component: 0,
             variant: ValidationVariant {
+                component: "base".into(),
+                component_label: "原始信号".into(),
                 combo_key: rule.name.clone(),
                 combo_label: rule.name.clone(),
                 formula: rule.when_src.clone(),

@@ -48,8 +48,8 @@ fn main() -> Result<(), String> {
                 research_artifact_path(&source, &journal.run_id, "members.db")?,
             )
             .map_err(|e| e.to_string())?;
+            value.membership_saved = true;
         }
-        value.membership_saved = true;
         value.archive_run_id = Some(journal.run_id.clone());
     }
     let payload = match &result {

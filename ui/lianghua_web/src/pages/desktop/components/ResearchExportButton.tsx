@@ -7,8 +7,8 @@ export function ResearchExportButton({sourcePath, runId, disabled}: {sourcePath:
   async function exportRun() {
     setBusy(true); setMessage("");
     try {
-      const path = await save({title: "导出报告与完整研究明细", defaultPath: `${runId}.lhresearch`, filters: [{name: "研究结果包", extensions: ["lhresearch"]}]});
-      if (path) {await exportResearchArchive(sourcePath,runId,path); setMessage("报告与明细已导出。");}
+      const path = await save({title: "导出研究结果", defaultPath: `${runId}.lhresearch`, filters: [{name: "研究结果包", extensions: ["lhresearch"]}]});
+      if (path) {await exportResearchArchive(sourcePath,runId,path); setMessage("结果已导出。");}
     } catch (failure) {setMessage(`导出失败：${String(failure)}`);}
     finally {setBusy(false);}
   }

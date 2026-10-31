@@ -181,12 +181,27 @@ fn describe_research_archive(header: &mut ResearchArchiveHeader, configuration: 
             .unwrap_or(configuration);
         let form = configuration.get("form").unwrap_or(query);
         let mut parts = vec![
-            form.get("importRuleName")
+            form.get("ruleDraft")
+                .and_then(|draft| draft.get("name"))
                 .and_then(Value::as_str)
+                .filter(|name| !name.trim().is_empty())
+                .or_else(|| {
+                    query
+                        .get("manualStrategy")
+                        .and_then(|strategy| strategy.get("name"))
+                        .and_then(Value::as_str)
+                        .filter(|name| !name.trim().is_empty())
+                })
+                .or_else(|| form.get("importRuleName").and_then(Value::as_str))
                 .filter(|name| !name.is_empty())
                 .unwrap_or(match header.kind.as_str() {
                     "rank_comparison" => "排名对照",
                     "paper_validation" => "模拟盘",
+                    _ if form.pointer("/ruleDraft/kind").and_then(Value::as_str)
+                        == Some("combination") =>
+                    {
+                        "组合策略"
+                    }
                     _ => "表达式",
                 })
                 .to_string(),
