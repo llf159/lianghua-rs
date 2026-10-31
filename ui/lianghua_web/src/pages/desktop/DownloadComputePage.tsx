@@ -10,11 +10,12 @@ import {
   getManagedStrategyBackupDiff,
 } from '../../apis/strategyAssets'
 import DataTaskProgress from '../../shared/DataTaskProgress'
+import { beginTaskGroup, finishTaskGroup, useTaskControl } from '../../shared/taskControl'
 import DataDownloadPage, { type DataDownloadPageHandle } from './DataDownloadPage'
 import RankingComputePage, { type RankingComputePageHandle } from './RankingComputePage'
 import './css/DownloadComputePage.css'
 
-type DailyWorkflowStage = 'idle' | 'download' | 'ranking' | 'similarity' | 'completed' | 'skipped' | 'failed'
+type DailyWorkflowStage = 'idle' | 'download' | 'ranking' | 'similarity' | 'completed' | 'skipped' | 'failed' | 'stopped'
 
 type DailyCompletion = {
   loading: boolean
@@ -63,6 +64,8 @@ export default function DownloadComputePage() {
   const downloadPageRef = useRef<DataDownloadPageHandle>(null)
   const rankingPageRef = useRef<RankingComputePageHandle>(null)
   const dailyWorkflowRunningRef = useRef(false)
+  const [workflowTaskId, setWorkflowTaskId] = useState<string | null>(null)
+  const workflowControl = useTaskControl(workflowTaskId)
   const dailyWorkflowRunning = ['download', 'ranking', 'similarity'].includes(dailyWorkflowStage)
   const dailyAllCompleted =
     Boolean(dailyCompletion.targetTradeDate) &&
@@ -157,8 +160,14 @@ export default function DownloadComputePage() {
     setDailyWorkflowElapsedMs(0)
     setDailyWorkflowStage('download')
     setDailyWorkflowMessage('正在执行行情增量更新；如新筹码策略有变化，将自动跳过新筹码维护。')
+    const taskId = `daily-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    let groupStarted = false
+    setWorkflowTaskId(taskId)
     try {
-      const downloadResult = await downloadPageRef.current.runDailyIncrementalUpdate()
+      const managed = await inspectManagedSourceStatus()
+      await beginTaskGroup(taskId, managed.sourcePath)
+      groupStarted = true
+      const downloadResult = await downloadPageRef.current.runDailyIncrementalUpdate(taskId)
       if (!downloadResult.completed || !downloadResult.latestTradeDate) {
         setDailyWorkflowStage('failed')
         setDailyWorkflowMessage('增量更新未完成，工作流已停止；请查看下载任务提示。')
@@ -179,6 +188,7 @@ export default function DownloadComputePage() {
             )
           }
         },
+        taskId,
       )
       if (rankingResult.strategyChanged) {
         setDailyWorkflowStage('skipped')
@@ -191,9 +201,17 @@ export default function DownloadComputePage() {
         `每日工作流完成：增量更新、${downloadResult.latestTradeDate} 排名和走势相似度排名均已完成${downloadResult.chipStrategySkipped ? '；新筹码维护因策略变化已跳过' : ''}。`,
       )
     } catch (workflowError) {
-      setDailyWorkflowStage('failed')
-      setDailyWorkflowMessage(`每日工作流失败：${String(workflowError)}`)
+      setDailyWorkflowStage(String(workflowError).includes('已停止') ? 'stopped' : 'failed')
+      setDailyWorkflowMessage(String(workflowError).includes('已停止') ? `每日工作流已停止，已完成阶段保留。${String(workflowError)}` : `每日工作流失败：${String(workflowError)}`)
     } finally {
+      if (groupStarted) {
+        try { await finishTaskGroup(taskId) }
+        catch (error) {
+          setDailyWorkflowStage(String(error).includes('已停止') ? 'stopped' : 'failed')
+          setDailyWorkflowMessage(String(error))
+        }
+      }
+      setWorkflowTaskId(null)
       await refreshDailyCompletion()
       dailyWorkflowRunningRef.current = false
       setRankingStatusRefreshSignal((current) => current + 1)
@@ -242,6 +260,8 @@ export default function DownloadComputePage() {
         ) : null}
         {dailyWorkflowRunning ? (
           <DataTaskProgress
+            onCancel={() => void workflowControl.stop()}
+            cancelDisabled={workflowControl.disabled}
             phaseLabel={dailyStageLabels[dailyStageIndex]}
             phaseStepPillText={` · ${dailyStageIndex + 1}/3`}
             phaseStepStatText={` ${dailyStageIndex + 1}/3`}
@@ -252,7 +272,7 @@ export default function DownloadComputePage() {
             shownProgressPercent={dailyProgressPercent ?? 0}
             progressCounterText={`${dailyStageIndex + 1} / 3`}
             currentObjectText={formatCompactTradeDate(dailyCompletion.targetTradeDate)}
-            message={dailyWorkflowMessage}
+            message={workflowControl.message || dailyWorkflowMessage}
             fallbackMessage="每日工作流正在执行。"
           />
         ) : null}

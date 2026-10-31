@@ -147,6 +147,7 @@ pub fn download_dragon_tiger(
 
     let today = Local::now().format("%Y%m%d").to_string();
     for (index, trade_date) in pending_dates.iter().enumerate() {
+        lianghua_model::task::checkpoint()?;
         if let Some(cb) = progress_cb {
             cb(DownloadProgress {
                 phase: "download_dragon_tiger".to_string(),

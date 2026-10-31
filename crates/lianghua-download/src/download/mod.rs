@@ -7,7 +7,6 @@ use rayon::prelude::*;
 use std::{
     collections::HashMap,
     sync::Mutex,
-    thread::sleep,
     time::{Duration, Instant},
 };
 
@@ -125,7 +124,7 @@ impl RateLimiter {
         };
 
         if !sleep_for.is_zero() {
-            sleep(sleep_for);
+            lianghua_model::task::wait(sleep_for)?;
         }
 
         Ok(())
@@ -207,6 +206,8 @@ pub struct DownloadTask {
 impl TushareClient {
     pub fn new(token: String, calls_per_min: usize) -> Result<Self, String> {
         let http = reqwest::blocking::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(60))
             .build()
             .map_err(|e| format!("创建HTTP客户端失败: {e}"))?;
         Ok(Self {
@@ -223,7 +224,9 @@ impl TushareClient {
         params: &P,
         fields: &str,
     ) -> Result<TushareTable, String> {
+        lianghua_model::task::checkpoint()?;
         self.limiter.wait(api_name)?;
+        lianghua_model::task::checkpoint()?;
 
         let json_body = TushareRequest {
             api_name,

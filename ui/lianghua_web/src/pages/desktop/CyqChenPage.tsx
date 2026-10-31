@@ -2461,8 +2461,8 @@ export default function CyqChenPage() {
   const [chartResultRevision, setChartResultRevision] = useState(0)
   const [savedRuns, setSavedRuns] = useState<SavedRun[]>([])
   const [selectedTradeDate, setSelectedTradeDate] = useState('')
+  const [resultView, setResultView] = useState('chart')
   const [chipPeakMode, setChipPeakMode] = useState<ChipPeakMode>('total')
-  const [compareMechanisms, setCompareMechanisms] = useState(false)
   const [retentionEnabled, setRetentionEnabled] = useState(false)
   const [retentionAnchor, setRetentionAnchor] = useState('')
   const [retentionEvaluation, setRetentionEvaluation] = useState('')
@@ -2480,12 +2480,13 @@ export default function CyqChenPage() {
     return selectedSnapshotByDate(result.snapshots, tradeDate)
   }, [result, selectedTradeDate])
 
-  const selectedMechanismDay = result?.mechanismComparison?.days.find(
-    (day) => day.tradeDate === selectedSnapshot?.tradeDate,
-  )
   const selectedBasisDay = result?.basis?.days.find((day) => day.tradeDate === selectedSnapshot?.tradeDate)
-  const selectedL2Day = result?.l2Days.find((day) => day.tradeDate === selectedSnapshot?.tradeDate)
-  const selectedOrigin = selectedSnapshot?.origin
+  const availableResultViews = [
+    { key: 'chart', label: '图表' },
+    ...((selectedSnapshot?.ageSummary || selectedBasisDay) ? [{ key: 'data', label: '数据' }] : []),
+    ...(result?.retention ? [{ key: 'retention', label: '旧筹码留存' }] : []),
+  ]
+  const activeResultView = availableResultViews.some((view) => view.key === resultView) ? resultView : 'chart'
   const chartRows = useMemo(() => buildChartRows(result), [result])
   const chartPanels = result?.klinePayload?.panels ?? []
   const snapshotOptions = result?.snapshots ?? []
@@ -2663,7 +2664,6 @@ export default function CyqChenPage() {
       setSourcePath(nextSourcePath)
       const nextResult = await runCyqChenSingleStockTest({
         version: strategyVersion,
-        compareMechanisms,
         retention: retentionEnabled ? {
           anchorDate: normalizeDateInput(retentionAnchor),
           evaluationDate: normalizeDateInput(retentionEvaluation),
@@ -2682,6 +2682,7 @@ export default function CyqChenPage() {
       setResult(nextResult)
       setChartResultRevision((value) => value + 1)
       setSelectedTradeDate(lastTradeDate)
+      setResultView('chart')
       setSavedRuns((items) => [
         {
           id: `${Date.now()}`,
@@ -2770,20 +2771,40 @@ export default function CyqChenPage() {
             <input type="number" min={0.01} step={0.1} value={bucketPctInput} onChange={(event) => setBucketPctInput(event.target.value)} />
           </label>
         </div>
-        <label className="cyq-chen-compare-toggle">
-          <input type="checkbox" checked={compareMechanisms} onChange={(event) => setCompareMechanisms(event.target.checked)} disabled={loading} />
-          <span>比较筹码生成机制（额外计算两次）</span>
-        </label>
-        <details className="cyq-chen-retention-form">
-          <summary>固定成本区旧筹码留存（只读查询）</summary>
-          <label className="cyq-chen-compare-toggle"><input type="checkbox" checked={retentionEnabled} onChange={(event) => setRetentionEnabled(event.target.checked)} disabled={loading} />随本次计算查询留存</label>
-          <div className="cyq-chen-retention-inputs">
-            <label>锚点收盘日期<input value={retentionAnchor} onChange={(event) => setRetentionAnchor(event.target.value)} placeholder="YYYYMMDD" /></label>
-            <label>评价日期<input value={retentionEvaluation} onChange={(event) => setRetentionEvaluation(event.target.value)} placeholder="YYYYMMDD" /></label>
-            <label>固定成本下界<input type="number" value={retentionLow} onChange={(event) => setRetentionLow(event.target.value)} /></label>
-            <label>固定成本上界<input type="number" value={retentionHigh} onChange={(event) => setRetentionHigh(event.target.value)} /></label>
+        <details className={`cyq-chen-retention-form${retentionEnabled ? ' is-enabled' : ''}`}>
+          <summary>
+            <span>
+              <strong>旧筹码留存</strong>
+              <small>固定成本区 · 只读分析</small>
+            </span>
+            <em>{retentionEnabled ? '已启用' : '可选'}</em>
+          </summary>
+          <div className="cyq-chen-retention-body">
+            <label className="cyq-chen-retention-trigger">
+              <input type="checkbox" checked={retentionEnabled} onChange={(event) => setRetentionEnabled(event.target.checked)} disabled={loading} />
+              <span>
+                <strong>随本次计算查询</strong>
+                <small>仅生成临时分析，不写入正式筹码库</small>
+              </span>
+            </label>
+            <div className="cyq-chen-retention-group">
+              <span>观察区间</span>
+              <div className="cyq-chen-retention-inputs">
+                <label>锚点日<input inputMode="numeric" value={retentionAnchor} onChange={(event) => setRetentionAnchor(event.target.value)} placeholder="YYYYMMDD" disabled={loading} /></label>
+                <label>评价日<input inputMode="numeric" value={retentionEvaluation} onChange={(event) => setRetentionEvaluation(event.target.value)} placeholder="YYYYMMDD" disabled={loading} /></label>
+              </div>
+            </div>
+            <div className="cyq-chen-retention-group">
+              <span>前复权成本区间</span>
+              <div className="cyq-chen-retention-inputs">
+                <label>成本下界<input type="number" min="0.01" step="0.01" value={retentionLow} onChange={(event) => setRetentionLow(event.target.value)} placeholder="0.00" disabled={loading} /></label>
+                <label>成本上界<input type="number" min="0.01" step="0.01" value={retentionHigh} onChange={(event) => setRetentionHigh(event.target.value)} placeholder="0.00" disabled={loading} /></label>
+              </div>
+            </div>
+            <p className="cyq-chen-retention-help">
+              区间取与输入范围相交的锚点整桶，边界随后固定。日期须位于本次模拟历史内，最多间隔 120 次报价更新；质量按每 100 份模型库存计。
+            </p>
           </div>
-          <p>采用与输入区间相交的锚点整桶，边界随后固定；日期须在本次模拟历史内，最多间隔120次报价更新。成本坐标为前复权，质量按每100份模型库存计。</p>
         </details>
         <div className="cyq-chen-run-row">
           <button className="cyq-chen-primary-btn cyq-chen-run-btn" type="button" onClick={runTest} disabled={loading}>
@@ -2807,6 +2828,7 @@ export default function CyqChenPage() {
                     setResult(item.data)
                     setChartResultRevision((value) => value + 1)
                     setSelectedTradeDate(item.data.snapshots[item.data.snapshots.length - 1]?.tradeDate ?? '')
+                    setResultView('chart')
                   }}
                 >
                   {item.label}
@@ -2857,8 +2879,32 @@ export default function CyqChenPage() {
           </label>
         </div>
 
+        {result ? (
+          <nav className="cyq-chen-result-nav" aria-label="筹码测试结果">
+            {availableResultViews.map((view) => (
+              <button
+                key={view.key}
+                type="button"
+                aria-pressed={activeResultView === view.key}
+                onClick={() => setResultView(view.key)}
+              >
+                {view.label}
+              </button>
+            ))}
+          </nav>
+        ) : null}
+
         {selectedSnapshot ? (
-          <div className="cyq-chen-comparison">
+          <div className="cyq-chen-snapshot-strip">
+            <div><span>主力获利</span><strong>{formatRatioPercent(selectedSnapshot.mainProfitRatio)}</strong></div>
+            <div><span>主力套牢</span><strong>{formatRatioPercent(selectedSnapshot.mainTrappedRatio)}</strong></div>
+            <div><span>主力成本</span><strong>{formatNumber(selectedSnapshot.mainAvgCost)}</strong></div>
+            <div><span>总筹码峰</span><strong>{formatNumber(selectedSnapshot.chipPeakPrice)}</strong></div>
+          </div>
+        ) : null}
+
+        {selectedSnapshot ? (
+          <div className="cyq-chen-comparison" hidden={activeResultView !== 'data'}>
             <h4>模型持仓年龄（报价日） · {selectedSnapshot.tradeDate}</h4>
             {selectedSnapshot.ageSummary ? <>
               <p>混合库存按桶等比例出库；观察起点 {selectedSnapshot.ageSummary.observationStartDate ?? '旧检查点未记录'}，共 {selectedSnapshot.ageSummary.observedDays} 次报价。零换手报价推进年龄，停牌无报价不推进。</p>
@@ -2882,7 +2928,7 @@ export default function CyqChenPage() {
           </div>
         ) : null}
 
-        {result?.retention ? <div className="cyq-chen-comparison">
+        {result?.retention ? <div className="cyq-chen-comparison" hidden={activeResultView !== 'retention'}>
           <h4>固定区间旧筹码留存 · {result.retention.request.anchorDate} → {result.retention.request.evaluationDate}</h4>
           <p>连续模拟起点 {result.retention.simulationStartDate ?? '--'}；前复权成本区 {formatNumber(result.retention.actualPriceLow)}—{formatNumber(result.retention.actualPriceHigh)}；间隔 {result.retention.quoteUpdates ?? '--'} 次报价更新。</p>
           {result.retention.unavailableReason ? <p>{result.retention.unavailableReason}</p> : <dl className="cyq-chen-comparison-metrics">
@@ -2897,7 +2943,7 @@ export default function CyqChenPage() {
         </div> : null}
 
         {selectedBasisDay ? (
-          <section className="cyq-chen-comparison" aria-label="基础成本与未知库存">
+          <section className="cyq-chen-comparison" aria-label="基础成本与未知库存" hidden={activeResultView !== 'data'}>
             <h4>基础成本 · {selectedBasisDay.tradeDate}</h4>
             <p>身份中性估计，模拟起点 {result?.basis?.simulationStartDate}。成本采用统一前复权坐标；下方原模型图仍为身份情景。</p>
             {selectedBasisDay.values ? <>
@@ -2923,154 +2969,69 @@ export default function CyqChenPage() {
           </section>
         ) : null}
 
-        {selectedL2Day ? (
-          <section className="cyq-chen-comparison" aria-label="L2成交证据">
-            <h4>L2 成交证据 · {selectedL2Day.tradeDate} · {selectedL2Day.board}</h4>
-            <p>
-              主动净量、大小单方向和买方分档占比分别显示，不合成主力概率，也不影响基础 K/U。
-              当日与含当日的过去三个市场交易日分别计算；停牌或字段缺失时不跨日拼接。
-            </p>
-            <p role="status">
-              {{
-                observable: '原始字段可观测。',
-                missing: '证据不完整，缺失项保持为空。',
-                invalid: '成交分母或输入数值无效，不裁剪成合法范围。',
-                unverified: '该市场L2口径未核实，数值仅作原始记录展示。',
-              }[selectedL2Day.status]}
-            </p>
-            <dl className="cyq-chen-comparison-metrics">
-              <div><dt>主动净量 / 成交量（当日）</dt><dd>{selectedL2Day.netMfRatio == null ? '--' : formatRatioPercent(selectedL2Day.netMfRatio)}</dd></div>
-              <div><dt>主动净量 / 成交量（三日）</dt><dd>{selectedL2Day.netMfRatio3d == null ? '--' : formatRatioPercent(selectedL2Day.netMfRatio3d)}</dd></div>
-              <div><dt>大小单净量 / 成交量（当日）</dt><dd>{selectedL2Day.largeNetRatio == null ? '--' : formatRatioPercent(selectedL2Day.largeNetRatio)}</dd></div>
-              <div><dt>大小单净量 / 成交量（三日）</dt><dd>{selectedL2Day.largeNetRatio3d == null ? '--' : formatRatioPercent(selectedL2Day.largeNetRatio3d)}</dd></div>
-              <div><dt>大单买方占比（当日）</dt><dd>{selectedL2Day.largeBuyShare == null ? '--' : formatRatioPercent(selectedL2Day.largeBuyShare)}</dd></div>
-              <div><dt>大单买方占比（三日）</dt><dd>{selectedL2Day.largeBuyShare3d == null ? '--' : formatRatioPercent(selectedL2Day.largeBuyShare3d)}</dd></div>
-            </dl>
-            <details>
-              <summary>原始分母与买卖量</summary>
-              <p>
-                成交量 {formatNumber(selectedL2Day.volume)}；主动净量 {formatNumber(selectedL2Day.netMfVolume)}；
-                大单及特大单买方 {formatNumber(selectedL2Day.largeBuyVolume)}、卖方 {formatNumber(selectedL2Day.largeSellVolume)}；
-                买方四档合计 {formatNumber(selectedL2Day.largeBuyDenominator)}。
-              </p>
-              <p>分档买卖两侧分别统计，合计接近两倍成交量并不代表应迁移两倍库存。</p>
-            </details>
-            {selectedL2Day.issues.length > 0 ? <ul>{selectedL2Day.issues.map((issue) => <li key={issue}>{issue}</li>)}</ul> : null}
-          </section>
-        ) : null}
+        <div className="cyq-chen-result-view" hidden={activeResultView !== 'chart'}>
+          <div className="cyq-chen-project-chart">
+            <div className="cyq-chen-chart-title">
+              <div>
+                <strong>K 线与筹码分布</strong>
+                <span>{chartRows.length} 根</span>
+              </div>
+              <div className="cyq-chen-chip-legend" aria-label="筹码颜色">
+                <span><i style={{ background: CHIP_COLOR_MAIN_PROFIT }} />主力盈利</span>
+                <span><i style={{ background: CHIP_COLOR_MAIN_TRAPPED }} />主力套牢</span>
+                <span><i style={{ background: CHIP_COLOR_RETAIL_PROFIT }} />散户盈利</span>
+                <span><i style={{ background: CHIP_COLOR_RETAIL_TRAPPED }} />散户套牢</span>
+              </div>
+            </div>
+            <CyqChenProjectChart
+              key={chartResultRevision}
+              kline={chartRows}
+              panels={chartPanels}
+              snapshots={snapshotOptions}
+              snapshot={selectedSnapshot}
+              selectedTradeDate={selectedSnapshot?.tradeDate ?? selectedTradeDate}
+              chipPeakMode={chipPeakMode}
+              watermarkName={watermarkName}
+              watermarkCode={watermarkCode}
+              onChipPeakModeChange={setChipPeakMode}
+              onSelectTradeDate={setSelectedTradeDate}
+            />
+          </div>
 
-        {selectedMechanismDay ? (
-          <section className="cyq-chen-comparison" aria-label="筹码生成机制对照">
-            <h4>筹码生成机制对照 · {selectedMechanismDay.tradeDate}</h4>
-            {result?.mechanismComparison?.universeVerified !== true ? (
-              <p className="cyq-chen-universe-status" role="status">流通总体未经核实：以下为固定总体假设下的模型对照。历史解禁、增发等变化尚未核对，初始未知库存不包含这些事件引入的未知成本。</p>
-            ) : null}
-            <p>同一行情、网格与初始化，模拟从 {result?.mechanismComparison?.simulationStartDate ?? '--'} 开始。下方图表仍显示当前规则。</p>
+          <details className="cyq-chen-bin-details">
+            <summary>筹码分桶明细{selectedSnapshot ? ` · ${selectedSnapshot.bins.length} 档` : ''}</summary>
             <div className="cyq-chen-bin-table-wrap">
               <table className="cyq-chen-bin-table">
-                <thead><tr><th>生成方式</th><th>总平均成本</th><th>获利盘</th><th>模型主力份额</th></tr></thead>
+                <thead>
+                  <tr>
+                    <th>价位</th>
+                    <th>区间</th>
+                    <th>主力</th>
+                    <th>散户</th>
+                    <th>合计</th>
+                  </tr>
+                </thead>
                 <tbody>
-                  <tr><td>当前规则</td><td>{formatNumber(selectedMechanismDay.currentAvgCost)}</td><td>{formatRatioPercent(selectedMechanismDay.currentProfitRatio)}</td><td>{formatNumber(selectedSnapshot?.mainTotal)}</td></tr>
-                  <tr><td>关闭延迟归属修正</td><td>{formatNumber(selectedMechanismDay.withoutPosteriorAvgCost)}</td><td>{formatRatioPercent(selectedMechanismDay.withoutPosteriorProfitRatio)}</td><td>{formatNumber(selectedMechanismDay.withoutPosteriorMainTotal)}</td></tr>
-                  <tr><td>等概率参照（含初值估计）</td><td>{formatNumber(selectedMechanismDay.referenceImputedAvgCost)}</td><td>{formatRatioPercent(selectedMechanismDay.referenceImputedProfitRatio)}</td><td>无身份含义</td></tr>
+                  {(selectedSnapshot?.bins ?? []).map((bin: CyqChenBin) => (
+                    <tr key={bin.index}>
+                      <td>{formatNumber(bin.price)}</td>
+                      <td>
+                        {formatNumber(bin.priceLow)} - {formatNumber(bin.priceHigh)}
+                      </td>
+                      <td>{formatNumber(bin.mainChip, 4)}</td>
+                      <td>{formatNumber(bin.retailChip, 4)}</td>
+                      <td>{formatNumber(bin.totalChip, 4)}</td>
+                    </tr>
+                  ))}
+                  {!selectedSnapshot ? (
+                    <tr>
+                      <td colSpan={5}>没有可展示的筹码分桶。</td>
+                    </tr>
+                  ) : null}
                 </tbody>
               </table>
             </div>
-            <dl className="cyq-chen-comparison-metrics">
-              <div><dt>固定总体假设下的初始未知库存</dt><dd>{formatRatioPercent(selectedMechanismDay.referenceUnknownRatio)}</dd></div>
-              <div><dt>剔除初值后的已知成本均价</dt><dd>{formatNumber(selectedMechanismDay.referenceKnownAvgCost)}</dd></div>
-              <div><dt>包含未知成本的获利盘范围</dt><dd>{formatRatioPercent(selectedMechanismDay.referenceProfitRatioLower)} – {formatRatioPercent(selectedMechanismDay.referenceProfitRatioUpper)}</dd></div>
-              <div><dt>当前与关闭归属修正的最大累计分布差</dt><dd>{formatNumber(selectedMechanismDay.posteriorCdfDistance * 100)} 个百分点</dd></div>
-              <div><dt>当前与中性参照的最大累计分布差</dt><dd>{formatNumber(selectedMechanismDay.referenceCdfDistance * 100)} 个百分点</dd></div>
-            </dl>
-            <p>未知库存按实际换手逐日扣减；已知成本未放大成全部流通盘。获利盘范围只反映未知成本，不是置信区间。对照采用固定流通总体假设，尚未处理解禁、增发等股本变化。</p>
-            {selectedOrigin && selectedSnapshot ? (
-              <>
-                <h4>当前模型库存来源（每 100 份）</h4>
-                <div className="cyq-chen-bin-table-wrap">
-                  <table className="cyq-chen-bin-table">
-                    <thead><tr><th>生成方式</th><th>主力：初始残留</th><th>主力：后续成交</th><th>散户：初始残留</th><th>散户：后续成交</th></tr></thead>
-                    <tbody>
-                      <tr><td>当前规则</td><td>{formatNumber(selectedOrigin.initialMain)}</td><td>{formatNumber(Math.max(0, selectedSnapshot.mainTotal - selectedOrigin.initialMain))}</td><td>{formatNumber(selectedOrigin.initialRetail)}</td><td>{formatNumber(Math.max(0, selectedSnapshot.retailTotal - selectedOrigin.initialRetail))}</td></tr>
-                      {selectedMechanismDay.withoutPosteriorOrigin ? (
-                        <tr><td>关闭延迟归属修正</td><td>{formatNumber(selectedMechanismDay.withoutPosteriorOrigin.initialMain)}</td><td>{formatNumber(Math.max(0, selectedMechanismDay.withoutPosteriorMainTotal - selectedMechanismDay.withoutPosteriorOrigin.initialMain))}</td><td>{formatNumber(selectedMechanismDay.withoutPosteriorOrigin.initialRetail)}</td><td>{formatNumber(Math.max(0, 100 - selectedMechanismDay.withoutPosteriorMainTotal - selectedMechanismDay.withoutPosteriorOrigin.initialRetail))}</td></tr>
-                      ) : null}
-                    </tbody>
-                  </table>
-                </div>
-                <p>初始残留来自模拟起点前的库存，后续成交只统计目前仍存活的份额。两者均为模型来源；归属修正保留来源，不代表新买入。这里的初始残留不是中性参照的未知比例，也不包含解禁等事件引入的未知成本。</p>
-              </>
-            ) : (
-              <p>当前快照缺少库存来源记录，不能推断初始残留为零。从模拟起点重新计算后可查看来源分解。</p>
-            )}
-            {selectedSnapshot?.flow ? (
-              <details>
-                <summary>当日模型交易与归属变化（每 100 份）</summary>
-                <p>主力归属买入 {formatNumber(selectedSnapshot.flow.mainBought)}，卖出 {formatNumber(selectedSnapshot.flow.mainSold)}；散户归属买入 {formatNumber(selectedSnapshot.flow.retailBought)}，卖出 {formatNumber(selectedSnapshot.flow.retailSold)}。</p>
-                <p>转归主力 {formatNumber(selectedSnapshot.flow.reclassifiedToMain)}，转归散户 {formatNumber(selectedSnapshot.flow.reclassifiedToRetail)}。归属修正没有产生新交易，可能经后续出库影响成本分布。</p>
-              </details>
-            ) : null}
-          </section>
-        ) : null}
-
-        <div className="cyq-chen-project-chart">
-          <div className="cyq-chen-chart-title">
-            <div>
-              <strong>K 线与筹码分布</strong>
-              <span>{chartRows.length} 根</span>
-            </div>
-            <div className="cyq-chen-chip-legend" aria-label="筹码颜色">
-              <span><i style={{ background: CHIP_COLOR_MAIN_PROFIT }} />主力盈利</span>
-              <span><i style={{ background: CHIP_COLOR_MAIN_TRAPPED }} />主力套牢</span>
-              <span><i style={{ background: CHIP_COLOR_RETAIL_PROFIT }} />散户盈利</span>
-              <span><i style={{ background: CHIP_COLOR_RETAIL_TRAPPED }} />散户套牢</span>
-            </div>
-          </div>
-          <CyqChenProjectChart
-            key={chartResultRevision}
-            kline={chartRows}
-            panels={chartPanels}
-            snapshots={snapshotOptions}
-            snapshot={selectedSnapshot}
-            selectedTradeDate={selectedSnapshot?.tradeDate ?? selectedTradeDate}
-            chipPeakMode={chipPeakMode}
-            watermarkName={watermarkName}
-            watermarkCode={watermarkCode}
-            onChipPeakModeChange={setChipPeakMode}
-            onSelectTradeDate={setSelectedTradeDate}
-          />
-        </div>
-
-        <div className="cyq-chen-bin-table-wrap">
-          <table className="cyq-chen-bin-table">
-            <thead>
-              <tr>
-                <th>价位</th>
-                <th>区间</th>
-                <th>主力</th>
-                <th>散户</th>
-                <th>合计</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(selectedSnapshot?.bins ?? []).map((bin: CyqChenBin) => (
-                <tr key={bin.index}>
-                  <td>{formatNumber(bin.price)}</td>
-                  <td>
-                    {formatNumber(bin.priceLow)} - {formatNumber(bin.priceHigh)}
-                  </td>
-                  <td>{formatNumber(bin.mainChip, 4)}</td>
-                  <td>{formatNumber(bin.retailChip, 4)}</td>
-                  <td>{formatNumber(bin.totalChip, 4)}</td>
-                </tr>
-              ))}
-              {!selectedSnapshot ? (
-                <tr>
-                  <td colSpan={5}>没有可展示的筹码分桶。</td>
-                </tr>
-              ) : null}
-            </tbody>
-          </table>
+          </details>
         </div>
       </section>
     </div>

@@ -278,6 +278,7 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
                 Ok((worker_reader, state_conn))
             },
             |worker_reader, ts_group| -> Result<(), String> {
+                lianghua_model::task::checkpoint()?;
                 let (worker_reader, state_conn) = worker_reader.as_ref().map_err(Clone::clone)?;
                 let progress_stock_done = |ts_code: &str| {
                     if let Some(progress_cb) = progress_cb {
@@ -334,6 +335,7 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
             },
         );
 
+        let compute_result = compute_result.and_then(|()| lianghua_model::task::checkpoint());
         match &compute_result {
             Ok(()) => {
                 let _ = abort_tx.send(CyqChenWriteMessage::Finish);
@@ -642,6 +644,7 @@ pub fn repair_cyq_chen_stocks_if_db_exists(
     let compute_result = ts_codes.par_chunks(compute_group_size).try_for_each_init(
         || DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys),
         |worker_reader, ts_group| -> Result<(), String> {
+            lianghua_model::task::checkpoint()?;
             let worker_reader = worker_reader.as_ref().map_err(Clone::clone)?;
             let progress_stock_done = |ts_code: &str| {
                 if let Some(progress_cb) = progress_cb {
@@ -680,6 +683,7 @@ pub fn repair_cyq_chen_stocks_if_db_exists(
         },
     );
 
+    let compute_result = compute_result.and_then(|()| lianghua_model::task::checkpoint());
     match &compute_result {
         Ok(()) => {
             let _ = abort_tx.send(CyqChenWriteMessage::Finish);
@@ -943,6 +947,7 @@ pub fn rebuild_cyq_chen_all_with_progress(
         ts_codes.par_chunks(compute_group_size).try_for_each_init(
             || DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys),
             |worker_reader, ts_group| -> Result<(), String> {
+                lianghua_model::task::checkpoint()?;
                 let worker_reader = worker_reader.as_ref().map_err(Clone::clone)?;
                 let progress_stock_done = |ts_code: &str| {
                     if let Some(progress_cb) = progress_cb {
@@ -994,6 +999,7 @@ pub fn rebuild_cyq_chen_all_with_progress(
         )
     });
 
+    let compute_result = compute_result.and_then(|()| lianghua_model::task::checkpoint());
     if let Err(err) = &compute_result {
         let _ = abort_tx.send(CyqChenWriteMessage::Abort(err.clone()));
     }
@@ -1045,6 +1051,7 @@ pub fn rebuild_cyq_chen_all_with_progress(
         remove_cyq_chen_db_artifacts(&rebuild_db)?;
         return Err("新筹码重建未生成任何快照，旧结果保持不变，请检查行情和预热区间".into());
     }
+    lianghua_model::task::checkpoint()?;
     if let Err(error) = replace_cyq_chen_db(&rebuild_db, &cyq_chen_db) {
         return Err(format!(
             "{error}；重建结果保留在 {}，重试可继续收尾",

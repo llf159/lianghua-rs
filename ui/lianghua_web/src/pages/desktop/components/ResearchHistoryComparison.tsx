@@ -20,6 +20,7 @@ type Props = {
   disabled: boolean;
   onOpen: (runId: string) => void;
   onUpdated: (header: ResearchArchiveHeader) => void;
+  onDelete: (runId: string) => void;
 } & ({
   kind: "expression_validation";
   result: RuleExpressionValidationData | null;
@@ -126,7 +127,13 @@ export function ResearchHistoryComparison(props: Props) {
       {label: "当前结果", header: props.archives.find((item) => item.run_id === props.result?.archive_run_id)},
       {label: "对比结果", header: props.archives.find((item) => item.run_id === selectedCompareId)},
     ].map(({label, header}) => header ? <article className="research-record" key={header.run_id}>
-      <div className="research-record-head"><strong>{header.question || label}</strong><button type="button" disabled={props.disabled || saving || header.status === "running"} onClick={() => {setEditor({runId: header.run_id, name: header.question, note: header.note ?? ""}); setMessage(null);}}>编辑备注</button></div>
+      <div className="research-record-head">
+        <strong>{header.question || label}</strong>
+        <div className="research-record-actions">
+          <button type="button" className="research-record-action" disabled={props.disabled || saving || header.status === "running"} onClick={() => {setEditor({runId: header.run_id, name: header.question, note: header.note ?? ""}); setMessage(null);}}>编辑备注</button>
+          {label === "当前结果" ? <button type="button" className="research-record-action research-record-delete" aria-label="删除当前记录" disabled={props.disabled || saving || header.status === "running"} onClick={() => props.onDelete(header.run_id)}>删除记录</button> : null}
+        </div>
+      </div>
       <time className="research-meta">{new Date(header.created_ms).toLocaleString()} · {researchRunStatusLabel(header.status)}</time>
       {header.summary ? <p className="research-record-summary">{header.summary}</p> : null}
       {editor?.runId === header.run_id ? <div className="research-record-editor">

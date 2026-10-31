@@ -694,6 +694,7 @@ fn refresh_inner(
     let mut warmup = 0usize;
     let mut full = false;
     for (index, (def, program)) in panel_defs.iter().zip(&programs).enumerate() {
+        lianghua_model::task::checkpoint()?;
         let inputs = expression_input_identifiers(program);
         let inherited = inputs
             .iter()
@@ -903,6 +904,7 @@ fn refresh_inner(
         let count = panel_defs.len();
         let output_day = output_index.saturating_sub(warm_index);
         for (index, (def, program)) in panel_defs.iter().zip(&programs).enumerate() {
+            lianghua_model::task::checkpoint()?;
             if let Some(cb) = progress {
                 cb(index, count + 1, &def.name);
             }
@@ -947,6 +949,7 @@ fn refresh_inner(
                 rt.source.stocks.len()
             };
             for chunk_start in (0..stock_count).step_by(128) {
+                lianghua_model::task::checkpoint()?;
                 let chunk_end = (chunk_start + 128).min(stock_count);
                 let capacity = (chunk_end - chunk_start) * (rt.source.dates.len() - output_day);
                 let mut names = StringBuilder::with_capacity(capacity, capacity * def.name.len());

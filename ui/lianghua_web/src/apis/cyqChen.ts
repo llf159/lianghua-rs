@@ -57,24 +57,6 @@ export type CyqChenOrigin = {
   initialRetail: number
 }
 
-export type CyqChenMechanismDay = {
-  withoutPosteriorOrigin?: CyqChenOrigin | null
-  tradeDate: string
-  currentAvgCost: number
-  withoutPosteriorAvgCost: number
-  referenceImputedAvgCost: number
-  currentProfitRatio: number
-  withoutPosteriorProfitRatio: number
-  referenceImputedProfitRatio: number
-  withoutPosteriorMainTotal: number
-  posteriorCdfDistance: number
-  referenceCdfDistance: number
-  referenceUnknownRatio: number
-  referenceKnownAvgCost: number | null
-  referenceProfitRatioLower: number
-  referenceProfitRatioUpper: number
-}
-
 export type CyqChenAgeSummary = {
   version: number
   tradeDate: string
@@ -133,28 +115,9 @@ export type CyqChenBasis = {
   }[]
 }
 
-export type CyqChenL2Day = {
-  tradeDate: string
-  board: string
-  status: 'observable' | 'missing' | 'invalid' | 'unverified'
-  volume: number | null
-  netMfVolume: number | null
-  netMfRatio: number | null
-  netMfRatio3d: number | null
-  largeBuyVolume: number | null
-  largeSellVolume: number | null
-  largeNetRatio: number | null
-  largeNetRatio3d: number | null
-  largeBuyDenominator: number | null
-  largeBuyShare: number | null
-  largeBuyShare3d: number | null
-  issues: string[]
-}
-
 export type CyqChenSingleStockData = {
   version: number
   basis?: CyqChenBasis | null
-  l2Days: CyqChenL2Day[]
   resolvedTsCode: string
   startDate: string
   endDate: string
@@ -164,11 +127,6 @@ export type CyqChenSingleStockData = {
   snapshots: CyqChenSnapshot[]
   retention?: CyqChenRetention | null
   priceCoordinate?: string
-  mechanismComparison?: {
-    simulationStartDate: string | null
-    universeVerified: boolean
-    days: CyqChenMechanismDay[]
-  } | null
 }
 
 export type CyqChenRetentionRequest = {
@@ -197,7 +155,6 @@ export type CyqChenRetention = {
 export type CyqChenSingleStockRequest = {
   retention?: CyqChenRetentionRequest | null
   version: number
-  compareMechanisms?: boolean
   sourcePath: string
   tsCode: string
   startDate?: string | null

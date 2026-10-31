@@ -1129,6 +1129,7 @@ pub fn write_score_batches_from_channel(
 
         let mut drained = false;
         while !drained {
+            lianghua_model::task::checkpoint()?;
             let tx = conn
                 .transaction()
                 .map_err(|e| format!("创建数据库事务失败:{e}"))?;
@@ -1148,6 +1149,7 @@ pub fn write_score_batches_from_channel(
                     .map_err(|e| format!("跟踪状态appender创建失败:{e}"))?;
                 let mut group_batches = 0usize;
                 while group_batches < 64 {
+                    lianghua_model::task::checkpoint()?;
                     let Ok(message) = rx.recv() else {
                         drained = true;
                         break;
@@ -1445,6 +1447,7 @@ pub fn write_score_batches_from_channel(
         let tx = conn
             .transaction()
             .map_err(|e| format!("创建数据库事务失败:{e}"))?;
+        lianghua_model::task::checkpoint()?;
         let replace_started_at = time::Instant::now();
         if full_replace {
             (|tx: &Transaction<'_>| -> Result<(), String> {
@@ -1535,6 +1538,7 @@ pub fn write_score_batches_from_channel(
             ALTER TABLE strategy_tracking_meta_stage RENAME TO strategy_tracking_meta;",
         )
         .map_err(|e| format!("提交跟踪状态失败:{e}"))?;
+        lianghua_model::task::checkpoint()?;
         let commit_started_at = time::Instant::now();
         tx.commit().map_err(|e| format!("事务提交错误:{e}"))?;
         profile.commit_ms = commit_started_at.elapsed().as_millis() as u64;

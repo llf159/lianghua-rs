@@ -1241,7 +1241,6 @@ async fn run_strategy_trigger_similarity_ranking(
         app.clone(),
         task_id.unwrap_or_else(|| format!("similarity-{}", chrono::Utc::now().timestamp_millis())),
         source_path.clone(),
-        "similarity",
         task_group,
         move || {
             core_run_strategy_trigger_similarity_ranking(
@@ -2347,7 +2346,6 @@ async fn run_ranking_score_calculation(
             .clone()
             .unwrap_or_else(|| format!("compute-{}", chrono::Utc::now().timestamp_millis())),
         source_path.clone(),
-        "score",
         task_group,
         move || {
             let started_at = Instant::now();
@@ -2495,7 +2493,6 @@ async fn run_cyq_compute(
             .clone()
             .unwrap_or_else(|| format!("compute-{}", chrono::Utc::now().timestamp_millis())),
         source_path.clone(),
-        "cyq",
         task_group,
         move || {
             let started_at = Instant::now();
@@ -2612,7 +2609,6 @@ async fn run_cyq_chen_compute(
             .clone()
             .unwrap_or_else(|| format!("compute-{}", chrono::Utc::now().timestamp_millis())),
         source_path.clone(),
-        "cyq-chen",
         task_group,
         move || {
             let started_at = Instant::now();

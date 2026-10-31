@@ -407,6 +407,7 @@ fn calc_gdnm_bx_rows(
 
     let mut bx_rows = Vec::with_capacity(juhe_map.len());
     for ((trade_date, concept), juhe) in juhe_map {
+        lianghua_model::task::checkpoint()?;
         if juhe.qrvs_he <= 0.0 || !juhe.qrvs_he.is_finite() {
             continue;
         }
@@ -830,6 +831,7 @@ pub fn rebuild_most_related_concept_csv(source_dir: &str) -> Result<usize, Strin
     let mut ts_code_set: HashSet<String> = HashSet::new();
 
     for rec in reader.records() {
+        lianghua_model::task::checkpoint()?;
         let record = rec.map_err(|e| format!("读取 stock_concepts.csv 记录失败: {e}"))?;
         let mut row = record.iter().map(|v| v.to_string()).collect::<Vec<_>>();
         while row.len() <= related_idx {
@@ -877,6 +879,7 @@ pub fn rebuild_most_related_concept_csv(source_dir: &str) -> Result<usize, Strin
     let best_map: HashMap<String, String> = out_rows
         .par_iter()
         .filter_map(|row| {
+            lianghua_model::task::checkpoint().ok()?;
             let ts_code = row.first().map(|v| v.trim()).unwrap_or_default();
             let concept_raw = row.get(2).map(|v| v.trim()).unwrap_or_default();
             if ts_code.is_empty() || concept_raw.is_empty() {
@@ -941,6 +944,7 @@ pub fn rebuild_most_related_concept_csv(source_dir: &str) -> Result<usize, Strin
         }
     }
 
+    lianghua_model::task::checkpoint()?;
     let mut writer = csv::Writer::from_path(&concepts_path)
         .map_err(|e| format!("重写 stock_concepts.csv 失败: {e}"))?;
     writer

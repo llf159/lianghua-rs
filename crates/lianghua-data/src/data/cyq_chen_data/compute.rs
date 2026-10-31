@@ -178,6 +178,7 @@ fn load_cyq_chen_group_rows(
     let mut rows_map =
         worker_reader.load_batch(ts_group, DEFAULT_ADJ_TYPE, load_start_date, end_date)?;
     for ts_code in ts_group {
+        lianghua_model::task::checkpoint()?;
         let mut row_data = match rows_map.remove(ts_code.as_str()) {
             Some(r) => r,
             None => {
@@ -277,6 +278,7 @@ pub fn compute_cyq_chen_stock_group_batch(
     )?;
     let mut batch = CyqChenWriteBatch::default();
     for ts_code in ts_group {
+        lianghua_model::task::checkpoint()?;
         let row_data = rows_map
             .remove(ts_code)
             .ok_or_else(|| format!("缺少已加载行情: {ts_code}"))?;
@@ -727,12 +729,14 @@ pub(super) fn compute_prepared_cyq_chen_stock_group_batch(
             return Err(error);
         }
         for ts_code in ts_group {
+            lianghua_model::task::checkpoint()?;
             if !seen.contains(ts_code) {
                 deferred.push(ts_code.clone());
             }
         }
     }
     while let Some(ts_code) = deferred.pop() {
+        lianghua_model::task::checkpoint()?;
         let row = worker_reader
             .load_one_tail_rows(&ts_code, DEFAULT_ADJ_TYPE, end_date, lookback.max(1) * 2)
             .map_err(|error| format!("ts_code={ts_code}: {error}"));

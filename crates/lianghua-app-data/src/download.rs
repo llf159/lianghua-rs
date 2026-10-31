@@ -477,10 +477,11 @@ fn with_transaction<T, F>(conn: &Connection, action: F) -> Result<T, String>
 where
     F: FnOnce(&Connection) -> Result<T, String>,
 {
+    lianghua_model::task::checkpoint()?;
     conn.execute_batch("BEGIN TRANSACTION")
         .map_err(|e| format!("开启事务失败: {e}"))?;
 
-    match action(conn) {
+    match action(conn).and_then(|value| lianghua_model::task::checkpoint().map(|_| value)) {
         Ok(value) => match conn.execute_batch("COMMIT") {
             Ok(()) => Ok(value),
             Err(commit_error) => match conn.execute_batch("ROLLBACK") {
@@ -560,6 +561,7 @@ fn compute_stock_data_indicator_rebuild_batch(
     let reader = DataReader::new_with_connection(source_path, conn)?;
 
     for item in work_group {
+        lianghua_model::task::checkpoint()?;
         let row_data = reader.load_one(
             item.ts_code.as_str(),
             item.adj_type.as_str(),
@@ -2173,6 +2175,7 @@ pub fn run_prepared_stock_data_indicator_columns_rebuild(
                 let mut last_label = None;
 
                 loop {
+                    lianghua_model::task::checkpoint()?;
                     match rx.recv() {
                         Ok(StockDataIndicatorRebuildMessage::Batch(batch)) => {
                             append_stock_data_indicator_stage_rows_with_appender(

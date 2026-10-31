@@ -176,6 +176,8 @@ export type StrategyTriggerRankingPageData = {
 }
 
 export type StrategyTriggerRankingQuery = {
+  taskId?: string
+  taskGroup?: string
   sourcePath: string
   tradeDate?: string
   windowTradeDays?: number

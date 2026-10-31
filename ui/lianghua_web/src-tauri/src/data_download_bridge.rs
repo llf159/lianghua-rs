@@ -225,7 +225,6 @@ pub async fn run_stock_data_indicator_columns_delete(
         app.clone(),
         request.download_id.clone(),
         request.source_path.clone(),
-        "indicator",
         request.task_group.clone(),
         move || {
             let download_id = request.download_id.trim().to_string();
@@ -333,7 +332,6 @@ pub async fn run_stock_data_indicator_columns_rebuild(
         app.clone(),
         request.download_id.clone(),
         request.source_path.clone(),
-        "indicator",
         request.task_group.clone(),
         move || {
             let download_id = request.download_id.trim().to_string();
@@ -443,7 +441,6 @@ pub async fn run_data_download(
         app.clone(),
         request.download_id.clone(),
         request.source_path.clone(),
-        "download",
         request.task_group.clone(),
         move || {
             let download_id = request.download_id.trim().to_string();
@@ -560,7 +557,6 @@ pub async fn run_dragon_tiger_download(
         app.clone(),
         request.download_id.clone(),
         request.source_path.clone(),
-        "download",
         request.task_group.clone(),
         move || {
             let download_id = request.download_id.trim().to_string();
@@ -671,7 +667,6 @@ pub async fn run_concept_most_related_repair(
         app.clone(),
         request.download_id.clone(),
         request.source_path.clone(),
-        "download",
         request.task_group.clone(),
         move || {
             let download_id = request.download_id.trim().to_string();
@@ -777,7 +772,6 @@ pub async fn run_missing_stock_repair(
         app.clone(),
         request.download_id.clone(),
         request.source_path.clone(),
-        "download",
         request.task_group.clone(),
         move || {
             let download_id = request.download_id.trim().to_string();
@@ -888,7 +882,6 @@ pub async fn run_ths_concept_download(
         app.clone(),
         request.download_id.clone(),
         request.source_path.clone(),
-        "download",
         request.task_group.clone(),
         move || {
             let download_id = request.download_id.trim().to_string();
@@ -999,7 +992,6 @@ pub async fn run_concept_performance_repair(
         app.clone(),
         request.download_id.clone(),
         request.source_path.clone(),
-        "download",
         request.task_group.clone(),
         move || {
             let download_id = request.download_id.trim().to_string();
@@ -1122,7 +1114,6 @@ pub async fn repair_database_issues(
         app.clone(),
         download_id.clone(),
         request.source_path.clone(),
-        "download",
         task_group,
         move || {
             let started = Instant::now();

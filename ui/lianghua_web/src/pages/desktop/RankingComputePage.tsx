@@ -1,3 +1,4 @@
+import { useTaskControl } from '../../shared/taskControl'
 import { forwardRef, useDeferredValue, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 import {
@@ -316,6 +317,7 @@ export type RankingComputePageHandle = {
   runDailyRankingWorkflow: (
     tradeDate: string,
     onStageChange?: (stage: 'ranking' | 'similarity') => void,
+    taskGroup?: string,
   ) => Promise<DailyRankingOutcome>
 }
 
@@ -379,6 +381,9 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
   const [pendingConfirm, setPendingConfirm] = useState<PendingConfirmState>(null)
 
   const activeDownloadIdRef = useRef('')
+  const [taskId, setTaskId] = useState<string | null>(null)
+  const taskGroupRef = useRef<string | undefined>(undefined)
+  const taskControl = useTaskControl(taskId)
   const progressUnlistenRef = useRef<UnlistenFn | null>(null)
   const pendingStatusRefreshRef = useRef(false)
   const similarityConfigLoadedRef = useRef(false)
@@ -526,7 +531,9 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
   function setFeedbackError(slot: FeedbackSlot, message: string) {
     setCardFeedback((current) => ({
       ...current,
-      [slot]: { notice: '', error: message },
+      [slot]: message.includes('任务已停止')
+        ? { notice: '任务已停止，已提交结果保留，可再次运行继续。', error: '' }
+        : { notice: '', error: message },
     }))
   }
 
@@ -591,6 +598,7 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
   async function startProgressListener(prefix: string) {
     const downloadId = `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     activeDownloadIdRef.current = downloadId
+    setTaskId(downloadId)
     progressUnlistenRef.current?.()
     progressUnlistenRef.current = await listenDataDownloadProgress(downloadId, (nextProgress) => {
       if (activeDownloadIdRef.current !== downloadId) {
@@ -618,6 +626,7 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
     progressUnlistenRef.current?.()
     progressUnlistenRef.current = null
     activeDownloadIdRef.current = ''
+    setTaskId(null)
   }
 
   function updateIndicatorDraftPrec(rawValue: string) {
@@ -807,6 +816,8 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
   function renderProgressCard(fallbackMessage: string, showEstimatedTime = false) {
     return (
       <DataTaskProgress
+        onCancel={() => void taskControl.stop()}
+        cancelDisabled={taskControl.disabled}
         phaseLabel={formatPhaseLabel(deferredProgress?.phase)}
         phaseStepPillText={phaseStep ? ` · ${phaseStep.current}/${phaseStep.total}` : ''}
         phaseStepStatText={phaseStep ? ` ${phaseStep.current}/${phaseStep.total}` : ''}
@@ -822,7 +833,7 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
         estimatedTotalText={
           showEstimatedTime ? formatProgressDuration(progressTiming.estimatedTotalMs) : undefined
         }
-        message={deferredProgress?.message}
+        message={taskControl.message || deferredProgress?.message}
         fallbackMessage={fallbackMessage}
       />
     )
@@ -986,6 +997,9 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
       await loadStatus({ preserveNotice: true })
     } catch (runError) {
       setFeedbackError('indicatorTask', `执行指标列维护失败: ${String(runError)}`)
+      if (String(runError).includes('任务已停止')) {
+        try { setStatus(await getRankingComputeStatus(sourcePath)) } catch { /* 保留停止结果。 */ }
+      }
     } finally {
       stopProgressListener()
       setBusyAction('idle')
@@ -1028,7 +1042,7 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
     setProgress(null)
     const downloadId = await startProgressListener('score')
     try {
-      const scoreResult = await runRankingScoreCalculation(sourcePath, startDate, endDate, undefined, downloadId)
+      const scoreResult = await runRankingScoreCalculation(sourcePath, startDate, endDate, undefined, downloadId, taskGroupRef.current)
       setStatus(scoreResult.status)
       const warningText = scoreResult.warnings?.length
         ? `\n\n提示：${scoreResult.warnings.join('\n')}`
@@ -1198,7 +1212,10 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
     setSimilarityNow(Date.now())
     clearFeedback('similarityRank')
     try {
+      const similarityTaskId = await startProgressListener('similarity')
       const result = await runStrategyTriggerSimilarityRanking({
+        taskId: similarityTaskId,
+        taskGroup: taskGroupRef.current,
         sourcePath,
         tradeDate,
         windowTradeDays: normalizePositiveInt(
@@ -1231,12 +1248,13 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
     } catch (actionError) {
       setFeedbackError('similarityRank', `走势相似排名计算失败: ${String(actionError)}`)
     } finally {
+      stopProgressListener()
       setBusyAction('idle')
     }
   }
 
   useImperativeHandle(ref, () => ({
-    async runDailyRankingWorkflow(tradeDate, onStageChange) {
+    async runDailyRankingWorkflow(tradeDate, onStageChange, taskGroup) {
       if (busyActionRef.current !== 'idle') {
         throw new Error('计算页当前有任务正在执行。')
       }
@@ -1247,6 +1265,7 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
         throw new Error('增量更新未返回有效的最新交易日。')
       }
 
+      taskGroupRef.current = taskGroup
       setBusyAction('computing')
       strategyDiffRequestRef.current += 1
       setStrategyDiff(null)
@@ -1286,7 +1305,10 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
         setSimilarityProgress(null)
         setSimilarityNow(Date.now())
         onStageChange?.('similarity')
+        const similarityTaskId = await startProgressListener('similarity')
         const result = await runStrategyTriggerSimilarityRanking({
+          taskId: similarityTaskId,
+          taskGroup: taskGroupRef.current,
           sourcePath,
           tradeDate: rankingEndDate,
           windowTradeDays: normalizePositiveInt(
@@ -1321,6 +1343,8 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
         setFeedbackError('similarityRank', `每日工作流计算失败: ${String(actionError)}`)
         throw actionError
       } finally {
+        stopProgressListener()
+        taskGroupRef.current = undefined
         setBusyAction('idle')
       }
     },
@@ -1424,6 +1448,7 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
         startDate || undefined,
         endDate || undefined,
         downloadId,
+        taskGroupRef.current,
       )
       const nextStatus = await getRankingComputeStatus(sourcePath)
       setStatus(nextStatus)
@@ -1475,6 +1500,7 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
         startDate || undefined,
         endDate || undefined,
         downloadId,
+        taskGroupRef.current,
       )
       const nextStatus = await getRankingComputeStatus(sourcePath)
       setStatus(nextStatus)
@@ -1828,6 +1854,8 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
         {renderCardFeedback('similarityRank')}
         {showSimilarityProgress ? (
           <DataTaskProgress
+            onCancel={() => void taskControl.stop()}
+            cancelDisabled={taskControl.disabled}
             phaseLabel={similarityPhaseLabel}
             phaseStepPillText={similarityPhaseIndex >= 0 ? ` · ${similarityPhaseIndex + 1}/${SIMILARITY_PHASES.length}` : ''}
             phaseStepStatText=""
@@ -1840,7 +1868,7 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
             progressCounterText={similarityProgress && similarityProgress.total > 0
               ? `${similarityProgress.completed.toLocaleString()} / ${similarityProgress.total.toLocaleString()}`
               : '等待进度'}
-            message={similarityProgress?.message}
+            message={taskControl.message || similarityProgress?.message}
             fallbackMessage="正在启动走势相似排名计算…"
           />
         ) : null}

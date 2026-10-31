@@ -4,6 +4,7 @@ version = "0.2.0"
 edition = "2024"
 
 [dependencies]
+lianghua-model = { path = "../lianghua-model" }
 lianghua-scoring = { path = "../lianghua-scoring" }
 lianghua-app-strategy = { path = "../lianghua-app-strategy" }
 lianghua-app-shared = { path = "../lianghua-app-shared" }

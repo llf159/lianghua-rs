@@ -71,7 +71,10 @@ type EditorMode = 'create' | 'edit'
 type SceneEditorMode = 'create' | 'edit'
 type DeleteSceneTarget = Pick<StrategyManageSceneItem, 'name' | 'rule_count'>
 type ChipStrategyDeleteTarget = { index: number; name: string }
-type ChipStrategyEditorDraft = Omit<CyqChenStrategyDraft, 'bias'> & { bias: string }
+type ChipStrategyEditorDraft = Omit<CyqChenStrategyDraft, 'bias' | 'confirm_after'> & {
+  bias: string
+  confirmAfterText: string
+}
 type RefactorSceneDraft = StrategyManageSceneDraft & { id: string }
 type RefactorRuleDraft = StrategyManageRuleDraft
 type StrategyManageView = 'rules' | 'chip'
@@ -429,8 +432,12 @@ function buildSceneSearchText(scene: StrategyManageSceneItem) {
 
 function buildChipStrategyEditorDraft(strategy: CyqChenStrategyDraft): ChipStrategyEditorDraft {
   return {
-    ...strategy,
+    name: strategy.name,
+    holder: strategy.holder,
+    direction: strategy.direction,
+    when: strategy.when,
     bias: String(strategy.bias),
+    confirmAfterText: strategy.confirm_after == null ? '' : String(strategy.confirm_after),
   }
 }
 
@@ -441,6 +448,7 @@ function buildEmptyChipStrategyDraft(): ChipStrategyEditorDraft {
     direction: 'buy',
     when: '',
     bias: '',
+    confirmAfterText: '',
   }
 }
 
@@ -1165,11 +1173,14 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
       throw new Error('没有可保存的筹码策略草稿')
     }
     const biasText = chipStrategyDraft.bias.trim()
+    const confirmAfterText = chipStrategyDraft.confirmAfterText.trim()
     const prepared: CyqChenStrategyDraft = {
-      ...chipStrategyDraft,
       name: chipStrategyDraft.name.trim(),
+      holder: chipStrategyDraft.holder,
+      direction: chipStrategyDraft.direction,
       when: chipStrategyDraft.when.trim(),
       bias: biasText === '' ? Number.NaN : Number(biasText),
+      confirm_after: confirmAfterText === '' ? undefined : Number(confirmAfterText),
     }
     if (!prepared.name) {
       throw new Error('策略名称不能为空')
@@ -2060,11 +2071,11 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
               </label>
               <label className="strategy-manage-field">
                 <span>确认延迟（0 为当天规则）</span>
-                <input type="number" min={0} step={1} value={chipStrategyDraft.confirm_after ?? 0}
-                  onChange={(event) => setChipStrategyDraft((current) => current ? { ...current, confirm_after: Number(event.target.value) } : current)} />
+                <input type="number" min={0} step={1} value={chipStrategyDraft.confirmAfterText} placeholder="0"
+                  onChange={(event) => setChipStrategyDraft((current) => current ? { ...current, confirmAfterText: event.target.value } : current)} />
               </label>
               <label className="strategy-manage-field">
-                <span>{chipStrategyDraft.confirm_after ? '归属修正比例（0～1，仅买入方向）' : 'Bias'}</span>
+                <span>{Number(chipStrategyDraft.confirmAfterText) > 0 ? '归属修正比例（0～1，仅买入方向）' : 'Bias'}</span>
                 <input
                   type="text"
                   inputMode="decimal"

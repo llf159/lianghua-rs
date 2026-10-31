@@ -142,6 +142,7 @@ export async function runRankingScoreCalculation(
   endDate: string,
   strategyPath?: string,
   downloadId?: string,
+  taskGroup?: string,
 ) {
   return invoke<RankingComputeRunResult>('run_ranking_score_calculation', {
     sourcePath,
@@ -149,6 +150,7 @@ export async function runRankingScoreCalculation(
     startDate,
     endDate,
     downloadId,
+    taskGroup,
   })
 }
 
@@ -174,6 +176,7 @@ export async function runCyqCompute(
   startDate?: string,
   endDate?: string,
   downloadId?: string,
+  taskGroup?: string,
 ) {
   return invoke<CyqComputeResult>('run_cyq_compute', {
     sourcePath,
@@ -181,6 +184,7 @@ export async function runCyqCompute(
     startDate,
     endDate,
     downloadId,
+    taskGroup,
   })
 }
 
@@ -191,6 +195,7 @@ export async function runCyqChenCompute(
   startDate?: string,
   endDate?: string,
   downloadId?: string,
+  taskGroup?: string,
 ) {
   return invoke<CyqChenComputeResult>('run_cyq_chen_compute', {
     sourcePath,
@@ -199,6 +204,7 @@ export async function runCyqChenCompute(
     startDate,
     endDate,
     downloadId,
+    taskGroup,
   })
 }
 

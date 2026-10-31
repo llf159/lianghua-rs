@@ -155,7 +155,7 @@ export default function StrategyRuleTrackingEditor({
                       min={item.ttl || 1}
                       step="1"
                       inputMode="numeric"
-                      value={item.max_age ?? item.ttl ?? ''}
+                      value={item.max_age === 0 ? '' : item.max_age ?? item.ttl ?? ''}
                       onChange={(event) => updateTrack(index, { max_age: Number(event.target.value) })}
                     />
                     <span>个市场交易日</span>

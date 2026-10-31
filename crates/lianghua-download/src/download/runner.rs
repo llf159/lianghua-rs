@@ -6,7 +6,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
-    thread::{self, sleep},
+    thread,
     time::Duration,
 };
 
@@ -446,6 +446,7 @@ pub fn download_ths_concepts(
     };
 
     for attempt_idx in 0..retry_total {
+        lianghua_model::task::checkpoint()?;
         let attempt_result = if download_config.concurrent_enabled {
             (|source_dir: &str,
               worker_threads: usize,
@@ -524,7 +525,9 @@ pub fn download_ths_concepts(
                             };
 
                             loop {
-                                if stop_flag.load(Ordering::Acquire) {
+                                if stop_flag.load(Ordering::Acquire)
+                                    || lianghua_model::task::checkpoint().is_err()
+                                {
                                     break;
                                 }
 
@@ -730,6 +733,7 @@ pub fn download_ths_concepts(
                 let total = all_items.len();
 
                 for item in &missing_items {
+                    lianghua_model::task::checkpoint()?;
                     emit_progress(
                         progress_cb,
                         "fetch_ths_concept",
@@ -837,7 +841,9 @@ pub fn download_ths_concepts(
                     ),
                 );
                 if download_config.retry_interval_secs > 0 {
-                    sleep(Duration::from_secs(download_config.retry_interval_secs));
+                    lianghua_model::task::wait(Duration::from_secs(
+                        download_config.retry_interval_secs,
+                    ))?;
                 }
             }
         }
@@ -1318,10 +1324,11 @@ fn with_transaction<T, F>(conn: &Connection, action: F) -> Result<T, String>
 where
     F: FnOnce(&Connection) -> Result<T, String>,
 {
+    lianghua_model::task::checkpoint()?;
     conn.execute_batch("BEGIN TRANSACTION")
         .map_err(|e| format!("开启事务失败: {e}"))?;
 
-    match action(conn) {
+    match action(conn).and_then(|value| lianghua_model::task::checkpoint().map(|_| value)) {
         Ok(value) => match conn.execute_batch("COMMIT") {
             Ok(()) => Ok(value),
             Err(commit_error) => match conn.execute_batch("ROLLBACK") {
@@ -1646,6 +1653,7 @@ fn download_selected_stocks_with_context(
         );
 
         for (batch_idx, batch) in tasks.chunks(pool.current_num_threads().max(1)).enumerate() {
+            lianghua_model::task::checkpoint()?;
             let prepared_batch = pool.install(|| client.prepare_stock_downloads(source_dir, batch));
             let batch_summary = prepared_batch.summary();
             emit_progress(
@@ -1697,6 +1705,9 @@ fn download_selected_stocks_with_context(
                 let mut pending_tasks = tasks;
 
                 for attempt_idx in 0..retry_times {
+                    if lianghua_model::task::checkpoint().is_err() {
+                        break;
+                    }
                     if pending_tasks.is_empty() {
                         break;
                     }
@@ -1877,6 +1888,7 @@ fn download_selected_stocks_with_mode(
             format!("针对性股票修复开始，共 {} 只股票待处理。", ts_codes.len()),
         );
         for (finished, code) in ts_codes.iter().enumerate() {
+            lianghua_model::task::checkpoint()?;
             prepare_stock_repairs(
                 &conn,
                 &HashSet::from([code.clone()]),
@@ -2346,6 +2358,7 @@ fn download_pending_all_market_after_basic_data(
     let mut fetched_trade_dates = Vec::with_capacity(total_trade_dates);
 
     for (trade_date_idx, trade_date) in pending_trade_dates.iter().enumerate() {
+        lianghua_model::task::checkpoint()?;
         emit_progress(
             progress_cb,
             "download_pending_trade_dates",
@@ -2398,6 +2411,7 @@ fn download_pending_all_market_after_basic_data(
     let mut passed_rows_by_stock: HashMap<String, Vec<ProBarRow>> = HashMap::new();
 
     for (trade_date_idx, pending) in fetched_trade_dates.iter().enumerate() {
+        lianghua_model::task::checkpoint()?;
         let mut passed_count = 0usize;
         let mut skipped_count = 0usize;
 
@@ -2514,6 +2528,7 @@ fn download_pending_all_market_after_basic_data(
                         let mut chunk_out = Vec::with_capacity(chunk.len());
 
                         for (ts_code, rows) in chunk {
+                            lianghua_model::task::checkpoint()?;
                             let indicators = calc_increment_inds_from_history(
                                 inds_cache,
                                 history_rows_by_stock.remove(ts_code),

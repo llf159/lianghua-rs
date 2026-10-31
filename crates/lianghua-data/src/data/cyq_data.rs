@@ -882,6 +882,7 @@ pub fn maintain_cyq_incremental_if_db_exists(
                 return Err(format!("筹码增量计算中断，结果库已回滚:{reason}"));
             }
 
+            lianghua_model::task::checkpoint()?;
             tx.commit().map_err(|e| format!("提交筹码库事务失败:{e}"))?;
             Ok((snapshot_rows, bin_rows))
         })(&cyq_db_str, rx, config, &write_start_date, &write_end_date)
@@ -890,6 +891,7 @@ pub fn maintain_cyq_incremental_if_db_exists(
     let compute_result = ts_codes
         .par_chunks(CYQ_GROUP_SIZE_INCREMENTAL)
         .try_for_each_with(tx, |sender, ts_group| -> Result<(), String> {
+            lianghua_model::task::checkpoint()?;
             let worker_reader = DataReader::new(source_dir)?;
             let batch = compute_cyq_stock_group_batch(
                 &worker_reader,
@@ -1189,6 +1191,7 @@ pub fn repair_cyq_stocks_if_db_exists(
                 return Err(format!("筹码局部修复中断，结果库已回滚:{reason}"));
             }
 
+            lianghua_model::task::checkpoint()?;
             tx.commit().map_err(|e| format!("提交筹码库事务失败:{e}"))?;
             Ok((snapshot_rows, bin_rows))
         })(
@@ -1205,6 +1208,7 @@ pub fn repair_cyq_stocks_if_db_exists(
     let compute_result = ts_codes
         .par_chunks(CYQ_GROUP_SIZE_INCREMENTAL)
         .try_for_each_with(tx, |sender, ts_group| -> Result<(), String> {
+            lianghua_model::task::checkpoint()?;
             let worker_reader =
                 DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
             let progress_stock_done = |ts_code: &str| {
@@ -1453,6 +1457,7 @@ pub fn rebuild_cyq_all_with_progress(
                 return Err(format!("筹码计算中断，结果库已回滚:{reason}"));
             }
 
+            lianghua_model::task::checkpoint()?;
             tx.commit().map_err(|e| format!("提交筹码库事务失败:{e}"))?;
             Ok((snapshot_rows, bin_rows))
         })(&cyq_db_str, rx, config)
@@ -1463,6 +1468,7 @@ pub fn rebuild_cyq_all_with_progress(
         ts_codes
             .par_chunks(128)
             .try_for_each_with(tx, |sender, ts_group| -> Result<(), String> {
+                lianghua_model::task::checkpoint()?;
                 let worker_reader =
                     DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
                 let progress_stock_done = |ts_code: &str| {

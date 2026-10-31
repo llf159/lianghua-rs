@@ -1,3 +1,4 @@
+import { useTaskControl } from '../../shared/taskControl'
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import { inspectManagedSourceStatus } from '../../apis/managedSource'
 import {
@@ -492,7 +493,7 @@ export type DailyDownloadOutcome = {
 }
 
 export type DataDownloadPageHandle = {
-  runDailyIncrementalUpdate: () => Promise<DailyDownloadOutcome>
+  runDailyIncrementalUpdate: (taskGroup?: string) => Promise<DailyDownloadOutcome>
 }
 
 const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProps>(function DataDownloadPage(
@@ -539,6 +540,9 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
   const [activeTaskSection, setActiveTaskSection] = useState<TaskSection | null>(null)
   const [feedbackSection, setFeedbackSection] = useState<TaskSection>('main')
   const activeDownloadIdRef = useRef('')
+  const [taskId, setTaskId] = useState<string | null>(null)
+  const taskGroupRef = useRef<string | undefined>(undefined)
+  const taskControl = useTaskControl(taskId)
   const progressUnlistenRef = useRef<null | (() => void)>(null)
   const busyActionRef = useRef(busyAction)
   busyActionRef.current = busyAction
@@ -657,7 +661,7 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
 
   async function runDataTask(
     section: TaskSection,
-    executor: (downloadId: string) => Promise<DataDownloadRunResult>,
+    executor: (downloadId: string, taskGroup?: string) => Promise<DataDownloadRunResult>,
   ) {
     setBusyAction('running')
     busyActionRef.current = 'running'
@@ -673,6 +677,7 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
 
     const downloadId = `download-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     activeDownloadIdRef.current = downloadId
+    setTaskId(downloadId)
     progressUnlistenRef.current?.()
     progressUnlistenRef.current = await listenDataDownloadProgress(downloadId, (nextProgress) => {
       if (activeDownloadIdRef.current !== downloadId) {
@@ -712,7 +717,7 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
     })
 
     try {
-      const result = await executor(downloadId)
+      const result = await executor(downloadId, taskGroupRef.current)
       setStatus(result.status)
       if (section === 'main') {
         onMainTaskComplete?.()
@@ -760,17 +765,20 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
       }
 
       setNotice('')
-      setError(`执行下载失败: ${String(runError)}`)
+      if (String(runError).startsWith('任务已停止')) setNotice(String(runError))
+      else setError(`执行下载失败: ${String(runError)}`)
       try {
         setStatus(await getDataDownloadStatus(sourcePath))
       } catch (statusError) {
         console.warn('下载失败后刷新待补全状态失败', statusError)
       }
+      if (taskGroupRef.current) throw runError
       return null
     } finally {
       progressUnlistenRef.current?.()
       progressUnlistenRef.current = null
       activeDownloadIdRef.current = ''
+      setTaskId(null)
       setBusyAction('idle')
     }
   }
@@ -836,9 +844,10 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
       return
     }
 
-    return runDataTask('main', (downloadId) =>
+    return runDataTask('main', (downloadId, taskGroup) =>
       runDataDownload({
         downloadId,
+        taskGroup,
         sourcePath,
         token: token.trim(),
         startDate,
@@ -855,7 +864,7 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
   }
 
   useImperativeHandle(ref, () => ({
-    async runDailyIncrementalUpdate() {
+    async runDailyIncrementalUpdate(taskGroup) {
       if (busyActionRef.current !== 'idle') {
         throw new Error('下载页当前有任务正在执行。')
       }
@@ -865,15 +874,20 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
 
       const chipStrategySkipped =
         readStoredDetailCyqModel() === 'chen' && status.cyqChenMaintenance.strategyChanged
-      const result = await onRunDownload(false, false, true)
-      return {
-        completed: Boolean(
-          result &&
-          result.summary.failedCount === 0 &&
-          result.status.missingStockRepair.missingCount === 0,
-        ),
-        latestTradeDate: result?.status.sourceDb.maxTradeDate ?? null,
-        chipStrategySkipped,
+      taskGroupRef.current = taskGroup
+      try {
+        const result = await onRunDownload(false, false, true)
+        return {
+          completed: Boolean(
+            result &&
+            result.summary.failedCount === 0 &&
+            result.status.missingStockRepair.missingCount === 0,
+          ),
+          latestTradeDate: result?.status.sourceDb.maxTradeDate ?? null,
+          chipStrategySkipped,
+        }
+      } finally {
+        taskGroupRef.current = undefined
       }
     },
   }))
@@ -904,7 +918,7 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
     }
     const startDate = issues[0].startDate
     const endDate = issues[0].endDate
-    await runDataTask('main', async (downloadId) => {
+    await runDataTask('main', async (downloadId, taskGroup) => {
       // 重算前重新检查，避免使用已经过期的检查结果。
       if (action === 'ranking') {
         const current = await checkDatabases(sourcePath)
@@ -917,7 +931,7 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
         })
         const rebuildStart = currentIssues.map((item) => item.startDate ?? startDate).sort()[0]
         const rebuildEnd = currentIssues.map((item) => item.endDate ?? endDate).sort().at(-1) ?? endDate
-        const result = await runRankingScoreCalculation(sourcePath, rebuildStart, rebuildEnd, undefined, downloadId)
+        const result = await runRankingScoreCalculation(sourcePath, rebuildStart, rebuildEnd, undefined, downloadId, taskGroup)
         return {
           action: 'repair-database', actionLabel: '评分／排名修复',
           elapsedMs: result.elapsedMs, summary: { successCount: 1, failedCount: 0, savedRows: 0, conceptPerformanceRows: 0, failedItems: [] },
@@ -928,7 +942,7 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
         sourcePath, issueIds: issues.map((issue) => issue.id), token: token.trim(),
         threads: Math.max(1, Number(threads) || 1), retryTimes: Math.max(0, Number(retryTimes) || 0),
         limitCallsPerMin: Math.max(1, Number(limitCallsPerMin) || 1), includeTurnover,
-      })
+      }, taskGroup)
     })
     busyActionRef.current = 'idle'
     await onCheckDatabases()
@@ -956,9 +970,10 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
       return
     }
 
-    await runDataTask('main', (downloadId) =>
+    await runDataTask('main', (downloadId, taskGroup) =>
       runMissingStockRepair({
         downloadId,
+        taskGroup,
         sourcePath,
         token: token.trim(),
         threads: Math.max(1, Number(threads) || 1),
@@ -976,9 +991,10 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
       return
     }
 
-    await runDataTask('concept', (downloadId) =>
+    await runDataTask('concept', (downloadId, taskGroup) =>
       runThsConceptDownload({
         downloadId,
+        taskGroup,
         sourcePath,
         retryEnabled: thsConceptRetryEnabled,
         retryTimes: Math.max(0, Number(thsConceptRetryTimes) || 0),
@@ -1019,9 +1035,10 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
       return
     }
 
-    await runDataTask('dragonTiger', (downloadId) =>
+    await runDataTask('dragonTiger', (downloadId, taskGroup) =>
       runDragonTigerDownload({
         downloadId,
+        taskGroup,
         sourcePath,
         token: token.trim(),
         startDate,
@@ -1039,9 +1056,10 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
       return
     }
 
-    await runDataTask('concept', (downloadId) =>
+    await runDataTask('concept', (downloadId, taskGroup) =>
       runConceptMostRelatedRepair({
         downloadId,
+        taskGroup,
         sourcePath,
       }),
     )
@@ -1333,6 +1351,8 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
 
         {showMainProgress ? (
           <DataTaskProgress
+            onCancel={() => void taskControl.stop()}
+            cancelDisabled={taskControl.disabled}
             phaseLabel={phaseLabel}
             phaseStepPillText={phaseStep ? ` · ${phaseStep.current}/${phaseStep.total}` : ''}
             phaseStepStatText={phaseStep ? ` ${phaseStep.current}/${phaseStep.total}` : ''}
@@ -1344,7 +1364,7 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
             progressCounterText={progressCounterText}
             estimatedRemainingText={formatProgressDuration(progressTiming.estimatedRemainingMs)}
             estimatedTotalText={formatProgressDuration(progressTiming.estimatedTotalMs)}
-            message={progress?.message}
+            message={taskControl.message || progress?.message}
             fallbackMessage="下载已经启动，正在等待后端返回当前状态。安卓端长时间无响应时，可以先看这里的阶段提示和耗时。"
           />
         ) : null}
@@ -1432,6 +1452,8 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
 
           {showDragonTigerProgress ? (
             <DataTaskProgress
+              onCancel={() => void taskControl.stop()}
+              cancelDisabled={taskControl.disabled}
               phaseLabel={phaseLabel}
               phaseStepPillText={phaseStep ? ` · ${phaseStep.current}/${phaseStep.total}` : ''}
               phaseStepStatText={phaseStep ? ` ${phaseStep.current}/${phaseStep.total}` : ''}
@@ -1442,7 +1464,7 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
               shownProgressPercent={shownProgressPercent}
               progressCounterText={progressCounterText}
               currentObjectText={getCurrentObjectText(progress)}
-              message={progress?.message}
+              message={taskControl.message || progress?.message}
               fallbackMessage="龙虎榜下载已经启动，正在等待后端返回当前交易日进度。"
             />
           ) : null}
@@ -1561,6 +1583,8 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
 
           {showConceptProgress ? (
             <DataTaskProgress
+              onCancel={() => void taskControl.stop()}
+              cancelDisabled={taskControl.disabled}
               phaseLabel={phaseLabel}
               phaseStepPillText={phaseStep ? ` · ${phaseStep.current}/${phaseStep.total}` : ''}
               phaseStepStatText={phaseStep ? ` ${phaseStep.current}/${phaseStep.total}` : ''}
@@ -1571,7 +1595,7 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
               shownProgressPercent={shownProgressPercent}
               progressCounterText={progressCounterText}
               currentObjectText={getCurrentObjectText(progress)}
-              message={progress?.message}
+              message={taskControl.message || progress?.message}
               fallbackMessage="下载已经启动，正在等待后端返回当前状态。安卓端长时间无响应时，可以先看这里的阶段提示和耗时。"
             />
           ) : null}

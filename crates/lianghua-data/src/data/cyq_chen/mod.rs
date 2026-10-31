@@ -2,12 +2,7 @@ mod basis;
 pub use basis::{ChenChipBasis, compute_chen_chip_basis};
 mod bars;
 mod buckets;
-mod comparison;
 mod config;
-pub use comparison::{
-    ChenChipMechanismComparison, ChenChipMechanismDay, compute_chen_chip_mechanism_comparison,
-    compute_chen_chip_mechanism_comparison_with_retention,
-};
 mod features;
 mod retention;
 use retention::ChenChipRetentionCapture;

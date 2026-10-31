@@ -649,7 +649,7 @@ export default function ExpressionBacktestPage() {
       setRunForm(restoredForm);
       setRunQuery(config.query);
       setResult({...saved.result, archive_run_id: saved.header.run_id, membership_saved: Boolean(saved.header.membership_saved)});
-      setArchiveMessage(`正在查看 ${saved.header.run_id}。图表读取当前行情和配置，可能与存档运行时不同。`);
+      setArchiveMessage(`正在查看「${saved.header.question.trim() || new Date(saved.header.created_ms).toLocaleString()}」。图表读取当前行情和配置，可能与存档运行时不同。`);
     } catch (failure) { setArchiveMessage(`读取研究存档失败：${String(failure)}`); }
     finally { setArchiveBusy(false); }
   }
@@ -685,7 +685,7 @@ export default function ExpressionBacktestPage() {
       </div>
 
       <div hidden={researchTab !== "expression"}>
-      <ResearchHistoryComparison kind="expression_validation" sourcePath={sourcePath} archives={archives} disabled={loading || archiveBusy} onOpen={(runId) => void openArchive(runId)} onUpdated={(header) => {setArchives((items) => items.map((item) => item.run_id === header.run_id ? header : item)); if (result?.archive_run_id === header.run_id) setResearchQuestion(header.question);}} result={result} settings={runQuery} combo={selectedCombo} horizon={displayedResult?.horizon ?? runQuery?.backtestPeriod ?? null} direction={displayedForm.direction} />
+      <ResearchHistoryComparison kind="expression_validation" sourcePath={sourcePath} archives={archives} disabled={loading || archiveBusy} onOpen={(runId) => void openArchive(runId)} onUpdated={(header) => {setArchives((items) => items.map((item) => item.run_id === header.run_id ? header : item)); if (result?.archive_run_id === header.run_id) setResearchQuestion(header.question);}} onDelete={(runId) => void removeArchive(runId)} result={result} settings={runQuery} combo={selectedCombo} horizon={displayedResult?.horizon ?? runQuery?.backtestPeriod ?? null} direction={displayedForm.direction} />
       {archiveMessage ? <p className="expression-backtest-caption" role="status">{archiveMessage}</p> : null}
       <div>
       <ExpressionBacktestForm
@@ -712,13 +712,12 @@ export default function ExpressionBacktestPage() {
       />
       </div>
 
-      {loading ? <ResearchRunProgress actionLabel="策略研究" phase={phase} cancelling={cancelling} onCancel={(rollback) => {
+      {loading ? <ResearchRunProgress actionLabel="策略研究" mode="expression" phase={phase} cancelling={cancelling} onCancel={(rollback) => {
         setCancelling(true);
         void cancelRuleExpressionValidation(activeTask.current, rollback).then(() => setPhase(`已请求${rollback ? "撤回" : "停止"}，等待当前读取或计算结束`)).catch((failure) => { setError(`请求失败：${String(failure)}`); setCancelling(false); });
       }} /> : null}
 
       <div ref={feedbackRef} className="research-feedback-target">
-      {result?.archive_run_id ? <button type="button" className="research-history-delete" disabled={loading || archiveBusy} onClick={() => void removeArchive(result.archive_run_id!)}>删除当前记录</button> : null}
       {result && runForm ? <p className="research-meta">{runForm.ruleDraft?.name || runForm.importRuleName || (runForm.ruleDraft?.kind === "combination" ? "组合策略" : "表达式")} · {runForm.startDateInput} ~ {runForm.endDateInput}{JSON.stringify(form) !== JSON.stringify(runForm) ? " · 参数已修改，结果尚未重算" : ""}</p> : null}
       {result ? <div className="expression-backtest-actions">
         {selectedCombo && new Set(comboRows.map((item) => item.component ?? "base")).size > 1 ? <label>信号组成 <select value={selectedCombo.component ?? "base"} onChange={(event) => {

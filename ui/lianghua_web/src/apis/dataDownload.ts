@@ -113,6 +113,7 @@ export type DataDownloadCyqChenMaintenanceStatus = {
 
 export type DataDownloadRequest = {
   downloadId: string
+  taskGroup?: string
   sourcePath: string
   token: string
   startDate: string
@@ -128,6 +129,7 @@ export type DataDownloadRequest = {
 
 export type MissingStockRepairRequest = {
   downloadId: string
+  taskGroup?: string
   sourcePath: string
   token: string
   threads: number
@@ -138,6 +140,7 @@ export type MissingStockRepairRequest = {
 
 export type DragonTigerDownloadRequest = {
   downloadId: string
+  taskGroup?: string
   sourcePath: string
   token: string
   startDate: string
@@ -148,6 +151,7 @@ export type DragonTigerDownloadRequest = {
 
 export type ThsConceptDownloadRequest = {
   downloadId: string
+  taskGroup?: string
   sourcePath: string
   retryEnabled: boolean
   retryTimes: number
@@ -158,21 +162,25 @@ export type ThsConceptDownloadRequest = {
 
 export type ConceptPerformanceRepairRequest = {
   downloadId: string
+  taskGroup?: string
   sourcePath: string
 }
 
 export type ConceptMostRelatedRepairRequest = {
   downloadId: string
+  taskGroup?: string
   sourcePath: string
 }
 
 export type StockDataIndicatorColumnsDeleteRequest = {
   downloadId: string
+  taskGroup?: string
   sourcePath: string
 }
 
 export type StockDataIndicatorColumnsRebuildRequest = {
   downloadId: string
+  taskGroup?: string
   sourcePath: string
 }
 
@@ -331,6 +339,6 @@ export async function repairDatabaseIssues(downloadId: string, request: {
   retryTimes: number
   limitCallsPerMin: number
   includeTurnover: boolean
-}) {
-  return invoke<DataDownloadRunResult>('repair_database_issues', { downloadId, request })
+}, taskGroup?: string) {
+  return invoke<DataDownloadRunResult>('repair_database_issues', { downloadId, request, taskGroup })
 }

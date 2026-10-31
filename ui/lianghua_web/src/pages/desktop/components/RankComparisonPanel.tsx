@@ -247,7 +247,7 @@ export function RankComparisonPanel({ settings, disabled, onRunningChange, onRes
   const feedback = feedbackOptions.find((item) => `${item.pool_kind}-${item.top_k}` === feedbackPool) ?? feedbackOptions[0];
   return <section className="scene-layer-card research-workbench">
     <h2 className="scene-layer-title">排名对照</h2>
-    <ResearchHistoryComparison kind="rank_comparison" sourcePath={settings.source_path} archives={archives} disabled={loading || archiveBusy} onOpen={(runId) => void openArchive(runId)} onUpdated={(header) => {setArchives((items) => items.map((item) => item.run_id === header.run_id ? header : item)); if (result?.archive_run_id === header.run_id) setQuestion(header.question);}} result={result} settings={runSettings} summary={feedback ?? null} />
+    <ResearchHistoryComparison kind="rank_comparison" sourcePath={settings.source_path} archives={archives} disabled={loading || archiveBusy} onOpen={(runId) => void openArchive(runId)} onUpdated={(header) => {setArchives((items) => items.map((item) => item.run_id === header.run_id ? header : item)); if (result?.archive_run_id === header.run_id) setQuestion(header.question);}} onDelete={(runId) => void removeArchive(runId)} result={result} settings={runSettings} summary={feedback ?? null} />
     {archiveMessage ? <p className="scene-layer-caption" role="status">{archiveMessage}</p> : null}
 
     <div className="research-toolbar research-file-actions">
@@ -271,10 +271,9 @@ export function RankComparisonPanel({ settings, disabled, onRunningChange, onRes
       <button type="button" className="scene-layer-primary-btn" disabled={disabled || loading || loadingBaseline || archiveBusy || !candidate.trim()} onClick={() => void run()}>{loading ? "计算中…" : "运行排名对照"}</button>
       <button type="button" className="scene-layer-secondary-btn" disabled={disabled || loading || archiveBusy || loadingBaseline} onClick={() => void loadBaseline()}>{loadingBaseline ? "读取中…" : "恢复当前策略"}</button>
     </div>
-    {loading ? <ResearchRunProgress actionLabel="排名对照" phase={phase} cancelling={cancelling} onCancel={(rollback) => void cancel(rollback)} /> : null}
+    {loading ? <ResearchRunProgress actionLabel="排名对照" mode="comparison" phase={phase} cancelling={cancelling} onCancel={(rollback) => void cancel(rollback)} /> : null}
     {error ? <p role="alert">{error}</p> : null}
     <div ref={feedbackRef} className="research-feedback-target">
-    {result?.archive_run_id ? <button type="button" className="research-history-delete" disabled={loading || archiveBusy} onClick={() => void removeArchive(result.archive_run_id!)}>删除当前记录</button> : null}
     {result && runSettings ? <>
       <h3>排名对照结果</h3>
       <div className="research-toolbar">

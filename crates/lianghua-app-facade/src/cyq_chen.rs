@@ -1,5 +1,4 @@
 use std::{
-    collections::{BTreeMap, HashSet},
     fs,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -14,19 +13,16 @@ use crate::{
     data::{
         DataReader, RowData, chip_change_rule_path,
         cyq_chen::{
-            ChenChipBasis, ChenChipConfig, ChenChipMechanismComparison, ChenChipRetention,
-            ChenChipRetentionRequest, ChenChipSnapshot, ChipChangeConfig, ChipChangeStrategy,
-            collect_chen_chip_runtime_keys, compute_chen_chip_basis,
-            compute_chen_chip_mechanism_comparison_with_retention,
-            compute_chen_chip_snapshots_with_retention, round_chen_chip_snapshot,
+            ChenChipBasis, ChenChipConfig, ChenChipRetention, ChenChipRetentionRequest,
+            ChenChipSnapshot, ChipChangeConfig, ChipChangeStrategy, collect_chen_chip_runtime_keys,
+            compute_chen_chip_basis, compute_chen_chip_snapshots_with_retention,
+            round_chen_chip_snapshot,
         },
         load_trade_date_list, source_db_path,
     },
     scoring::tools::{inject_stock_extra_fields, load_st_list, load_total_share_map},
 };
 use lianghua_app_shared::normalize_ts_code;
-
-use crate::utils::utils::board_category;
 
 const DEFAULT_ADJ_TYPE: &str = "qfq";
 const CHIP_CHANGE_BACKUP_DIR_NAME: &str = "chip_change_rule_backups";
@@ -36,8 +32,6 @@ const EMPTY_CHIP_CHANGE_TEMPLATE: &str = "version = 1\n";
 #[serde(rename_all = "camelCase")]
 pub struct CyqChenSingleStockRequest {
     pub version: Option<u32>,
-    #[serde(default)]
-    pub compare_mechanisms: bool,
     pub retention: Option<ChenChipRetentionRequest>,
     pub source_path: String,
     pub ts_code: String,
@@ -70,31 +64,9 @@ pub struct CyqChenSingleStockData {
     pub kline: Vec<CyqChenKlineRow>,
     pub kline_payload: Option<DetailKlinePayload>,
     pub snapshots: Vec<ChenChipSnapshot>,
-    pub mechanism_comparison: Option<ChenChipMechanismComparison>,
     pub basis: Option<ChenChipBasis>,
     pub retention: Option<ChenChipRetention>,
     pub price_coordinate: String,
-    pub l2_days: Vec<CyqChenL2Day>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CyqChenL2Day {
-    pub trade_date: String,
-    pub board: String,
-    pub status: String,
-    pub volume: Option<f64>,
-    pub net_mf_volume: Option<f64>,
-    pub net_mf_ratio: Option<f64>,
-    pub net_mf_ratio_3d: Option<f64>,
-    pub large_buy_volume: Option<f64>,
-    pub large_sell_volume: Option<f64>,
-    pub large_net_ratio: Option<f64>,
-    pub large_net_ratio_3d: Option<f64>,
-    pub large_buy_denominator: Option<f64>,
-    pub large_buy_share: Option<f64>,
-    pub large_buy_share_3d: Option<f64>,
-    pub issues: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1088,11 +1060,9 @@ pub fn run_cyq_chen_single_stock_test(
                     kline: Vec::new(),
                     kline_payload: None,
                     snapshots: Vec::new(),
-                    mechanism_comparison: None,
                     basis: None,
                     retention: None,
                     price_coordinate: DEFAULT_ADJ_TYPE.into(),
-                    l2_days: Vec::new(),
                 });
             }
             Err(err) => return Err(err),
@@ -1108,11 +1078,9 @@ pub fn run_cyq_chen_single_stock_test(
             kline: Vec::new(),
             kline_payload: None,
             snapshots: Vec::new(),
-            mechanism_comparison: None,
             basis: None,
             retention: None,
             price_coordinate: DEFAULT_ADJ_TYPE.into(),
-            l2_days: Vec::new(),
         });
     }
 
@@ -1203,36 +1171,21 @@ pub fn run_cyq_chen_single_stock_test(
     })(source_path, &ts_code, &start_date, &end_date)?;
     let output_start_date =
         resolve_output_start_date(&row_data, &start_date, &end_date, config.warmup_days);
-    let (mut snapshots, mechanism_comparison, retention) =
-        if let Some(output_start_date) = output_start_date.as_deref() {
-            if request.compare_mechanisms {
-                let (snapshots, comparison, retention) =
-                    compute_chen_chip_mechanism_comparison_with_retention(
-                        &row_data,
-                        output_start_date,
-                        &compiled_chip_config,
-                        config,
-                        request.retention.as_ref(),
-                    )?;
-                (snapshots, Some(comparison), retention)
-            } else {
-                let (snapshots, retention) = compute_chen_chip_snapshots_with_retention(
-                    &row_data,
-                    output_start_date,
-                    &compiled_chip_config,
-                    config,
-                    request.retention.as_ref(),
-                )?;
-                (snapshots, None, retention)
-            }
-        } else {
-            (Vec::new(), None, None)
-        };
+    let (mut snapshots, retention) = if let Some(output_start_date) = output_start_date.as_deref() {
+        compute_chen_chip_snapshots_with_retention(
+            &row_data,
+            output_start_date,
+            &compiled_chip_config,
+            config,
+            request.retention.as_ref(),
+        )?
+    } else {
+        (Vec::new(), None)
+    };
     let basis = output_start_date
         .as_deref()
         .map(|date| compute_chen_chip_basis(&row_data, date, config))
         .transpose()?;
-    let l2_days = load_cyq_chen_l2_days(source_path, &ts_code, &start_date, &end_date)?;
     for snapshot in &mut snapshots {
         round_chen_chip_snapshot(snapshot);
     }
@@ -1246,11 +1199,9 @@ pub fn run_cyq_chen_single_stock_test(
         kline,
         kline_payload,
         snapshots,
-        mechanism_comparison,
         basis,
         retention,
         price_coordinate: DEFAULT_ADJ_TYPE.into(),
-        l2_days,
     })
 }
 
@@ -1288,296 +1239,6 @@ fn resolve_output_start_date(
             }
             Some(trade_date.clone())
         })
-}
-
-#[derive(Clone, Copy, Default)]
-struct CyqChenL2Raw {
-    volume: Option<f64>,
-    net_mf_volume: Option<f64>,
-    buy_small: Option<f64>,
-    buy_medium: Option<f64>,
-    buy_large: Option<f64>,
-    sell_large: Option<f64>,
-    buy_extra_large: Option<f64>,
-    sell_extra_large: Option<f64>,
-}
-
-fn load_cyq_chen_l2_days(
-    source_path: &str,
-    ts_code: &str,
-    start_date: &str,
-    end_date: &str,
-) -> Result<Vec<CyqChenL2Day>, String> {
-    let trade_calendar = load_trade_date_list(source_path)?;
-    let query_start = trade_calendar
-        .iter()
-        .position(|date| date == start_date)
-        .and_then(|index| trade_calendar.get(index.saturating_sub(2)))
-        .map_or(start_date, String::as_str);
-    let source_db = source_db_path(source_path);
-    let source_db_str = source_db
-        .to_str()
-        .ok_or_else(|| "source_db路径不是有效UTF-8".to_string())?;
-    let conn = crate::data::open_db_readonly(source_db_str)
-        .map_err(|error| format!("打开L2证据原始库失败:{error}"))?;
-    let columns = (|conn: &duckdb::Connection| -> Result<HashSet<String>, String> {
-        let mut stmt = conn
-            .prepare("SELECT name FROM pragma_table_info('stock_data')")
-            .map_err(|error| format!("读取L2字段结构失败:{error}"))?;
-        stmt.query_map([], |row| row.get::<_, String>(0))
-            .map_err(|error| format!("查询L2字段结构失败:{error}"))?
-            .collect::<Result<HashSet<_>, _>>()
-            .map_err(|error| format!("读取L2字段结构失败:{error}"))
-    })(&conn)?;
-    let expression = |column: &str| {
-        columns
-            .iter()
-            .any(|name| name.eq_ignore_ascii_case(column))
-            .then(|| format!("TRY_CAST(\"{column}\" AS DOUBLE)"))
-            .unwrap_or_else(|| "NULL::DOUBLE".to_string())
-    };
-    let sql = format!(
-        "SELECT trade_date, {}, {}, {}, {}, {}, {}, {}, {} \
-         FROM stock_data WHERE ts_code=? AND adj_type=? AND trade_date>=? AND trade_date<=? \
-         ORDER BY trade_date",
-        expression("vol"),
-        expression("net_mf_v"),
-        expression("b_sm_v"),
-        expression("b_md_v"),
-        expression("b_lg_v"),
-        expression("s_lg_v"),
-        expression("b_elg_v"),
-        expression("s_elg_v"),
-    );
-    let mut stmt = conn
-        .prepare(&sql)
-        .map_err(|error| format!("预编译L2证据查询失败:{error}"))?;
-    let mut rows = stmt
-        .query(params![ts_code, DEFAULT_ADJ_TYPE, query_start, end_date])
-        .map_err(|error| format!("查询L2证据失败:{error}"))?;
-    let mut raw_by_date = BTreeMap::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|error| format!("读取L2证据失败:{error}"))?
-    {
-        raw_by_date.insert(
-            row.get::<_, String>(0)
-                .map_err(|error| format!("读取L2证据日期失败:{error}"))?,
-            CyqChenL2Raw {
-                volume: row.get(1).map_err(|error| format!("读取V失败:{error}"))?,
-                net_mf_volume: row
-                    .get(2)
-                    .map_err(|error| format!("读取NET_MF_V失败:{error}"))?,
-                buy_small: row
-                    .get(3)
-                    .map_err(|error| format!("读取B_SM_V失败:{error}"))?,
-                buy_medium: row
-                    .get(4)
-                    .map_err(|error| format!("读取B_MD_V失败:{error}"))?,
-                buy_large: row
-                    .get(5)
-                    .map_err(|error| format!("读取B_LG_V失败:{error}"))?,
-                sell_large: row
-                    .get(6)
-                    .map_err(|error| format!("读取S_LG_V失败:{error}"))?,
-                buy_extra_large: row
-                    .get(7)
-                    .map_err(|error| format!("读取B_ELG_V失败:{error}"))?,
-                sell_extra_large: row
-                    .get(8)
-                    .map_err(|error| format!("读取S_ELG_V失败:{error}"))?,
-            },
-        );
-    }
-
-    let ratio = |numerator: Option<f64>, denominator: Option<f64>| {
-        numerator
-            .filter(|value| value.is_finite())
-            .zip(denominator.filter(|value| value.is_finite() && *value > 0.0))
-            .map(|(numerator, denominator)| numerator / denominator)
-    };
-    let three_day_mean = |values: &[Option<f64>]| {
-        (values.len() == 3)
-            .then(|| {
-                values
-                    .iter()
-                    .copied()
-                    .collect::<Option<Vec<_>>>()
-                    .filter(|values| values.iter().all(|value| value.is_finite()))
-                    .map(|values| values.iter().sum::<f64>() / 3.0)
-            })
-            .flatten()
-    };
-    let board = board_category(ts_code, None);
-    let mut days = Vec::new();
-    for (trade_date, raw) in raw_by_date.iter().filter(|(trade_date, _)| {
-        trade_date.as_str() >= start_date && trade_date.as_str() <= end_date
-    }) {
-        let large_buy = raw
-            .buy_large
-            .zip(raw.buy_extra_large)
-            .map(|(large, extra_large)| large + extra_large)
-            .filter(|value| value.is_finite());
-        let large_sell = raw
-            .sell_large
-            .zip(raw.sell_extra_large)
-            .map(|(large, extra_large)| large + extra_large)
-            .filter(|value| value.is_finite());
-        let large_buy_denominator = [
-            raw.buy_small,
-            raw.buy_medium,
-            raw.buy_large,
-            raw.buy_extra_large,
-        ]
-        .into_iter()
-        .collect::<Option<Vec<_>>>()
-        .map(|values| values.into_iter().sum::<f64>())
-        .filter(|value| value.is_finite() && *value > 0.0);
-        let net_mf_ratio = ratio(raw.net_mf_volume, raw.volume);
-        let large_net_ratio = large_buy
-            .zip(large_sell)
-            .and_then(|(buy, sell)| ratio(Some(buy - sell), raw.volume));
-        let large_buy_share = large_buy.and_then(|buy| ratio(Some(buy), large_buy_denominator));
-        let window = trade_calendar
-            .iter()
-            .position(|date| date == trade_date)
-            .and_then(|index| {
-                index
-                    .checked_sub(2)
-                    .map(|start| &trade_calendar[start..=index])
-            })
-            .filter(|window| window.len() == 3)
-            .unwrap_or_default();
-        let window_raw = window
-            .iter()
-            .map(|date| raw_by_date.get(date).copied().unwrap_or_default())
-            .collect::<Vec<_>>();
-        let net_mf_ratio_3d = three_day_mean(
-            &window_raw
-                .iter()
-                .map(|raw| ratio(raw.net_mf_volume, raw.volume))
-                .collect::<Vec<_>>(),
-        );
-        let large_net_ratio_3d = three_day_mean(
-            &window_raw
-                .iter()
-                .map(|raw| {
-                    raw.buy_large
-                        .zip(raw.buy_extra_large)
-                        .zip(raw.sell_large.zip(raw.sell_extra_large))
-                        .and_then(
-                            |((buy_large, buy_extra_large), (sell_large, sell_extra_large))| {
-                                ratio(
-                                    Some(
-                                        buy_large + buy_extra_large - sell_large - sell_extra_large,
-                                    ),
-                                    raw.volume,
-                                )
-                            },
-                        )
-                })
-                .collect::<Vec<_>>(),
-        );
-        let large_buy_share_3d = three_day_mean(
-            &window_raw
-                .iter()
-                .map(|raw| {
-                    let buy_large = raw
-                        .buy_large
-                        .zip(raw.buy_extra_large)
-                        .map(|(large, extra_large)| large + extra_large);
-                    let denominator = [
-                        raw.buy_small,
-                        raw.buy_medium,
-                        raw.buy_large,
-                        raw.buy_extra_large,
-                    ]
-                    .into_iter()
-                    .collect::<Option<Vec<_>>>()
-                    .map(|values| values.into_iter().sum::<f64>());
-                    buy_large.and_then(|buy| ratio(Some(buy), denominator))
-                })
-                .collect::<Vec<_>>(),
-        );
-
-        let mut issues = Vec::new();
-        if board == "北交所" {
-            issues.push("北交所主动净量口径未核实，零值不等同于无方向".to_string());
-        } else if !matches!(board, "主板" | "创业板" | "科创板") {
-            issues.push("市场板块无法识别，L2口径未核实".to_string());
-        }
-        if raw.volume.is_none() {
-            issues.push("成交量缺失，无法形成L2分母".to_string());
-        } else if !raw
-            .volume
-            .is_some_and(|value| value.is_finite() && value > 0.0)
-        {
-            issues.push("成交量为零或非有限值，L2分母无效".to_string());
-        }
-        if raw.net_mf_volume.is_none() {
-            issues.push("主动净量缺失".to_string());
-        }
-        if [
-            raw.buy_large,
-            raw.sell_large,
-            raw.buy_extra_large,
-            raw.sell_extra_large,
-        ]
-        .into_iter()
-        .any(|value| value.is_none())
-        {
-            issues.push("大小单买卖量不完整".to_string());
-        }
-        if large_buy_denominator.is_none() {
-            issues.push("买方分档合计缺失或无效".to_string());
-        }
-        if [
-            raw.volume,
-            raw.net_mf_volume,
-            raw.buy_small,
-            raw.buy_medium,
-            raw.buy_large,
-            raw.sell_large,
-            raw.buy_extra_large,
-            raw.sell_extra_large,
-        ]
-        .into_iter()
-        .flatten()
-        .any(|value| !value.is_finite())
-        {
-            issues.push("L2存在非有限数值".to_string());
-        }
-        let status = if matches!(board, "北交所" | "其他") {
-            "unverified"
-        } else if issues
-            .iter()
-            .any(|issue| issue.contains("无效") || issue.contains("非有限"))
-        {
-            "invalid"
-        } else if issues.is_empty() {
-            "observable"
-        } else {
-            "missing"
-        };
-        days.push(CyqChenL2Day {
-            trade_date: trade_date.clone(),
-            board: board.to_string(),
-            status: status.to_string(),
-            volume: raw.volume,
-            net_mf_volume: raw.net_mf_volume,
-            net_mf_ratio,
-            net_mf_ratio_3d,
-            large_buy_volume: large_buy,
-            large_sell_volume: large_sell,
-            large_net_ratio,
-            large_net_ratio_3d,
-            large_buy_denominator,
-            large_buy_share,
-            large_buy_share_3d,
-            issues,
-        });
-    }
-    Ok(days)
 }
 
 fn required_series<'a>(row_data: &'a RowData, key: &str) -> Result<&'a [Option<f64>], String> {
@@ -1690,7 +1351,6 @@ mod tests {
 
         let request = CyqChenSingleStockRequest {
             version: None,
-            compare_mechanisms: true,
             retention: Some(crate::data::cyq_chen::ChenChipRetentionRequest {
                 anchor_date: "20260403".into(),
                 evaluation_date: "20260407".into(),
@@ -1734,39 +1394,10 @@ mod tests {
         let basis = data.basis.as_ref().unwrap();
         assert_eq!(basis.days.len(), 2);
         assert!(basis.days.iter().all(|day| day.values.is_some()));
-        let comparison = data.mechanism_comparison.as_ref().unwrap();
-        assert_eq!(
-            serde_json::to_value(comparison).unwrap()["universeVerified"],
-            false
-        );
-        assert_eq!(comparison.days.len(), data.snapshots.len());
-        assert!(comparison.days[0].reference_unknown_ratio > 0.0);
-        assert!(comparison.days[0].without_posterior_origin.is_some());
         assert!(data.snapshots[0].origin.is_some());
         assert!(data.snapshots[0].flow.is_some());
-        let l2 = data
-            .l2_days
-            .iter()
-            .find(|day| day.trade_date == "20260403")
-            .expect("L2 evidence for output day");
-        assert_eq!(l2.status, "observable");
-        assert!((l2.net_mf_ratio.unwrap() - 0.05).abs() < 1e-9);
-        assert!((l2.large_net_ratio.unwrap() - 0.1).abs() < 1e-9);
-        assert!((l2.large_buy_share.unwrap() - 30.0 / 90.0).abs() < 1e-9);
-        assert!((l2.net_mf_ratio_3d.unwrap() - 0.05).abs() < 1e-9);
         assert!(!source_dir.join("cyq_chen.db").exists());
 
-        let mut request = request;
-        request.compare_mechanisms = false;
-        let without_comparison = run_cyq_chen_single_stock_test(request).unwrap();
-        assert_eq!(
-            serde_json::to_value(&without_comparison.snapshots).unwrap(),
-            serde_json::to_value(&data.snapshots).unwrap()
-        );
-        assert_eq!(
-            serde_json::to_value(&without_comparison.retention).unwrap(),
-            serde_json::to_value(&data.retention).unwrap()
-        );
         fs::remove_dir_all(source_dir).expect("cleanup temp dir");
     }
 
@@ -1777,7 +1408,6 @@ mod tests {
 
         let data = run_cyq_chen_single_stock_test(CyqChenSingleStockRequest {
             version: None,
-            compare_mechanisms: true,
             retention: None,
             source_path: source_dir.to_str().expect("utf8 path").to_string(),
             ts_code: "000999".to_string(),
@@ -1834,7 +1464,6 @@ mod tests {
         assert_eq!(page.version, 2);
         let data = run_cyq_chen_single_stock_test(CyqChenSingleStockRequest {
             version: Some(page.version),
-            compare_mechanisms: true,
             retention: None,
             source_path: source_path.into(),
             ts_code: "000001".into(),

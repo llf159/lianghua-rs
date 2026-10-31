@@ -299,6 +299,7 @@ fn compute_strategy_trigger_similarity_ranking(
     );
     let mut candidate_completed = 0;
     loop {
+        lianghua_model::task::checkpoint()?;
         let mut chunk = candidate_anchor_iter
             .by_ref()
             .take(ANCHOR_CHUNK_SIZE)
@@ -399,6 +400,7 @@ fn compute_strategy_trigger_similarity_ranking(
     );
     let mut target_completed = 0;
     loop {
+        lianghua_model::task::checkpoint()?;
         let chunk = target_anchor_iter
             .by_ref()
             .take(ANCHOR_CHUNK_SIZE)
@@ -509,6 +511,7 @@ fn compute_strategy_trigger_similarity_ranking(
     let mut ranking_rows = targets
         .par_iter()
         .map(|target| {
+            lianghua_model::task::checkpoint()?;
             let target_started = Instant::now();
             let row = (|target: &RankingSample,
                         candidates: &[RankingSample],
@@ -559,6 +562,7 @@ fn compute_strategy_trigger_similarity_ranking(
                         }
 
                         for position in 0..scratch.candidate_indices.len() {
+                            if position % 256 == 0 && lianghua_model::task::checkpoint().is_err() { break; }
                             let candidate_index = scratch.candidate_indices[position];
                             let candidate = &candidates[candidate_index];
                             if candidate.anchor.ts_code == target.anchor.ts_code {
@@ -653,6 +657,7 @@ fn compute_strategy_trigger_similarity_ranking(
 
 
                         for candidate_position in 0..scratch.candidate_indices.len() {
+                            if candidate_position % 256 == 0 && lianghua_model::task::checkpoint().is_err() { break; }
                             let candidate_index = scratch.candidate_indices[candidate_position];
                             let candidate = &candidates[candidate_index];
                             let price_available = target.fingerprint.price_volume.has_vectors
@@ -922,6 +927,7 @@ fn compute_strategy_trigger_similarity_ranking(
                 &concept_map,
                 &rule_weights,
             );
+            lianghua_model::task::checkpoint()?;
             let (row, prune_stats) = row;
             for (counter, value) in [
                 (&prune_counters.overlap_candidates, prune_stats.overlap_candidates),
@@ -957,9 +963,9 @@ fn compute_strategy_trigger_similarity_ranking(
                 completed,
                 targets.len(),
             );
-            row
+            Ok::<_, String>(row)
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, _>>()?;
     log::info!(
         "相似榜精排剪枝统计: overlap={}, market_pruned={}, price_evaluated={}, price_pruned={}, indicator_evaluated={}, indicator_pruned={}, timing_evaluated={}, timing_pruned={}, scored={}",
         prune_counters
@@ -986,6 +992,7 @@ fn compute_strategy_trigger_similarity_ranking(
         elapsed_ms: elapsed_ms(phase),
     });
 
+    lianghua_model::task::checkpoint()?;
     set_ranking_progress("validate", "正在校验计算期间的数据一致性", 0, 0);
     let final_signature = load_data_signature(&conn, &source_path, &resolved_trade_date)?;
     if final_signature != initial_signature {
@@ -1012,6 +1019,7 @@ fn compute_strategy_trigger_similarity_ranking(
     drop(conn);
     let before_write_elapsed = elapsed_ms(started);
     let phase = Instant::now();
+    lianghua_model::task::checkpoint()?;
     set_ranking_progress("write", "正在写入走势相似排行榜", 0, 0);
     let key = config_key(
         window_trade_days,
@@ -1194,6 +1202,7 @@ fn compute_strategy_trigger_similarity_ranking(
             ],
         )
         .map_err(|e| format!("写入相似排行生效配置失败: {e}"))?;
+        lianghua_model::task::checkpoint()?;
         tx.commit().map_err(|e| format!("提交相似排行榜失败: {e}"))
     })(
         &source_path,

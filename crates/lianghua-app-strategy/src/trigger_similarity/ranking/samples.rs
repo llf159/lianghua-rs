@@ -34,10 +34,12 @@ pub(in crate::trigger_similarity) fn build_ranking_samples_for_chunk(
     progress: Option<(&str, usize, usize)>,
     rule_catalog: &mut RuleCatalog,
 ) -> Result<Vec<RankingSample>, String> {
+    lianghua_model::task::checkpoint()?;
     if let Some((phase, completed, total)) = progress {
         set_ranking_progress(phase, "正在读取本批股票的行情和指标窗口", completed, total);
     }
     let market_by_anchor = load_market_rows(conn, &anchors, schema)?;
+    lianghua_model::task::checkpoint()?;
     if let Some((phase, completed, total)) = progress {
         set_ranking_progress(phase, "正在读取本批股票的策略触发窗口", completed, total);
     }
@@ -45,12 +47,14 @@ pub(in crate::trigger_similarity) fn build_ranking_samples_for_chunk(
     let summaries = if include_outcome {
         HashMap::new()
     } else {
+        lianghua_model::task::checkpoint()?;
         if let Some((phase, completed, total)) = progress {
             set_ranking_progress(phase, "正在读取本批股票的评分摘要", completed, total);
         }
         load_summary_rows(conn, &anchors)?
     };
     let future_by_anchor = if include_outcome {
+        lianghua_model::task::checkpoint()?;
         if let Some((phase, completed, total)) = progress {
             set_ranking_progress(phase, "正在读取本批历史模板的后验行情", completed, total);
         }
@@ -58,6 +62,7 @@ pub(in crate::trigger_similarity) fn build_ranking_samples_for_chunk(
     } else {
         HashMap::new()
     };
+    lianghua_model::task::checkpoint()?;
     if let Some((phase, completed, total)) = progress {
         set_ranking_progress(phase, "正在构建本批股票的指纹", completed, total);
     }

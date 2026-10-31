@@ -270,7 +270,8 @@ pub fn compute_chen_chip_basis(
 mod tests {
     use super::*;
     use crate::data::cyq_chen::{
-        ChipChangeConfig, compute_chen_chip_snapshots_with_compiled_config,
+        ChipChangeConfig, ChipChangeStrategy, ChipDirection, ChipHolder,
+        compute_chen_chip_snapshots_with_compiled_config,
         test_support::{assert_close, sample_row_data},
     };
 
@@ -282,11 +283,29 @@ mod tests {
             warmup_days: 1,
             bucket_pct: 0.3,
         };
+        let uniform = ChipChangeConfig {
+            version: 1,
+            strategy: [ChipDirection::Buy, ChipDirection::Sell]
+                .into_iter()
+                .flat_map(|direction| {
+                    [ChipHolder::Main, ChipHolder::Retail]
+                        .into_iter()
+                        .map(move |holder| ChipChangeStrategy {
+                            name: format!("等概率换手 {holder:?} {direction:?}"),
+                            holder,
+                            direction,
+                            when: "C > 0".into(),
+                            bias: 1.0,
+                            confirm_after: 0,
+                        })
+                })
+                .collect(),
+        };
         let basis = compute_chen_chip_basis(&rows, "20240103", config).unwrap();
         let native = compute_chen_chip_snapshots_with_compiled_config(
             &rows,
             "20240103",
-            &ChipChangeConfig::uniform_turnover().compile().unwrap(),
+            &uniform.compile().unwrap(),
             config,
         )
         .unwrap();

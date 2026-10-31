@@ -8,7 +8,6 @@ use std::sync::{
 pub enum TaskState {
     Running,
     Stop,
-    Rollback,
     Finishing,
 }
 
@@ -21,15 +20,11 @@ impl Default for TaskControl {
 }
 
 impl TaskControl {
-    pub fn request(&self, rollback: bool) -> Result<(), String> {
+    pub fn request(&self) -> Result<(), String> {
         self.0
             .compare_exchange(
                 TaskState::Running as u8,
-                if rollback {
-                    TaskState::Rollback
-                } else {
-                    TaskState::Stop
-                } as u8,
+                TaskState::Stop as u8,
                 Ordering::SeqCst,
                 Ordering::SeqCst,
             )
@@ -40,7 +35,6 @@ impl TaskControl {
         match self.0.load(Ordering::SeqCst) {
             0 => TaskState::Running,
             1 => TaskState::Stop,
-            2 => TaskState::Rollback,
             _ => TaskState::Finishing,
         }
     }
@@ -48,15 +42,14 @@ impl TaskControl {
         match self.0.swap(TaskState::Finishing as u8, Ordering::SeqCst) {
             0 => TaskState::Running,
             1 => TaskState::Stop,
-            2 => TaskState::Rollback,
             _ => TaskState::Finishing,
         }
     }
     pub fn check(&self) -> Result<(), String> {
         match self.state() {
             TaskState::Stop => Err("任务已停止，保留已提交结果".into()),
-            TaskState::Rollback => Err("任务已请求撤回".into()),
-            _ => Ok(()),
+            TaskState::Finishing => Err("任务已结束".into()),
+            TaskState::Running => Ok(()),
         }
     }
 }
@@ -82,4 +75,44 @@ pub fn checkpoint() -> Result<(), String> {
         control.check()?;
     }
     Ok(())
+}
+
+pub fn wait(duration: std::time::Duration) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + duration;
+    loop {
+        checkpoint()?;
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Ok(());
+        }
+        std::thread::sleep(remaining.min(std::time::Duration::from_millis(100)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stopping_stage_or_parent_preserves_other_controls_and_rejects_late_requests() {
+        let parent = Arc::new(TaskControl::default());
+        let stage = Arc::new(TaskControl::default());
+        let active = ActiveTask::enter(vec![parent.clone(), stage.clone()]);
+        assert!(checkpoint().is_ok());
+        stage.request().unwrap();
+        assert!(checkpoint().is_err());
+        assert!(parent.check().is_ok());
+        assert!(stage.seal() == TaskState::Stop);
+        assert!(stage.request().is_err());
+        drop(active);
+        assert!(checkpoint().is_ok());
+
+        let next = Arc::new(TaskControl::default());
+        let active = ActiveTask::enter(vec![parent.clone(), next.clone()]);
+        parent.request().unwrap();
+        assert!(checkpoint().is_err());
+        assert!(next.check().is_ok());
+        drop(active);
+        assert!(checkpoint().is_ok());
+    }
 }

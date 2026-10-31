@@ -30,12 +30,15 @@ type SyntaxGuideDynamicFunction = {
   meaning: string
 }
 
-const SYNTAX_GUIDE_FUNCTIONS: SyntaxGuideFunction[] = [
-  { name: 'LN / EXP / SQRT / ISVALID / NULL', signature: 'LN(x)、EXP(x)、SQRT(x)、ISVALID(x)、NULL()', returns: '数值', description: '自然对数、指数、平方根、有效值检测和显式空值；数学定义域错误或溢出为空。', example: 'IF(ISVALID(C), LN(C), NULL())' },
+const SYNTAX_GUIDE_CROSS_SECTION_FUNCTIONS: SyntaxGuideFunction[] = [
   { name: 'CS_MEAN / CS_SUM / CS_COUNT / CS_MIN / CS_MAX / CS_MEDIAN / CS_STD / CS_VAR', signature: 'CS_MEAN(x[, filter[, group]])，其余同形', returns: '每日共享值或组内各股值', description: '只用于市场／横截面指标。按同一天的股票统计，filter筛选、数值group分组；忽略无效x，STD/VAR使用样本口径。COUNT统计有效值数量。', example: 'MA(CS_MEAN(PCT_CHG, LISTED_DAYS>=60), 5)' },
   { name: 'CS_RANK / CS_ZSCORE', signature: 'CS_RANK(x[, filter[, group]])', returns: '每日各股值', description: '全市场或组内百分位排名／样本标准差标准化。RANK从小到大，平均并列名次除以样本数；不等同于时间窗口GRANK/LRANK。', example: 'CS_RANK(SUM(PCT_CHG,10), LISTED_DAYS>=60)' },
   { name: 'CS_CORR / CS_SPEARMAN / CS_WMEAN', signature: 'CS_CORR(x,y[, filter[, group]])；CS_WMEAN(x,weight[, filter[, group]])', returns: '每日共享值或组内各股值', description: 'Pearson相关、平均并列秩相关、非负权重加权均值；数据成对有效才参与。', example: 'CS_SPEARMAN(PCT_CHG, AMOUNT/REF(MA(AMOUNT,20),1))' },
   { name: 'CS_QUANTILE / CS_TOPSHARE', signature: 'CS_QUANTILE(x,q[, filter[, group]])；CS_TOPSHARE(x,q[, filter[, group]])', returns: '每日共享值或组内各股值', description: 'q为[0,1]常数：线性插值分位数／最大ceil(q×样本数)项的合计占比。TOPSHARE要求非负x。', example: 'CS_TOPSHARE(AMOUNT,0.1,LISTED_DAYS>=60)' },
+]
+
+const SYNTAX_GUIDE_FUNCTIONS: SyntaxGuideFunction[] = [
+  { name: 'LN / EXP / SQRT / ISVALID / NULL', signature: 'LN(x)、EXP(x)、SQRT(x)、ISVALID(x)、NULL()', returns: '数值', description: '自然对数、指数、平方根、有效值检测和显式空值；数学定义域错误或溢出为空。', example: 'IF(ISVALID(C), LN(C), NULL())' },
   { name: 'ABS', signature: 'ABS(x)', returns: '数值序列', description: '取绝对值。', example: '输入 [-2, 3] -> 输出 [2, 3]' },
   { name: 'MAX', signature: 'MAX(a, b)', returns: '数值序列', description: '逐项取较大值。', example: 'a=[1,5], b=[2,3] -> [2,5]' },
   { name: 'MIN', signature: 'MIN(a, b)', returns: '数值序列', description: '逐项取较小值。', example: 'a=[1,5], b=[2,3] -> [1,3]' },
@@ -68,6 +71,35 @@ const SYNTAX_GUIDE_DYNAMIC_FUNCTIONS: SyntaxGuideDynamicFunction[] = [
   { group: '动态排名 / 取值', functions: 'GRANKD / LRANKD / GETD', signature: 'GRANKD(x, win, max_win)；GETD(cond, x, win, max_win)', meaning: '排名函数按动态 win 排序；GETD 在动态 win 内找最近一次条件成立对应的 x；max_win 必须是正整数。' },
   { group: '动态扩展指标', functions: 'RSVD / GTOPCOUNTD / LTOPCOUNTD', signature: 'RSVD(C,H,L,win,max_win)；GTOPCOUNTD(x,cond,win,topn,max_win)', meaning: 'RSVD 是动态窗口 RSV；TOPCOUNTD 在动态 win 内排序后取前 topn 统计条件次数；max_win 必须是正整数。' },
 ]
+
+function SyntaxFunctionTable({ items }: { items: SyntaxGuideFunction[] }) {
+  return (
+    <div className="strategy-syntax-guide-table-wrap">
+      <table className="strategy-syntax-guide-table strategy-syntax-guide-function-table">
+        <thead>
+          <tr>
+            <th>函数</th>
+            <th>签名</th>
+            <th className="strategy-syntax-guide-return">返回</th>
+            <th>作用</th>
+            <th>输入输出例子</th>
+          </tr>
+        </thead>
+        <tbody>
+          {items.map((item) => (
+            <tr key={item.name}>
+              <td><code>{item.name}</code></td>
+              <td><code>{item.signature}</code></td>
+              <td className="strategy-syntax-guide-return">{item.returns}</td>
+              <td>{item.description}</td>
+              <td>{item.example}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
 
 const SYNTAX_GUIDE_FIELD_SECTIONS: SyntaxGuideFieldSection[] = [
   {
@@ -272,29 +304,11 @@ IF(C > O, C - O, 0)`}</pre>
 
         <section className="strategy-syntax-guide-section">
           <h4>4. 支持的函数</h4>
-          <div className="strategy-syntax-guide-table-wrap">
-            <table className="strategy-syntax-guide-table">
-              <thead>
-                <tr>
-                  <th>函数</th>
-                  <th>签名</th>
-                  <th>返回</th>
-                  <th>作用</th>
-                  <th>输入输出例子</th>
-                </tr>
-              </thead>
-              <tbody>
-                {SYNTAX_GUIDE_FUNCTIONS.map((item) => (
-                  <tr key={item.name}>
-                    <td><code>{item.name}</code></td>
-                    <td><code>{item.signature}</code></td>
-                    <td>{item.returns}</td>
-                    <td>{item.description}</td>
-                    <td>{item.example}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <SyntaxFunctionTable items={SYNTAX_GUIDE_FUNCTIONS} />
+          <div className="strategy-syntax-guide-subsection">
+            <h5>市场 / 横截面函数</h5>
+            <p>这些函数只用于指标管理中的市场或横截面范围，按同一天股票集合计算，不参与普通逐股时间序列。</p>
+            <SyntaxFunctionTable items={SYNTAX_GUIDE_CROSS_SECTION_FUNCTIONS} />
           </div>
           <div className="strategy-syntax-guide-subsection">
             <h5>动态窗口 D 函数</h5>
@@ -330,34 +344,37 @@ PRE_H := REFD(H, GAP + 1, 60);`}</pre>
           </div>
         </section>
 
-        {fieldSections.map((section) => (
-          <section key={section.title} className="strategy-syntax-guide-section">
-            <h4>{section.title}</h4>
-            <p>{section.note}</p>
-            <div className="strategy-syntax-guide-table-wrap">
-              <table className="strategy-syntax-guide-table">
-                <thead>
-                  <tr>
-                    <th>字段</th>
-                    <th>范围</th>
-                    <th>作用</th>
-                    <th>例子</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {section.fields.map((item) => (
-                    <tr key={`${section.title}-${item.name}`}>
-                      <td><code>{item.name}</code></td>
-                      <td>{item.scope}</td>
-                      <td>{item.description}</td>
-                      <td>{item.example}</td>
+        {fieldSections.map((section) => {
+          const omitScope = section.title.startsWith('8.') || section.title.startsWith('10.')
+          return (
+            <section key={section.title} className="strategy-syntax-guide-section">
+              <h4>{section.title}</h4>
+              <p>{section.note}</p>
+              <div className="strategy-syntax-guide-table-wrap">
+                <table className={`strategy-syntax-guide-table strategy-syntax-guide-field-table${omitScope ? ' is-without-scope' : ''}`}>
+                  <thead>
+                    <tr>
+                      <th>字段</th>
+                      {omitScope ? null : <th className="strategy-syntax-guide-scope">范围</th>}
+                      <th>作用</th>
+                      <th>例子</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </section>
-        ))}
+                  </thead>
+                  <tbody>
+                    {section.fields.map((item) => (
+                      <tr key={`${section.title}-${item.name}`}>
+                        <td><code>{item.name}</code></td>
+                        {omitScope ? null : <td className="strategy-syntax-guide-scope">{item.scope}</td>}
+                        <td>{item.description}</td>
+                        <td>{item.example}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          )
+        })}
       </div>
     </div>
   )

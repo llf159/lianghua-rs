@@ -39,14 +39,16 @@
   flex-direction: row;
   align-items: center;
   gap: 6px;
-  min-height: 44px;
+  min-height: 36px;
+  font-size: 13px;
   cursor: pointer;
   white-space: nowrap;
 }
 .strategy-rule-tracking .strategy-tracking-check input {
-  width: 18px;
-  height: 18px;
-  min-height: 18px;
+  width: 17px;
+  height: 17px;
+  min-height: 17px;
+  margin: 0;
   flex: 0 0 auto;
   accent-color: var(--theme-orange-600);
 }
@@ -149,6 +151,10 @@
 }
 .strategy-rule-tracking button {
   min-height: 44px;
+}
+.strategy-rule-tracking .strategy-manage-inline-btn {
+  font-size: 12px;
+  line-height: 1.4;
 }
 .strategy-rule-tracking-add {
   justify-self: start;

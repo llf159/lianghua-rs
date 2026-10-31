@@ -1,14 +1,17 @@
+export type DataTaskProgressSegment = {
+  key: string
+  label: string
+  state: 'done' | 'active' | 'pending'
+  progress?: number | null
+}
+
 type DataTaskProgressProps = {
   phaseLabel: string
   phaseStepPillText: string
   phaseStepStatText: string
   actionLabel: string
   progressPercent: number | null
-  progressSegments?: Array<{
-    key: string
-    label: string
-    state: 'done' | 'active' | 'pending'
-  }> | null
+  progressSegments?: DataTaskProgressSegment[] | null
   elapsedText: string
   estimatedRemainingText?: string
   estimatedTotalText?: string
@@ -56,16 +59,6 @@ export default function DataTaskProgress({
             <strong>{progressPercent === null ? '--' : `${Math.floor(shownProgressPercent * 10) / 10}%`}</strong>
             <span>{elapsedText}</span>
           </div>
-          {onCancel ? (
-            <button type="button" className="data-download-secondary-btn" disabled={cancelDisabled} onClick={onCancel}>
-              停止
-            </button>
-          ) : null}
-          {onRollback ? (
-            <button type="button" className="data-download-secondary-btn" disabled={cancelDisabled} onClick={onRollback}>
-              撤回
-            </button>
-          ) : null}
         </div>
       </div>
       <div
@@ -91,7 +84,14 @@ export default function DataTaskProgress({
                 className={`data-download-progress-segment is-${segment.state}`}
                 title={segment.label}
                 aria-label={segment.label}
-              />
+              >
+                {segment.progress !== undefined && segment.progress !== null && segment.progress > 0 ? (
+                  <span
+                    className="data-download-progress-segment-fill"
+                    style={{ width: `${Math.max(0, Math.min(100, segment.progress))}%` }}
+                  />
+                ) : null}
+              </span>
             ))}
           </div>
         ) : null}
@@ -127,7 +127,35 @@ export default function DataTaskProgress({
           </div>
         ) : null}
       </div>
-      <div className="data-download-progress-text">{message ?? fallbackMessage}</div>
+      <div className="data-download-progress-footer">
+        <div className="data-download-progress-text">{message ?? fallbackMessage}</div>
+        {onCancel || onRollback ? (
+          <div className="data-download-progress-actions">
+            {onCancel ? (
+              <button
+                type="button"
+                className="data-download-progress-action-btn"
+                disabled={cancelDisabled}
+                title="停止任务并保留已提交结果"
+                onClick={onCancel}
+              >
+                停止
+              </button>
+            ) : null}
+            {onRollback ? (
+              <button
+                type="button"
+                className="data-download-progress-action-btn is-danger"
+                disabled={cancelDisabled}
+                title="停止任务并撤回本次研究记录"
+                onClick={onRollback}
+              >
+                撤回
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
     </div>
   )
 }

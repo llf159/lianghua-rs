@@ -620,12 +620,16 @@ fn scoring_stock_group_batch(
     ts_group: &[String],
     memory_mode: ScoringMemoryMode,
     tracking: &ScoringTrackingPlan,
+    check_stop: bool,
 ) -> Result<ScoreBatch, String> {
     let mut rows_map = worker_reader.load_batch(ts_group, adj_type, query_start_date, end_date)?;
     let mut group_batch = ScoreBatch::default();
     let mut stock_rows = Vec::with_capacity(ts_group.len());
 
     for ts_code in ts_group {
+        if check_stop {
+            lianghua_model::task::checkpoint()?;
+        }
         let mut row = match rows_map.remove(ts_code.as_str()) {
             Some(r) => r,
             None => {
@@ -659,6 +663,9 @@ fn scoring_stock_group_batch(
     }
 
     for (ts_code, row) in stock_rows {
+        if check_stop {
+            lianghua_model::task::checkpoint()?;
+        }
         let batch = (|mut row: RowData,
                       score_start_date: &str,
                       rules_cache: &[CachedRule],
@@ -848,6 +855,7 @@ pub fn scoring_all_to_db(
                 )
             },
             |worker, ts_group| -> Result<(), String> {
+                lianghua_model::task::checkpoint()?;
                 let (sender, worker_reader, cyq_chen_injector, similarity_rank_injector) =
                     worker.as_ref().map_err(Clone::clone)?;
                 let batch = scoring_stock_group_batch(
@@ -868,6 +876,7 @@ pub fn scoring_all_to_db(
                     ts_group,
                     ScoringMemoryMode::All,
                     &tracking,
+                    true,
                 )?;
                 sender
                     .send(ScoreWriteMessage::Batch(batch))
@@ -1088,6 +1097,7 @@ pub fn scoring_all_to_memory_with_mode(
                     ts_group,
                     memory_mode,
                     &tracking,
+                    false,
                 )?;
                 if let Some(progress) = progress {
                     let mut finished = progress_counter.lock().map_err(|_| "评分进度锁已损坏")?;

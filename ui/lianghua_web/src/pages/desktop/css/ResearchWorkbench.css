@@ -161,7 +161,6 @@
 .research-history-formulas pre { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.7; }
 .research-comparison-table { margin-top: 14px; }
 .research-comparison-table :where(th,td):not(:first-child) { text-align: right; font-variant-numeric: tabular-nums; }
-.research-history-delete { margin-bottom: 8px; }
 .research-run-actions { margin-block: 16px; }
 .research-strategy-editor { margin-block: 12px; }
 .research-strategy-editor .strategy-manage-title { font-size: 16px; }
@@ -172,9 +171,13 @@
 
 .research-records { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,260px),1fr)); gap: 12px; margin-top: 14px; }
 .research-record { min-width: 0; padding: 12px; border: 1px solid #e3e8ef; border-radius: 8px; background: #fafbfc; }
-.research-record-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
-.research-record-head strong { min-width: 0; overflow-wrap: anywhere; font-size: 13px; color: #334155; }
-.research-record-head button { flex: none; }
+.research-record-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px 10px; margin-bottom: 6px; }
+.research-record-head strong { flex: 1 1 140px; min-width: 0; overflow-wrap: anywhere; font-size: 13px; line-height: 1.5; color: #334155; }
+.research-record-actions { display: inline-flex; align-items: center; gap: 2px; margin-left: auto; padding: 2px; border: 1px solid #e3e8ef; border-radius: 9px; background: #fff; }
+.research-record-action { display: inline-flex; align-items: center; justify-content: center; min-height: 36px; padding: 6px 9px; border: 0; border-radius: 6px; background: transparent; color: #64748b; font-size: 12px; line-height: 1.4; cursor: pointer; }
+.research-record-action:hover:not(:disabled) { background: #eef2f7; color: #334155; }
+.research-record-delete { color: #b42318; }
+.research-record-delete:hover:not(:disabled) { background: #fff1f0; color: #8f1d14; }
 .research-record-summary { color: #64748b; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; margin-block: 8px; }
 .research-record-note { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; line-height: 1.7; color: #334155; margin-bottom: 0; }
 .research-record-editor { display: grid; gap: 10px; margin-top: 12px; }

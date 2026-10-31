@@ -2526,6 +2526,7 @@ dependencies = [
  "lianghua-core",
  "lianghua-data",
  "lianghua-download",
+ "lianghua-model",
  "lianghua-scoring",
  "rayon",
  "serde",
