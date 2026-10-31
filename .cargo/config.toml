@@ -1,2 +1,5 @@
+[env]
+RUST_MIN_STACK = { value = "268435456", force = true }
+
 [target.x86_64-unknown-linux-gnu]
 rustflags = ["-L", "native=/usr/local/lib"]

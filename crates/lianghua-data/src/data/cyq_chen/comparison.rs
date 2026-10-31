@@ -1,8 +1,9 @@
 use super::{
-    ChenChipConfig, ChenChipFeatureState, ChenChipOrigin, ChenChipSnapshot, ChipChangeConfig,
-    ChipChangeStrategy, ChipDirection, ChipHolder, CompiledChipChangeConfig, EPS,
-    bars::bucket_step, bars::build_initial_buckets, bars::build_validated_bars,
-    compute_chen_chip_snapshots_with_compiled_config, replay_chen_chip_snapshots,
+    ChenChipConfig, ChenChipFeatureState, ChenChipOrigin, ChenChipRetention,
+    ChenChipRetentionRequest, ChenChipSnapshot, ChipChangeConfig, ChipChangeStrategy,
+    ChipDirection, ChipHolder, CompiledChipChangeConfig, EPS, bars::bucket_step,
+    bars::build_initial_buckets, bars::build_validated_bars,
+    compute_chen_chip_snapshots_with_retention, replay_chen_chip_snapshots,
 };
 use crate::data::RowData;
 use serde::Serialize;
@@ -106,11 +107,36 @@ pub fn compute_chen_chip_mechanism_comparison(
     chip_config: &CompiledChipChangeConfig,
     config: ChenChipConfig,
 ) -> Result<(Vec<ChenChipSnapshot>, ChenChipMechanismComparison), String> {
-    let current = compute_chen_chip_snapshots_with_compiled_config(
+    let (snapshots, comparison, _) = compute_chen_chip_mechanism_comparison_with_retention(
         row_data,
         output_start_date,
         chip_config,
         config,
+        None,
+    )?;
+    Ok((snapshots, comparison))
+}
+
+pub fn compute_chen_chip_mechanism_comparison_with_retention(
+    row_data: &RowData,
+    output_start_date: &str,
+    chip_config: &CompiledChipChangeConfig,
+    config: ChenChipConfig,
+    request: Option<&ChenChipRetentionRequest>,
+) -> Result<
+    (
+        Vec<ChenChipSnapshot>,
+        ChenChipMechanismComparison,
+        Option<ChenChipRetention>,
+    ),
+    String,
+> {
+    let (current, retention) = compute_chen_chip_snapshots_with_retention(
+        row_data,
+        output_start_date,
+        chip_config,
+        config,
+        request,
     )?;
     let mut comparison = ChenChipMechanismComparison {
         simulation_start_date: None,
@@ -118,7 +144,7 @@ pub fn compute_chen_chip_mechanism_comparison(
         days: Vec::with_capacity(current.len()),
     };
     if current.is_empty() {
-        return Ok((current, comparison));
+        return Ok((current, comparison, retention));
     }
 
     let mut without_posterior = chip_config.clone();
@@ -133,6 +159,7 @@ pub fn compute_chen_chip_mechanism_comparison(
         config,
         &mut ChenChipFeatureState::default(),
         false,
+        None,
         |without| {
             let original = current
                 .get(comparison.days.len())
@@ -201,6 +228,7 @@ pub fn compute_chen_chip_mechanism_comparison(
         config,
         &mut ChenChipFeatureState::default(),
         false,
+        None,
         |reference| {
             let original = current
                 .get(reference_index)
@@ -235,12 +263,13 @@ pub fn compute_chen_chip_mechanism_comparison(
     if reference_index != current.len() {
         return Err("等概率参照快照数量改变，无法比较".into());
     }
-    Ok((current, comparison))
+    Ok((current, comparison, retention))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data::cyq_chen::compute_chen_chip_snapshots_with_compiled_config;
     use crate::data::cyq_chen::test_support::{assert_close, sample_row_data};
 
     #[test]

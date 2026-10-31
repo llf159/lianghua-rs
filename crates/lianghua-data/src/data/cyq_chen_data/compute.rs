@@ -646,6 +646,7 @@ pub(super) fn compute_prepared_cyq_chen_stock_group_batch(
                     config,
                     &mut state,
                     false,
+                    None,
                     |snapshot| {
                         if snapshot
                             .trade_date
@@ -1486,6 +1487,15 @@ mod tests {
             })
             .unwrap();
         assert_eq!(stored, 64);
+        let (age_json, age_version, initial): (String, u32, f64) = conn.query_row(
+            "SELECT age_summary, age_summary_version, age_initial FROM cyq_chen_snapshot LIMIT 1", [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        ).unwrap();
+        let age: crate::data::cyq_chen::ChenChipAgeSummary =
+            serde_json::from_str(&age_json).unwrap();
+        assert_eq!(Some(&age), snapshot.age_summary.as_ref());
+        assert_eq!(age.version, age_version);
+        assert_eq!(age.initial_pct, initial);
         drop(conn);
         drop(reader);
         fs::remove_dir_all(source_dir).unwrap();

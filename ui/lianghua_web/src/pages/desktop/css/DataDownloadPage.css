@@ -607,6 +607,12 @@
   gap: 4px;
 }
 
+.data-download-progress-head-end {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
 .data-download-progress-value strong {
   color: #8a3f00;
   font-size: 28px;

@@ -99,6 +99,7 @@ impl ValidationResearchOutput {
         min_listed: usize,
         codes: &[String],
         snapshot_baseline_scores: bool,
+        progress: Option<&(dyn Fn(&str) -> Result<(), String> + Sync)>,
     ) -> Result<(), String> {
         let conn = self.open()?;
         let prepared: i64 = conn
@@ -279,6 +280,11 @@ impl ValidationResearchOutput {
                 .map_err(|e| e.to_string())?;
             let temporary = self.path.with_extension("baseline.toml");
             std::fs::write(&temporary, &configuration).map_err(|e| e.to_string())?;
+            let report = |finished, total| {
+                progress.map_or(Ok(()), |progress| {
+                    progress(&format!("研究基线评分 {finished}/{total}"))
+                })
+            };
             let scored = crate::scoring::runner::scoring_all_to_memory_with_mode(
                 source,
                 Some(temporary.to_str().ok_or("基线配置路径不是有效UTF-8")?),
@@ -286,6 +292,7 @@ impl ValidationResearchOutput {
                 start,
                 end,
                 crate::scoring::runner::ScoringMemoryMode::RuleBacktest,
+                progress.map(|_| &report as &(dyn Fn(usize, usize) -> Result<(), String> + Sync)),
             );
             let _ = std::fs::remove_file(&temporary);
             let (scored, profile) = scored?;

@@ -18,7 +18,7 @@ use crate::expr::{
     },
 };
 
-pub const CYQ_CHEN_RUNTIME_FIELDS: [(&str, &str); 18] = [
+pub const CYQ_CHEN_RUNTIME_FIELDS: [(&str, &str); 21] = [
     ("CYQ_MIN", "min_price"),
     ("CYQ_MAX", "max_price"),
     ("CYQ_MT", "main_total"),
@@ -27,6 +27,9 @@ pub const CYQ_CHEN_RUNTIME_FIELDS: [(&str, &str); 18] = [
     ("CYQ_TTR", "total_trapped_ratio"),
     ("CYQ_TRAP_COEF", "trap_coef"),
     ("CYQ_REAL_LOSS20", "real_loss20"),
+    ("CYQ_AGE_NEW5", "age_new5"),
+    ("CYQ_AGE_KNOWN_GE20", "age_known_ge20"),
+    ("CYQ_AGE_INITIAL", "age_initial"),
     ("CYQ_MPR", "main_profit_ratio"),
     ("CYQ_MTR", "main_trapped_ratio"),
     ("CYQ_MAC", "main_avg_cost"),
@@ -392,6 +395,8 @@ impl CyqChenFieldInjector {
                 existing_columns.contains(&db_col.to_ascii_lowercase())
                     && (!matches!(*runtime_key, "CYQ_TRAP_COEF" | "CYQ_REAL_LOSS20")
                         || (feature_current && existing_columns.contains("feature_version")))
+                    && (!runtime_key.starts_with("CYQ_AGE_")
+                        || existing_columns.contains("age_summary_version"))
             })
             .collect::<Vec<_>>();
         if available_fields.is_empty() {
@@ -410,6 +415,10 @@ impl CyqChenFieldInjector {
         "CYQ_TRAP_COEF" | "CYQ_REAL_LOSS20" => format!(
             "CASE WHEN snap.feature_version = {} THEN TRY_CAST(snap.\"{db_col}\" AS DOUBLE) ELSE NULL END AS \"{db_col}\"",
             crate::data::cyq_chen::CYQ_CHEN_FEATURE_VERSION
+        ),
+        "CYQ_AGE_NEW5" | "CYQ_AGE_KNOWN_GE20" | "CYQ_AGE_INITIAL" => format!(
+            "CASE WHEN snap.age_summary_version = {} THEN TRY_CAST(snap.\"{db_col}\" AS DOUBLE) ELSE NULL END AS \"{db_col}\"",
+            crate::data::cyq_chen::CYQ_CHEN_AGE_SUMMARY_VERSION
         ),
         "CYQ_MPR" => format!(
             "COALESCE(TRY_CAST(snap.\"{db_col}\" AS DOUBLE), {}) AS \"{db_col}\"",
@@ -1084,6 +1093,49 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(stale.cols["CYQ_TRAP_COEF"], vec![None, None, None]);
+        let age_keys = HashSet::from([
+            "CYQ_AGE_NEW5".into(),
+            "CYQ_AGE_KNOWN_GE20".into(),
+            "CYQ_AGE_INITIAL".into(),
+        ]);
+        let mut missing = row();
+        CyqChenFieldInjector::new(directory.to_str().unwrap(), &age_keys)
+            .inject(&mut missing, "000001.SZ");
+        assert!(
+            missing
+                .cols
+                .values()
+                .all(|values| values.iter().all(Option::is_none))
+        );
+        let conn = duckdb::Connection::open(directory.join("cyq_chen.db")).unwrap();
+        conn.execute_batch("ALTER TABLE cyq_chen_snapshot ADD COLUMN age_summary_version INTEGER;
+            ALTER TABLE cyq_chen_snapshot ADD COLUMN age_new5 DOUBLE;
+            ALTER TABLE cyq_chen_snapshot ADD COLUMN age_known_ge20 DOUBLE;
+            ALTER TABLE cyq_chen_snapshot ADD COLUMN age_initial DOUBLE;
+            UPDATE cyq_chen_snapshot SET age_summary_version=1, age_new5=0, age_known_ge20=NULL, age_initial=100 WHERE trade_date='20240102';
+            UPDATE cyq_chen_snapshot SET age_summary_version=99, age_new5=5, age_known_ge20=90, age_initial=5 WHERE trade_date='20240103';").unwrap();
+        drop(conn);
+        let injector = CyqChenFieldInjector::new(directory.to_str().unwrap(), &age_keys);
+        let mut single = row();
+        let mut batch = vec![("000001.SZ".into(), row())];
+        assert!(injector.inject(&mut single, "000001.SZ").is_empty());
+        assert!(injector.inject_batch(&mut batch).is_empty());
+        assert_eq!(single.cols, batch[0].1.cols);
+        assert_eq!(single.cols["CYQ_AGE_NEW5"], vec![Some(0.0), None, None]);
+        assert_eq!(
+            single.cols["CYQ_AGE_INITIAL"],
+            vec![Some(100.0), None, None]
+        );
+        assert_eq!(single.cols["CYQ_AGE_KNOWN_GE20"], vec![None, None, None]);
+        let program = crate::expr::validation::parse_expression_program(
+            "CYQ_AGE_NEW5 < 30 AND CYQ_AGE_KNOWN_GE20 > 40 AND CYQ_AGE_INITIAL < 10",
+        )
+        .unwrap();
+        assert_eq!(
+            super::collect_used_cyq_chen_runtime_keys(&[&program]),
+            age_keys
+        );
+        drop(injector);
         std::fs::remove_dir_all(directory).unwrap();
     }
 

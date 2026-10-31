@@ -327,6 +327,7 @@ pub(super) fn build_snapshot(
         trap_coef: None,
         real_loss20: None,
         feature_version: None,
+        age_summary: None,
         feature_days: None,
         unknown_trapped: None,
         trade_date: Some(bar.trade_date.clone()),

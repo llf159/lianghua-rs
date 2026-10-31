@@ -2463,6 +2463,11 @@ export default function CyqChenPage() {
   const [selectedTradeDate, setSelectedTradeDate] = useState('')
   const [chipPeakMode, setChipPeakMode] = useState<ChipPeakMode>('total')
   const [compareMechanisms, setCompareMechanisms] = useState(false)
+  const [retentionEnabled, setRetentionEnabled] = useState(false)
+  const [retentionAnchor, setRetentionAnchor] = useState('')
+  const [retentionEvaluation, setRetentionEvaluation] = useState('')
+  const [retentionLow, setRetentionLow] = useState('')
+  const [retentionHigh, setRetentionHigh] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
@@ -2659,6 +2664,12 @@ export default function CyqChenPage() {
       const nextResult = await runCyqChenSingleStockTest({
         version: strategyVersion,
         compareMechanisms,
+        retention: retentionEnabled ? {
+          anchorDate: normalizeDateInput(retentionAnchor),
+          evaluationDate: normalizeDateInput(retentionEvaluation),
+          priceLow: Number(retentionLow),
+          priceHigh: Number(retentionHigh),
+        } : null,
         sourcePath: nextSourcePath,
         tsCode: resolvedTestTsCode,
         startDate: normalizeDateInput(startDateInput) || null,
@@ -2763,6 +2774,17 @@ export default function CyqChenPage() {
           <input type="checkbox" checked={compareMechanisms} onChange={(event) => setCompareMechanisms(event.target.checked)} disabled={loading} />
           <span>比较筹码生成机制（额外计算两次）</span>
         </label>
+        <details className="cyq-chen-retention-form">
+          <summary>固定成本区旧筹码留存（只读查询）</summary>
+          <label className="cyq-chen-compare-toggle"><input type="checkbox" checked={retentionEnabled} onChange={(event) => setRetentionEnabled(event.target.checked)} disabled={loading} />随本次计算查询留存</label>
+          <div className="cyq-chen-retention-inputs">
+            <label>锚点收盘日期<input value={retentionAnchor} onChange={(event) => setRetentionAnchor(event.target.value)} placeholder="YYYYMMDD" /></label>
+            <label>评价日期<input value={retentionEvaluation} onChange={(event) => setRetentionEvaluation(event.target.value)} placeholder="YYYYMMDD" /></label>
+            <label>固定成本下界<input type="number" value={retentionLow} onChange={(event) => setRetentionLow(event.target.value)} /></label>
+            <label>固定成本上界<input type="number" value={retentionHigh} onChange={(event) => setRetentionHigh(event.target.value)} /></label>
+          </div>
+          <p>采用与输入区间相交的锚点整桶，边界随后固定；日期须在本次模拟历史内，最多间隔120次报价更新。成本坐标为前复权，质量按每100份模型库存计。</p>
+        </details>
         <div className="cyq-chen-run-row">
           <button className="cyq-chen-primary-btn cyq-chen-run-btn" type="button" onClick={runTest} disabled={loading}>
             {loading ? '计算中...' : '计算'}
@@ -2834,6 +2856,45 @@ export default function CyqChenPage() {
             </select>
           </label>
         </div>
+
+        {selectedSnapshot ? (
+          <div className="cyq-chen-comparison">
+            <h4>模型持仓年龄（报价日） · {selectedSnapshot.tradeDate}</h4>
+            {selectedSnapshot.ageSummary ? <>
+              <p>混合库存按桶等比例出库；观察起点 {selectedSnapshot.ageSummary.observationStartDate ?? '旧检查点未记录'}，共 {selectedSnapshot.ageSummary.observedDays} 次报价。零换手报价推进年龄，停牌无报价不推进。</p>
+              <div className="cyq-chen-age-bar" aria-label="年龄分布，分母为全部模型库存">
+                {selectedSnapshot.ageSummary.masses.map((mass, index) => (
+                  <span key={index} style={{ flex: mass, background: ['#3b82f6', '#14b8a6', '#84cc16', '#eab308', '#f97316', '#94a3b8'][index] }}
+                    title={`${['0—4日', '5—19日', '20—59日', '60—119日', '120+日', '初始年龄未知'][index]}：${formatRatioPercent(mass / selectedSnapshot.ageSummary!.totalMass)}`} />
+                ))}
+              </div>
+              <dl className="cyq-chen-comparison-metrics">
+                {selectedSnapshot.ageSummary.masses.map((mass, index) => <div key={index}>
+                  <dt>{['0—4日', '5—19日', '20—59日', '60—119日', '120+日（开区间）', '初始年龄未知'][index]}</dt>
+                  <dd>{formatRatioPercent(mass / selectedSnapshot.ageSummary!.totalMass)}</dd>
+                </div>)}
+              </dl>
+              <details><summary>表达式读数与口径</summary>
+                <p>NEW5：{selectedSnapshot.ageSummary.new5Pct == null ? '观察不足5次' : `${formatNumber(selectedSnapshot.ageSummary.new5Pct)} 个百分点`}；KNOWN_GE20：{selectedSnapshot.ageSummary.knownGe20Pct == null ? '观察不足21次' : `${formatNumber(selectedSnapshot.ageSummary.knownGe20Pct)} 个百分点`}。</p>
+                <p>初始未知始终单列；120+合并所有更长年龄，不能计算精确平均年龄。这里不表示主力年龄，也不等同于基础成本K/U或主散来源。</p>
+              </details>
+            </> : <p>此结果没有兼容的年龄摘要，请重新计算单股临时结果；缺失不代表零。</p>}
+          </div>
+        ) : null}
+
+        {result?.retention ? <div className="cyq-chen-comparison">
+          <h4>固定区间旧筹码留存 · {result.retention.request.anchorDate} → {result.retention.request.evaluationDate}</h4>
+          <p>连续模拟起点 {result.retention.simulationStartDate ?? '--'}；前复权成本区 {formatNumber(result.retention.actualPriceLow)}—{formatNumber(result.retention.actualPriceHigh)}；间隔 {result.retention.quoteUpdates ?? '--'} 次报价更新。</p>
+          {result.retention.unavailableReason ? <p>{result.retention.unavailableReason}</p> : <dl className="cyq-chen-comparison-metrics">
+            <div><dt>锚点质量</dt><dd>{formatNumber(result.retention.anchorMass)}</dd></div>
+            <div><dt>旧批次剩余</dt><dd>{formatNumber(result.retention.oldRemaining)}</dd></div>
+            <div><dt>区间当前总量</dt><dd>{formatNumber(result.retention.currentMass)}</dd></div>
+            <div><dt>锚点后补入</dt><dd>{formatNumber(result.retention.addedMass)}</dd></div>
+            <div><dt>留存率</dt><dd>{result.retention.retentionRatio == null ? '无锚点库存' : formatRatioPercent(result.retention.retentionRatio)}</dd></div>
+            <div><dt>补入占比</dt><dd>{result.retention.addedRatio == null ? '无当前库存' : formatRatioPercent(result.retention.addedRatio)}</dd></div>
+          </dl>}
+          <p>初始年龄未知库存参与事件存活；这是混合出库模型的批次估计，质量不是跨日真实股数。</p>
+        </div> : null}
 
         {selectedBasisDay ? (
           <section className="cyq-chen-comparison" aria-label="基础成本与未知库存">

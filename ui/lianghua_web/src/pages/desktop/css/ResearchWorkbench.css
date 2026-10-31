@@ -198,27 +198,9 @@
   display: grid;
   gap: 8px;
   margin: 12px 0;
-  padding: 12px;
-  border: 1px solid var(--panel-border, #374151);
-  border-radius: 10px;
+  justify-items: start;
 }
-
-.research-run-progress-head,
-.research-run-progress-detail {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.research-run-progress progress {
+.research-run-progress > .data-download-progress {
   width: 100%;
-  height: 10px;
-  accent-color: #3b82f6;
-}
-
-.research-run-progress-detail {
-  color: var(--text-secondary, #9ca3af);
-  font-size: 13px;
+  box-sizing: border-box;
 }

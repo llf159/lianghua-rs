@@ -1292,6 +1292,7 @@ pub fn run_transient_scene_layer_backtest(
         &params.start_date,
         &params.end_date,
         ScoringMemoryMode::SceneOnly,
+        None,
     )?;
     let scene_rows = (|rows: Vec<SceneBacktestRow>,
                        allowed_ts_codes: Option<&HashSet<String>>|
@@ -1447,6 +1448,7 @@ pub fn run_transient_rule_layer_backtest(
         &params.start_date,
         &params.end_date,
         ScoringMemoryMode::RuleBacktest,
+        None,
     )?;
     filter_compact_rule_score_batch(&mut score_batch, params.allowed_ts_codes.as_ref());
     let summary_rows = score_batch.summary_rows;
@@ -1677,6 +1679,7 @@ pub fn run_transient_rank_layer_backtest(
         &input.start_date,
         &input.end_date,
         ScoringMemoryMode::SummaryOnly,
+        None,
     )?;
     let summary_rows = filter_score_summary_rows_by_ts_codes(
         score_batch.summary_rows,

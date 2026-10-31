@@ -82,8 +82,8 @@ fn query(conn: &Connection, trade_date: &str) -> Result<HashMap<String, DailyBas
             SELECT ts_code,
                 closes[1].value, closes[5].value, closes[6].value,
                 CASE WHEN LEN(volumes) = 5
-                    AND LEN(LIST_DISTINCT(LIST_TRANSFORM(volumes, x -> x.day))) = 5
-                    THEN LIST_AVG(LIST_TRANSFORM(volumes, x -> x.volume)) END AS average_volume
+                    AND LEN(LIST_DISTINCT(LIST_TRANSFORM(volumes, lambda x: x.day))) = 5
+                    THEN LIST_AVG(LIST_TRANSFORM(volumes, lambda x: x.volume)) END AS average_volume
             FROM baselines
             "#,
         )

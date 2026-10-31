@@ -744,6 +744,7 @@ bonus_points = 1.0
             "20240102",
             "20240104",
             scoring::runner::ScoringMemoryMode::RuleBacktest,
+            None,
         )
         .unwrap();
         let tracked = memory

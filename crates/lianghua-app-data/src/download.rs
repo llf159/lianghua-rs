@@ -2170,6 +2170,7 @@ pub fn run_prepared_stock_data_indicator_columns_rebuild(
                 )?;
                 let mut batch_rows = 0_u64;
                 let mut compute_done = false;
+                let mut last_label = None;
 
                 loop {
                     match rx.recv() {
@@ -2185,26 +2186,8 @@ pub fn run_prepared_stock_data_indicator_columns_rebuild(
                             batch_rows += batch.row_count;
                             updated_rows += batch.row_count;
                             finished_groups += 1;
-
-                            if let Some(cb) = progress_cb {
-                                cb(lianghua_download::download::runner::DownloadProgress {
-                                    phase: "rebuild_stock_data_indicator_columns".to_string(),
-                                    finished: finished_groups,
-                                    total: work_items.len(),
-                                    current_label: Some(format!(
-                                        "{} / {}",
-                                        batch.ts_code, batch.adj_type_label
-                                    )),
-                                    message: format!(
-                                        "已补算 {}/{} 组，当前 {} / {}，本组 {} 行。",
-                                        finished_groups,
-                                        work_items.len(),
-                                        batch.ts_code,
-                                        batch.adj_type_label,
-                                        batch.row_count
-                                    ),
-                                });
-                            }
+                            last_label =
+                                Some(format!("{} / {}", batch.ts_code, batch.adj_type_label));
 
                             if batch_rows >= 131_072 {
                                 break;
@@ -2229,6 +2212,22 @@ pub fn run_prepared_stock_data_indicator_columns_rebuild(
                     flush_stock_data_indicator_stage_table(tx, &indicator_names)
                 })?;
                 committed_rows += batch_rows;
+                if batch_rows > 0 {
+                    if let Some(cb) = progress_cb {
+                        cb(DownloadProgress {
+                            phase: "rebuild_stock_data_indicator_columns".into(),
+                            finished: finished_groups,
+                            total: work_items.len(),
+                            current_label: last_label,
+                            message: format!(
+                                "已提交 {}/{} 组，累计回写 {} 行。",
+                                finished_groups,
+                                work_items.len(),
+                                committed_rows
+                            ),
+                        });
+                    }
+                }
 
                 if compute_done {
                     break;

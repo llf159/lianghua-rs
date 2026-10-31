@@ -105,6 +105,9 @@ const SYNTAX_GUIDE_FIELD_SECTIONS: SyntaxGuideFieldSection[] = [
     fields: [
       { name: 'CYQ_TRAP_COEF', scope: '通用', description: '逐批汇总：筹码份额×正的(成本价/现价−1)×连续套牢日数/120，时间120日封顶；表示按时间加权的浮亏占当前流通市值比例，可超过1。解套归零，覆盖不足时为空。版本2需重建历史，旧阈值不适用。', example: 'CYQ_TRAP_COEF > 0.2' },
       { name: 'CYQ_REAL_LOSS20', scope: '通用', description: '20个交易日的有界模拟实现亏损日均：卖出份额×正的(成本−成交代表价)/(成本＋成交代表价)。不是账户亏损或累计亏损百分比；不足20日为空。', example: 'CYQ_REAL_LOSS20 < 0.005' },
+      { name: 'CYQ_AGE_NEW5', scope: '通用', description: '混合年龄中0—4报价日成交筹码占全部库存的百分点（0—100）；至少5次观察，旧历史未补算时为空。', example: 'CYQ_AGE_NEW5 < 30' },
+      { name: 'CYQ_AGE_KNOWN_GE20', scope: '通用', description: '已知成交来源20+报价日占全部库存的百分点，不含初始未知；至少21次观察。', example: 'CYQ_AGE_KNOWN_GE20 > 40' },
+      { name: 'CYQ_AGE_INITIAL', scope: '通用', description: '混合年龄账本中初始年龄未知库存的百分点（0—100），不是主散初始来源或基础K/U。', example: 'CYQ_AGE_INITIAL < 10' },
       { name: 'CYQ_TPR / CYQ_TTR', scope: '通用', description: '新筹码整体获利 / 套牢筹码比例。', example: 'CYQ_TPR > 0.6 AND CYQ_TTR < 0.35' },
       { name: 'CYQ_MPR / CYQ_MTR', scope: '通用', description: '新筹码主力获利 / 套牢筹码比例。', example: 'CYQ_MPR > 0.6 AND CYQ_MTR < 0.35' },
       { name: 'CYQ_MAC', scope: '通用', description: '新筹码主力平均成本，按价格分桶的主力筹码加权计算。', example: 'C > CYQ_MAC' },

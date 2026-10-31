@@ -145,7 +145,7 @@ pub fn read_rank_comparison_baseline(source_path: &str) -> Result<String, String
 
 pub fn run_rank_comparison(
     request: RankComparisonRequest,
-    progress: &dyn Fn(&str) -> Result<(), String>,
+    progress: &(dyn Fn(&str) -> Result<(), String> + Sync),
     cancelled: &dyn Fn() -> bool,
 ) -> Result<RankComparisonResult, String> {
     request.grouping.validate()?;
@@ -238,6 +238,7 @@ pub fn run_rank_comparison(
             &scoring_start_date,
             &request.end_date,
             ScoringMemoryMode::SummaryOnly,
+            Some(&|finished, total| progress(&format!("基线评分 {finished}/{total}"))),
         )?;
         progress("重算候选评分与跟踪")?;
         let (candidate, candidate_profile) = scoring_all_to_memory_with_mode(
@@ -247,6 +248,7 @@ pub fn run_rank_comparison(
             &scoring_start_date,
             &request.end_date,
             ScoringMemoryMode::SummaryOnly,
+            Some(&|finished, total| progress(&format!("候选评分 {finished}/{total}"))),
         )?;
         let source_db = crate::data::source_db_path(source);
         let source_db = source_db
@@ -302,6 +304,7 @@ pub fn run_rank_comparison(
             request.min_listed_trade_days,
             &codes,
             false,
+            None,
         )?;
         {
             let db = evidence.open()?;
@@ -531,12 +534,40 @@ pub fn run_rank_comparison(
             summaries: comparison.summaries,
         })
     })();
-    let _ = fs::remove_dir_all(&temporary);
-    let _ = fs::remove_file(&evidence_path);
-    let _ = fs::remove_file(format!("{}.wal", evidence_path.to_string_lossy()));
-    if result.is_err() {
-        let _ = fs::remove_file(&membership_staging);
-        let _ = fs::remove_file(format!("{}.wal", membership_staging.to_string_lossy()));
+    let mut cleanup_errors = Vec::new();
+    for path in [
+        &temporary,
+        &evidence_path,
+        &std::path::PathBuf::from(format!("{}.wal", evidence_path.to_string_lossy())),
+    ] {
+        let removed = if path == &temporary {
+            fs::remove_dir_all(path)
+        } else {
+            fs::remove_file(path)
+        };
+        if let Err(error) = removed {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                cleanup_errors.push(format!("{}: {error}", path.display()));
+            }
+        }
+    }
+    if result.is_err() || !cleanup_errors.is_empty() {
+        for path in [
+            &membership_staging,
+            &std::path::PathBuf::from(format!("{}.wal", membership_staging.to_string_lossy())),
+        ] {
+            if let Err(error) = fs::remove_file(path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    cleanup_errors.push(format!("{}: {error}", path.display()));
+                }
+            }
+        }
+    }
+    if !cleanup_errors.is_empty() {
+        return Err(format!(
+            "清理排名对照临时文件失败：{}",
+            cleanup_errors.join("；")
+        ));
     }
     result
 }

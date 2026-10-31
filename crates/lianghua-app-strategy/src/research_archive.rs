@@ -1102,6 +1102,59 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn cancelled_archive_can_be_retained_or_withdrawn_without_touching_previous_run() {
+        let root =
+            std::env::temp_dir().join(format!("lianghua-cancel-{:016x}", rand::random::<u64>()));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.to_str().unwrap();
+        let previous = save_research_archive(
+            source,
+            None,
+            "previous".into(),
+            json!({}),
+            json!({}),
+            "expression_validation",
+            "draft",
+            None,
+            None,
+        )
+        .unwrap();
+        let run = save_research_archive(
+            source,
+            None,
+            "current".into(),
+            json!({}),
+            json!({}),
+            "expression_validation",
+            "running",
+            None,
+            None,
+        )
+        .unwrap();
+        let run_path = archive_run_path(source, &run.run_id).unwrap();
+        fs::write(run_path.join("evidence.db"), b"unfinished").unwrap();
+        finish_research_archive(
+            source,
+            &run.run_id,
+            "cancelled",
+            None,
+            json!({"error":"cancelled"}),
+        )
+        .unwrap();
+        assert_eq!(
+            read_research_archive_header(source, &run.run_id)
+                .unwrap()
+                .status,
+            "cancelled"
+        );
+        assert!(!run_path.join("evidence.db").exists());
+        delete_research_archive(source, &run.run_id).unwrap();
+        assert!(!run_path.exists());
+        assert!(read_research_archive_header(source, &previous.run_id).is_ok());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn archived_rank_members_keep_three_day_missing_and_page_changes() {
         let root = std::env::temp_dir().join(format!(
             "lianghua-member-test-{:016x}",

@@ -6,8 +6,12 @@ mod comparison;
 mod config;
 pub use comparison::{
     ChenChipMechanismComparison, ChenChipMechanismDay, compute_chen_chip_mechanism_comparison,
+    compute_chen_chip_mechanism_comparison_with_retention,
 };
 mod features;
+mod retention;
+use retention::ChenChipRetentionCapture;
+pub use retention::{ChenChipRetention, ChenChipRetentionRequest, query_chen_chip_retention};
 mod simulate;
 use crate::data::cyq_chen::bars::{
     bucket_step, build_initial_buckets, build_validated_bars, ensure_bucket_rate_series,
@@ -22,7 +26,7 @@ use crate::data::cyq_chen::simulate::{
 #[cfg(test)]
 mod test_support;
 
-pub use features::{CYQ_CHEN_FEATURE_VERSION, ChenChipFeatureState};
+pub use features::{CYQ_CHEN_AGE_SUMMARY_VERSION, CYQ_CHEN_FEATURE_VERSION, ChenChipFeatureState};
 
 pub use config::{
     collect_chen_chip_runtime_keys, estimate_chen_chip_expression_warmup,
@@ -148,6 +152,7 @@ pub struct ChenChipSnapshot {
     pub origin: Option<ChenChipOrigin>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub flow: Option<ChenChipFlow>,
+    pub age_summary: Option<ChenChipAgeSummary>,
     pub trap_coef: Option<f64>,
     pub real_loss20: Option<f64>,
     pub feature_version: Option<u32>,
@@ -169,6 +174,24 @@ pub struct ChenChipSnapshot {
     pub percent_70: ChenChipPercentRange,
     pub percent_90: ChenChipPercentRange,
     pub bins: Vec<ChenChipBin>,
+}
+
+/// Mixed inventory ages; masses use the model inventory unit, percentages use all inventory.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChenChipAgeSummary {
+    pub version: u32,
+    pub trade_date: String,
+    pub observation_start_date: Option<String>,
+    pub observed_days: usize,
+    pub clock: String,
+    pub model: String,
+    pub total_mass: f64,
+    /// 0–4, 5–19, 20–59, 60–119, 120+ quote updates, then initial age unknown.
+    pub masses: [f64; 6],
+    pub new5_pct: Option<f64>,
+    pub known_ge20_pct: Option<f64>,
+    pub initial_pct: f64,
 }
 
 /// Actual daily transfers in the model, in shares out of 100; reclassification is not trading.
@@ -341,6 +364,7 @@ pub fn compute_chen_chip_snapshots_with_compiled_config_with_features(
         config,
         feature_state,
         true,
+        None,
         |snapshot| {
             snapshots.push(snapshot);
             Ok(())
@@ -349,7 +373,42 @@ pub fn compute_chen_chip_snapshots_with_compiled_config_with_features(
     Ok(snapshots)
 }
 
+/// Capture a single retention event during the same replay that produces chart snapshots.
+pub fn compute_chen_chip_snapshots_with_retention(
+    row_data: &RowData,
+    output_start_date: &str,
+    chip_config: &CompiledChipChangeConfig,
+    config: ChenChipConfig,
+    request: Option<&ChenChipRetentionRequest>,
+) -> Result<(Vec<ChenChipSnapshot>, Option<ChenChipRetention>), String> {
+    let mut retention = request
+        .map(|request| ChenChipRetention::new(output_start_date, chip_config, config, request))
+        .transpose()?;
+    let mut snapshots = Vec::new();
+    replay_chen_chip_snapshots(
+        Cow::Borrowed(row_data),
+        output_start_date,
+        chip_config,
+        config,
+        &mut ChenChipFeatureState::default(),
+        true,
+        request
+            .zip(retention.as_mut())
+            .map(|(request, result)| ChenChipRetentionCapture {
+                request,
+                result,
+                query_only: false,
+            }),
+        |snapshot| {
+            snapshots.push(snapshot);
+            Ok(())
+        },
+    )?;
+    Ok((snapshots, retention))
+}
+
 /// Emit each output snapshot immediately, without retaining its historical bins.
+/// Query-only capture skips snapshots and stops at evaluation; chart capture continues replay.
 pub(super) fn replay_chen_chip_snapshots(
     row_data: Cow<'_, RowData>,
     output_start_date: &str,
@@ -357,6 +416,7 @@ pub(super) fn replay_chen_chip_snapshots(
     config: ChenChipConfig,
     feature_state: &mut ChenChipFeatureState,
     retain_history_state: bool,
+    mut retention: Option<ChenChipRetentionCapture<'_>>,
     mut emit: impl FnMut(ChenChipSnapshot) -> Result<(), String>,
 ) -> Result<(), String> {
     validate_compute_config(config)?;
@@ -424,6 +484,7 @@ pub(super) fn replay_chen_chip_snapshots(
     let mut before = Vec::new();
     let mut after_sell = Vec::new();
     let mut after_buy = Vec::new();
+    let mut frozen_bounds = std::collections::HashSet::new();
     let mut sell_bias_cache = std::collections::HashMap::new();
     for day_index in process_start_index..len {
         let Some(bar) = bars[day_index].as_ref() else {
@@ -487,8 +548,91 @@ pub(super) fn replay_chen_chip_snapshots(
         )?;
         normalize_buckets(&mut buckets)?;
         feature_state.observe(bar, &buckets, &before, &after_sell, &after_buy)?;
+        if let Some(capture) = retention.as_mut() {
+            let request = capture.request;
+            let result = &mut capture.result;
+            result
+                .simulation_start_date
+                .clone_from(&feature_state.observation_start_date);
+            if bar.trade_date == request.anchor_date {
+                let selected = feature_state
+                    .buckets
+                    .iter()
+                    .filter(|bucket| {
+                        bucket.high > request.price_low && bucket.low < request.price_high
+                    })
+                    .collect::<Vec<_>>();
+                result.anchor_observation = Some(feature_state.observed_days);
+                result.actual_price_low = selected.first().map(|bucket| bucket.low);
+                result.actual_price_high = selected.last().map(|bucket| bucket.high);
+                result.anchor_mass = Some(
+                    selected
+                        .iter()
+                        .map(|bucket| bucket.initial + bucket.ages.iter().sum::<f64>())
+                        .sum(),
+                );
+                frozen_bounds.extend(
+                    selected
+                        .iter()
+                        .map(|bucket| (bucket.low.to_bits(), bucket.high.to_bits())),
+                );
+            }
+            if bar.trade_date == request.evaluation_date {
+                result.evaluation_observation = Some(feature_state.observed_days);
+                if let Some(anchor) = result.anchor_observation {
+                    let distance = feature_state.observed_days - anchor;
+                    result.quote_updates = Some(distance);
+                    if distance > 120 {
+                        result.unavailable_reason =
+                            Some("超过120次报价更新，120+合并档不能区分锚点批次".into());
+                    } else if frozen_bounds.is_empty() {
+                        result.unavailable_reason = Some("固定区间未覆盖锚点成本桶".into());
+                    } else {
+                        let selected = feature_state
+                            .buckets
+                            .iter()
+                            .filter(|bucket| {
+                                frozen_bounds
+                                    .contains(&(bucket.low.to_bits(), bucket.high.to_bits()))
+                            })
+                            .collect::<Vec<_>>();
+                        if selected.len() != frozen_bounds.len() {
+                            result.unavailable_reason = Some("锚点桶边界已改变，无法比较".into());
+                        } else {
+                            let old = selected
+                                .iter()
+                                .map(|bucket| {
+                                    bucket.initial + bucket.ages[distance..].iter().sum::<f64>()
+                                })
+                                .sum::<f64>();
+                            let total = selected
+                                .iter()
+                                .map(|bucket| bucket.initial + bucket.ages.iter().sum::<f64>())
+                                .sum::<f64>();
+                            result.old_remaining = Some(old);
+                            result.current_mass = Some(total);
+                            result.added_mass = Some((total - old).max(0.0));
+                            result.retention_ratio = result
+                                .anchor_mass
+                                .filter(|mass| *mass > EPS)
+                                .map(|mass| old / mass);
+                            result.added_ratio =
+                                (total > EPS).then_some((total - old).max(0.0) / total);
+                            result.unavailable_reason = None;
+                        }
+                    }
+                } else {
+                    result.unavailable_reason = Some("锚点不在本次连续模拟的有效报价中".into());
+                }
+                if capture.query_only {
+                    return Ok(());
+                }
+            }
+        }
 
-        if day_index >= output_start_index {
+        if day_index >= output_start_index
+            && retention.as_ref().is_none_or(|capture| !capture.query_only)
+        {
             let mut snapshot =
                 build_snapshot(bar, &buckets, retain_history_state || day_index + 1 == len)?;
             snapshot.flow = Some(ChenChipFlow {

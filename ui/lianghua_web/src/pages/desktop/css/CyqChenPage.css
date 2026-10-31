@@ -621,3 +621,12 @@ body .cyq-chen-bin-table-wrap {
 }
 .cyq-chen-basis-events button { margin-top: 8px; min-height: 36px; }
 .cyq-chen-comparison li { overflow-wrap: anywhere; }
+
+.cyq-chen-age-bar { display: flex; height: 18px; width: 100%; overflow: hidden; border-radius: 6px; margin: 12px 0; }
+.cyq-chen-age-bar span { min-width: 0; }
+
+.cyq-chen-retention-inputs { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-top: 12px; }
+.cyq-chen-retention-inputs label { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.cyq-chen-retention-form { margin: 12px 0; }
+
+.cyq-chen-retention-inputs input { width: 100%; min-width: 0; box-sizing: border-box; min-height: 34px; padding: 0 9px; border: 1px solid #c9d4e5; border-radius: 7px; background: #fff; color: #172033; font: inherit; }

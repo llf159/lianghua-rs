@@ -14,10 +14,11 @@ use crate::{
     data::{
         DataReader, RowData, chip_change_rule_path,
         cyq_chen::{
-            ChenChipBasis, ChenChipConfig, ChenChipMechanismComparison, ChenChipSnapshot,
-            ChipChangeConfig, ChipChangeStrategy, collect_chen_chip_runtime_keys,
-            compute_chen_chip_basis, compute_chen_chip_mechanism_comparison,
-            compute_chen_chip_snapshots_with_compiled_config, round_chen_chip_snapshot,
+            ChenChipBasis, ChenChipConfig, ChenChipMechanismComparison, ChenChipRetention,
+            ChenChipRetentionRequest, ChenChipSnapshot, ChipChangeConfig, ChipChangeStrategy,
+            collect_chen_chip_runtime_keys, compute_chen_chip_basis,
+            compute_chen_chip_mechanism_comparison_with_retention,
+            compute_chen_chip_snapshots_with_retention, round_chen_chip_snapshot,
         },
         load_trade_date_list, source_db_path,
     },
@@ -37,6 +38,7 @@ pub struct CyqChenSingleStockRequest {
     pub version: Option<u32>,
     #[serde(default)]
     pub compare_mechanisms: bool,
+    pub retention: Option<ChenChipRetentionRequest>,
     pub source_path: String,
     pub ts_code: String,
     pub start_date: Option<String>,
@@ -70,6 +72,8 @@ pub struct CyqChenSingleStockData {
     pub snapshots: Vec<ChenChipSnapshot>,
     pub mechanism_comparison: Option<ChenChipMechanismComparison>,
     pub basis: Option<ChenChipBasis>,
+    pub retention: Option<ChenChipRetention>,
+    pub price_coordinate: String,
     pub l2_days: Vec<CyqChenL2Day>,
 }
 
@@ -1086,6 +1090,8 @@ pub fn run_cyq_chen_single_stock_test(
                     snapshots: Vec::new(),
                     mechanism_comparison: None,
                     basis: None,
+                    retention: None,
+                    price_coordinate: DEFAULT_ADJ_TYPE.into(),
                     l2_days: Vec::new(),
                 });
             }
@@ -1104,6 +1110,8 @@ pub fn run_cyq_chen_single_stock_test(
             snapshots: Vec::new(),
             mechanism_comparison: None,
             basis: None,
+            retention: None,
+            price_coordinate: DEFAULT_ADJ_TYPE.into(),
             l2_days: Vec::new(),
         });
     }
@@ -1195,29 +1203,30 @@ pub fn run_cyq_chen_single_stock_test(
     })(source_path, &ts_code, &start_date, &end_date)?;
     let output_start_date =
         resolve_output_start_date(&row_data, &start_date, &end_date, config.warmup_days);
-    let (mut snapshots, mechanism_comparison) =
+    let (mut snapshots, mechanism_comparison, retention) =
         if let Some(output_start_date) = output_start_date.as_deref() {
             if request.compare_mechanisms {
-                let (snapshots, comparison) = compute_chen_chip_mechanism_comparison(
-                    &row_data,
-                    output_start_date,
-                    &compiled_chip_config,
-                    config,
-                )?;
-                (snapshots, Some(comparison))
-            } else {
-                (
-                    compute_chen_chip_snapshots_with_compiled_config(
+                let (snapshots, comparison, retention) =
+                    compute_chen_chip_mechanism_comparison_with_retention(
                         &row_data,
                         output_start_date,
                         &compiled_chip_config,
                         config,
-                    )?,
-                    None,
-                )
+                        request.retention.as_ref(),
+                    )?;
+                (snapshots, Some(comparison), retention)
+            } else {
+                let (snapshots, retention) = compute_chen_chip_snapshots_with_retention(
+                    &row_data,
+                    output_start_date,
+                    &compiled_chip_config,
+                    config,
+                    request.retention.as_ref(),
+                )?;
+                (snapshots, None, retention)
             }
         } else {
-            (Vec::new(), None)
+            (Vec::new(), None, None)
         };
     let basis = output_start_date
         .as_deref()
@@ -1239,6 +1248,8 @@ pub fn run_cyq_chen_single_stock_test(
         snapshots,
         mechanism_comparison,
         basis,
+        retention,
+        price_coordinate: DEFAULT_ADJ_TYPE.into(),
         l2_days,
     })
 }
@@ -1677,9 +1688,15 @@ mod tests {
         let source_dir = unique_temp_source_dir();
         prepare_source_db(&source_dir);
 
-        let data = run_cyq_chen_single_stock_test(CyqChenSingleStockRequest {
+        let request = CyqChenSingleStockRequest {
             version: None,
             compare_mechanisms: true,
+            retention: Some(crate::data::cyq_chen::ChenChipRetentionRequest {
+                anchor_date: "20260403".into(),
+                evaluation_date: "20260407".into(),
+                price_low: 9.0,
+                price_high: 11.0,
+            }),
             source_path: source_dir.to_str().expect("utf8 path").to_string(),
             ts_code: "000001".to_string(),
             start_date: Some("20260401".to_string()),
@@ -1694,13 +1711,26 @@ mod tests {
                 bias: 1.0,
                 confirm_after: 0,
             }],
-        })
-        .expect("run single stock test");
+        };
+        let data = run_cyq_chen_single_stock_test(request.clone()).expect("run single stock test");
 
         assert_eq!(data.resolved_ts_code, "000001.SZ");
         assert_eq!(data.kline.len(), 4);
         assert_eq!(data.output_start_date.as_deref(), Some("20260403"));
         assert_eq!(data.snapshots.len(), 2);
+        assert!(
+            data.snapshots
+                .iter()
+                .all(|snapshot| snapshot.age_summary.is_some())
+        );
+        assert_eq!(data.retention.as_ref().unwrap().quote_updates, Some(1));
+        assert!(
+            data.retention
+                .as_ref()
+                .unwrap()
+                .unavailable_reason
+                .is_none()
+        );
         let basis = data.basis.as_ref().unwrap();
         assert_eq!(basis.days.len(), 2);
         assert!(basis.days.iter().all(|day| day.values.is_some()));
@@ -1726,6 +1756,17 @@ mod tests {
         assert!((l2.net_mf_ratio_3d.unwrap() - 0.05).abs() < 1e-9);
         assert!(!source_dir.join("cyq_chen.db").exists());
 
+        let mut request = request;
+        request.compare_mechanisms = false;
+        let without_comparison = run_cyq_chen_single_stock_test(request).unwrap();
+        assert_eq!(
+            serde_json::to_value(&without_comparison.snapshots).unwrap(),
+            serde_json::to_value(&data.snapshots).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&without_comparison.retention).unwrap(),
+            serde_json::to_value(&data.retention).unwrap()
+        );
         fs::remove_dir_all(source_dir).expect("cleanup temp dir");
     }
 
@@ -1737,6 +1778,7 @@ mod tests {
         let data = run_cyq_chen_single_stock_test(CyqChenSingleStockRequest {
             version: None,
             compare_mechanisms: true,
+            retention: None,
             source_path: source_dir.to_str().expect("utf8 path").to_string(),
             ts_code: "000999".to_string(),
             start_date: Some("20260401".to_string()),
@@ -1793,6 +1835,7 @@ mod tests {
         let data = run_cyq_chen_single_stock_test(CyqChenSingleStockRequest {
             version: Some(page.version),
             compare_mechanisms: true,
+            retention: None,
             source_path: source_path.into(),
             ts_code: "000001".into(),
             start_date: Some("20260401".into()),

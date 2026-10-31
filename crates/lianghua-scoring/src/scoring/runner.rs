@@ -980,6 +980,7 @@ pub fn scoring_all_to_memory(
         start_date,
         end_date,
         ScoringMemoryMode::All,
+        None,
     )
 }
 
@@ -990,6 +991,7 @@ pub fn scoring_all_to_memory_with_mode(
     start_date: &str,
     end_date: &str,
     memory_mode: ScoringMemoryMode,
+    progress: Option<&(dyn Fn(usize, usize) -> Result<(), String> + Sync)>,
 ) -> Result<(ScoreBatch, ScoringRunProfile), String> {
     crate::data::download_state::ensure_stock_data_ready_for_derived(source_dir)?;
     let total_started_at = time::Instant::now();
@@ -1047,6 +1049,10 @@ pub fn scoring_all_to_memory_with_mode(
     let prepare_ms = prepare_started_at.elapsed().as_millis() as u64;
 
     let compute_started_at = time::Instant::now();
+    let progress_counter = Mutex::new(0_usize);
+    if let Some(progress) = progress {
+        progress(0, tc_list.len())?;
+    }
     let batch = tc_list
         .par_chunks(SCORING_MEMORY_GROUP_SIZE)
         .map_init(
@@ -1064,7 +1070,7 @@ pub fn scoring_all_to_memory_with_mode(
             |worker, ts_group| -> Result<ScoreBatch, String> {
                 let (worker_reader, cyq_chen_injector, similarity_rank_injector) =
                     worker.as_ref().map_err(Clone::clone)?;
-                scoring_stock_group_batch(
+                let batch = scoring_stock_group_batch(
                     worker_reader,
                     adj_type,
                     start_date,
@@ -1082,7 +1088,13 @@ pub fn scoring_all_to_memory_with_mode(
                     ts_group,
                     memory_mode,
                     &tracking,
-                )
+                )?;
+                if let Some(progress) = progress {
+                    let mut finished = progress_counter.lock().map_err(|_| "评分进度锁已损坏")?;
+                    *finished += ts_group.len();
+                    progress(*finished, tc_list.len())?;
+                }
+                Ok(batch)
             },
         )
         .try_reduce(ScoreBatch::default, |mut left, right| {

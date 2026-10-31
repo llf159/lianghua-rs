@@ -392,7 +392,7 @@ pub fn run_rule_expression_validation(
     total_mv_max: Option<f64>,
     walk_forward_folds: Option<usize>,
     core_rule_names: Option<Vec<String>>,
-    progress: Option<&dyn Fn(&str) -> Result<(), String>>,
+    progress: Option<&(dyn Fn(&str) -> Result<(), String> + Sync)>,
     research: Option<&crate::research_evidence::ValidationResearchOutput>,
 ) -> Result<RuleExpressionValidationData, String> {
     if let Some(progress) = progress {
@@ -1080,12 +1080,17 @@ pub fn run_rule_expression_validation(
                     params.min_listed_trade_days,
                     &validation_ts_codes,
                     research.baseline_diagnostics,
+                    progress,
                 );
                 log::info!(
                     "表达式研究：隔离基线准备耗时 {:.3}s",
                     started.elapsed().as_secs_f64()
                 );
-                result
+                result?;
+                if let Some(progress) = progress {
+                    progress("等待并行后验数据准备完成")?;
+                }
+                Ok::<(), String>(())
             })
         });
         let runtime_cache = build_rule_layer_runtime_cache_from_stock_data_with_ts_filter(
@@ -1311,23 +1316,30 @@ pub fn run_rule_expression_validation(
                     .collect::<Result<Vec<_>, _>>()
             })
             .transpose()?;
-        let combo_triggered_maps =
-            if let Some(cached) = cached.filter(|cached| cached.iter().all(Option::is_some)) {
-                cached.into_iter().map(Option::unwrap).collect()
-            } else {
-                build_validation_triggered_scores_for_combos(
-                    &source_path,
-                    &params.stock_adj_type,
-                    &execution_plan.query_start_date,
-                    &params.start_date,
-                    &params.end_date,
-                    execution_plan.need_rows,
-                    &validation_ts_codes,
-                    &st_list,
-                    combo_chunk,
-                    research.is_some(),
-                )?
+        let combo_triggered_maps = if let Some(cached) =
+            cached.filter(|cached| cached.iter().all(Option::is_some))
+        {
+            cached.into_iter().map(Option::unwrap).collect()
+        } else {
+            let report = |finished, total| {
+                progress.map_or(Ok(()), |progress| {
+                    progress(&format!("本批组合信号计算 {finished}/{total}"))
+                })
             };
+            build_validation_triggered_scores_for_combos(
+                &source_path,
+                &params.stock_adj_type,
+                &execution_plan.query_start_date,
+                &params.start_date,
+                &params.end_date,
+                execution_plan.need_rows,
+                &validation_ts_codes,
+                &st_list,
+                combo_chunk,
+                research.is_some(),
+                progress.map(|_| &report as &(dyn Fn(usize, usize) -> Result<(), String> + Sync)),
+            )?
+        };
 
         log::info!(
             "表达式研究：{}组信号读取/计算耗时 {:.3}s",
@@ -1977,9 +1989,9 @@ bonus_points = 2.0
             grouping: Default::default(),
             statistics: Default::default(),
         };
-        let phases = std::cell::RefCell::new(Vec::new());
+        let phases = std::sync::Mutex::new(Vec::new());
         let progress = |phase: &str| {
-            phases.borrow_mut().push(phase.to_string());
+            phases.lock().unwrap().push(phase.to_string());
             Ok(())
         };
         let mut outputs = Vec::new();
@@ -2148,7 +2160,8 @@ bonus_points = 2.0
         assert_eq!(data.combo_results.len(), 2);
         assert!(
             phases
-                .borrow()
+                .lock()
+                .unwrap()
                 .iter()
                 .any(|phase| phase == "统计参数组合 2/2")
         );

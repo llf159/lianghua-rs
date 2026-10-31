@@ -955,8 +955,8 @@ export async function runRuleExpressionValidation(query: RuleExpressionValidatio
   return invoke<RuleExpressionValidationData>('run_rule_expression_validation', query)
 }
 
-export async function cancelRuleExpressionValidation(taskId: string) {
-  return invoke<void>('cancel_rule_expression_validation', { taskId })
+export async function cancelRuleExpressionValidation(taskId: string, rollback: boolean) {
+  return invoke<void>('cancel_rule_expression_validation', { taskId, rollback })
 }
 
 export async function getValidationCoreRuleOptions(sourcePath: string) {
@@ -1133,8 +1133,8 @@ export async function readRankComparisonBaseline(sourcePath: string) {
   return invoke<string>('read_rank_comparison_baseline', { sourcePath })
 }
 
-export async function cancelRankComparison(taskId: string) {
-  return invoke<void>('cancel_rank_comparison', { taskId })
+export async function cancelRankComparison(taskId: string, rollback: boolean) {
+  return invoke<void>('cancel_rank_comparison', { taskId, rollback })
 }
 
 export async function runRankComparison(request: RankComparisonRequest) {

@@ -2145,7 +2145,7 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
         </div>
 
         {showIndicatorProgress
-          ? renderProgressCard('任务已经启动，正在等待后端返回当前状态。')
+          ? renderProgressCard('任务已经启动，正在等待后端返回当前状态。', true)
           : null}
 
         {renderCardFeedback('indicatorTask')}

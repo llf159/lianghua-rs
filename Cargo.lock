@@ -80,7 +80,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "duckdb",
@@ -95,6 +95,7 @@ dependencies = [
  "lianghua-backtest",
  "lianghua-data",
  "lianghua-download",
+ "lianghua-model",
  "lianghua-provider",
  "libc",
  "log",
@@ -2504,7 +2505,7 @@ dependencies = [
 
 [[package]]
 name = "lianghua-app-chart"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "duckdb",
  "lianghua-core",
@@ -2516,7 +2517,7 @@ dependencies = [
 
 [[package]]
 name = "lianghua-app-data"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "duckdb",
@@ -2533,7 +2534,7 @@ dependencies = [
 
 [[package]]
 name = "lianghua-app-expression"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "lianghua-core",
  "serde",
@@ -2541,7 +2542,7 @@ dependencies = [
 
 [[package]]
 name = "lianghua-app-facade"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "csv",
@@ -2567,7 +2568,7 @@ dependencies = [
 
 [[package]]
 name = "lianghua-app-market"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bincode-next",
  "chrono",
@@ -2587,7 +2588,7 @@ dependencies = [
 
 [[package]]
 name = "lianghua-app-shared"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "duckdb",
  "lianghua-data",
@@ -2595,7 +2596,7 @@ dependencies = [
 
 [[package]]
 name = "lianghua-app-strategy"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "csv",
@@ -2619,7 +2620,7 @@ dependencies = [
 
 [[package]]
 name = "lianghua-backtest"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "csv",
  "duckdb",
@@ -2631,14 +2632,14 @@ dependencies = [
 
 [[package]]
 name = "lianghua-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "lianghua-data"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "csv",
@@ -2656,7 +2657,7 @@ dependencies = [
 
 [[package]]
 name = "lianghua-download"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "duckdb",
@@ -2675,11 +2676,11 @@ dependencies = [
 
 [[package]]
 name = "lianghua-model"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "lianghua-provider"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "encoding_rs",
@@ -2691,7 +2692,7 @@ dependencies = [
 
 [[package]]
 name = "lianghua-rs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "duckdb",
  "lianghua-backtest",
@@ -2704,7 +2705,7 @@ dependencies = [
 
 [[package]]
 name = "lianghua-scoring"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "duckdb",
  "lianghua-core",

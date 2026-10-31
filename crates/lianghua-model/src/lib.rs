@@ -1,4 +1,5 @@
 pub mod scoring;
+pub mod task;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdjType {

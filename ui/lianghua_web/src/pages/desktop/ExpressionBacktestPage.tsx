@@ -571,7 +571,11 @@ export default function ExpressionBacktestPage() {
     } catch (runError) {
       activeTask.current = "";
       setPhase("正在保存运行记录");
-      setError(`执行表达式回测失败: ${String(runError)}`);
+      if (["表达式回测已取消", "表达式回测已停止并撤回本次研究记录"].includes(String(runError))) {
+        setArchiveMessage(String(runError) === "表达式回测已取消" ? "回测已停止，保留本次运行记录。" : String(runError));
+      } else {
+        setError(`执行表达式回测失败: ${String(runError)}`);
+      }
       if (runQuerySnapshot) {
         try {setArchives((await listResearchArchives(sourcePath)).filter((item) => item.kind === "expression_validation"));}
         catch (failure) {setArchiveMessage(`读取运行记录失败：${String(failure)}`);}
@@ -708,9 +712,9 @@ export default function ExpressionBacktestPage() {
       />
       </div>
 
-      {loading ? <ResearchRunProgress phase={phase} cancelling={cancelling} onCancel={() => {
+      {loading ? <ResearchRunProgress actionLabel="策略研究" phase={phase} cancelling={cancelling} onCancel={(rollback) => {
         setCancelling(true);
-        void cancelRuleExpressionValidation(activeTask.current).then(() => setPhase("已请求取消，等待当前读取或计算阶段结束")).catch((failure) => { setError(`取消请求失败：${String(failure)}`); setCancelling(false); });
+        void cancelRuleExpressionValidation(activeTask.current, rollback).then(() => setPhase(`已请求${rollback ? "撤回" : "停止"}，等待当前读取或计算结束`)).catch((failure) => { setError(`请求失败：${String(failure)}`); setCancelling(false); });
       }} /> : null}
 
       <div ref={feedbackRef} className="research-feedback-target">

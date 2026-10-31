@@ -47,6 +47,11 @@ pub(super) struct CyqChenBatchBuilder {
     snapshot_feature_version: Int32Builder,
     snapshot_feature_days: Int32Builder,
     snapshot_unknown_trapped: Float64Builder,
+    snapshot_age_summary: StringBuilder,
+    snapshot_age_summary_version: Int32Builder,
+    snapshot_age_new5: Float64Builder,
+    snapshot_age_known_ge20: Float64Builder,
+    snapshot_age_initial: Float64Builder,
     bin_ts_code: StringBuilder,
     bin_trade_date: StringBuilder,
     bin_adj_type: StringBuilder,
@@ -107,6 +112,14 @@ impl CyqChenBatchBuilder {
             snapshot_feature_version: Int32Builder::with_capacity(snapshot_capacity),
             snapshot_feature_days: Int32Builder::with_capacity(snapshot_capacity),
             snapshot_unknown_trapped: Float64Builder::with_capacity(snapshot_capacity),
+            snapshot_age_summary: StringBuilder::with_capacity(
+                snapshot_capacity,
+                snapshot_capacity.saturating_mul(512),
+            ),
+            snapshot_age_summary_version: Int32Builder::with_capacity(snapshot_capacity),
+            snapshot_age_new5: Float64Builder::with_capacity(snapshot_capacity),
+            snapshot_age_known_ge20: Float64Builder::with_capacity(snapshot_capacity),
+            snapshot_age_initial: Float64Builder::with_capacity(snapshot_capacity),
             bin_ts_code: StringBuilder::with_capacity(bin_capacity, bin_capacity.saturating_mul(9)),
             bin_trade_date: StringBuilder::with_capacity(
                 bin_capacity,
@@ -178,6 +191,26 @@ impl CyqChenBatchBuilder {
             .append_option(snapshot.real_loss20);
         self.snapshot_trap_coef.append_option(snapshot.trap_coef);
 
+        self.snapshot_age_summary.append_option(
+            snapshot
+                .age_summary
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|e| e.to_string())?,
+        );
+        self.snapshot_age_summary_version
+            .append_option(snapshot.age_summary.as_ref().map(|age| age.version as i32));
+        self.snapshot_age_new5
+            .append_option(snapshot.age_summary.as_ref().and_then(|age| age.new5_pct));
+        self.snapshot_age_known_ge20.append_option(
+            snapshot
+                .age_summary
+                .as_ref()
+                .and_then(|age| age.known_ge20_pct),
+        );
+        self.snapshot_age_initial
+            .append_option(snapshot.age_summary.as_ref().map(|age| age.initial_pct));
         for bin in snapshot.bins {
             self.bin_ts_code.append_value(&ts_code);
             self.bin_trade_date.append_value(&trade_date);
@@ -252,6 +285,11 @@ impl CyqChenBatchBuilder {
                 Field::new("feature_version", DataType::Int32, true),
                 Field::new("feature_days", DataType::Int32, true),
                 Field::new("unknown_trapped", DataType::Float64, true),
+                Field::new("age_summary", DataType::Utf8, true),
+                Field::new("age_summary_version", DataType::Int32, true),
+                Field::new("age_new5", DataType::Float64, true),
+                Field::new("age_known_ge20", DataType::Float64, true),
+                Field::new("age_initial", DataType::Float64, true),
             ]);
             Some(
                 RecordBatch::try_new(
@@ -291,6 +329,11 @@ impl CyqChenBatchBuilder {
                         Arc::new(self.snapshot_feature_version.finish()) as ArrayRef,
                         Arc::new(self.snapshot_feature_days.finish()) as ArrayRef,
                         Arc::new(self.snapshot_unknown_trapped.finish()) as ArrayRef,
+                        Arc::new(self.snapshot_age_summary.finish()) as ArrayRef,
+                        Arc::new(self.snapshot_age_summary_version.finish()) as ArrayRef,
+                        Arc::new(self.snapshot_age_new5.finish()) as ArrayRef,
+                        Arc::new(self.snapshot_age_known_ge20.finish()) as ArrayRef,
+                        Arc::new(self.snapshot_age_initial.finish()) as ArrayRef,
                     ],
                 )
                 .map_err(|e| format!("创建cyq_chen_snapshot批次失败:{e}"))?,

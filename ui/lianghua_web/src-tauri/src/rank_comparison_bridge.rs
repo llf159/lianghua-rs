@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicU8, Ordering},
     Arc, Mutex, OnceLock,
 };
 
@@ -10,7 +10,8 @@ use lianghua_app_strategy::rank_comparison::{
 };
 use tauri::Emitter;
 
-static RANK_COMPARISON_TASKS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
+// 0 运行中，1 停止，2 撤回，3 结果提交中；提交与取消原子竞争。
+static RANK_COMPARISON_TASKS: OnceLock<Mutex<HashMap<String, Arc<AtomicU8>>>> = OnceLock::new();
 
 #[tauri::command]
 pub fn edit_strategy_backtest_config(
@@ -29,7 +30,7 @@ pub fn read_rank_comparison_baseline(source_path: String) -> Result<String, Stri
 }
 
 #[tauri::command]
-pub fn cancel_rank_comparison(task_id: String) -> Result<(), String> {
+pub fn cancel_rank_comparison(task_id: String, rollback: bool) -> Result<(), String> {
     let tasks = RANK_COMPARISON_TASKS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
@@ -37,7 +38,13 @@ pub fn cancel_rank_comparison(task_id: String) -> Result<(), String> {
     let flag = tasks
         .get(&task_id)
         .ok_or_else(|| "排名对照任务已结束或不存在".to_string())?;
-    flag.store(true, Ordering::Relaxed);
+    flag.compare_exchange(
+        0,
+        if rollback { 2 } else { 1 },
+        Ordering::SeqCst,
+        Ordering::SeqCst,
+    )
+    .map_err(|_| "任务已在停止或进入结果提交阶段".to_string())?;
     Ok(())
 }
 
@@ -51,7 +58,7 @@ pub async fn run_rank_comparison(
     }
     let settings = serde_json::to_value(&request).map_err(|e| e.to_string())?;
     let task_id = request.task_id.clone();
-    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancelled = Arc::new(AtomicU8::new(0));
     {
         let mut tasks = RANK_COMPARISON_TASKS
             .get_or_init(|| Mutex::new(HashMap::new()))
@@ -71,7 +78,7 @@ pub async fn run_rank_comparison(
         let _execution = lianghua_app_strategy::research_archive::try_research_execution()?;
         let _archive_access =
             lianghua_app_strategy::research_archive::research_archive_lock(&source_path, false)?;
-        let check_cancelled = || cancelled.load(Ordering::Relaxed);
+        let check_cancelled = || matches!(cancelled.load(Ordering::SeqCst), 1 | 2);
         let progress = |phase: &str| -> Result<(), String> {
             if check_cancelled() {
                 return Err("排名对照已取消".to_string());
@@ -117,6 +124,16 @@ pub async fn run_rank_comparison(
                 run_comparison(request, &progress, &check_cancelled)
             }
         });
+        let cancellation = cancelled.swap(3, Ordering::SeqCst);
+        let membership = result
+            .as_ref()
+            .ok()
+            .and_then(|value| value.membership_staging.clone());
+        if (cancellation == 1 || cancellation == 2)
+            && !matches!(&result, Err(error) if error.starts_with("清理排名对照临时文件失败："))
+        {
+            result = Err("排名对照已取消".to_string());
+        }
         let status = match &result {
             Ok(_) => "completed",
             Err(error) if error == "排名对照已取消" => "cancelled",
@@ -128,23 +145,22 @@ pub async fn run_rank_comparison(
             }
             Err(error) => Ok(serde_json::json!({ "status": status, "error": error })),
         };
-        let membership = result
-            .as_ref()
-            .ok()
-            .and_then(|value| value.membership_staging.clone());
         let saved = payload.and_then(|mut payload| {
             let _guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
                 .read()
                 .unwrap_or_else(|e| e.into_inner());
-            if let Some(path) = membership.as_deref() {
-                let destination = lianghua_app_strategy::research_archive::research_artifact_path(
-                    &source_path,
-                    &journal.run_id,
-                    "members.db",
-                )?;
-                std::fs::rename(path, destination).map_err(|e| e.to_string())?;
-                payload["membership_saved"] = serde_json::json!(true);
-                payload["archive_run_id"] = serde_json::json!(journal.run_id);
+            if status == "completed" {
+                if let Some(path) = membership.as_deref() {
+                    let destination =
+                        lianghua_app_strategy::research_archive::research_artifact_path(
+                            &source_path,
+                            &journal.run_id,
+                            "members.db",
+                        )?;
+                    std::fs::rename(path, destination).map_err(|e| e.to_string())?;
+                    payload["membership_saved"] = serde_json::json!(true);
+                    payload["archive_run_id"] = serde_json::json!(journal.run_id);
+                }
             }
             lianghua_app_strategy::research_archive::finish_research_archive(
                 &source_path,
@@ -154,9 +170,18 @@ pub async fn run_rank_comparison(
                 payload,
             )
         });
+        let mut cleanup_errors = Vec::new();
         if let Some(path) = &membership {
-            let _ = std::fs::remove_file(path);
-            let _ = std::fs::remove_file(format!("{}.wal", path.to_string_lossy()));
+            for file in [
+                path.clone(),
+                std::path::PathBuf::from(format!("{}.wal", path.to_string_lossy())),
+            ] {
+                if let Err(error) = std::fs::remove_file(&file) {
+                    if error.kind() != std::io::ErrorKind::NotFound {
+                        cleanup_errors.push(format!("{}: {error}", file.display()));
+                    }
+                }
+            }
         }
         match (&mut result, saved) {
             (Ok(value), Ok(header)) => {
@@ -168,6 +193,25 @@ pub async fn run_rank_comparison(
                 error.push_str(&format!("；失败记录未保存: {archive_error}"))
             }
             (Err(_), Ok(_)) => {}
+        }
+        if cancellation == 2 {
+            lianghua_app_strategy::research_archive::delete_research_archive(
+                &source_path,
+                &journal.run_id,
+            )
+            .map_err(|error| format!("任务已停止，但撤回研究存档失败：{error}"))?;
+            if let Err(error) = &result {
+                if error.starts_with("清理排名对照临时文件失败：") {
+                    return Err(error.clone());
+                }
+            }
+            if !cleanup_errors.is_empty() {
+                return Err(format!(
+                    "任务已停止，但清理成员临时文件失败：{}",
+                    cleanup_errors.join("；")
+                ));
+            }
+            return Err("排名对照已停止并撤回本次研究记录".into());
         }
         result
     })

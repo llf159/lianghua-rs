@@ -110,6 +110,11 @@ pub fn init_cyq_chen_db(db_path: &Path) -> Result<(), String> {
             ("feature_version", "INTEGER"),
             ("feature_days", "INTEGER"),
             ("unknown_trapped", "DOUBLE"),
+            ("age_summary", "VARCHAR"),
+            ("age_summary_version", "INTEGER"),
+            ("age_new5", "DOUBLE"),
+            ("age_known_ge20", "DOUBLE"),
+            ("age_initial", "DOUBLE"),
         ] {
             let exists = conn
                 .query_row(
@@ -690,6 +695,31 @@ mod tests {
         assert!(error.contains("computed checksum"), "{error}");
         assert!(error.contains("正式库未替换"), "{error}");
         assert_eq!(fs::read(&db_path).unwrap(), corrupted);
+        fs::remove_dir_all(source_dir).unwrap();
+    }
+
+    #[test]
+    fn age_columns_migrate_without_filling_legacy_rows() {
+        let source_dir = unique_temp_source_dir();
+        fs::create_dir_all(&source_dir).unwrap();
+        let path = source_dir.join("legacy.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE cyq_chen_snapshot(ts_code VARCHAR, trade_date VARCHAR, adj_type VARCHAR,
+            warmup_days INTEGER, bucket_pct DOUBLE, close DOUBLE, min_price DOUBLE, max_price DOUBLE,
+            main_total DOUBLE, retail_total DOUBLE, total_chips DOUBLE);
+            INSERT INTO cyq_chen_snapshot(ts_code, trade_date) VALUES('000001.SZ', '20240102');").unwrap();
+        drop(conn);
+        super::init_cyq_chen_db(&path).unwrap();
+        let conn = Connection::open(&path).unwrap();
+        let legacy: (Option<String>, Option<u32>, Option<f64>) = conn
+            .query_row(
+                "SELECT age_summary, age_summary_version, age_new5 FROM cyq_chen_snapshot",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(legacy, (None, None, None));
+        drop(conn);
         fs::remove_dir_all(source_dir).unwrap();
     }
 

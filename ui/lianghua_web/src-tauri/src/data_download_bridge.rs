@@ -38,6 +38,8 @@ use tauri::Emitter;
 #[serde(rename_all = "camelCase")]
 pub struct DataDownloadRequest {
     download_id: String,
+    #[serde(default)]
+    task_group: Option<String>,
     source_path: String,
     token: String,
     start_date: String,
@@ -56,6 +58,8 @@ pub struct DataDownloadRequest {
 #[serde(rename_all = "camelCase")]
 pub struct MissingStockRepairRequest {
     download_id: String,
+    #[serde(default)]
+    task_group: Option<String>,
     source_path: String,
     token: String,
     threads: usize,
@@ -68,6 +72,8 @@ pub struct MissingStockRepairRequest {
 #[serde(rename_all = "camelCase")]
 pub struct DragonTigerDownloadRequest {
     download_id: String,
+    #[serde(default)]
+    task_group: Option<String>,
     source_path: String,
     token: String,
     start_date: String,
@@ -80,6 +86,8 @@ pub struct DragonTigerDownloadRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ThsConceptDownloadRequest {
     download_id: String,
+    #[serde(default)]
+    task_group: Option<String>,
     source_path: String,
     retry_enabled: bool,
     retry_times: usize,
@@ -92,6 +100,8 @@ pub struct ThsConceptDownloadRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ConceptPerformanceRepairRequest {
     download_id: String,
+    #[serde(default)]
+    task_group: Option<String>,
     source_path: String,
 }
 
@@ -99,6 +109,8 @@ pub struct ConceptPerformanceRepairRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ConceptMostRelatedRepairRequest {
     download_id: String,
+    #[serde(default)]
+    task_group: Option<String>,
     source_path: String,
 }
 
@@ -106,6 +118,8 @@ pub struct ConceptMostRelatedRepairRequest {
 #[serde(rename_all = "camelCase")]
 pub struct StockDataIndicatorColumnsDeleteRequest {
     download_id: String,
+    #[serde(default)]
+    task_group: Option<String>,
     source_path: String,
 }
 
@@ -113,6 +127,8 @@ pub struct StockDataIndicatorColumnsDeleteRequest {
 #[serde(rename_all = "camelCase")]
 pub struct StockDataIndicatorColumnsRebuildRequest {
     download_id: String,
+    #[serde(default)]
+    task_group: Option<String>,
     source_path: String,
 }
 
@@ -205,106 +221,107 @@ pub async fn run_stock_data_indicator_columns_delete(
     app: tauri::AppHandle,
     request: StockDataIndicatorColumnsDeleteRequest,
 ) -> Result<DataDownloadRunResult, String> {
-    let download_id = request.download_id.trim().to_string();
-    if download_id.is_empty() {
-        return Err("download_id 不能为空".to_string());
-    }
+    crate::task_control::run(
+        app.clone(),
+        request.download_id.clone(),
+        request.source_path.clone(),
+        "indicator",
+        request.task_group.clone(),
+        move || {
+            let download_id = request.download_id.trim().to_string();
+            if download_id.is_empty() {
+                return Err("download_id 不能为空".to_string());
+            }
 
-    let prepared = {
-        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        core_prepare_stock_data_indicator_columns_delete_run(
-            CoreStockDataIndicatorColumnsDeleteRunInput {
-                source_path: request.source_path,
-            },
-        )?
-    };
-    let action = prepared.action.clone();
-    let action_label = prepared.action_label.clone();
-    emit_data_download_event(
-        &app,
-        DataDownloadEventPayload {
-            download_id: download_id.clone(),
-            phase: "started".to_string(),
-            action: action.clone(),
-            action_label: action_label.clone(),
-            elapsed_ms: 0,
-            finished: 0,
-            total: 0,
-            current_label: None,
-            message: format!("{action_label} 已启动，正在准备删除行情指标列。"),
-        },
-    );
-
-    tauri::async_runtime::spawn_blocking(move || {
-        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        let started_at = Instant::now();
-        let result = (|| -> Result<DataDownloadRunResult, String> {
-            let progress_app = app.clone();
-            let progress_download_id = download_id.clone();
-            let progress_action = action.clone();
-            let progress_action_label = action_label.clone();
-            let progress_started_at = started_at;
-            let progress_cb = move |progress: CoreDownloadProgress| {
-                emit_core_download_progress(
-                    &progress_app,
-                    progress_download_id.as_str(),
-                    progress_action.as_str(),
-                    progress_action_label.as_str(),
-                    progress_started_at.elapsed().as_millis() as u64,
-                    progress,
-                );
+            let prepared = {
+                core_prepare_stock_data_indicator_columns_delete_run(
+                    CoreStockDataIndicatorColumnsDeleteRunInput {
+                        source_path: request.source_path,
+                    },
+                )?
             };
-
-            let mut run_result = core_run_prepared_stock_data_indicator_columns_delete(
-                &prepared,
-                Some(&progress_cb),
-            )?;
-            run_result.elapsed_ms = started_at.elapsed().as_millis() as u64;
-            Ok(run_result)
-        })();
-
-        match &result {
-            Ok(run_result) => emit_data_download_event(
+            let action = prepared.action.clone();
+            let action_label = prepared.action_label.clone();
+            emit_data_download_event(
                 &app,
                 DataDownloadEventPayload {
                     download_id: download_id.clone(),
-                    phase: "completed".to_string(),
+                    phase: "started".to_string(),
                     action: action.clone(),
                     action_label: action_label.clone(),
-                    elapsed_ms: run_result.elapsed_ms,
-                    finished: run_result.summary.success_count + run_result.summary.failed_count,
-                    total: run_result.summary.success_count + run_result.summary.failed_count,
-                    current_label: None,
-                    message: format!(
-                        "{} 已完成，共删除 {} 列。",
-                        action_label, run_result.summary.success_count
-                    ),
-                },
-            ),
-            Err(error) => emit_data_download_event(
-                &app,
-                DataDownloadEventPayload {
-                    download_id: download_id.clone(),
-                    phase: "failed".to_string(),
-                    action: action.clone(),
-                    action_label: action_label.clone(),
-                    elapsed_ms: started_at.elapsed().as_millis() as u64,
+                    elapsed_ms: 0,
                     finished: 0,
                     total: 0,
                     current_label: None,
-                    message: format!("{} 失败: {}", action_label, error),
+                    message: format!("{action_label} 已启动，正在准备删除行情指标列。"),
                 },
-            ),
-        }
+            );
 
-        result
-    })
+            let started_at = Instant::now();
+            let result = (|| -> Result<DataDownloadRunResult, String> {
+                let progress_app = app.clone();
+                let progress_download_id = download_id.clone();
+                let progress_action = action.clone();
+                let progress_action_label = action_label.clone();
+                let progress_started_at = started_at;
+                let progress_cb = move |progress: CoreDownloadProgress| {
+                    emit_core_download_progress(
+                        &progress_app,
+                        progress_download_id.as_str(),
+                        progress_action.as_str(),
+                        progress_action_label.as_str(),
+                        progress_started_at.elapsed().as_millis() as u64,
+                        progress,
+                    );
+                };
+
+                let mut run_result = core_run_prepared_stock_data_indicator_columns_delete(
+                    &prepared,
+                    Some(&progress_cb),
+                )?;
+                run_result.elapsed_ms = started_at.elapsed().as_millis() as u64;
+                Ok(run_result)
+            })();
+
+            match &result {
+                Ok(run_result) => emit_data_download_event(
+                    &app,
+                    DataDownloadEventPayload {
+                        download_id: download_id.clone(),
+                        phase: "completed".to_string(),
+                        action: action.clone(),
+                        action_label: action_label.clone(),
+                        elapsed_ms: run_result.elapsed_ms,
+                        finished: run_result.summary.success_count
+                            + run_result.summary.failed_count,
+                        total: run_result.summary.success_count + run_result.summary.failed_count,
+                        current_label: None,
+                        message: format!(
+                            "{} 已完成，共删除 {} 列。",
+                            action_label, run_result.summary.success_count
+                        ),
+                    },
+                ),
+                Err(error) => emit_data_download_event(
+                    &app,
+                    DataDownloadEventPayload {
+                        download_id: download_id.clone(),
+                        phase: "failed".to_string(),
+                        action: action.clone(),
+                        action_label: action_label.clone(),
+                        elapsed_ms: started_at.elapsed().as_millis() as u64,
+                        finished: 0,
+                        total: 0,
+                        current_label: None,
+                        message: format!("{} 失败: {}", action_label, error),
+                    },
+                ),
+            }
+
+            result
+        },
+    )
     .await
-    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -312,108 +329,109 @@ pub async fn run_stock_data_indicator_columns_rebuild(
     app: tauri::AppHandle,
     request: StockDataIndicatorColumnsRebuildRequest,
 ) -> Result<DataDownloadRunResult, String> {
-    let download_id = request.download_id.trim().to_string();
-    if download_id.is_empty() {
-        return Err("download_id 不能为空".to_string());
-    }
+    crate::task_control::run(
+        app.clone(),
+        request.download_id.clone(),
+        request.source_path.clone(),
+        "indicator",
+        request.task_group.clone(),
+        move || {
+            let download_id = request.download_id.trim().to_string();
+            if download_id.is_empty() {
+                return Err("download_id 不能为空".to_string());
+            }
 
-    let prepared = {
-        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        core_prepare_stock_data_indicator_columns_rebuild_run(
-            CoreStockDataIndicatorColumnsRebuildRunInput {
-                source_path: request.source_path,
-            },
-        )?
-    };
-    let action = prepared.action.clone();
-    let action_label = prepared.action_label.clone();
-    emit_data_download_event(
-        &app,
-        DataDownloadEventPayload {
-            download_id: download_id.clone(),
-            phase: "started".to_string(),
-            action: action.clone(),
-            action_label: action_label.clone(),
-            elapsed_ms: 0,
-            finished: 0,
-            total: 0,
-            current_label: None,
-            message: format!("{action_label} 已启动，正在准备补算行情指标列。"),
-        },
-    );
-
-    tauri::async_runtime::spawn_blocking(move || {
-        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        let started_at = Instant::now();
-        let result = (|| -> Result<DataDownloadRunResult, String> {
-            let progress_app = app.clone();
-            let progress_download_id = download_id.clone();
-            let progress_action = action.clone();
-            let progress_action_label = action_label.clone();
-            let progress_started_at = started_at;
-            let progress_cb = move |progress: CoreDownloadProgress| {
-                emit_core_download_progress(
-                    &progress_app,
-                    progress_download_id.as_str(),
-                    progress_action.as_str(),
-                    progress_action_label.as_str(),
-                    progress_started_at.elapsed().as_millis() as u64,
-                    progress,
-                );
+            let prepared = {
+                core_prepare_stock_data_indicator_columns_rebuild_run(
+                    CoreStockDataIndicatorColumnsRebuildRunInput {
+                        source_path: request.source_path,
+                    },
+                )?
             };
-
-            let mut run_result = core_run_prepared_stock_data_indicator_columns_rebuild(
-                &prepared,
-                Some(&progress_cb),
-            )?;
-            run_result.elapsed_ms = started_at.elapsed().as_millis() as u64;
-            Ok(run_result)
-        })();
-
-        match &result {
-            Ok(run_result) => emit_data_download_event(
+            let action = prepared.action.clone();
+            let action_label = prepared.action_label.clone();
+            emit_data_download_event(
                 &app,
                 DataDownloadEventPayload {
                     download_id: download_id.clone(),
-                    phase: "completed".to_string(),
+                    phase: "started".to_string(),
                     action: action.clone(),
                     action_label: action_label.clone(),
-                    elapsed_ms: run_result.elapsed_ms,
-                    finished: run_result.summary.success_count + run_result.summary.failed_count,
-                    total: run_result.summary.success_count + run_result.summary.failed_count,
-                    current_label: None,
-                    message: format!(
-                        "{} 已完成，共补算 {} 组，回写 {} 行。",
-                        action_label,
-                        run_result.summary.success_count,
-                        run_result.summary.saved_rows
-                    ),
-                },
-            ),
-            Err(error) => emit_data_download_event(
-                &app,
-                DataDownloadEventPayload {
-                    download_id: download_id.clone(),
-                    phase: "failed".to_string(),
-                    action: action.clone(),
-                    action_label: action_label.clone(),
-                    elapsed_ms: started_at.elapsed().as_millis() as u64,
+                    elapsed_ms: 0,
                     finished: 0,
                     total: 0,
                     current_label: None,
-                    message: format!("{} 失败: {}", action_label, error),
+                    message: format!("{action_label} 已启动，正在准备补算行情指标列。"),
                 },
-            ),
-        }
+            );
 
-        result
-    })
+            let started_at = Instant::now();
+            let result = (|| -> Result<DataDownloadRunResult, String> {
+                let progress_app = app.clone();
+                let progress_download_id = download_id.clone();
+                let progress_action = action.clone();
+                let progress_action_label = action_label.clone();
+                let progress_started_at = started_at;
+                let progress_cb = move |progress: CoreDownloadProgress| {
+                    emit_core_download_progress(
+                        &progress_app,
+                        progress_download_id.as_str(),
+                        progress_action.as_str(),
+                        progress_action_label.as_str(),
+                        progress_started_at.elapsed().as_millis() as u64,
+                        progress,
+                    );
+                };
+
+                let mut run_result = core_run_prepared_stock_data_indicator_columns_rebuild(
+                    &prepared,
+                    Some(&progress_cb),
+                )?;
+                run_result.elapsed_ms = started_at.elapsed().as_millis() as u64;
+                Ok(run_result)
+            })();
+
+            match &result {
+                Ok(run_result) => emit_data_download_event(
+                    &app,
+                    DataDownloadEventPayload {
+                        download_id: download_id.clone(),
+                        phase: "completed".to_string(),
+                        action: action.clone(),
+                        action_label: action_label.clone(),
+                        elapsed_ms: run_result.elapsed_ms,
+                        finished: run_result.summary.success_count
+                            + run_result.summary.failed_count,
+                        total: run_result.summary.success_count + run_result.summary.failed_count,
+                        current_label: None,
+                        message: format!(
+                            "{} 已完成，共补算 {} 组，回写 {} 行。",
+                            action_label,
+                            run_result.summary.success_count,
+                            run_result.summary.saved_rows
+                        ),
+                    },
+                ),
+                Err(error) => emit_data_download_event(
+                    &app,
+                    DataDownloadEventPayload {
+                        download_id: download_id.clone(),
+                        phase: "failed".to_string(),
+                        action: action.clone(),
+                        action_label: action_label.clone(),
+                        elapsed_ms: started_at.elapsed().as_millis() as u64,
+                        finished: 0,
+                        total: 0,
+                        current_label: None,
+                        message: format!("{} 失败: {}", action_label, error),
+                    },
+                ),
+            }
+
+            result
+        },
+    )
     .await
-    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -421,114 +439,116 @@ pub async fn run_data_download(
     app: tauri::AppHandle,
     request: DataDownloadRequest,
 ) -> Result<DataDownloadRunResult, String> {
-    let download_id = request.download_id.trim().to_string();
-    if download_id.is_empty() {
-        return Err("download_id 不能为空".to_string());
-    }
+    crate::task_control::run(
+        app.clone(),
+        request.download_id.clone(),
+        request.source_path.clone(),
+        "download",
+        request.task_group.clone(),
+        move || {
+            let download_id = request.download_id.trim().to_string();
+            if download_id.is_empty() {
+                return Err("download_id 不能为空".to_string());
+            }
 
-    let prepared = {
-        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        core_prepare_data_download_run(CoreDataDownloadRunInput {
-            source_path: request.source_path,
-            token: request.token,
-            start_date: request.start_date,
-            end_date: request.end_date,
-            threads: request.threads,
-            retry_times: request.retry_times,
-            limit_calls_per_min: request.limit_calls_per_min,
-            include_turnover: request.include_turnover,
-            allow_stale_stock_list: request.allow_stale_stock_list,
-            allow_cyq_chen_strategy_rebuild: request.allow_cyq_chen_strategy_rebuild,
-            chip_model: request.chip_model,
-        })?
-    };
-    let action = prepared.action.clone();
-    let action_label = prepared.action_label.clone();
-    emit_data_download_event(
-        &app,
-        DataDownloadEventPayload {
-            download_id: download_id.clone(),
-            phase: "started".to_string(),
-            action: action.clone(),
-            action_label: action_label.clone(),
-            elapsed_ms: 0,
-            finished: 0,
-            total: 0,
-            current_label: None,
-            message: format!("{action_label} 已启动，正在准备执行下载。"),
-        },
-    );
-
-    tauri::async_runtime::spawn_blocking(move || {
-        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        let started_at = Instant::now();
-        let result = (|| -> Result<DataDownloadRunResult, String> {
-            let progress_app = app.clone();
-            let progress_download_id = download_id.clone();
-            let progress_action = action.clone();
-            let progress_action_label = action_label.clone();
-            let progress_started_at = started_at;
-            let progress_cb = move |progress: CoreDownloadProgress| {
-                emit_core_download_progress(
-                    &progress_app,
-                    progress_download_id.as_str(),
-                    progress_action.as_str(),
-                    progress_action_label.as_str(),
-                    progress_started_at.elapsed().as_millis() as u64,
-                    progress,
-                );
+            let prepared = {
+                core_prepare_data_download_run(CoreDataDownloadRunInput {
+                    source_path: request.source_path,
+                    token: request.token,
+                    start_date: request.start_date,
+                    end_date: request.end_date,
+                    threads: request.threads,
+                    retry_times: request.retry_times,
+                    limit_calls_per_min: request.limit_calls_per_min,
+                    include_turnover: request.include_turnover,
+                    allow_stale_stock_list: request.allow_stale_stock_list,
+                    allow_cyq_chen_strategy_rebuild: request.allow_cyq_chen_strategy_rebuild,
+                    chip_model: request.chip_model,
+                })?
             };
-
-            let mut run_result = core_run_prepared_data_download(&prepared, Some(&progress_cb))?;
-            run_result.elapsed_ms = started_at.elapsed().as_millis() as u64;
-            Ok(run_result)
-        })();
-
-        match &result {
-            Ok(run_result) => emit_data_download_event(
+            let action = prepared.action.clone();
+            let action_label = prepared.action_label.clone();
+            emit_data_download_event(
                 &app,
                 DataDownloadEventPayload {
                     download_id: download_id.clone(),
-                    phase: "completed".to_string(),
+                    phase: "started".to_string(),
                     action: action.clone(),
                     action_label: action_label.clone(),
-                    elapsed_ms: run_result.elapsed_ms,
-                    finished: run_result.summary.success_count + run_result.summary.failed_count,
-                    total: run_result.summary.success_count + run_result.summary.failed_count,
-                    current_label: None,
-                    message: format!(
-                        "{} 已完成，成功 {} 只，失败 {} 只{}。",
-                        action_label,
-                        run_result.summary.success_count,
-                        run_result.summary.failed_count,
-                        format_completion_detail_tail(&run_result.completion_details)
-                    ),
-                },
-            ),
-            Err(error) => emit_data_download_event(
-                &app,
-                DataDownloadEventPayload {
-                    download_id: download_id.clone(),
-                    phase: "failed".to_string(),
-                    action: action.clone(),
-                    action_label: action_label.clone(),
-                    elapsed_ms: started_at.elapsed().as_millis() as u64,
+                    elapsed_ms: 0,
                     finished: 0,
                     total: 0,
                     current_label: None,
-                    message: format!("{} 失败: {}", action_label, error),
+                    message: format!("{action_label} 已启动，正在准备执行下载。"),
                 },
-            ),
-        }
+            );
 
-        result
-    })
+            let started_at = Instant::now();
+            let result = (|| -> Result<DataDownloadRunResult, String> {
+                let progress_app = app.clone();
+                let progress_download_id = download_id.clone();
+                let progress_action = action.clone();
+                let progress_action_label = action_label.clone();
+                let progress_started_at = started_at;
+                let progress_cb = move |progress: CoreDownloadProgress| {
+                    emit_core_download_progress(
+                        &progress_app,
+                        progress_download_id.as_str(),
+                        progress_action.as_str(),
+                        progress_action_label.as_str(),
+                        progress_started_at.elapsed().as_millis() as u64,
+                        progress,
+                    );
+                };
+
+                let mut run_result =
+                    core_run_prepared_data_download(&prepared, Some(&progress_cb))?;
+                run_result.elapsed_ms = started_at.elapsed().as_millis() as u64;
+                Ok(run_result)
+            })();
+
+            match &result {
+                Ok(run_result) => emit_data_download_event(
+                    &app,
+                    DataDownloadEventPayload {
+                        download_id: download_id.clone(),
+                        phase: "completed".to_string(),
+                        action: action.clone(),
+                        action_label: action_label.clone(),
+                        elapsed_ms: run_result.elapsed_ms,
+                        finished: run_result.summary.success_count
+                            + run_result.summary.failed_count,
+                        total: run_result.summary.success_count + run_result.summary.failed_count,
+                        current_label: None,
+                        message: format!(
+                            "{} 已完成，成功 {} 只，失败 {} 只{}。",
+                            action_label,
+                            run_result.summary.success_count,
+                            run_result.summary.failed_count,
+                            format_completion_detail_tail(&run_result.completion_details)
+                        ),
+                    },
+                ),
+                Err(error) => emit_data_download_event(
+                    &app,
+                    DataDownloadEventPayload {
+                        download_id: download_id.clone(),
+                        phase: "failed".to_string(),
+                        action: action.clone(),
+                        action_label: action_label.clone(),
+                        elapsed_ms: started_at.elapsed().as_millis() as u64,
+                        finished: 0,
+                        total: 0,
+                        current_label: None,
+                        message: format!("{} 失败: {}", action_label, error),
+                    },
+                ),
+            }
+
+            result
+        },
+    )
     .await
-    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -536,110 +556,110 @@ pub async fn run_dragon_tiger_download(
     app: tauri::AppHandle,
     request: DragonTigerDownloadRequest,
 ) -> Result<DataDownloadRunResult, String> {
-    let download_id = request.download_id.trim().to_string();
-    if download_id.is_empty() {
-        return Err("download_id 不能为空".to_string());
-    }
+    crate::task_control::run(
+        app.clone(),
+        request.download_id.clone(),
+        request.source_path.clone(),
+        "download",
+        request.task_group.clone(),
+        move || {
+            let download_id = request.download_id.trim().to_string();
+            if download_id.is_empty() {
+                return Err("download_id 不能为空".to_string());
+            }
 
-    let prepared = {
-        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        core_prepare_dragon_tiger_download_run(CoreDragonTigerDownloadRunInput {
-            source_path: request.source_path,
-            token: request.token,
-            start_date: request.start_date,
-            end_date: request.end_date,
-            retry_times: request.retry_times,
-            limit_calls_per_min: request.limit_calls_per_min,
-        })?
-    };
-    let action = prepared.action.clone();
-    let action_label = prepared.action_label.clone();
-    emit_data_download_event(
-        &app,
-        DataDownloadEventPayload {
-            download_id: download_id.clone(),
-            phase: "started".to_string(),
-            action: action.clone(),
-            action_label: action_label.clone(),
-            elapsed_ms: 0,
-            finished: 0,
-            total: 0,
-            current_label: None,
-            message: format!("{action_label} 已启动，正在准备执行下载。"),
-        },
-    );
-
-    tauri::async_runtime::spawn_blocking(move || {
-        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        let started_at = Instant::now();
-        let result = (|| -> Result<DataDownloadRunResult, String> {
-            let progress_app = app.clone();
-            let progress_download_id = download_id.clone();
-            let progress_action = action.clone();
-            let progress_action_label = action_label.clone();
-            let progress_started_at = started_at;
-            let progress_cb = move |progress: CoreDownloadProgress| {
-                emit_core_download_progress(
-                    &progress_app,
-                    progress_download_id.as_str(),
-                    progress_action.as_str(),
-                    progress_action_label.as_str(),
-                    progress_started_at.elapsed().as_millis() as u64,
-                    progress,
-                );
+            let prepared = {
+                core_prepare_dragon_tiger_download_run(CoreDragonTigerDownloadRunInput {
+                    source_path: request.source_path,
+                    token: request.token,
+                    start_date: request.start_date,
+                    end_date: request.end_date,
+                    retry_times: request.retry_times,
+                    limit_calls_per_min: request.limit_calls_per_min,
+                })?
             };
-
-            let mut run_result =
-                core_run_prepared_dragon_tiger_download(&prepared, Some(&progress_cb))?;
-            run_result.elapsed_ms = started_at.elapsed().as_millis() as u64;
-            Ok(run_result)
-        })();
-
-        match &result {
-            Ok(run_result) => emit_data_download_event(
+            let action = prepared.action.clone();
+            let action_label = prepared.action_label.clone();
+            emit_data_download_event(
                 &app,
                 DataDownloadEventPayload {
                     download_id: download_id.clone(),
-                    phase: "completed".to_string(),
+                    phase: "started".to_string(),
                     action: action.clone(),
                     action_label: action_label.clone(),
-                    elapsed_ms: run_result.elapsed_ms,
-                    finished: run_result.summary.success_count,
-                    total: run_result.summary.success_count,
-                    current_label: None,
-                    message: format!(
-                        "{} 已完成，同步 {} 个交易日，写入 {} 行{}。",
-                        action_label,
-                        run_result.summary.success_count,
-                        run_result.summary.saved_rows,
-                        format_completion_detail_tail(&run_result.completion_details)
-                    ),
-                },
-            ),
-            Err(error) => emit_data_download_event(
-                &app,
-                DataDownloadEventPayload {
-                    download_id: download_id.clone(),
-                    phase: "failed".to_string(),
-                    action: action.clone(),
-                    action_label: action_label.clone(),
-                    elapsed_ms: started_at.elapsed().as_millis() as u64,
+                    elapsed_ms: 0,
                     finished: 0,
                     total: 0,
                     current_label: None,
-                    message: format!("{} 失败: {}", action_label, error),
+                    message: format!("{action_label} 已启动，正在准备执行下载。"),
                 },
-            ),
-        }
+            );
 
-        result
-    })
+            let started_at = Instant::now();
+            let result = (|| -> Result<DataDownloadRunResult, String> {
+                let progress_app = app.clone();
+                let progress_download_id = download_id.clone();
+                let progress_action = action.clone();
+                let progress_action_label = action_label.clone();
+                let progress_started_at = started_at;
+                let progress_cb = move |progress: CoreDownloadProgress| {
+                    emit_core_download_progress(
+                        &progress_app,
+                        progress_download_id.as_str(),
+                        progress_action.as_str(),
+                        progress_action_label.as_str(),
+                        progress_started_at.elapsed().as_millis() as u64,
+                        progress,
+                    );
+                };
+
+                let mut run_result =
+                    core_run_prepared_dragon_tiger_download(&prepared, Some(&progress_cb))?;
+                run_result.elapsed_ms = started_at.elapsed().as_millis() as u64;
+                Ok(run_result)
+            })();
+
+            match &result {
+                Ok(run_result) => emit_data_download_event(
+                    &app,
+                    DataDownloadEventPayload {
+                        download_id: download_id.clone(),
+                        phase: "completed".to_string(),
+                        action: action.clone(),
+                        action_label: action_label.clone(),
+                        elapsed_ms: run_result.elapsed_ms,
+                        finished: run_result.summary.success_count,
+                        total: run_result.summary.success_count,
+                        current_label: None,
+                        message: format!(
+                            "{} 已完成，同步 {} 个交易日，写入 {} 行{}。",
+                            action_label,
+                            run_result.summary.success_count,
+                            run_result.summary.saved_rows,
+                            format_completion_detail_tail(&run_result.completion_details)
+                        ),
+                    },
+                ),
+                Err(error) => emit_data_download_event(
+                    &app,
+                    DataDownloadEventPayload {
+                        download_id: download_id.clone(),
+                        phase: "failed".to_string(),
+                        action: action.clone(),
+                        action_label: action_label.clone(),
+                        elapsed_ms: started_at.elapsed().as_millis() as u64,
+                        finished: 0,
+                        total: 0,
+                        current_label: None,
+                        message: format!("{} 失败: {}", action_label, error),
+                    },
+                ),
+            }
+
+            result
+        },
+    )
     .await
-    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -647,102 +667,105 @@ pub async fn run_concept_most_related_repair(
     app: tauri::AppHandle,
     request: ConceptMostRelatedRepairRequest,
 ) -> Result<DataDownloadRunResult, String> {
-    let download_id = request.download_id.trim().to_string();
-    if download_id.is_empty() {
-        return Err("download_id 不能为空".to_string());
-    }
+    crate::task_control::run(
+        app.clone(),
+        request.download_id.clone(),
+        request.source_path.clone(),
+        "download",
+        request.task_group.clone(),
+        move || {
+            let download_id = request.download_id.trim().to_string();
+            if download_id.is_empty() {
+                return Err("download_id 不能为空".to_string());
+            }
 
-    let prepared = {
-        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        core_prepare_concept_most_related_repair_run(CoreConceptMostRelatedRepairRunInput {
-            source_path: request.source_path,
-        })?
-    };
-    let action = prepared.action.clone();
-    let action_label = prepared.action_label.clone();
-    emit_data_download_event(
-        &app,
-        DataDownloadEventPayload {
-            download_id: download_id.clone(),
-            phase: "started".to_string(),
-            action: action.clone(),
-            action_label: action_label.clone(),
-            elapsed_ms: 0,
-            finished: 0,
-            total: 0,
-            current_label: None,
-            message: format!("{action_label} 已启动，正在准备补算最相关概念。"),
-        },
-    );
-
-    tauri::async_runtime::spawn_blocking(move || {
-        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        let started_at = Instant::now();
-        let result = (|| -> Result<DataDownloadRunResult, String> {
-            let progress_app = app.clone();
-            let progress_download_id = download_id.clone();
-            let progress_action = action.clone();
-            let progress_action_label = action_label.clone();
-            let progress_started_at = started_at;
-            let progress_cb = move |progress: CoreDownloadProgress| {
-                emit_core_download_progress(
-                    &progress_app,
-                    progress_download_id.as_str(),
-                    progress_action.as_str(),
-                    progress_action_label.as_str(),
-                    progress_started_at.elapsed().as_millis() as u64,
-                    progress,
-                );
+            let prepared = {
+                core_prepare_concept_most_related_repair_run(
+                    CoreConceptMostRelatedRepairRunInput {
+                        source_path: request.source_path,
+                    },
+                )?
             };
-
-            let mut run_result =
-                core_run_prepared_concept_most_related_repair(&prepared, Some(&progress_cb))?;
-            run_result.elapsed_ms = started_at.elapsed().as_millis() as u64;
-            Ok(run_result)
-        })();
-
-        match &result {
-            Ok(run_result) => emit_data_download_event(
+            let action = prepared.action.clone();
+            let action_label = prepared.action_label.clone();
+            emit_data_download_event(
                 &app,
                 DataDownloadEventPayload {
                     download_id: download_id.clone(),
-                    phase: "completed".to_string(),
+                    phase: "started".to_string(),
                     action: action.clone(),
                     action_label: action_label.clone(),
-                    elapsed_ms: run_result.elapsed_ms,
-                    finished: run_result.summary.success_count + run_result.summary.failed_count,
-                    total: run_result.summary.success_count + run_result.summary.failed_count,
-                    current_label: None,
-                    message: format!(
-                        "{} 已完成，更新 {} 行。",
-                        action_label, run_result.summary.saved_rows
-                    ),
-                },
-            ),
-            Err(error) => emit_data_download_event(
-                &app,
-                DataDownloadEventPayload {
-                    download_id: download_id.clone(),
-                    phase: "failed".to_string(),
-                    action: action.clone(),
-                    action_label: action_label.clone(),
-                    elapsed_ms: started_at.elapsed().as_millis() as u64,
+                    elapsed_ms: 0,
                     finished: 0,
                     total: 0,
                     current_label: None,
-                    message: format!("{} 失败: {}", action_label, error),
+                    message: format!("{action_label} 已启动，正在准备补算最相关概念。"),
                 },
-            ),
-        }
+            );
 
-        result
-    })
+            let started_at = Instant::now();
+            let result = (|| -> Result<DataDownloadRunResult, String> {
+                let progress_app = app.clone();
+                let progress_download_id = download_id.clone();
+                let progress_action = action.clone();
+                let progress_action_label = action_label.clone();
+                let progress_started_at = started_at;
+                let progress_cb = move |progress: CoreDownloadProgress| {
+                    emit_core_download_progress(
+                        &progress_app,
+                        progress_download_id.as_str(),
+                        progress_action.as_str(),
+                        progress_action_label.as_str(),
+                        progress_started_at.elapsed().as_millis() as u64,
+                        progress,
+                    );
+                };
+
+                let mut run_result =
+                    core_run_prepared_concept_most_related_repair(&prepared, Some(&progress_cb))?;
+                run_result.elapsed_ms = started_at.elapsed().as_millis() as u64;
+                Ok(run_result)
+            })();
+
+            match &result {
+                Ok(run_result) => emit_data_download_event(
+                    &app,
+                    DataDownloadEventPayload {
+                        download_id: download_id.clone(),
+                        phase: "completed".to_string(),
+                        action: action.clone(),
+                        action_label: action_label.clone(),
+                        elapsed_ms: run_result.elapsed_ms,
+                        finished: run_result.summary.success_count
+                            + run_result.summary.failed_count,
+                        total: run_result.summary.success_count + run_result.summary.failed_count,
+                        current_label: None,
+                        message: format!(
+                            "{} 已完成，更新 {} 行。",
+                            action_label, run_result.summary.saved_rows
+                        ),
+                    },
+                ),
+                Err(error) => emit_data_download_event(
+                    &app,
+                    DataDownloadEventPayload {
+                        download_id: download_id.clone(),
+                        phase: "failed".to_string(),
+                        action: action.clone(),
+                        action_label: action_label.clone(),
+                        elapsed_ms: started_at.elapsed().as_millis() as u64,
+                        finished: 0,
+                        total: 0,
+                        current_label: None,
+                        message: format!("{} 失败: {}", action_label, error),
+                    },
+                ),
+            }
+
+            result
+        },
+    )
     .await
-    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -750,109 +773,110 @@ pub async fn run_missing_stock_repair(
     app: tauri::AppHandle,
     request: MissingStockRepairRequest,
 ) -> Result<DataDownloadRunResult, String> {
-    let download_id = request.download_id.trim().to_string();
-    if download_id.is_empty() {
-        return Err("download_id 不能为空".to_string());
-    }
+    crate::task_control::run(
+        app.clone(),
+        request.download_id.clone(),
+        request.source_path.clone(),
+        "download",
+        request.task_group.clone(),
+        move || {
+            let download_id = request.download_id.trim().to_string();
+            if download_id.is_empty() {
+                return Err("download_id 不能为空".to_string());
+            }
 
-    let prepared = {
-        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        core_prepare_missing_stock_repair_run(CoreMissingStockRepairRunInput {
-            source_path: request.source_path,
-            token: request.token,
-            threads: request.threads,
-            retry_times: request.retry_times,
-            limit_calls_per_min: request.limit_calls_per_min,
-            include_turnover: request.include_turnover,
-        })?
-    };
-    let action = prepared.action.clone();
-    let action_label = prepared.action_label.clone();
-    emit_data_download_event(
-        &app,
-        DataDownloadEventPayload {
-            download_id: download_id.clone(),
-            phase: "started".to_string(),
-            action: action.clone(),
-            action_label: action_label.clone(),
-            elapsed_ms: 0,
-            finished: 0,
-            total: 0,
-            current_label: None,
-            message: format!("{action_label} 已启动，正在准备缺失股票补全。"),
-        },
-    );
-
-    tauri::async_runtime::spawn_blocking(move || {
-        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        let started_at = Instant::now();
-        let result = (|| -> Result<DataDownloadRunResult, String> {
-            let progress_app = app.clone();
-            let progress_download_id = download_id.clone();
-            let progress_action = action.clone();
-            let progress_action_label = action_label.clone();
-            let progress_started_at = started_at;
-            let progress_cb = move |progress: CoreDownloadProgress| {
-                emit_core_download_progress(
-                    &progress_app,
-                    progress_download_id.as_str(),
-                    progress_action.as_str(),
-                    progress_action_label.as_str(),
-                    progress_started_at.elapsed().as_millis() as u64,
-                    progress,
-                );
+            let prepared = {
+                core_prepare_missing_stock_repair_run(CoreMissingStockRepairRunInput {
+                    source_path: request.source_path,
+                    token: request.token,
+                    threads: request.threads,
+                    retry_times: request.retry_times,
+                    limit_calls_per_min: request.limit_calls_per_min,
+                    include_turnover: request.include_turnover,
+                })?
             };
-
-            let mut run_result =
-                core_run_prepared_missing_stock_repair(&prepared, Some(&progress_cb))?;
-            run_result.elapsed_ms = started_at.elapsed().as_millis() as u64;
-            Ok(run_result)
-        })();
-
-        match &result {
-            Ok(run_result) => emit_data_download_event(
+            let action = prepared.action.clone();
+            let action_label = prepared.action_label.clone();
+            emit_data_download_event(
                 &app,
                 DataDownloadEventPayload {
                     download_id: download_id.clone(),
-                    phase: "completed".to_string(),
+                    phase: "started".to_string(),
                     action: action.clone(),
                     action_label: action_label.clone(),
-                    elapsed_ms: run_result.elapsed_ms,
-                    finished: run_result.summary.success_count + run_result.summary.failed_count,
-                    total: run_result.summary.success_count + run_result.summary.failed_count,
-                    current_label: None,
-                    message: format!(
-                        "{} 已完成，成功 {} 只，失败 {} 只。",
-                        action_label,
-                        run_result.summary.success_count,
-                        run_result.summary.failed_count
-                    ),
-                },
-            ),
-            Err(error) => emit_data_download_event(
-                &app,
-                DataDownloadEventPayload {
-                    download_id: download_id.clone(),
-                    phase: "failed".to_string(),
-                    action: action.clone(),
-                    action_label: action_label.clone(),
-                    elapsed_ms: started_at.elapsed().as_millis() as u64,
+                    elapsed_ms: 0,
                     finished: 0,
                     total: 0,
                     current_label: None,
-                    message: format!("{} 失败: {}", action_label, error),
+                    message: format!("{action_label} 已启动，正在准备缺失股票补全。"),
                 },
-            ),
-        }
+            );
 
-        result
-    })
+            let started_at = Instant::now();
+            let result = (|| -> Result<DataDownloadRunResult, String> {
+                let progress_app = app.clone();
+                let progress_download_id = download_id.clone();
+                let progress_action = action.clone();
+                let progress_action_label = action_label.clone();
+                let progress_started_at = started_at;
+                let progress_cb = move |progress: CoreDownloadProgress| {
+                    emit_core_download_progress(
+                        &progress_app,
+                        progress_download_id.as_str(),
+                        progress_action.as_str(),
+                        progress_action_label.as_str(),
+                        progress_started_at.elapsed().as_millis() as u64,
+                        progress,
+                    );
+                };
+
+                let mut run_result =
+                    core_run_prepared_missing_stock_repair(&prepared, Some(&progress_cb))?;
+                run_result.elapsed_ms = started_at.elapsed().as_millis() as u64;
+                Ok(run_result)
+            })();
+
+            match &result {
+                Ok(run_result) => emit_data_download_event(
+                    &app,
+                    DataDownloadEventPayload {
+                        download_id: download_id.clone(),
+                        phase: "completed".to_string(),
+                        action: action.clone(),
+                        action_label: action_label.clone(),
+                        elapsed_ms: run_result.elapsed_ms,
+                        finished: run_result.summary.success_count
+                            + run_result.summary.failed_count,
+                        total: run_result.summary.success_count + run_result.summary.failed_count,
+                        current_label: None,
+                        message: format!(
+                            "{} 已完成，成功 {} 只，失败 {} 只。",
+                            action_label,
+                            run_result.summary.success_count,
+                            run_result.summary.failed_count
+                        ),
+                    },
+                ),
+                Err(error) => emit_data_download_event(
+                    &app,
+                    DataDownloadEventPayload {
+                        download_id: download_id.clone(),
+                        phase: "failed".to_string(),
+                        action: action.clone(),
+                        action_label: action_label.clone(),
+                        elapsed_ms: started_at.elapsed().as_millis() as u64,
+                        finished: 0,
+                        total: 0,
+                        current_label: None,
+                        message: format!("{} 失败: {}", action_label, error),
+                    },
+                ),
+            }
+
+            result
+        },
+    )
     .await
-    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -860,109 +884,110 @@ pub async fn run_ths_concept_download(
     app: tauri::AppHandle,
     request: ThsConceptDownloadRequest,
 ) -> Result<DataDownloadRunResult, String> {
-    let download_id = request.download_id.trim().to_string();
-    if download_id.is_empty() {
-        return Err("download_id 不能为空".to_string());
-    }
+    crate::task_control::run(
+        app.clone(),
+        request.download_id.clone(),
+        request.source_path.clone(),
+        "download",
+        request.task_group.clone(),
+        move || {
+            let download_id = request.download_id.trim().to_string();
+            if download_id.is_empty() {
+                return Err("download_id 不能为空".to_string());
+            }
 
-    let prepared = {
-        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        core_prepare_ths_concept_download_run(CoreThsConceptDownloadRunInput {
-            source_path: request.source_path,
-            retry_enabled: request.retry_enabled,
-            retry_times: request.retry_times,
-            retry_interval_secs: request.retry_interval_secs,
-            concurrent_enabled: request.concurrent_enabled,
-            worker_threads: request.worker_threads,
-        })?
-    };
-    let action = prepared.action.clone();
-    let action_label = prepared.action_label.clone();
-    emit_data_download_event(
-        &app,
-        DataDownloadEventPayload {
-            download_id: download_id.clone(),
-            phase: "started".to_string(),
-            action: action.clone(),
-            action_label: action_label.clone(),
-            elapsed_ms: 0,
-            finished: 0,
-            total: 0,
-            current_label: None,
-            message: format!("{action_label} 已启动，正在准备概念数据下载。"),
-        },
-    );
-
-    tauri::async_runtime::spawn_blocking(move || {
-        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        let started_at = Instant::now();
-        let result = (|| -> Result<DataDownloadRunResult, String> {
-            let progress_app = app.clone();
-            let progress_download_id = download_id.clone();
-            let progress_action = action.clone();
-            let progress_action_label = action_label.clone();
-            let progress_started_at = started_at;
-            let progress_cb = move |progress: CoreDownloadProgress| {
-                emit_core_download_progress(
-                    &progress_app,
-                    progress_download_id.as_str(),
-                    progress_action.as_str(),
-                    progress_action_label.as_str(),
-                    progress_started_at.elapsed().as_millis() as u64,
-                    progress,
-                );
+            let prepared = {
+                core_prepare_ths_concept_download_run(CoreThsConceptDownloadRunInput {
+                    source_path: request.source_path,
+                    retry_enabled: request.retry_enabled,
+                    retry_times: request.retry_times,
+                    retry_interval_secs: request.retry_interval_secs,
+                    concurrent_enabled: request.concurrent_enabled,
+                    worker_threads: request.worker_threads,
+                })?
             };
-
-            let mut run_result =
-                core_run_prepared_ths_concept_download(&prepared, Some(&progress_cb))?;
-            run_result.elapsed_ms = started_at.elapsed().as_millis() as u64;
-            Ok(run_result)
-        })();
-
-        match &result {
-            Ok(run_result) => emit_data_download_event(
+            let action = prepared.action.clone();
+            let action_label = prepared.action_label.clone();
+            emit_data_download_event(
                 &app,
                 DataDownloadEventPayload {
                     download_id: download_id.clone(),
-                    phase: "completed".to_string(),
+                    phase: "started".to_string(),
                     action: action.clone(),
                     action_label: action_label.clone(),
-                    elapsed_ms: run_result.elapsed_ms,
-                    finished: run_result.summary.success_count + run_result.summary.failed_count,
-                    total: run_result.summary.success_count + run_result.summary.failed_count,
-                    current_label: None,
-                    message: format!(
-                        "{} 已完成，成功 {} 只，失败 {} 只。",
-                        action_label,
-                        run_result.summary.success_count,
-                        run_result.summary.failed_count
-                    ),
-                },
-            ),
-            Err(error) => emit_data_download_event(
-                &app,
-                DataDownloadEventPayload {
-                    download_id: download_id.clone(),
-                    phase: "failed".to_string(),
-                    action: action.clone(),
-                    action_label: action_label.clone(),
-                    elapsed_ms: started_at.elapsed().as_millis() as u64,
+                    elapsed_ms: 0,
                     finished: 0,
                     total: 0,
                     current_label: None,
-                    message: format!("{} 失败: {}", action_label, error),
+                    message: format!("{action_label} 已启动，正在准备概念数据下载。"),
                 },
-            ),
-        }
+            );
 
-        result
-    })
+            let started_at = Instant::now();
+            let result = (|| -> Result<DataDownloadRunResult, String> {
+                let progress_app = app.clone();
+                let progress_download_id = download_id.clone();
+                let progress_action = action.clone();
+                let progress_action_label = action_label.clone();
+                let progress_started_at = started_at;
+                let progress_cb = move |progress: CoreDownloadProgress| {
+                    emit_core_download_progress(
+                        &progress_app,
+                        progress_download_id.as_str(),
+                        progress_action.as_str(),
+                        progress_action_label.as_str(),
+                        progress_started_at.elapsed().as_millis() as u64,
+                        progress,
+                    );
+                };
+
+                let mut run_result =
+                    core_run_prepared_ths_concept_download(&prepared, Some(&progress_cb))?;
+                run_result.elapsed_ms = started_at.elapsed().as_millis() as u64;
+                Ok(run_result)
+            })();
+
+            match &result {
+                Ok(run_result) => emit_data_download_event(
+                    &app,
+                    DataDownloadEventPayload {
+                        download_id: download_id.clone(),
+                        phase: "completed".to_string(),
+                        action: action.clone(),
+                        action_label: action_label.clone(),
+                        elapsed_ms: run_result.elapsed_ms,
+                        finished: run_result.summary.success_count
+                            + run_result.summary.failed_count,
+                        total: run_result.summary.success_count + run_result.summary.failed_count,
+                        current_label: None,
+                        message: format!(
+                            "{} 已完成，成功 {} 只，失败 {} 只。",
+                            action_label,
+                            run_result.summary.success_count,
+                            run_result.summary.failed_count
+                        ),
+                    },
+                ),
+                Err(error) => emit_data_download_event(
+                    &app,
+                    DataDownloadEventPayload {
+                        download_id: download_id.clone(),
+                        phase: "failed".to_string(),
+                        action: action.clone(),
+                        action_label: action_label.clone(),
+                        elapsed_ms: started_at.elapsed().as_millis() as u64,
+                        finished: 0,
+                        total: 0,
+                        current_label: None,
+                        message: format!("{} 失败: {}", action_label, error),
+                    },
+                ),
+            }
+
+            result
+        },
+    )
     .await
-    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -970,102 +995,103 @@ pub async fn run_concept_performance_repair(
     app: tauri::AppHandle,
     request: ConceptPerformanceRepairRequest,
 ) -> Result<DataDownloadRunResult, String> {
-    let download_id = request.download_id.trim().to_string();
-    if download_id.is_empty() {
-        return Err("download_id 不能为空".to_string());
-    }
+    crate::task_control::run(
+        app.clone(),
+        request.download_id.clone(),
+        request.source_path.clone(),
+        "download",
+        request.task_group.clone(),
+        move || {
+            let download_id = request.download_id.trim().to_string();
+            if download_id.is_empty() {
+                return Err("download_id 不能为空".to_string());
+            }
 
-    let prepared = {
-        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        core_prepare_concept_performance_repair_run(CoreConceptPerformanceRepairRunInput {
-            source_path: request.source_path,
-        })?
-    };
-    let action = prepared.action.clone();
-    let action_label = prepared.action_label.clone();
-    emit_data_download_event(
-        &app,
-        DataDownloadEventPayload {
-            download_id: download_id.clone(),
-            phase: "started".to_string(),
-            action: action.clone(),
-            action_label: action_label.clone(),
-            elapsed_ms: 0,
-            finished: 0,
-            total: 0,
-            current_label: None,
-            message: format!("{action_label} 已启动，正在准备补全概念表现库。"),
-        },
-    );
-
-    tauri::async_runtime::spawn_blocking(move || {
-        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        let started_at = Instant::now();
-        let result = (|| -> Result<DataDownloadRunResult, String> {
-            let progress_app = app.clone();
-            let progress_download_id = download_id.clone();
-            let progress_action = action.clone();
-            let progress_action_label = action_label.clone();
-            let progress_started_at = started_at;
-            let progress_cb = move |progress: CoreDownloadProgress| {
-                emit_core_download_progress(
-                    &progress_app,
-                    progress_download_id.as_str(),
-                    progress_action.as_str(),
-                    progress_action_label.as_str(),
-                    progress_started_at.elapsed().as_millis() as u64,
-                    progress,
-                );
+            let prepared = {
+                core_prepare_concept_performance_repair_run(CoreConceptPerformanceRepairRunInput {
+                    source_path: request.source_path,
+                })?
             };
-
-            let mut run_result =
-                core_run_prepared_concept_performance_repair(&prepared, Some(&progress_cb))?;
-            run_result.elapsed_ms = started_at.elapsed().as_millis() as u64;
-            Ok(run_result)
-        })();
-
-        match &result {
-            Ok(run_result) => emit_data_download_event(
+            let action = prepared.action.clone();
+            let action_label = prepared.action_label.clone();
+            emit_data_download_event(
                 &app,
                 DataDownloadEventPayload {
                     download_id: download_id.clone(),
-                    phase: "completed".to_string(),
+                    phase: "started".to_string(),
                     action: action.clone(),
                     action_label: action_label.clone(),
-                    elapsed_ms: run_result.elapsed_ms,
-                    finished: run_result.summary.success_count + run_result.summary.failed_count,
-                    total: run_result.summary.success_count + run_result.summary.failed_count,
-                    current_label: None,
-                    message: format!(
-                        "{} 已完成，写入 {} 行。",
-                        action_label, run_result.summary.saved_rows
-                    ),
-                },
-            ),
-            Err(error) => emit_data_download_event(
-                &app,
-                DataDownloadEventPayload {
-                    download_id: download_id.clone(),
-                    phase: "failed".to_string(),
-                    action: action.clone(),
-                    action_label: action_label.clone(),
-                    elapsed_ms: started_at.elapsed().as_millis() as u64,
+                    elapsed_ms: 0,
                     finished: 0,
                     total: 0,
                     current_label: None,
-                    message: format!("{} 失败: {}", action_label, error),
+                    message: format!("{action_label} 已启动，正在准备补全概念表现库。"),
                 },
-            ),
-        }
+            );
 
-        result
-    })
+            let started_at = Instant::now();
+            let result = (|| -> Result<DataDownloadRunResult, String> {
+                let progress_app = app.clone();
+                let progress_download_id = download_id.clone();
+                let progress_action = action.clone();
+                let progress_action_label = action_label.clone();
+                let progress_started_at = started_at;
+                let progress_cb = move |progress: CoreDownloadProgress| {
+                    emit_core_download_progress(
+                        &progress_app,
+                        progress_download_id.as_str(),
+                        progress_action.as_str(),
+                        progress_action_label.as_str(),
+                        progress_started_at.elapsed().as_millis() as u64,
+                        progress,
+                    );
+                };
+
+                let mut run_result =
+                    core_run_prepared_concept_performance_repair(&prepared, Some(&progress_cb))?;
+                run_result.elapsed_ms = started_at.elapsed().as_millis() as u64;
+                Ok(run_result)
+            })();
+
+            match &result {
+                Ok(run_result) => emit_data_download_event(
+                    &app,
+                    DataDownloadEventPayload {
+                        download_id: download_id.clone(),
+                        phase: "completed".to_string(),
+                        action: action.clone(),
+                        action_label: action_label.clone(),
+                        elapsed_ms: run_result.elapsed_ms,
+                        finished: run_result.summary.success_count
+                            + run_result.summary.failed_count,
+                        total: run_result.summary.success_count + run_result.summary.failed_count,
+                        current_label: None,
+                        message: format!(
+                            "{} 已完成，写入 {} 行。",
+                            action_label, run_result.summary.saved_rows
+                        ),
+                    },
+                ),
+                Err(error) => emit_data_download_event(
+                    &app,
+                    DataDownloadEventPayload {
+                        download_id: download_id.clone(),
+                        phase: "failed".to_string(),
+                        action: action.clone(),
+                        action_label: action_label.clone(),
+                        elapsed_ms: started_at.elapsed().as_millis() as u64,
+                        finished: 0,
+                        total: 0,
+                        current_label: None,
+                        message: format!("{} 失败: {}", action_label, error),
+                    },
+                ),
+            }
+
+            result
+        },
+    )
     .await
-    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -1086,72 +1112,77 @@ pub async fn check_databases(
 pub async fn repair_database_issues(
     app: tauri::AppHandle,
     download_id: String,
+    task_group: Option<String>,
     request: lianghua_app_data::integrity::DatabaseRepairInput,
 ) -> Result<DataDownloadRunResult, String> {
     if download_id.trim().is_empty() {
         return Err("download_id 不能为空".to_string());
     }
-    tauri::async_runtime::spawn_blocking(move || {
-        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        let started = Instant::now();
-        let callback = |progress: CoreDownloadProgress| {
-            emit_core_download_progress(
-                &app,
-                &download_id,
-                "repair-database",
-                "数据库针对性修复",
-                started.elapsed().as_millis() as u64,
-                progress,
-            );
-        };
-        callback(CoreDownloadProgress {
-            phase: "audit_recheck".to_string(),
-            finished: 0,
-            total: 0,
-            current_label: None,
-            message: "正在重新检查当前数据库，生成针对性修复计划。".to_string(),
-        });
-        let result = lianghua_app_data::integrity::repair_database_issues(request, Some(&callback));
-        match result {
-            Ok(mut result) => {
-                result.elapsed_ms = started.elapsed().as_millis() as u64;
-                emit_data_download_event(
+    crate::task_control::run(
+        app.clone(),
+        download_id.clone(),
+        request.source_path.clone(),
+        "download",
+        task_group,
+        move || {
+            let started = Instant::now();
+            let callback = |progress: CoreDownloadProgress| {
+                emit_core_download_progress(
                     &app,
-                    DataDownloadEventPayload {
-                        download_id,
-                        phase: "completed".to_string(),
-                        action: "repair-database".to_string(),
-                        action_label: "数据库针对性修复".to_string(),
-                        elapsed_ms: result.elapsed_ms,
-                        finished: result.summary.success_count,
-                        total: result.summary.success_count,
-                        current_label: None,
-                        message: "所选修复任务已提交，随后重新检查剩余问题。".to_string(),
-                    },
+                    &download_id,
+                    "repair-database",
+                    "数据库针对性修复",
+                    started.elapsed().as_millis() as u64,
+                    progress,
                 );
-                Ok(result)
+            };
+            callback(CoreDownloadProgress {
+                phase: "audit_recheck".to_string(),
+                finished: 0,
+                total: 0,
+                current_label: None,
+                message: "正在重新检查当前数据库，生成针对性修复计划。".to_string(),
+            });
+            let result =
+                lianghua_app_data::integrity::repair_database_issues(request, Some(&callback));
+            match result {
+                Ok(mut result) => {
+                    result.elapsed_ms = started.elapsed().as_millis() as u64;
+                    emit_data_download_event(
+                        &app,
+                        DataDownloadEventPayload {
+                            download_id,
+                            phase: "completed".to_string(),
+                            action: "repair-database".to_string(),
+                            action_label: "数据库针对性修复".to_string(),
+                            elapsed_ms: result.elapsed_ms,
+                            finished: result.summary.success_count,
+                            total: result.summary.success_count,
+                            current_label: None,
+                            message: "所选修复任务已提交，随后重新检查剩余问题。".to_string(),
+                        },
+                    );
+                    Ok(result)
+                }
+                Err(error) => {
+                    emit_data_download_event(
+                        &app,
+                        DataDownloadEventPayload {
+                            download_id,
+                            phase: "failed".to_string(),
+                            action: "repair-database".to_string(),
+                            action_label: "数据库针对性修复".to_string(),
+                            elapsed_ms: started.elapsed().as_millis() as u64,
+                            finished: 0,
+                            total: 0,
+                            current_label: None,
+                            message: error.clone(),
+                        },
+                    );
+                    Err(error)
+                }
             }
-            Err(error) => {
-                emit_data_download_event(
-                    &app,
-                    DataDownloadEventPayload {
-                        download_id,
-                        phase: "failed".to_string(),
-                        action: "repair-database".to_string(),
-                        action_label: "数据库针对性修复".to_string(),
-                        elapsed_ms: started.elapsed().as_millis() as u64,
-                        finished: 0,
-                        total: 0,
-                        current_label: None,
-                        message: error.clone(),
-                    },
-                );
-                Err(error)
-            }
-        }
-    })
+        },
+    )
     .await
-    .map_err(|error| error.to_string())?
 }

@@ -137,7 +137,11 @@ export function RankComparisonPanel({ settings, disabled, onRunningChange, onRes
         } else if (response.archive_error) setArchiveMessage(`结果尚未自动保存：${response.archive_error}`);
       }
     } catch (failure) {
-      setError(`执行排名对照失败：${String(failure)}`);
+      if (["排名对照已取消", "排名对照已停止并撤回本次研究记录"].includes(String(failure))) {
+        setArchiveMessage(String(failure) === "排名对照已取消" ? "排名对照已停止，保留本次运行记录。" : String(failure));
+      } else {
+        setError(`执行排名对照失败：${String(failure)}`);
+      }
       if (activeSource.current === settings.source_path) {
         try { setArchives((await listResearchArchives(settings.source_path)).filter((item) => item.kind === "rank_comparison")); }
         catch { /* 原始运行错误仍需显示。 */ }
@@ -146,12 +150,12 @@ export function RankComparisonPanel({ settings, disabled, onRunningChange, onRes
     finally { activeTask.current = ""; setPhase(""); setCancelling(false); setLoading(false); onRunningChange(false); }
   }
 
-  async function cancel() {
+  async function cancel(rollback: boolean) {
     if (!activeTask.current || cancelling) return;
     setCancelling(true);
     try {
-      await cancelRankComparison(activeTask.current);
-      setPhase("已请求取消，等待仓库锁或当前评分、后验阶段结束");
+      await cancelRankComparison(activeTask.current, rollback);
+      setPhase(`已请求${rollback ? "撤回" : "停止"}，等待当前读取或计算结束`);
     } catch (failure) { setError(`取消请求失败：${String(failure)}`); setCancelling(false); }
   }
 
@@ -267,7 +271,7 @@ export function RankComparisonPanel({ settings, disabled, onRunningChange, onRes
       <button type="button" className="scene-layer-primary-btn" disabled={disabled || loading || loadingBaseline || archiveBusy || !candidate.trim()} onClick={() => void run()}>{loading ? "计算中…" : "运行排名对照"}</button>
       <button type="button" className="scene-layer-secondary-btn" disabled={disabled || loading || archiveBusy || loadingBaseline} onClick={() => void loadBaseline()}>{loadingBaseline ? "读取中…" : "恢复当前策略"}</button>
     </div>
-    {loading ? <ResearchRunProgress phase={phase} cancelling={cancelling} onCancel={() => void cancel()} /> : null}
+    {loading ? <ResearchRunProgress actionLabel="排名对照" phase={phase} cancelling={cancelling} onCancel={(rollback) => void cancel(rollback)} /> : null}
     {error ? <p role="alert">{error}</p> : null}
     <div ref={feedbackRef} className="research-feedback-target">
     {result?.archive_run_id ? <button type="button" className="research-history-delete" disabled={loading || archiveBusy} onClick={() => void removeArchive(result.archive_run_id!)}>删除当前记录</button> : null}

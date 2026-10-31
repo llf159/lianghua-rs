@@ -75,7 +75,22 @@ export type CyqChenMechanismDay = {
   referenceProfitRatioUpper: number
 }
 
+export type CyqChenAgeSummary = {
+  version: number
+  tradeDate: string
+  observationStartDate?: string | null
+  observedDays: number
+  clock: 'quoteUpdates'
+  model: 'mixedProportionalSurvival'
+  totalMass: number
+  masses: [number, number, number, number, number, number]
+  new5Pct?: number | null
+  knownGe20Pct?: number | null
+  initialPct: number
+}
+
 export type CyqChenSnapshot = {
+  ageSummary?: CyqChenAgeSummary | null
   origin?: CyqChenOrigin | null
   flow?: CyqChenFlow | null
   tradeDate?: string | null
@@ -147,6 +162,8 @@ export type CyqChenSingleStockData = {
   kline: CyqChenKlineRow[]
   klinePayload?: DetailKlinePayload | null
   snapshots: CyqChenSnapshot[]
+  retention?: CyqChenRetention | null
+  priceCoordinate?: string
   mechanismComparison?: {
     simulationStartDate: string | null
     universeVerified: boolean
@@ -154,7 +171,31 @@ export type CyqChenSingleStockData = {
   } | null
 }
 
+export type CyqChenRetentionRequest = {
+  anchorDate: string
+  evaluationDate: string
+  priceLow: number
+  priceHigh: number
+}
+
+export type CyqChenRetention = {
+  request: CyqChenRetentionRequest
+  model: string
+  simulationStartDate?: string | null
+  quoteUpdates?: number | null
+  actualPriceLow?: number | null
+  actualPriceHigh?: number | null
+  anchorMass?: number | null
+  oldRemaining?: number | null
+  currentMass?: number | null
+  addedMass?: number | null
+  retentionRatio?: number | null
+  addedRatio?: number | null
+  unavailableReason?: string | null
+}
+
 export type CyqChenSingleStockRequest = {
+  retention?: CyqChenRetentionRequest | null
   version: number
   compareMechanisms?: boolean
   sourcePath: string

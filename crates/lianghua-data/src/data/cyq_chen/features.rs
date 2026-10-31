@@ -1,24 +1,27 @@
-use super::{ChenChipBar, ChenChipSnapshot, ChipBucket, EPS};
+use super::{ChenChipAgeSummary, ChenChipBar, ChenChipSnapshot, ChipBucket, EPS};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 pub const CYQ_CHEN_FEATURE_VERSION: u32 = 2;
+pub const CYQ_CHEN_AGE_SUMMARY_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChenChipFeatureState {
     pub version: u32,
     pub trade_date: Option<String>,
     pub observed_days: usize,
-    buckets: Vec<FeatureBucket>,
+    #[serde(default)]
+    pub observation_start_date: Option<String>,
+    pub(super) buckets: Vec<FeatureBucket>,
     losses: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct FeatureBucket {
-    low: f64,
-    high: f64,
-    ages: Vec<f64>,
-    initial: f64,
+pub(super) struct FeatureBucket {
+    pub(super) low: f64,
+    pub(super) high: f64,
+    pub(super) ages: Vec<f64>,
+    pub(super) initial: f64,
     loss_run: usize,
     recovered: bool,
 }
@@ -202,6 +205,9 @@ impl ChenChipFeatureState {
         if self.losses.len() > 20 {
             self.losses.remove(0);
         }
+        if self.observed_days == 0 {
+            self.observation_start_date = Some(bar.trade_date.clone());
+        }
         self.observed_days += 1;
         self.version = CYQ_CHEN_FEATURE_VERSION;
         self.trade_date = Some(bar.trade_date.clone());
@@ -210,6 +216,31 @@ impl ChenChipFeatureState {
 
     pub(super) fn fill_snapshot(&self, snapshot: &mut ChenChipSnapshot) {
         let mass = snapshot.total_chips;
+        let mut masses = [0.0; 6];
+        for bucket in &self.buckets {
+            masses[0] += bucket.ages[..5].iter().sum::<f64>();
+            masses[1] += bucket.ages[5..20].iter().sum::<f64>();
+            masses[2] += bucket.ages[20..60].iter().sum::<f64>();
+            masses[3] += bucket.ages[60..120].iter().sum::<f64>();
+            masses[4] += bucket.ages[120];
+            masses[5] += bucket.initial;
+        }
+        snapshot.age_summary =
+            (self.version == CYQ_CHEN_FEATURE_VERSION && self.observed_days > 0 && mass > EPS)
+                .then(|| ChenChipAgeSummary {
+                    version: CYQ_CHEN_AGE_SUMMARY_VERSION,
+                    trade_date: self.trade_date.clone().unwrap_or_default(),
+                    observation_start_date: self.observation_start_date.clone(),
+                    observed_days: self.observed_days,
+                    clock: "quoteUpdates".into(),
+                    model: "mixedProportionalSurvival".into(),
+                    total_mass: mass,
+                    masses,
+                    new5_pct: (self.observed_days >= 5).then_some(masses[0] / mass * 100.0),
+                    known_ge20_pct: (self.observed_days >= 21)
+                        .then_some(masses[2..5].iter().sum::<f64>() / mass * 100.0),
+                    initial_pct: masses[5] / mass * 100.0,
+                });
         let mut weighted = 0.0;
         let mut unknown = 0.0;
         for bucket in &self.buckets {
@@ -282,6 +313,12 @@ mod tests {
                 .unwrap();
             let mut snapshot = build_snapshot(&bar, &buckets, true).unwrap();
             state.fill_snapshot(&mut snapshot);
+            if day == 1 {
+                let age = snapshot.age_summary.as_ref().unwrap();
+                assert_eq!(age.new5_pct, None);
+                assert_eq!(age.known_ge20_pct, None);
+                assert_close(age.initial_pct, 100.0);
+            }
             if day == 19 {
                 assert!(snapshot.real_loss20.is_none());
             }
@@ -325,6 +362,11 @@ mod tests {
             0.2 * (0.5 * 3.0 / 120.0 + 0.5 / 120.0),
         );
         assert_close(snapshot.real_loss20.unwrap(), 0.5 * (2.0 / 22.0) / 20.0);
+        let age = snapshot.age_summary.as_ref().unwrap();
+        assert_close(age.masses[0], 50.0);
+        assert_close(age.masses[5], 50.0);
+        assert_close(age.initial_pct, 50.0);
+        assert_eq!(age.observation_start_date.as_deref(), Some("00000001"));
         assert_close(
             state.buckets[0].initial + state.buckets[0].ages.iter().sum::<f64>(),
             100.0,
@@ -515,10 +557,24 @@ mod tests {
             assert_close(actual.trap_coef.unwrap(), expected.trap_coef.unwrap());
             assert_close(actual.real_loss20.unwrap(), expected.real_loss20.unwrap());
             assert_eq!(actual.feature_days, expected.feature_days);
+            assert_eq!(actual.age_summary, expected.age_summary);
             assert_close(actual.total_chips, expected.total_chips);
         }
         assert_eq!(restored.losses, full_state.losses);
         assert_eq!(restored.trade_date, full_state.trade_date);
+        let mut legacy = serde_json::to_value(&restored).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("observation_start_date");
+        let legacy: ChenChipFeatureState = serde_json::from_value(legacy).unwrap();
+        legacy
+            .validate(
+                full.last().unwrap().trade_date.as_deref().unwrap(),
+                &full.last().unwrap().bins,
+            )
+            .unwrap();
+        assert!(legacy.observation_start_date.is_none());
         restored.version = 1;
         assert!(
             restored

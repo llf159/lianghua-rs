@@ -193,6 +193,7 @@ pub(in crate::statistics) fn build_validation_triggered_scores_for_combos(
     st_list: &HashSet<String>,
     combos: &[PreparedValidationCombo],
     include_non_hits: bool,
+    progress: Option<&(dyn Fn(usize, usize) -> Result<(), String> + Sync)>,
 ) -> Result<Vec<ValidationTriggeredScoreMap>, String> {
     if combos.is_empty() {
         return Ok(Vec::new());
@@ -282,6 +283,10 @@ pub(in crate::statistics) fn build_validation_triggered_scores_for_combos(
     // One bounded producer batches database work; Rayon workers only evaluate expressions.
     // A batch and queue each target ~64K stock-days, with at least one stock.
     let batch_size = (65_536 / need_rows.max(1)).clamp(1, 64);
+    let processed = Mutex::new(0_usize);
+    if let Some(progress) = progress {
+        progress(0, ts_codes.len())?;
+    }
     std::thread::scope(|scope| -> Result<(), String> {
         let (sender, receiver) = std::sync::mpsc::sync_channel(batch_size);
         let producer = scope.spawn(move || -> Result<(), String> {
@@ -548,6 +553,14 @@ pub(in crate::statistics) fn build_validation_triggered_scores_for_combos(
                     }
                 }
 
+                if let Some(progress) = progress {
+                    let mut finished = processed.lock().map_err(|_| "信号计算进度锁已损坏")?;
+                    *finished += 1;
+                    if *finished % 32 == 0 || *finished == ts_codes.len() {
+                        progress(*finished, ts_codes.len())?;
+                    }
+                }
+
                 Ok::<(), String>(())
             })
             .collect::<Vec<_>>();
@@ -609,6 +622,7 @@ pub(in crate::statistics) fn build_validation_triggered_scores(
         &st_list,
         &[combo],
         false,
+        None,
     )?;
     Ok(triggered_maps.pop().unwrap_or_default())
 }
@@ -1311,6 +1325,7 @@ mod tests {
             &st_list,
             &combos,
             false,
+            None,
         )
         .expect("build batch triggered scores");
 

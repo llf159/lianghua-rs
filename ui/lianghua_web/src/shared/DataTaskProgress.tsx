@@ -17,6 +17,9 @@ type DataTaskProgressProps = {
   currentObjectText?: string
   message: string | null | undefined
   fallbackMessage: string
+  onCancel?: () => void
+  onRollback?: () => void
+  cancelDisabled?: boolean
 }
 
 export default function DataTaskProgress({
@@ -34,6 +37,9 @@ export default function DataTaskProgress({
   currentObjectText,
   message,
   fallbackMessage,
+  onCancel,
+  onRollback,
+  cancelDisabled,
 }: DataTaskProgressProps) {
   return (
     <div className="data-download-progress">
@@ -45,9 +51,21 @@ export default function DataTaskProgress({
           </span>
           <strong>{actionLabel}</strong>
         </div>
-        <div className="data-download-progress-value">
-          <strong>{progressPercent === null ? '--' : `${Math.floor(shownProgressPercent * 10) / 10}%`}</strong>
-          <span>{elapsedText}</span>
+        <div className="data-download-progress-head-end">
+          <div className="data-download-progress-value">
+            <strong>{progressPercent === null ? '--' : `${Math.floor(shownProgressPercent * 10) / 10}%`}</strong>
+            <span>{elapsedText}</span>
+          </div>
+          {onCancel ? (
+            <button type="button" className="data-download-secondary-btn" disabled={cancelDisabled} onClick={onCancel}>
+              停止
+            </button>
+          ) : null}
+          {onRollback ? (
+            <button type="button" className="data-download-secondary-btn" disabled={cancelDisabled} onClick={onRollback}>
+              撤回
+            </button>
+          ) : null}
         </div>
       </div>
       <div
