@@ -32,6 +32,7 @@ const EMPTY_CHIP_CHANGE_TEMPLATE: &str = "version = 1\n";
 #[serde(rename_all = "camelCase")]
 pub struct CyqChenSingleStockRequest {
     pub version: Option<u32>,
+    pub negative_evidence_scale: Option<f64>,
     pub retention: Option<ChenChipRetentionRequest>,
     pub source_path: String,
     pub ts_code: String,
@@ -57,6 +58,7 @@ pub struct CyqChenKlineRow {
 #[serde(rename_all = "camelCase")]
 pub struct CyqChenSingleStockData {
     pub version: u32,
+    pub negative_evidence_scale: Option<f64>,
     pub resolved_ts_code: String,
     pub start_date: String,
     pub end_date: String,
@@ -73,6 +75,7 @@ pub struct CyqChenSingleStockData {
 #[serde(rename_all = "camelCase")]
 pub struct CyqChenStrategyPageData {
     pub version: u32,
+    pub negative_evidence_scale: Option<f64>,
     pub file_path: String,
     pub exists: bool,
     pub strategies: Vec<ChipChangeStrategy>,
@@ -122,6 +125,7 @@ pub struct CyqChenStrategyBackupDiff {
 #[serde(rename_all = "camelCase")]
 pub struct CyqChenStrategyFileDraft {
     pub version: Option<u32>,
+    pub negative_evidence_scale: Option<f64>,
     pub strategies: Vec<ChipChangeStrategy>,
 }
 
@@ -142,6 +146,7 @@ fn chip_change_backup_dir(source_path: &str) -> PathBuf {
 fn validate_chip_change_draft(draft: CyqChenStrategyFileDraft) -> Result<ChipChangeConfig, String> {
     let config = ChipChangeConfig {
         version: draft.version.unwrap_or(1),
+        negative_evidence_scale: draft.negative_evidence_scale,
         strategy: draft.strategies,
     };
     config.compile()?;
@@ -319,6 +324,7 @@ bias = -0.6
     };
     Ok(CyqChenStrategyPageData {
         version: config.version,
+        negative_evidence_scale: config.negative_evidence_scale,
         file_path: path.display().to_string(),
         exists,
         strategies: config.strategy,
@@ -432,8 +438,12 @@ pub fn save_cyq_chen_strategy_file(
         return Err("数据目录为空，请先确认当前数据源".to_string());
     }
     let path = chip_change_rule_path(source_path);
-    if draft.version.is_none() && path.exists() {
-        draft.version = Some(ChipChangeConfig::load(source_path)?.version);
+    if (draft.version.is_none() || draft.negative_evidence_scale.is_none()) && path.exists() {
+        let saved = ChipChangeConfig::load(source_path)?;
+        draft.version = Some(draft.version.unwrap_or(saved.version));
+        if draft.version == Some(2) && draft.negative_evidence_scale.is_none() {
+            draft.negative_evidence_scale = saved.negative_evidence_scale;
+        }
     }
     let config = validate_chip_change_draft(draft)?;
     if let Some(parent) = path.parent() {
@@ -958,14 +968,28 @@ pub fn run_cyq_chen_single_stock_test(
         warmup_days: request.warmup_days,
         bucket_pct: request.bucket_pct,
     };
+    let saved_config = if (request.version.is_none() || request.negative_evidence_scale.is_none())
+        && chip_change_rule_path(source_path).exists()
+    {
+        Some(ChipChangeConfig::load(source_path)?)
+    } else {
+        None
+    };
     let chip_config = ChipChangeConfig {
-        version: match request.version {
-            Some(version) => version,
-            None if chip_change_rule_path(source_path).exists() => {
-                ChipChangeConfig::load(source_path)?.version
-            }
-            None => 1,
-        },
+        version: request
+            .version
+            .or(saved_config.as_ref().map(|config| config.version))
+            .unwrap_or(1),
+        negative_evidence_scale: request.negative_evidence_scale.or_else(|| {
+            saved_config
+                .as_ref()
+                .filter(|config| {
+                    request
+                        .version
+                        .is_none_or(|version| version == config.version)
+                })
+                .and_then(|config| config.negative_evidence_scale)
+        }),
         strategy: request.strategies,
     };
     let compiled_chip_config = chip_config.compile()?;
@@ -1053,6 +1077,7 @@ pub fn run_cyq_chen_single_stock_test(
             Err(err) if err.contains("trade_dates为空") => {
                 return Ok(CyqChenSingleStockData {
                     version: chip_config.version,
+                    negative_evidence_scale: chip_config.negative_evidence_scale,
                     resolved_ts_code: ts_code,
                     start_date,
                     end_date,
@@ -1071,6 +1096,7 @@ pub fn run_cyq_chen_single_stock_test(
     if row_data.trade_dates.is_empty() {
         return Ok(CyqChenSingleStockData {
             version: chip_config.version,
+            negative_evidence_scale: chip_config.negative_evidence_scale,
             resolved_ts_code: ts_code,
             start_date,
             end_date,
@@ -1192,6 +1218,7 @@ pub fn run_cyq_chen_single_stock_test(
 
     Ok(CyqChenSingleStockData {
         version: chip_config.version,
+        negative_evidence_scale: chip_config.negative_evidence_scale,
         resolved_ts_code: ts_code,
         start_date,
         end_date,
@@ -1351,6 +1378,7 @@ mod tests {
 
         let request = CyqChenSingleStockRequest {
             version: None,
+            negative_evidence_scale: None,
             retention: Some(crate::data::cyq_chen::ChenChipRetentionRequest {
                 anchor_date: "20260403".into(),
                 evaluation_date: "20260407".into(),
@@ -1408,6 +1436,7 @@ mod tests {
 
         let data = run_cyq_chen_single_stock_test(CyqChenSingleStockRequest {
             version: None,
+            negative_evidence_scale: None,
             retention: None,
             source_path: source_dir.to_str().expect("utf8 path").to_string(),
             ts_code: "000999".to_string(),
@@ -1447,23 +1476,28 @@ mod tests {
             source_path,
             super::CyqChenStrategyFileDraft {
                 version: Some(2),
+                negative_evidence_scale: Some(1.0),
                 strategies: config.strategy,
             },
         )
         .unwrap();
         assert_eq!(page.version, 2);
+        assert_eq!(page.negative_evidence_scale, Some(1.0));
         // A client without the new field must not downgrade an existing version 2 file on save.
         let page = super::save_cyq_chen_strategy_file(
             source_path,
             super::CyqChenStrategyFileDraft {
                 version: None,
+                negative_evidence_scale: None,
                 strategies: page.strategies,
             },
         )
         .unwrap();
         assert_eq!(page.version, 2);
+        assert_eq!(page.negative_evidence_scale, Some(1.0));
         let data = run_cyq_chen_single_stock_test(CyqChenSingleStockRequest {
             version: Some(page.version),
+            negative_evidence_scale: None,
             retention: None,
             source_path: source_path.into(),
             ts_code: "000001".into(),
@@ -1475,6 +1509,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(data.version, 2);
+        assert_eq!(data.negative_evidence_scale, Some(1.0));
         assert!(!data.snapshots.is_empty());
         assert!(
             data.snapshots

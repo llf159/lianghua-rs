@@ -175,6 +175,7 @@ impl ChipChangeConfig {
         });
         Ok(CompiledChipChangeConfig {
             version: self.version,
+            negative_evidence_scale: self.negative_evidence_scale.unwrap_or(3.0),
             strategies,
             sell_uses_bucket_rate_series,
             sell_uses_main_ratio_history,
@@ -191,6 +192,11 @@ impl ChipChangeConfig {
     }
 
     fn validate(&self) -> Result<(), String> {
+        if let Some(scale) = self.negative_evidence_scale {
+            if self.version != 2 || !scale.is_finite() || scale < 0.0 {
+                return Err("negative_evidence_scale 仅支持版本 2，且必须为非负有限数值".into());
+            }
+        }
         if !matches!(self.version, 1 | 2) {
             return Err(format!(
                 "筹码变化策略文件 version 只支持 1 或 2，当前为 {}",
@@ -652,6 +658,25 @@ mod tests {
         .unwrap();
         assert_eq!(config.version, 2);
         assert_eq!(config.compile().unwrap().strategies.len(), 64);
+        assert_eq!(config.compile().unwrap().negative_evidence_scale, 3.0);
+        assert!(
+            !toml::to_string(&config)
+                .unwrap()
+                .contains("negative_evidence_scale")
+        );
+        config.negative_evidence_scale = Some(1.0);
+        let restored = ChipChangeConfig::from_toml_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(restored.compile().unwrap().negative_evidence_scale, 1.0);
+        for scale in [-1.0, f64::NAN, f64::INFINITY] {
+            config.negative_evidence_scale = Some(scale);
+            assert!(
+                config
+                    .compile()
+                    .unwrap_err()
+                    .contains("negative_evidence_scale")
+            );
+        }
+        config.negative_evidence_scale = None;
         let buy = config
             .strategy
             .iter()

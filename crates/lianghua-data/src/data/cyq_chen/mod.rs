@@ -41,6 +41,9 @@ pub(super) const EPS: f64 = 1e-10;
 pub struct ChipChangeConfig {
     /// 1: fixed buyer weights; 2: inventory-neutral directional migration.
     pub version: u32,
+    /// Version 2 net-negative evidence multiplier; omission preserves the legacy value 3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub negative_evidence_scale: Option<f64>,
     pub strategy: Vec<ChipChangeStrategy>,
 }
 
@@ -72,6 +75,7 @@ pub enum ChipDirection {
 #[derive(Debug, Clone)]
 pub struct CompiledChipChangeConfig {
     pub version: u32,
+    pub negative_evidence_scale: f64,
     pub strategies: Vec<CompiledChipChangeStrategy>,
     sell_uses_bucket_rate_series: bool,
     pub(in crate::data) sell_uses_main_ratio_history: bool,

@@ -64,6 +64,8 @@ impl ChenChipRetention {
             request: request.clone(),
             strategy: ChipChangeConfig {
                 version: chip_config.version,
+                negative_evidence_scale: (chip_config.version == 2)
+                    .then_some(chip_config.negative_evidence_scale),
                 strategy: chip_config
                     .strategies
                     .iter()
@@ -155,6 +157,7 @@ mod tests {
         };
         let chip = ChipChangeConfig {
             version: 2,
+            negative_evidence_scale: None,
             strategy: vec![],
         }
         .compile()

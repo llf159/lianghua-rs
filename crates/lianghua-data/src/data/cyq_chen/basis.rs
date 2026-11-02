@@ -285,6 +285,7 @@ mod tests {
         };
         let uniform = ChipChangeConfig {
             version: 1,
+            negative_evidence_scale: None,
             strategy: [ChipDirection::Buy, ChipDirection::Sell]
                 .into_iter()
                 .flat_map(|direction| {

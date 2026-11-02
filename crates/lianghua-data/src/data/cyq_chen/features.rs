@@ -24,6 +24,32 @@ pub(super) struct FeatureBucket {
     pub(super) initial: f64,
     loss_run: usize,
     recovered: bool,
+    // Outside this interval all ages are zero. Rebuilt lazily for legacy checkpoints.
+    #[serde(skip)]
+    active_ages: Option<(usize, usize)>,
+}
+
+impl FeatureBucket {
+    fn age_range(&self) -> std::ops::Range<usize> {
+        if let Some((start, end)) = self.active_ages {
+            start..end
+        } else if let Some(start) = self.ages.iter().position(|q| *q != 0.0) {
+            start..self.ages.iter().rposition(|q| *q != 0.0).unwrap() + 1
+        } else {
+            0..0
+        }
+    }
+
+    fn age_mass(&self, range: std::ops::Range<usize>) -> f64 {
+        let active = self.age_range();
+        let start = range.start.max(active.start);
+        let end = range.end.min(active.end);
+        if start < end {
+            self.ages[start..end].iter().sum()
+        } else {
+            0.0
+        }
+    }
 }
 
 impl ChenChipFeatureState {
@@ -125,6 +151,7 @@ impl ChenChipFeatureState {
                     initial: bucket.total_chip(),
                     loss_run: 0,
                     recovered: false,
+                    active_ages: None,
                 });
                 self.buckets.push(state);
             }
@@ -134,8 +161,7 @@ impl ChenChipFeatureState {
         }
         for (state, bucket) in self.buckets.iter().zip(buckets) {
             if self.observed_days > 0
-                && (state.ages.iter().sum::<f64>() + state.initial - bucket.total_chip()).abs()
-                    > 1e-8
+                && (state.age_mass(0..121) + state.initial - bucket.total_chip()).abs() > 1e-8
             {
                 return Err("筹码特征库存与引擎库存不一致".into());
             }
@@ -177,21 +203,47 @@ impl ChenChipFeatureState {
             } else {
                 0.0
             };
+            let active = state.age_range();
             state.initial *= survival;
-            for q in &mut state.ages {
+            for q in &mut state.ages[active.clone()] {
                 *q *= survival;
             }
-            state.ages[120] += state.ages[119];
-            state.ages.copy_within(0..119, 1);
+            // Keep the checkpoint's logical age order, but move only populated ages.
+            if !active.is_empty() {
+                if active.end > 119 {
+                    state.ages[120] += state.ages[119];
+                }
+                if active.start < 119 {
+                    state
+                        .ages
+                        .copy_within(active.start..active.end.min(119), active.start + 1);
+                }
+                if active.start < 120 {
+                    state.ages[active.start] = 0.0;
+                }
+            }
             state.ages[0] = bought.max(0.0);
-            let total = state.ages.iter().sum::<f64>() + state.initial;
+            state.active_ages = Some(if active.is_empty() {
+                if bought > 0.0 { (0, 1) } else { (0, 0) }
+            } else {
+                (
+                    if bought > 0.0 {
+                        0
+                    } else {
+                        (active.start + 1).min(120)
+                    },
+                    (active.end + 1).min(121),
+                )
+            });
+            let total = state.age_mass(0..121) + state.initial;
             let current = bucket.total_chip();
             if current > EPS && total <= EPS {
                 return Err("筹码特征缺少可追踪的库存".into());
             }
             let scale = if total > EPS { current / total } else { 0.0 };
             state.initial *= scale;
-            for q in &mut state.ages {
+            let active = state.age_range();
+            for q in &mut state.ages[active] {
                 *q *= scale;
             }
             if bucket.price() > bar.close {
@@ -218,10 +270,10 @@ impl ChenChipFeatureState {
         let mass = snapshot.total_chips;
         let mut masses = [0.0; 6];
         for bucket in &self.buckets {
-            masses[0] += bucket.ages[..5].iter().sum::<f64>();
-            masses[1] += bucket.ages[5..20].iter().sum::<f64>();
-            masses[2] += bucket.ages[20..60].iter().sum::<f64>();
-            masses[3] += bucket.ages[60..120].iter().sum::<f64>();
+            masses[0] += bucket.age_mass(0..5);
+            masses[1] += bucket.age_mass(5..20);
+            masses[2] += bucket.age_mass(20..60);
+            masses[3] += bucket.age_mass(60..120);
             masses[4] += bucket.ages[120];
             masses[5] += bucket.initial;
         }
@@ -248,7 +300,9 @@ impl ChenChipFeatureState {
                 continue;
             }
             let depth = (((bucket.low + bucket.high) / 2.0) / snapshot.close - 1.0).max(0.0);
-            for (age, q) in bucket.ages.iter().enumerate() {
+            let active = bucket.age_range();
+            for (offset, q) in bucket.ages[active.clone()].iter().enumerate() {
+                let age = active.start + offset;
                 weighted += q * depth * (age + 1).min(bucket.loss_run).min(120) as f64 / 120.0;
             }
             weighted += bucket.initial * depth * bucket.loss_run as f64 / 120.0;
@@ -281,6 +335,131 @@ mod tests {
         compute_chen_chip_snapshots_from_initial_bins_with_compiled_config_with_features,
         compute_chen_chip_snapshots_with_compiled_config_with_features,
     };
+
+    #[test]
+    fn active_age_range_matches_dense_ledger_exactly() {
+        let mut buckets = (0..12)
+            .map(|index| ChipBucket {
+                price_low: 8.0 + index as f64,
+                price_high: 9.0 + index as f64,
+                main_chip: 50.0 / 12.0,
+                retail_chip: 50.0 / 12.0,
+                pending: Vec::new(),
+                origin: None,
+                rateo: None,
+                rateh: None,
+                ratel: None,
+                ratec: None,
+            })
+            .collect::<Vec<_>>();
+        let mut state = ChenChipFeatureState::default();
+        state.align(&buckets).unwrap();
+        // Include sub-EPS mass and cohorts at each published age boundary.
+        for (index, bucket) in state.buckets.iter_mut().enumerate() {
+            if index % 2 == 0 {
+                bucket.ages[[0, 4, 19, 59, 119, 120][index / 2]] = 1e-20;
+            }
+        }
+        for day in 0..700 {
+            state.align(&buckets).unwrap();
+            let before = buckets
+                .iter()
+                .map(ChipBucket::total_chip)
+                .collect::<Vec<_>>();
+            let survival = if day % 173 == 172 {
+                0.0
+            } else if day % 17 == 0 {
+                1.0
+            } else {
+                0.97
+            };
+            let after_sell = before.iter().map(|q| q * survival).collect::<Vec<_>>();
+            let sold = before.iter().sum::<f64>() - after_sell.iter().sum::<f64>();
+            let mut after_buy = after_sell.clone();
+            after_buy[(day / 31) % buckets.len()] += sold;
+            let normalization = 100.0 / after_buy.iter().sum::<f64>();
+            for (bucket, q) in buckets.iter_mut().zip(&after_buy) {
+                bucket.main_chip = q * normalization * 0.5;
+                bucket.retail_chip = q * normalization * 0.5;
+            }
+            let mut dense = state.buckets.clone();
+            for (index, bucket) in dense.iter_mut().enumerate() {
+                let survival = if before[index] > EPS {
+                    (after_sell[index] / before[index]).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                // Original full-array update, deliberately independent of the range cache.
+                bucket.initial *= survival;
+                for q in &mut bucket.ages {
+                    *q *= survival;
+                }
+                bucket.ages[120] += bucket.ages[119];
+                bucket.ages.copy_within(0..119, 1);
+                bucket.ages[0] = (after_buy[index] - after_sell[index]).max(0.0);
+                let total = bucket.ages.iter().sum::<f64>() + bucket.initial;
+                let scale = if total > EPS {
+                    buckets[index].total_chip() / total
+                } else {
+                    0.0
+                };
+                bucket.initial *= scale;
+                for q in &mut bucket.ages {
+                    *q *= scale;
+                }
+            }
+            let bar = ChenChipBar {
+                trade_date: format!("{day:08}"),
+                open: 12.0,
+                high: 13.0,
+                low: 11.0,
+                close: if day % 151 < 130 { 10.0 } else { 20.0 },
+                turnover_rate: (1.0 - survival) * 100.0,
+            };
+            state
+                .observe(&bar, &buckets, &before, &after_sell, &after_buy)
+                .unwrap();
+            for (actual, expected) in state.buckets.iter().zip(&dense) {
+                assert_eq!(actual.ages, expected.ages, "day={day}");
+                assert_eq!(actual.initial, expected.initial, "day={day}");
+            }
+            let mut snapshot = build_snapshot(&bar, &buckets, true).unwrap();
+            state.fill_snapshot(&mut snapshot);
+            let mut masses = [0.0; 6];
+            let mut weighted = 0.0;
+            for bucket in &state.buckets {
+                for (slot, range) in [0..5, 5..20, 20..60, 60..120, 120..121]
+                    .into_iter()
+                    .enumerate()
+                {
+                    masses[slot] += bucket.ages[range].iter().sum::<f64>();
+                }
+                masses[5] += bucket.initial;
+                if bucket.loss_run > 0 {
+                    let depth = (((bucket.low + bucket.high) / 2.0) / bar.close - 1.0).max(0.0);
+                    for (age, q) in bucket.ages.iter().enumerate() {
+                        weighted +=
+                            q * depth * (age + 1).min(bucket.loss_run).min(120) as f64 / 120.0;
+                    }
+                    weighted += bucket.initial * depth * bucket.loss_run as f64 / 120.0;
+                }
+            }
+            assert_eq!(
+                snapshot.age_summary.as_ref().unwrap().masses,
+                masses,
+                "day={day}"
+            );
+            if let Some(trap) = snapshot.trap_coef {
+                assert_eq!(trap, weighted / snapshot.total_chips, "day={day}");
+            }
+            if day % 97 == 96 {
+                let encoded = serde_json::to_string(&state).unwrap();
+                assert!(!encoded.contains("active_ages"));
+                state = serde_json::from_str(&encoded).unwrap();
+                state.validate(&bar.trade_date, &snapshot.bins).unwrap();
+            }
+        }
+    }
 
     #[test]
     fn coefficient_tracks_known_time_resets_and_unknown_saturation() {

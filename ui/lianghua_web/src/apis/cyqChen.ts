@@ -117,6 +117,7 @@ export type CyqChenBasis = {
 
 export type CyqChenSingleStockData = {
   version: number
+  negativeEvidenceScale?: number | null
   basis?: CyqChenBasis | null
   resolvedTsCode: string
   startDate: string
@@ -155,6 +156,7 @@ export type CyqChenRetention = {
 export type CyqChenSingleStockRequest = {
   retention?: CyqChenRetentionRequest | null
   version: number
+  negativeEvidenceScale?: number | null
   sourcePath: string
   tsCode: string
   startDate?: string | null
@@ -178,6 +180,7 @@ export type CyqChenStrategyBackupItem = {
 
 export type CyqChenStrategyPageData = {
   version: number
+  negativeEvidenceScale?: number | null
   filePath: string
   exists: boolean
   strategies: CyqChenStrategyDraft[]
@@ -221,16 +224,17 @@ export async function saveCyqChenStrategyFile(
   sourcePath: string,
   strategies: CyqChenStrategyDraft[],
   version: number,
+  negativeEvidenceScale?: number | null,
 ) {
   return invoke<CyqChenStrategyPageData>('save_cyq_chen_strategy_file', {
     sourcePath,
-    draft: { version, strategies },
+    draft: { version, negativeEvidenceScale, strategies },
   })
 }
 
-export async function checkCyqChenStrategyFileDraft(strategies: CyqChenStrategyDraft[], version: number) {
+export async function checkCyqChenStrategyFileDraft(strategies: CyqChenStrategyDraft[], version: number, negativeEvidenceScale?: number | null) {
   return invoke<string>('check_cyq_chen_strategy_file_draft', {
-    draft: { version, strategies },
+    draft: { version, negativeEvidenceScale, strategies },
   })
 }
 

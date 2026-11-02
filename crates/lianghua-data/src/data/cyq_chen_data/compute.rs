@@ -1445,6 +1445,7 @@ mod tests {
                 "20260403",
                 &crate::data::cyq_chen::ChipChangeConfig {
                     version: 1,
+                    negative_evidence_scale: None,
                     strategy: Vec::new(),
                 }
                 .compile()

@@ -2453,6 +2453,7 @@ export default function CyqChenPage() {
   const [warmupDaysInput, setWarmupDaysInput] = useState(persistedDraft.warmupDaysInput)
   const [bucketPctInput, setBucketPctInput] = useState(persistedDraft.bucketPctInput)
   const [strategyVersion, setStrategyVersion] = useState(1)
+  const [negativeEvidenceScale, setNegativeEvidenceScale] = useState<number | null>(null)
   const [strategies, setStrategies] = useState<CyqChenStrategyDraft[]>(() => cloneDefaultStrategies())
   const [sourcePath, setSourcePath] = useState('')
   const [stockLookupRows, setStockLookupRows] = useState<StockLookupRow[]>([])
@@ -2559,6 +2560,7 @@ export default function CyqChenPage() {
         }
         setSourcePath(nextSourcePath)
         setStrategyVersion(page.version)
+        setNegativeEvidenceScale(page.negativeEvidenceScale ?? null)
         setStrategies(page.strategies.map((strategy) => ({ ...strategy })))
         setNotice(page.exists ? `已读取 ${page.version === 2 ? '库存记忆' : '旧版'}筹码策略。` : '策略文件不存在，已载入默认测试配置。')
       } catch (loadError) {
@@ -2664,6 +2666,7 @@ export default function CyqChenPage() {
       setSourcePath(nextSourcePath)
       const nextResult = await runCyqChenSingleStockTest({
         version: strategyVersion,
+        negativeEvidenceScale,
         retention: retentionEnabled ? {
           anchorDate: normalizeDateInput(retentionAnchor),
           evaluationDate: normalizeDateInput(retentionEvaluation),
@@ -2686,7 +2689,7 @@ export default function CyqChenPage() {
       setSavedRuns((items) => [
         {
           id: `${Date.now()}`,
-          label: `${nextResult.version === 2 ? '库存记忆' : '旧版'} ${nextResult.resolvedTsCode} ${nextResult.startDate}-${nextResult.endDate}`,
+          label: `${nextResult.version === 2 ? `库存记忆·负向×${nextResult.negativeEvidenceScale ?? 3}` : '旧版'} ${nextResult.resolvedTsCode} ${nextResult.startDate}-${nextResult.endDate}`,
           data: nextResult,
         },
         ...items,

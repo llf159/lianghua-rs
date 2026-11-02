@@ -1780,6 +1780,7 @@ bias = 0.5
         let mut state = crate::data::cyq_chen::ChenChipFeatureState::default();
         let chip = crate::data::cyq_chen::ChipChangeConfig {
             version: 1,
+            negative_evidence_scale: None,
             strategy: Vec::new(),
         }
         .compile()
@@ -1911,6 +1912,7 @@ bias = 0.5
                 "20260403",
                 &crate::data::cyq_chen::ChipChangeConfig {
                     version: 1,
+                    negative_evidence_scale: None,
                     strategy: Vec::new(),
                 }
                 .compile()

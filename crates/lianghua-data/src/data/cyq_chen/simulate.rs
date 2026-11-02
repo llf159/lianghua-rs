@@ -445,7 +445,14 @@ pub(super) fn apply_buy_for_day(
         } else {
             0.0
         };
-        let strength = (evidence.abs() * 4.0 * if evidence < 0.0 { 3.0 } else { 1.0 }).min(1.0);
+        let strength = (evidence.abs()
+            * 4.0
+            * if evidence < 0.0 {
+                chip_config.negative_evidence_scale
+            } else {
+                1.0
+            })
+        .min(1.0);
         // Inventory is measured per 100 original chips; holder_chip_totals above
         // normalizes the remaining inventory after selling and cannot supply S.
         let main_sold =
@@ -966,14 +973,17 @@ bias = 1.0
     }
     #[test]
     fn inventory_migration_preserves_neutral_inventory_and_obeys_trade_limits() {
-        for (evidence, main_sell, retail_sell, expected_first) in [
-            (0.0, 1.0, 2.0, 50.0),
-            (0.12, 1.0, 1.0, 51.68),
-            (-0.04, 1.0, 1.0, 48.08),
-            (0.12, 1.0, 0.0, 50.0), // All turnover already belongs to main; buying cannot exceed it.
-            (-0.04, 0.0, 1.0, 50.0), // No main inventory was sold; negative evidence cannot reclassify it.
+        for (evidence, scale, main_sell, retail_sell, expected_first) in [
+            (0.0, None, 1.0, 2.0, 50.0),
+            (0.12, None, 1.0, 1.0, 51.68),
+            (-0.04, None, 1.0, 1.0, 48.08),
+            (-0.04, Some(1.0), 1.0, 1.0, 49.36),
+            (0.12, Some(1.0), 1.0, 1.0, 51.68),
+            (-0.04, Some(0.0), 1.0, 1.0, 50.0),
+            (0.12, None, 1.0, 0.0, 50.0), // All turnover already belongs to main; buying cannot exceed it.
+            (-0.04, Some(1.0), 0.0, 1.0, 50.0), // No main inventory was sold; negative evidence cannot reclassify it.
         ] {
-            let config = ChipChangeConfig::from_toml_str(&format!(
+            let mut config = ChipChangeConfig::from_toml_str(&format!(
                 r#"
 version = 2
 [[strategy]]
@@ -997,6 +1007,7 @@ bias = {retail_sell}
 "#
             ))
             .unwrap();
+            config.negative_evidence_scale = scale;
             let mut row = sample_row_data();
             row.cols.get_mut("TOR").unwrap()[2] = Some(0.0);
             let snapshots = compute_chen_chip_snapshots_from_row_data(
@@ -1043,6 +1054,7 @@ bias = {retail_sell}
         };
         let mut config = sample_config();
         config.version = 2;
+        config.negative_evidence_scale = Some(1.0);
         config.strategy[0].bias = 0.12;
         let compiled = config.compile().unwrap();
         let row = sample_row_data();

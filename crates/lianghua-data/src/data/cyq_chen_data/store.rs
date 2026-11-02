@@ -368,8 +368,7 @@ pub(super) fn chip_strategy_hash_matches(stored: Option<&str>, current: &str) ->
     let Some(stored) = stored else {
         return false;
     };
-    stored == current
-        || chip_strategy_hash_payload(stored) == chip_strategy_hash_payload(current)
+    stored == current || chip_strategy_hash_payload(stored) == chip_strategy_hash_payload(current)
 }
 
 fn chip_strategy_hash_payload(hash: &str) -> Option<(&str, &str)> {
@@ -661,6 +660,23 @@ mod tests {
     use crate::data::cyq_chen_db_path;
     use duckdb::Connection;
     use std::fs;
+
+    #[test]
+    fn inventory_negative_scale_changes_strategy_identity() {
+        let source_dir = unique_temp_source_dir();
+        fs::create_dir_all(&source_dir).unwrap();
+        let path = chip_change_rule_path(source_dir.to_str().unwrap());
+        fs::write(&path, "version = 2\nstrategy = []\n").unwrap();
+        let old = super::current_chip_change_strategy_hash(source_dir.to_str().unwrap()).unwrap();
+        fs::write(
+            &path,
+            "version = 2\nnegative_evidence_scale = 1.0\nstrategy = []\n",
+        )
+        .unwrap();
+        let new = super::current_chip_change_strategy_hash(source_dir.to_str().unwrap()).unwrap();
+        assert!(!super::chip_strategy_hash_matches(Some(&old), &new));
+        fs::remove_dir_all(source_dir).unwrap();
+    }
 
     #[test]
     fn cyq_readback_verification_rejects_corrupt_persisted_block() {

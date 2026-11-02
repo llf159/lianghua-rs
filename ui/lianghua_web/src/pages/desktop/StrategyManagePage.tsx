@@ -498,6 +498,7 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
   const [deleteTarget, setDeleteTarget] = useState<StrategyManageRuleItem | null>(null)
   const [deleteSceneTarget, setDeleteSceneTarget] = useState<DeleteSceneTarget | null>(null)
   const [chipVersion, setChipVersion] = useState(1)
+  const [chipNegativeEvidenceScale, setChipNegativeEvidenceScale] = useState<number | null>(null)
   const [chipStrategies, setChipStrategies] = useState<CyqChenStrategyDraft[]>([])
   const [chipStrategyFilePath, setChipStrategyFilePath] = useState('')
   const [chipStrategyFileExists, setChipStrategyFileExists] = useState(false)
@@ -756,6 +757,7 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
 
   function applyChipStrategyPage(page: CyqChenStrategyPageData) {
     setChipVersion(page.version)
+    setChipNegativeEvidenceScale(page.negativeEvidenceScale ?? null)
     setChipStrategies(page.strategies ?? [])
     setChipStrategyFilePath(page.filePath)
     setChipStrategyFileExists(page.exists)
@@ -1233,7 +1235,7 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
   async function onCheckChipStrategyDraft() {
     try {
       const preparedDraft = buildPreparedChipStrategyDraft()
-      const message = await checkCyqChenStrategyFileDraft(buildNextChipStrategies(preparedDraft), chipVersion)
+      const message = await checkCyqChenStrategyFileDraft(buildNextChipStrategies(preparedDraft), chipVersion, chipNegativeEvidenceScale)
       setChipStrategyNotice(message)
       setChipStrategyError('')
     } catch (checkError) {
@@ -1250,7 +1252,7 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
     setChipStrategySaving(true)
     setChipStrategyError('')
     try {
-      const page = await saveCyqChenStrategyFile(sourcePath, nextStrategies, chipVersion)
+      const page = await saveCyqChenStrategyFile(sourcePath, nextStrategies, chipVersion, chipNegativeEvidenceScale)
       applyChipStrategyPage(page)
       setChipStrategyDraft(null)
       setChipStrategyEditingIndex(null)
@@ -1267,7 +1269,7 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
     try {
       const preparedDraft = buildPreparedChipStrategyDraft()
       const nextStrategies = buildNextChipStrategies(preparedDraft)
-      await checkCyqChenStrategyFileDraft(nextStrategies, chipVersion)
+      await checkCyqChenStrategyFileDraft(nextStrategies, chipVersion, chipNegativeEvidenceScale)
       await saveChipStrategies(
         nextStrategies,
         chipStrategyEditorMode === 'create' ? '筹码策略已新增。' : '筹码策略已更新。',
@@ -1695,6 +1697,10 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
                 <span>{chipVersion === 2 ? '库存记忆策略' : '筹码策略'}</span>
                 <strong>{chipStrategies.length}</strong>
               </div>
+              {chipVersion === 2 ? <div className="strategy-manage-summary-item">
+                <span>负向证据倍率</span>
+                <strong>{chipNegativeEvidenceScale ?? 3}</strong>
+              </div> : null}
               <div className="strategy-manage-summary-item">
                 <span>{chipVersion === 2 ? '主力方向证据' : '主力策略'}</span>
                 <strong>
