@@ -1145,26 +1145,27 @@ pub fn get_all_market_monitor_snapshot(
     let volume_ratios = if (market_active || volume_ratio_fetch_enabled.unwrap_or(false))
         && matches!(provider, RealtimeQuoteProvider::Tencent)
     {
-        fetch_meta
-            .quote_trade_date
-            .as_deref()
-            .and_then(|date| {
-                match super::volume_ratio::snapshot(source_path, &quotes, date) {
-                    Ok(snapshot) => Some(snapshot),
-                    Err(_) => {
-                        // 量比本地检查失败只停止补齐，行情和原榜单继续刷新。
-                        let _ = super::volume_ratio::set_fetch_paused(true);
-                        volume_ratio_source_statuses = ["tencent", "eastmoney", "microsoft", "local"]
-                            .into_iter()
-                            .map(|source| super::volume_ratio::VolumeRatioSourceStatus {
-                                source,
-                                state: if source == "local" { "blocked" } else { "paused" },
-                            })
-                            .collect();
-                        None
-                    }
+        fetch_meta.quote_trade_date.as_deref().and_then(|date| {
+            match super::volume_ratio::snapshot(source_path, &quotes, date) {
+                Ok(snapshot) => Some(snapshot),
+                Err(_) => {
+                    // 量比本地检查失败只停止补齐，行情和原榜单继续刷新。
+                    let _ = super::volume_ratio::set_fetch_paused(true);
+                    volume_ratio_source_statuses = ["tencent", "eastmoney", "microsoft", "local"]
+                        .into_iter()
+                        .map(|source| super::volume_ratio::VolumeRatioSourceStatus {
+                            source,
+                            state: if source == "local" {
+                                "blocked"
+                            } else {
+                                "paused"
+                            },
+                        })
+                        .collect();
+                    None
                 }
-            })
+            }
+        })
     } else {
         None
     };

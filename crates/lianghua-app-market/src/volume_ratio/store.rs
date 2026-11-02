@@ -90,14 +90,25 @@ impl Store {
         })
     }
 
-    pub(super) fn save(&self, code: String, baseline: SavedBaseline) -> Result<(), String> {
+    pub(super) fn save(
+        &self,
+        code: String,
+        baseline: SavedBaseline,
+        wait: bool,
+    ) -> Result<(), String> {
+        if wait {
+            return self
+                .sender
+                .send(Command::Save(code, baseline))
+                .map_err(|_| "量比落盘线程已停止，数据尚未落盘".to_string());
+        }
         self.sender
             .try_send(Command::Save(code, baseline))
             .map_err(|error| match error {
-                mpsc::TrySendError::Full(_) =>
-                    "量比落盘队列已满，将在后续快照重试".to_string(),
-                mpsc::TrySendError::Disconnected(_) =>
-                    "量比落盘线程已停止，数据尚未落盘".to_string(),
+                mpsc::TrySendError::Full(_) => "量比落盘队列已满，将在后续快照重试".to_string(),
+                mpsc::TrySendError::Disconnected(_) => {
+                    "量比落盘线程已停止，数据尚未落盘".to_string()
+                }
             })
     }
 
@@ -151,4 +162,58 @@ fn write_batch(
         }
     }
     transaction.commit().map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{Baseline, Cache, Entry};
+    use super::*;
+
+    #[test]
+    fn full_queue_keeps_only_unsent_baselines_for_retry() {
+        // A one-slot queue without a worker makes backpressure deterministic.
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let mut cache = Cache {
+            store: Some(Store {
+                sender,
+                error: Arc::new(Mutex::new(None)),
+                worker: None,
+            }),
+            ..Default::default()
+        };
+        for code in ["000001.SZ", "000002.SZ"] {
+            cache.entries.insert(
+                code.into(),
+                Entry::Ready(Baseline {
+                    data: TencentVolumeRatioData {
+                        trade_date: "20261102".into(),
+                        average_daily_volume: 100.0,
+                        volume_to_hands: 1.0,
+                        points: Vec::new(),
+                    },
+                    source: 0,
+                    observed_high: 0.0,
+                    observed_opening_high: 1.0,
+                    next_point: 0,
+                    loaded_at: Instant::now(),
+                }),
+            );
+            cache.dirty.insert(code.into());
+        }
+        let error = cache.persist(false).unwrap_err();
+        assert!(error.contains("队列已满"));
+        cache.persistence_error = Some(error);
+        assert_eq!(cache.dirty.len(), 1);
+        let Command::Save(first, _) = receiver.recv().unwrap() else {
+            panic!("expected baseline");
+        };
+        assert!(!cache.dirty.contains(&first));
+        cache.persist(true).unwrap();
+        assert!(cache.dirty.is_empty());
+        assert!(cache.persistence_error.is_none());
+        let Command::Save(second, _) = receiver.recv().unwrap() else {
+            panic!("expected remaining baseline");
+        };
+        assert_ne!(first, second);
+    }
 }

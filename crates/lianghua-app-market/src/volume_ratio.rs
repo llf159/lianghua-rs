@@ -312,19 +312,22 @@ impl Cache {
         Ok(())
     }
 
-    fn persist(&mut self) -> Result<(), String> {
+    fn persist(&mut self, wait: bool) -> Result<(), String> {
         if self.dirty.is_empty() {
             return Ok(());
         }
         let store = self.store.as_ref().ok_or("量比缓存未打开，数据尚未落盘")?;
-        for code in &self.dirty {
-            let baseline = match self.entries.get(code) {
+        for code in self.dirty.iter().cloned().collect::<Vec<_>>() {
+            let baseline = match self.entries.get(&code) {
                 Some(Entry::Ready(baseline) | Entry::Pending(Some(baseline)))
                 | Some(Entry::Failed {
                     baseline: Some(baseline),
                     ..
                 }) => baseline,
-                _ => continue,
+                _ => {
+                    self.dirty.remove(&code);
+                    continue;
+                }
             };
             // 缓存锁内只复制待写字段并入队；编码与 SQLite 事务都由独立线程执行。
             store.save(
@@ -334,9 +337,11 @@ impl Cache {
                     baseline.source,
                     baseline.observed_opening_high,
                 ),
+                wait,
             )?;
+            self.dirty.remove(&code);
         }
-        self.dirty.clear();
+        self.persistence_error = None;
         Ok(())
     }
 
@@ -506,7 +511,7 @@ pub fn set_fetch_paused(paused: bool) -> Result<(), String> {
             .map_err(|_| "量比缓存锁已损坏".to_string())?;
         state.set_paused(paused);
         if paused {
-            state.persist()?;
+            state.persist(true)?;
             if let Some(store) = &state.store {
                 store.flush()?;
             }
@@ -532,11 +537,12 @@ pub struct VolumeRatioCacheStatus {
 }
 
 pub fn inspect_cache(source_path: &str) -> Result<VolumeRatioCacheStatus, String> {
-    let state = CACHE
+    let mut state = CACHE
         .get_or_init(|| Arc::new(Mutex::new(Cache::default())))
         .lock()
         .map_err(|_| "量比缓存锁已损坏")?;
     if state.source_path == source_path {
+        state.persist(true)?;
         if let Some(store) = &state.store {
             store.flush()?;
         }
@@ -606,6 +612,8 @@ pub fn clear_cache(source_path: &str) -> Result<(), String> {
         state.next_request_at = [None; 3];
         state.cooldown_until = [None; 3];
         state.request_interval_ms = [0; 3];
+        state.recovery_at = [None; 3];
+        state.source_successes = [0; 3];
         state.dirty.clear();
         state.local_averages.clear();
         state.local_loaded_at = None;
@@ -653,6 +661,8 @@ pub fn snapshot(
         .map_err(Clone::clone)?;
     let mut state = cache.lock().map_err(|_| "量比缓存锁已损坏".to_string())?;
     if state.source_path != source_path || state.date != trade_date {
+        state.persist(true)?;
+        state.store = None;
         state.date = trade_date.to_string();
         state.source_path = source_path.to_string();
         state.entries.clear();
@@ -660,6 +670,8 @@ pub fn snapshot(
         state.next_request_at = [None; 3];
         state.cooldown_until = [None; 3];
         state.request_interval_ms = [0; 3];
+        state.recovery_at = [None; 3];
+        state.source_successes = [0; 3];
         state.revision += 1;
         state.generation += 1;
         state.local_loaded_at = None;
@@ -874,7 +886,7 @@ pub fn snapshot(
                         },
                     );
                     state.revision += 1;
-                    if let Err(error) = state.persist() {
+                    if let Err(error) = state.persist(false) {
                         state.persistence_error = Some(error);
                     }
                 }
@@ -917,7 +929,7 @@ pub fn snapshot(
             }
         }
     }
-    if let Err(error) = state.persist() {
+    if let Err(error) = state.persist(false) {
         state.persistence_error = Some(error);
     }
     let approximate = state
@@ -1164,7 +1176,7 @@ mod tests {
                 })),
             );
             state.dirty.insert("000001.SZ".into());
-            state.persist().unwrap();
+            state.persist(false).unwrap();
             state.generation
         };
         let status = inspect_cache(source).unwrap();
@@ -1233,7 +1245,7 @@ mod tests {
             .entries
             .insert("000001.SZ".into(), Entry::Pending(Some(baseline)));
         cache.dirty.insert("000001.SZ".into());
-        cache.persist().unwrap();
+        cache.persist(false).unwrap();
         drop(cache);
         let mut restored = Cache {
             source_path: source_path.clone(),
@@ -1387,7 +1399,7 @@ mod tests {
             points: Vec::new(),
         };
         store
-            .save("000001.SZ".into(), (data.clone(), 2, 1.0))
+            .save("000001.SZ".into(), (data.clone(), 2, 1.0), false)
             .unwrap();
         assert!(store.flush().unwrap_err().contains("blocked"));
         assert!(store.error().is_some());
@@ -1402,7 +1414,9 @@ mod tests {
                 .unwrap(),
             1
         );
-        store.save("000001.SZ".into(), (data, 2, 3.0)).unwrap();
+        store
+            .save("000001.SZ".into(), (data, 2, 3.0), false)
+            .unwrap();
         drop(store); // 不等 250ms，关闭仍须提交队列并关闭连接。
         let bytes: Vec<u8> = reader
             .query_row("SELECT baseline FROM baselines_v2", [], |r| r.get(0))
