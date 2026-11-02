@@ -12,6 +12,7 @@ import {
   useEastmoneyVerifiedSession as connectEastmoneySession,
   stopEastmoneyVerifiedSession,
   type StockLookupRow,
+  type VolumeRatioSourceStatus,
   type AllMarketIndexRow,
   type AllMarketMonitorRow,
   type IntradayMonitorTemplate,
@@ -671,6 +672,9 @@ export default function AllMarketMonitorPage() {
   const [error, setError] = useState("");
   const [templateWarning, setTemplateWarning] = useState("");
   const [volumeRatioStatus, setVolumeRatioStatus] = useState("");
+  const [volumeRatioSources, setVolumeRatioSources] = useState<
+    VolumeRatioSourceStatus[]
+  >([]);
   const [volumeRatioEnabled, setVolumeRatioEnabled] = useState(false);
   const [eastmoneySessionOpen, setEastmoneySessionOpen] = useState(false);
   const eastmoneySessionMenuRef = useRef<HTMLDivElement>(null);
@@ -1112,12 +1116,11 @@ export default function AllMarketMonitorPage() {
 
   useEffect(() => {
     volumeRatioEnabledRef.current = volumeRatioEnabled;
-    void setAllMarketVolumeRatioPaused(!volumeRatioEnabled).catch(
-      (pauseError) => {
-        setError(`切换盘中量比拉取失败: ${String(pauseError)}`);
-        setVolumeRatioEnabled(false);
-      },
-    );
+    void setAllMarketVolumeRatioPaused(!volumeRatioEnabled).catch(() => {
+      setVolumeRatioStatus("量比拉取未启动");
+      setVolumeRatioSources([{ source: "local", state: "blocked" }]);
+      setVolumeRatioEnabled(false);
+    });
   }, [volumeRatioEnabled]);
 
   useEffect(
@@ -1168,9 +1171,21 @@ export default function AllMarketMonitorPage() {
       if (enabledRef.current) {
         setMarketStatus(result.market_status_message ?? "");
       }
+      const sourceStatuses = result.volume_ratio_source_statuses ?? [];
+      // 暂停补齐的本地故障不停止行情轮询，也不清空原榜单。
+      setVolumeRatioSources(sourceStatuses);
+      if (
+        sourceStatuses.some(
+          (item) => item.source === "local" && item.state === "blocked",
+        )
+      ) {
+        setVolumeRatioEnabled(false);
+      }
       setVolumeRatioStatus(
         result.volume_ratio_status_message ??
-          (volumeRatioEnabledRef.current ? "等待分时数据" : ""),
+          (sourceStatuses.some((item) => item.source === "local" && item.state === "blocked")
+            ? "本地检查未通过 · 拉取已暂停"
+            : volumeRatioEnabledRef.current ? "等待分时数据" : ""),
       );
       if (enabledRef.current && result.market_active === false) {
         if (!volumeRatioEnabledRef.current) {
@@ -1376,9 +1391,9 @@ export default function AllMarketMonitorPage() {
           setNotificationError(`量比异动通知失败: ${String(notifyError)}`);
         }
       }
-    } catch (runError) {
+    } catch {
       if (enabledRef.current || volumeRatioEnabledRef.current) {
-        setError(`实时刷新失败: ${String(runError)}`);
+        setError("行情刷新异常，监控已暂停，请重新开启");
         window.clearInterval(pollTimerRef.current);
         setEnabled(false);
         setVolumeRatioEnabled(false);
@@ -2787,11 +2802,15 @@ export default function AllMarketMonitorPage() {
                     setVolumeRatioStatus(
                       volumeRatioEnabled ? "已暂停" : "检查本地数据…",
                     );
+                    setVolumeRatioSources([]);
                     setVolumeRatioEnabled((value) => !value);
                   }}
                 >
                   <span>量比拉取</span>
-                  <span className="all-market-volume-switch-track" aria-hidden="true" />
+                  <span
+                    className="all-market-volume-switch-track"
+                    aria-hidden="true"
+                  />
                 </button>
                 <div
                   className="eastmoney-session-menu"
@@ -2839,8 +2858,10 @@ export default function AllMarketMonitorPage() {
                               setEastmoneySessionMessage(
                                 "验证后点击“检查连接”。",
                               );
-                            } catch (sessionError) {
-                              setEastmoneySessionMessage(String(sessionError));
+                            } catch {
+                              setEastmoneySessionMessage(
+                                "验证会话异常，请重试",
+                              );
                             } finally {
                               setEastmoneySessionBusy(false);
                             }
@@ -2858,9 +2879,9 @@ export default function AllMarketMonitorPage() {
                             try {
                               await connectEastmoneySession();
                               setEastmoneySessionMessage("已连接");
-                            } catch (sessionError) {
+                            } catch {
                               setEastmoneySessionMessage(
-                                `连接失败：${String(sessionError)}`,
+                                "连接失败，请重新验证",
                               );
                             } finally {
                               setEastmoneySessionBusy(false);
@@ -2878,8 +2899,10 @@ export default function AllMarketMonitorPage() {
                             try {
                               await stopEastmoneyVerifiedSession();
                               setEastmoneySessionMessage("已停用");
-                            } catch (sessionError) {
-                              setEastmoneySessionMessage(String(sessionError));
+                            } catch {
+                              setEastmoneySessionMessage(
+                                "验证会话异常，请重试",
+                              );
                             } finally {
                               setEastmoneySessionBusy(false);
                             }
@@ -2895,14 +2918,66 @@ export default function AllMarketMonitorPage() {
                   ) : null}
                 </div>
               </div>
-              {volumeRatioEnabled || volumeRatioStatus ? (
-                <span
-                  className="all-market-volume-ratio-progress"
-                  role="status"
-                >
-                  {volumeRatioStatus || "准备拉取…"}
+              <div
+                className="all-market-volume-ratio-status"
+                role="status"
+                aria-label="量比拉取状态"
+              >
+                <span className="all-market-volume-ratio-progress">
+                  {volumeRatioStatus ||
+                    (volumeRatioEnabled ? "准备拉取…" : "已暂停")}
                 </span>
-              ) : null}
+                <div className="all-market-volume-ratio-sources">
+                  {(
+                    [
+                      ["tencent", "腾讯"],
+                      ["eastmoney", "东财"],
+                      ["microsoft", "微软"],
+                      ["local", "本地"],
+                    ] as const
+                  ).map(([source, label]) => {
+                    const state =
+                      volumeRatioSources.find((item) => item.source === source)
+                        ?.state ?? (volumeRatioEnabled ? "waiting" : "paused");
+                    const text: Record<
+                      VolumeRatioSourceStatus["state"],
+                      string
+                    > = {
+                      paused: "已暂停",
+                      not_ready: "待开放",
+                      cooling_down: "冷却中",
+                      available: "正常",
+                      retrying: "待重试",
+                      waiting: "等待中",
+                      data_unavailable: "数据不可用",
+                      cache_error: "缓存异常",
+                      incomplete: "数据不全",
+                      blocked: "检查未通过",
+                    };
+                    return (
+                      <span
+                        key={source}
+                        className={`all-market-volume-source is-${state}`}
+                        title={
+                          source === "local" &&
+                          [
+                            "blocked",
+                            "data_unavailable",
+                            "incomplete",
+                          ].includes(state)
+                            ? "请更新日线、股票列表和交易日历后重新开启；缓存基准不一致时请清空量比缓存"
+                            : source === "microsoft"
+                              ? "当日沪深行情 09:50 后参与补齐，使用近似基准"
+                              : undefined
+                        }
+                      >
+                        <span>{label}</span>
+                        <strong>{text[state]}</strong>
+                      </span>
+                    );
+                  })}
+                </div>
+              </div>
             </div>
             <div
               className="all-market-event-tabs"

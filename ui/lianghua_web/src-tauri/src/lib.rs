@@ -3604,6 +3604,13 @@ pub fn run() {
             resolve_watch_observe_watch_date,
             remove_watch_observe_rows
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                if let Err(error) = market::volume_ratio::set_fetch_paused(true) {
+                    log::warn!("退出时提交量比缓存失败: {error}");
+                }
+            }
+        });
 }

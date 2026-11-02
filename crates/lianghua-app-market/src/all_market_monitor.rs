@@ -153,6 +153,7 @@ pub struct AllMarketMonitorSnapshotData {
     pub fetched_count: usize,
     pub template_warning_message: Option<String>,
     pub volume_ratio_status_message: Option<String>,
+    pub volume_ratio_source_statuses: Vec<super::volume_ratio::VolumeRatioSourceStatus>,
 }
 
 pub(crate) fn check_market_activity(
@@ -1140,18 +1141,35 @@ pub fn get_all_market_monitor_snapshot(
         })
     });
     // 手动补齐可以在休市后拉取行情所带日期；分时响应仍严格校验日期。
+    let mut volume_ratio_source_statuses = Vec::new();
     let volume_ratios = if (market_active || volume_ratio_fetch_enabled.unwrap_or(false))
         && matches!(provider, RealtimeQuoteProvider::Tencent)
     {
         fetch_meta
             .quote_trade_date
             .as_deref()
-            .map(|date| super::volume_ratio::snapshot(source_path, &quotes, date))
-            .transpose()?
+            .and_then(|date| {
+                match super::volume_ratio::snapshot(source_path, &quotes, date) {
+                    Ok(snapshot) => Some(snapshot),
+                    Err(_) => {
+                        // 量比本地检查失败只停止补齐，行情和原榜单继续刷新。
+                        let _ = super::volume_ratio::set_fetch_paused(true);
+                        volume_ratio_source_statuses = ["tencent", "eastmoney", "microsoft", "local"]
+                            .into_iter()
+                            .map(|source| super::volume_ratio::VolumeRatioSourceStatus {
+                                source,
+                                state: if source == "local" { "blocked" } else { "paused" },
+                            })
+                            .collect();
+                        None
+                    }
+                }
+            })
     } else {
         None
     };
     if let Some(snapshot) = &volume_ratios {
+        volume_ratio_source_statuses = snapshot.source_statuses.clone();
         for (code, value) in &snapshot.values {
             volume_ratio_map.insert(code.clone(), value.current);
         }
@@ -1167,11 +1185,20 @@ pub fn get_all_market_monitor_snapshot(
     let mut volume_ratio_status_message = volume_ratios
         .as_ref()
         .and_then(|snapshot| snapshot.status.clone());
-    if let Some(warning) = &meta.warning {
-        volume_ratio_status_message = Some(match volume_ratio_status_message {
-            Some(message) => format!("{message}；{warning}"),
-            None => warning.clone(),
-        });
+    if meta.warning.is_some() {
+        if let Some(local) = volume_ratio_source_statuses
+            .iter_mut()
+            .find(|item| item.source == "local")
+        {
+            if local.state == "available" {
+                local.state = "incomplete";
+            }
+        } else {
+            volume_ratio_source_statuses.push(super::volume_ratio::VolumeRatioSourceStatus {
+                source: "local",
+                state: "incomplete",
+            });
+        }
     }
     if !has_new_realtime_data(last_data_version.as_deref(), data_version.as_deref()) {
         return Ok(AllMarketMonitorSnapshotData {
@@ -1187,6 +1214,7 @@ pub fn get_all_market_monitor_snapshot(
             fetched_count: fetch_meta.fetched_count,
             template_warning_message: None,
             volume_ratio_status_message,
+            volume_ratio_source_statuses,
         });
     }
 
@@ -1240,12 +1268,21 @@ pub fn get_all_market_monitor_snapshot(
     );
     let daily_baselines = match daily_baselines {
         Ok(baselines) => baselines,
-        Err(error) => {
-            let warning = format!("读取本地日线基准失败，五日涨幅暂不可用: {error}");
-            volume_ratio_status_message = Some(match volume_ratio_status_message {
-                Some(message) => format!("{message}；{warning}"),
-                None => warning,
-            });
+        Err(_) => {
+            volume_ratio_status_message = Some("本地日线基准不可用，五日涨幅暂不可用".to_string());
+            if let Some(local) = volume_ratio_source_statuses
+                .iter_mut()
+                .find(|item| item.source == "local")
+            {
+                if local.state != "blocked" {
+                    local.state = "data_unavailable";
+                }
+            } else {
+                volume_ratio_source_statuses.push(super::volume_ratio::VolumeRatioSourceStatus {
+                    source: "local",
+                    state: "data_unavailable",
+                });
+            }
             Default::default()
         }
     };
@@ -1612,6 +1649,7 @@ pub fn get_all_market_monitor_snapshot(
         fetched_count: fetch_meta.fetched_count,
         template_warning_message,
         volume_ratio_status_message,
+        volume_ratio_source_statuses,
     })
 }
 
