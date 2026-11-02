@@ -1,14 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  getDataDownloadStatus,
   readStoredDragonTigerDownloadSettings,
 } from '../../apis/dataDownload'
+import { getDownloadComputeOverview } from '../../apis/downloadCompute'
 import { inspectManagedSourceStatus } from '../../apis/managedSource'
-import { getRankingComputeStatus } from '../../apis/rankingCompute'
-import {
-  getManagedStrategyAssetsStatus,
-  getManagedStrategyBackupDiff,
-} from '../../apis/strategyAssets'
 import DataTaskProgress from '../../shared/DataTaskProgress'
 import { beginTaskGroup, finishTaskGroup, useTaskControl } from '../../shared/taskControl'
 import DataDownloadPage, { type DataDownloadPageHandle } from './DataDownloadPage'
@@ -76,18 +71,11 @@ export default function DownloadComputePage() {
   const refreshDailyCompletion = useCallback(async () => {
     setDailyCompletion((current) => ({ ...current, loading: true, error: '' }))
     try {
-      const managedStatus = await inspectManagedSourceStatus()
-      const [downloadStatus, rankingStatus, strategyAssetsStatus] = await Promise.all([
-        getDataDownloadStatus(managedStatus.sourcePath),
-        getRankingComputeStatus(managedStatus.sourcePath),
-        getManagedStrategyAssetsStatus(),
-      ])
-      const latestComputeSnapshot = strategyAssetsStatus.backups.find(
-        (item) => item.sourceKind === 'rank_compute',
-      )
-      const rankingStrategyChanged = latestComputeSnapshot
-        ? (await getManagedStrategyBackupDiff(latestComputeSnapshot.backupId)).changedLineCount > 0
-        : false
+      const {
+        downloadStatus,
+        rankingStatus,
+        rankingStrategyChanged,
+      } = await getDownloadComputeOverview()
       const targetTradeDate = downloadStatus.dailyTargetTradeDate
       const reachesTarget = (latestTradeDate: string | null | undefined) =>
         Boolean(targetTradeDate && latestTradeDate && latestTradeDate >= targetTradeDate)

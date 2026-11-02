@@ -29,9 +29,9 @@ import {
   type RankComputeResultContinuity,
   type RankingComputeStatus,
 } from '../../apis/rankingCompute'
+import { getDownloadComputeOverview } from '../../apis/downloadCompute'
 import {
   getStrategyTriggerSimilarityRankingProgress,
-  listStrategyTriggerSimilarityBenchmarkIndexCodes,
   runStrategyTriggerSimilarityRanking,
   type StrategyTriggerRankingProgress,
 } from '../../apis/strategyTriggerSimilarity'
@@ -850,8 +850,14 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
     clearFeedback('status')
 
     try {
-      const managedStatus = await inspectManagedSourceStatus()
-      const nextStatus = await getRankingComputeStatus(managedStatus.sourcePath)
+      const overview = await getDownloadComputeOverview()
+      const nextStatus = overview.rankingStatus
+      setSimilarityBenchmarkCodes(overview.similarityBenchmarkCodes)
+      setSimilarityBenchmarkCode((current) =>
+        overview.similarityBenchmarkCodes.includes(current)
+          ? current
+          : overview.similarityBenchmarkCodes[0] || DEFAULT_SIMILARITY_BENCHMARK_INDEX_CODE,
+      )
 
       setStatus(nextStatus)
       applySimilarityActiveConfig(
@@ -905,17 +911,6 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
 
   useEffect(() => {
     void loadStatusRef.current()
-  }, [])
-
-  useEffect(() => {
-    void listStrategyTriggerSimilarityBenchmarkIndexCodes()
-      .then((codes) => {
-        setSimilarityBenchmarkCodes(codes)
-        setSimilarityBenchmarkCode((current) =>
-          codes.includes(current) ? current : codes[0] || '000001.SH',
-        )
-      })
-      .catch(() => {})
   }, [])
 
   useEffect(() => {

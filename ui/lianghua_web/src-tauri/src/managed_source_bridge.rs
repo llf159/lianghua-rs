@@ -880,6 +880,55 @@ fn get_managed_strategy_assets_status_inner(
     })
 }
 
+pub(crate) fn rank_compute_strategy_changed(
+    data_root: &Path,
+    source_dir: &str,
+) -> Result<bool, String> {
+    let source_root = resolve_source_root(data_root, source_dir)?;
+    let snapshot_root = managed_rank_compute_snapshot_root(&source_root);
+    let mut latest_snapshot: Option<(String, PathBuf)> = None;
+
+    if snapshot_root.exists() {
+        for entry in std::fs::read_dir(&snapshot_root).map_err(|error| error.to_string())? {
+            let entry = entry.map_err(|error| error.to_string())?;
+            if !entry
+                .file_type()
+                .map_err(|error| error.to_string())?
+                .is_dir()
+            {
+                continue;
+            }
+            let backup_id = entry.file_name().to_string_lossy().to_string();
+            let Ok(meta) = read_strategy_backup_meta(&source_root, &backup_id) else {
+                continue;
+            };
+            if meta.source_kind == "rank_compute"
+                && latest_snapshot
+                    .as_ref()
+                    .is_none_or(|(current_id, _)| current_id < &backup_id)
+            {
+                let snapshot_file_path =
+                    managed_rank_compute_snapshot_file_path(&source_root, &backup_id);
+                latest_snapshot = Some((backup_id, snapshot_file_path));
+            }
+        }
+    }
+
+    let Some((_, snapshot_file_path)) = latest_snapshot else {
+        return Ok(false);
+    };
+    let active_file_path = source_root.join(STRATEGY_RULE_FILE_NAME);
+    if !active_file_path.is_file() {
+        return Err("当前没有可对比的生效策略文件".to_string());
+    }
+
+    let snapshot_text = std::fs::read_to_string(&snapshot_file_path)
+        .map_err(|error| format!("读取排名计算快照失败: {error}"))?;
+    let active_text = std::fs::read_to_string(&active_file_path)
+        .map_err(|error| format!("读取当前生效策略失败: {error}"))?;
+    Ok(!snapshot_text.lines().eq(active_text.lines()))
+}
+
 fn copy_import_file_to_appdata_inner(
     app: tauri::AppHandle,
     source_path: String,

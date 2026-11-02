@@ -1,6 +1,6 @@
 import { useTaskControl } from '../../shared/taskControl'
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
-import { inspectManagedSourceStatus } from '../../apis/managedSource'
+import { getDownloadComputeOverview } from '../../apis/downloadCompute'
 import {
   DATA_DOWNLOAD_DRAFT_STORAGE_KEY,
   checkDatabases,
@@ -637,8 +637,7 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
     setError('')
 
     try {
-      const managedStatus = await inspectManagedSourceStatus()
-      const nextStatus = await getDataDownloadStatus(managedStatus.sourcePath)
+      const { downloadStatus: nextStatus } = await getDownloadComputeOverview()
       setStatus(nextStatus)
     } catch (loadError) {
       setNotice('')

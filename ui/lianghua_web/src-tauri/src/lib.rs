@@ -78,6 +78,7 @@ use {
         validate_chart_indicator_settings as core_validate_chart_indicator_settings,
         ChartIndicatorSettingsPayload, ChartIndicatorValidationResult,
     },
+    data::download::get_data_download_status as core_get_data_download_status,
     data::viewer::{list_stock_lookup_rows as core_list_stock_lookup_rows, StockLookupRow},
     expression::{
         get_expression_capabilities as core_get_expression_capabilities, ExpressionCapabilitiesData,
@@ -238,6 +239,16 @@ use {
 };
 
 struct SimilarityDisplaySleepInhibitor(Option<tokio::sync::oneshot::Sender<()>>);
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DownloadComputeOverview {
+    source_path: String,
+    download_status: data::download::DataDownloadStatus,
+    ranking_status: RankComputeStatus,
+    ranking_strategy_changed: bool,
+    similarity_benchmark_codes: Vec<String>,
+}
 
 impl SimilarityDisplaySleepInhibitor {
     fn acquire() -> Self {
@@ -614,6 +625,50 @@ fn get_ranking_compute_status(
         .read()
         .unwrap_or_else(|e| e.into_inner());
     core_get_ranking_compute_status(&source_path, strategy_path.as_deref())
+}
+
+#[tauri::command]
+async fn get_download_compute_overview(
+    app: tauri::AppHandle,
+) -> Result<DownloadComputeOverview, String> {
+    let data_root = warehouse::warehouse_root(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        let source_root = data::import::resolve_source_root(&data_root, "source")?;
+        let source_path = source_root
+            .to_str()
+            .ok_or_else(|| "数据目录路径不是有效 UTF-8".to_string())?
+            .to_string();
+        let source_path_for_download = source_path.as_str();
+        let source_path_for_ranking = source_path.as_str();
+        let (download_result, ranking_result, strategy_changed_result) =
+            std::thread::scope(|scope| {
+                let download =
+                    scope.spawn(|| core_get_data_download_status(source_path_for_download));
+                let ranking =
+                    scope.spawn(|| core_get_ranking_compute_status(source_path_for_ranking, None));
+                let strategy_changed = scope.spawn(|| {
+                    managed_source_bridge::rank_compute_strategy_changed(&data_root, "source")
+                });
+                (download.join(), ranking.join(), strategy_changed.join())
+            });
+
+        Ok(DownloadComputeOverview {
+            source_path,
+            download_status: download_result
+                .map_err(|_| "下载状态检查线程异常退出".to_string())??,
+            ranking_status: ranking_result
+                .map_err(|_| "计算状态检查线程异常退出".to_string())??,
+            ranking_strategy_changed: strategy_changed_result
+                .map_err(|_| "排名策略检查线程异常退出".to_string())??,
+            similarity_benchmark_codes: core_list_strategy_trigger_similarity_benchmark_index_codes(
+            ),
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -3463,6 +3518,7 @@ pub fn run() {
             export_managed_strategy_backup_file,
             export_managed_strategy_bundle,
             get_data_download_status,
+            get_download_compute_overview,
             check_databases,
             repair_database_issues,
             get_indicator_manage_page,
