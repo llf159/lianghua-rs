@@ -15,6 +15,7 @@ import {
   type VolumeRatioSourceStatus,
   type AllMarketIndexRow,
   type AllMarketMonitorRow,
+  type AllMarketMonitorTimings,
   type IntradayMonitorTemplate,
 } from "../../apis/reader";
 import IntradayTemplateManagerModal from "./components/IntradayTemplateManagerModal";
@@ -681,6 +682,16 @@ export default function AllMarketMonitorPage() {
   const [eastmoneySessionBusy, setEastmoneySessionBusy] = useState(false);
   const [eastmoneySessionMessage, setEastmoneySessionMessage] = useState("");
   const [marketStatus, setMarketStatus] = useState("");
+  const refreshTimingRef = useRef<{
+    backend: AllMarketMonitorTimings;
+    requestMs: number;
+    receivedAt: number;
+  } | null>(null);
+  const [refreshTiming, setRefreshTiming] = useState<{
+    backend: AllMarketMonitorTimings;
+    requestMs: number;
+    viewMs: number | null;
+  } | null>(null);
   const [refreshedAt, setRefreshedAt] = useState("");
   const [rankDate, setRankDate] = useState("");
   const [requestedCount, setRequestedCount] = useState(0);
@@ -1153,6 +1164,7 @@ export default function AllMarketMonitorPage() {
         lastProcessedConfigFingerprintRef.current !== configFingerprint
           ? undefined
           : (lastProcessedDataVersionRef.current ?? undefined);
+      const requestStarted = performance.now();
       const result = await getAllMarketMonitorSnapshot(
         sourcePathTrimmed,
         realtimeProvider,
@@ -1168,6 +1180,12 @@ export default function AllMarketMonitorPage() {
         volumeRatioEnabledRef.current,
       );
       if (!enabledRef.current && !volumeRatioEnabledRef.current) return;
+      const receivedAt = performance.now();
+      refreshTimingRef.current = result.timings ? {
+        backend: result.timings,
+        requestMs: receivedAt - requestStarted,
+        receivedAt,
+      } : null;
       if (enabledRef.current) {
         setMarketStatus(result.market_status_message ?? "");
       }
@@ -1194,7 +1212,12 @@ export default function AllMarketMonitorPage() {
         setEnabled(false);
       }
       // 单独拉取量比只更新进度，保留已暂停监控的表格和异动记录。
-      if (!enabledRef.current || result.has_new_data === false) return;
+      if (!enabledRef.current || result.has_new_data === false) {
+        if (refreshTimingRef.current) {
+          setRefreshTiming({ ...refreshTimingRef.current, viewMs: null });
+        }
+        return;
+      }
 
       lastProcessedDataVersionRef.current =
         result.data_version ?? result.refreshed_at ?? null;
@@ -1431,6 +1454,19 @@ export default function AllMarketMonitorPage() {
     sourcePathTrimmed,
     refreshSeconds,
   ]);
+
+  useEffect(() => {
+    const measurement = refreshTimingRef.current;
+    if (!measurement) return;
+    const frame = requestAnimationFrame(() => {
+      setRefreshTiming({
+        backend: measurement.backend,
+        requestMs: measurement.requestMs,
+        viewMs: performance.now() - measurement.receivedAt,
+      });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [rows]);
 
   const speedMapsByPeriod = useMemo(() => {
     const now = Date.now();
@@ -1990,6 +2026,21 @@ export default function AllMarketMonitorPage() {
               <span>
                 行情 {fetchedCount}/{requestedCount}
               </span>
+              {refreshTiming ? (
+                <details className="all-market-refresh-timing">
+                  <summary>本轮 {((refreshTiming.requestMs + (refreshTiming.viewMs ?? 0)) / 1000).toFixed(2)} 秒</summary>
+                  <div>
+                    <span>股票行情请求（含解析）：{refreshTiming.backend.quotes_ms.toFixed(0)} ms</span>
+                    <span>量比及交易状态：{refreshTiming.backend.volume_ratio_ms.toFixed(0)} ms</span>
+                    <span>本地资料及日线：{(refreshTiming.backend.metadata_ms + refreshTiming.backend.rows_ms).toFixed(0)} ms</span>
+                    <span>模板及其他排序：{(refreshTiming.backend.templates_ms + refreshTiming.backend.other_sort_ms).toFixed(0)} ms</span>
+                    <span title="股票与指数请求并行执行，不能将两项耗时相加">指数请求（含解析）：{refreshTiming.backend.indices_ms.toFixed(0)} ms</span>
+                    <span>后端合计：{refreshTiming.backend.total_ms.toFixed(0)} ms</span>
+                    <span title="包含任务排队、仓库锁等待、结果序列化和传输">调用额外等待：{Math.max(0, refreshTiming.requestMs - refreshTiming.backend.total_ms).toFixed(0)} ms</span>
+                    <span title="收到结果至提交界面后的下一动画帧，包含前端计算、React 更新与帧等待，并非纯 CPU 耗时">界面更新：{refreshTiming.viewMs == null ? "本轮未更新表格" : `${refreshTiming.viewMs.toFixed(0)} ms`}</span>
+                  </div>
+                </details>
+              ) : null}
               {rankDate ? <span>排名 {rankDate}</span> : null}
               {templateEnabled ? (
                 <span>

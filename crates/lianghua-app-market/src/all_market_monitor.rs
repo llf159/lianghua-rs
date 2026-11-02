@@ -6,6 +6,7 @@ use std::{
     collections::{HashMap, HashSet, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
     sync::{Arc, Mutex, OnceLock},
+    time::Instant,
 };
 
 use chrono::{FixedOffset, NaiveDateTime, Timelike, Utc};
@@ -139,6 +140,18 @@ pub struct AllMarketIndexRow {
     pub realtime_amount: Option<f64>,
 }
 
+#[derive(Debug, Default, Serialize)]
+pub struct AllMarketMonitorTimings {
+    pub metadata_ms: f64,
+    pub quotes_ms: f64,
+    pub volume_ratio_ms: f64,
+    pub rows_ms: f64,
+    pub templates_ms: f64,
+    pub other_sort_ms: f64,
+    pub indices_ms: f64,
+    pub total_ms: f64,
+}
+
 #[derive(Debug, Serialize)]
 pub struct AllMarketMonitorSnapshotData {
     pub rows: Vec<AllMarketMonitorRow>,
@@ -154,6 +167,7 @@ pub struct AllMarketMonitorSnapshotData {
     pub template_warning_message: Option<String>,
     pub volume_ratio_status_message: Option<String>,
     pub volume_ratio_source_statuses: Vec<super::volume_ratio::VolumeRatioSourceStatus>,
+    pub timings: AllMarketMonitorTimings,
 }
 
 pub(crate) fn check_market_activity(
@@ -1036,6 +1050,9 @@ pub fn get_all_market_monitor_snapshot(
     last_data_version: Option<String>,
     volume_ratio_fetch_enabled: Option<bool>,
 ) -> Result<AllMarketMonitorSnapshotData, String> {
+    let started = Instant::now();
+    let mut stage_started = started;
+    let mut timings = AllMarketMonitorTimings::default();
     let mut meta = (|source_path: &str| -> Result<Arc<SourceMetaCacheEntry>, String> {
         if let Some(entry) = source_meta_cache()
             .lock()
@@ -1105,30 +1122,98 @@ pub fn get_all_market_monitor_snapshot(
         .map(|item| item.ts_code.clone())
         .collect::<Vec<_>>();
     let provider = RealtimeQuoteProvider::parse(realtime_provider.as_deref())?;
-    let (quotes, mut volume_ratio_map, avg_price_map, fetch_meta) = match provider {
-        RealtimeQuoteProvider::Sina => {
-            let (quotes, fetch_meta) = fetch_all_market_realtime_quote_map_for_codes(&ts_codes)?;
-            (quotes, HashMap::new(), HashMap::new(), fetch_meta)
-        }
-        RealtimeQuoteProvider::Tencent => {
-            let (tencent_quotes, fetch_meta) =
-                fetch_all_market_tencent_realtime_quote_map_for_codes(&ts_codes)?;
-            let mut volume_ratio_map = HashMap::with_capacity(tencent_quotes.len());
-            let mut avg_price_map = HashMap::with_capacity(tencent_quotes.len());
-            let mut quotes = HashMap::with_capacity(tencent_quotes.len());
-            for (ts_code, quote) in tencent_quotes {
-                if let Some(value) = quote.volume_ratio {
-                    volume_ratio_map.insert(ts_code.clone(), value);
-                }
-                if let Some(value) = quote.avg_price {
-                    avg_price_map.insert(ts_code.clone(), value);
-                }
-                quotes.insert(ts_code, quote.into_sina_quote());
-            }
-            (quotes, volume_ratio_map, avg_price_map, fetch_meta)
-        }
-    };
+    timings.metadata_ms = stage_started.elapsed().as_secs_f64() * 1000.0;
+    // Index quotes use a separate source; start them alongside stock quotes.
+    let ((quotes_result, quotes_ms), (index_rows, indices_ms)) = std::thread::scope(|scope| {
+        let indices = scope.spawn(|| {
+            let started = Instant::now();
+            let index_rows = (|provider: RealtimeQuoteProvider| -> Vec<AllMarketIndexRow> {
+                let index_ts_codes = default_realtime_index_ts_codes();
+                let quote_result = match provider {
+                    RealtimeQuoteProvider::Sina => {
+                        fetch_all_market_realtime_quote_map_for_codes(&index_ts_codes)
+                            .map(|(quotes, _)| quotes)
+                    }
+                    RealtimeQuoteProvider::Tencent => {
+                        fetch_all_market_tencent_realtime_quote_map_for_codes(&index_ts_codes).map(
+                            |(quotes, _)| {
+                                quotes
+                                    .into_iter()
+                                    .map(|(ts_code, quote)| (ts_code, quote.into_sina_quote()))
+                                    .collect::<HashMap<_, _>>()
+                            },
+                        )
+                    }
+                };
 
+                quote_result
+                    .map(|quotes| {
+                        (|quotes: &HashMap<String, SinaQuote>| -> Vec<AllMarketIndexRow> {
+                            default_realtime_index_ts_codes()
+                                .into_iter()
+                                .map(|ts_code| {
+                                    let quote = quotes.get(&ts_code);
+                                    AllMarketIndexRow {
+                                        ts_code: ts_code.clone(),
+                                        name: quote
+                                            .map(|item| item.name.trim())
+                                            .filter(|value| !value.is_empty())
+                                            .unwrap_or(ts_code.as_str())
+                                            .to_string(),
+                                        realtime_trade_date: quote.and_then(|item| {
+                                            normalize_quote_trade_date(&item.date)
+                                        }),
+                                        realtime_price: quote.map(|item| item.price),
+                                        realtime_change_pct: quote.and_then(|item| item.change_pct),
+                                        realtime_amount: quote
+                                            .map(|item| item.amount)
+                                            .filter(|value| value.is_finite() && *value >= 0.0),
+                                    }
+                                })
+                                .collect()
+                        })(&quotes)
+                    })
+                    .unwrap_or_else(|_| Vec::new())
+            })(provider.opposite());
+            (index_rows, started.elapsed().as_secs_f64() * 1000.0)
+        });
+        let started = Instant::now();
+        let quotes_result = (|| -> Result<_, String> {
+            Ok(match provider {
+                RealtimeQuoteProvider::Sina => {
+                    let (quotes, fetch_meta) =
+                        fetch_all_market_realtime_quote_map_for_codes(&ts_codes)?;
+                    (quotes, HashMap::new(), HashMap::new(), fetch_meta)
+                }
+                RealtimeQuoteProvider::Tencent => {
+                    let (tencent_quotes, fetch_meta) =
+                        fetch_all_market_tencent_realtime_quote_map_for_codes(&ts_codes)?;
+                    let mut volume_ratio_map = HashMap::with_capacity(tencent_quotes.len());
+                    let mut avg_price_map = HashMap::with_capacity(tencent_quotes.len());
+                    let mut quotes = HashMap::with_capacity(tencent_quotes.len());
+                    for (ts_code, quote) in tencent_quotes {
+                        if let Some(value) = quote.volume_ratio {
+                            volume_ratio_map.insert(ts_code.clone(), value);
+                        }
+                        if let Some(value) = quote.avg_price {
+                            avg_price_map.insert(ts_code.clone(), value);
+                        }
+                        quotes.insert(ts_code, quote.into_sina_quote());
+                    }
+                    (quotes, volume_ratio_map, avg_price_map, fetch_meta)
+                }
+            })
+        })();
+        let quotes_ms = started.elapsed().as_secs_f64() * 1000.0;
+        (
+            (quotes_result, quotes_ms),
+            indices.join().expect("index quote worker panicked"),
+        )
+    });
+    let (quotes, mut volume_ratio_map, avg_price_map, fetch_meta) = quotes_result?;
+    timings.quotes_ms = quotes_ms;
+    timings.indices_ms = indices_ms;
+    stage_started = Instant::now();
     let now = Utc::now()
         .with_timezone(&FixedOffset::east_opt(8 * 3600).expect("valid China offset"))
         .naive_local();
@@ -1175,6 +1260,8 @@ pub fn get_all_market_monitor_snapshot(
             volume_ratio_map.insert(code.clone(), value.current);
         }
     }
+    timings.volume_ratio_ms = stage_started.elapsed().as_secs_f64() * 1000.0;
+    stage_started = Instant::now();
     let data_version = fetch_meta.refreshed_at.as_ref().map(|version| {
         format!(
             "{version}|volume-ratio:{}",
@@ -1202,6 +1289,7 @@ pub fn get_all_market_monitor_snapshot(
         }
     }
     if !has_new_realtime_data(last_data_version.as_deref(), data_version.as_deref()) {
+        timings.total_ms = started.elapsed().as_secs_f64() * 1000.0;
         return Ok(AllMarketMonitorSnapshotData {
             rows: Vec::new(),
             index_rows: Vec::new(),
@@ -1216,6 +1304,7 @@ pub fn get_all_market_monitor_snapshot(
             template_warning_message: None,
             volume_ratio_status_message,
             volume_ratio_source_statuses,
+            timings,
         });
     }
 
@@ -1305,6 +1394,8 @@ pub fn get_all_market_monitor_snapshot(
             }
         }
     }
+    timings.rows_ms = stage_started.elapsed().as_secs_f64() * 1000.0;
+    stage_started = Instant::now();
     let template_warning_message = if template_enabled.unwrap_or(false) {
         (|source_path: &str,
           stocks: &[StockMeta],
@@ -1416,6 +1507,8 @@ pub fn get_all_market_monitor_snapshot(
     } else {
         None
     };
+    timings.templates_ms = stage_started.elapsed().as_secs_f64() * 1000.0;
+    stage_started = Instant::now();
     let other_sort_warning_message = (|source_path: &str,
                                        stocks: &[StockMeta],
                                        rows: &mut [AllMarketMonitorRow],
@@ -1589,54 +1682,8 @@ pub fn get_all_market_monitor_snapshot(
         (Some(message), None) | (None, Some(message)) => Some(message),
         (None, None) => None,
     };
-    let index_rows = (|provider: RealtimeQuoteProvider| -> Vec<AllMarketIndexRow> {
-        let index_ts_codes = default_realtime_index_ts_codes();
-        let quote_result = match provider {
-            RealtimeQuoteProvider::Sina => {
-                fetch_all_market_realtime_quote_map_for_codes(&index_ts_codes)
-                    .map(|(quotes, _)| quotes)
-            }
-            RealtimeQuoteProvider::Tencent => {
-                fetch_all_market_tencent_realtime_quote_map_for_codes(&index_ts_codes).map(
-                    |(quotes, _)| {
-                        quotes
-                            .into_iter()
-                            .map(|(ts_code, quote)| (ts_code, quote.into_sina_quote()))
-                            .collect::<HashMap<_, _>>()
-                    },
-                )
-            }
-        };
-
-        quote_result
-            .map(|quotes| {
-                (|quotes: &HashMap<String, SinaQuote>| -> Vec<AllMarketIndexRow> {
-                    default_realtime_index_ts_codes()
-                        .into_iter()
-                        .map(|ts_code| {
-                            let quote = quotes.get(&ts_code);
-                            AllMarketIndexRow {
-                                ts_code: ts_code.clone(),
-                                name: quote
-                                    .map(|item| item.name.trim())
-                                    .filter(|value| !value.is_empty())
-                                    .unwrap_or(ts_code.as_str())
-                                    .to_string(),
-                                realtime_trade_date: quote
-                                    .and_then(|item| normalize_quote_trade_date(&item.date)),
-                                realtime_price: quote.map(|item| item.price),
-                                realtime_change_pct: quote.and_then(|item| item.change_pct),
-                                realtime_amount: quote
-                                    .map(|item| item.amount)
-                                    .filter(|value| value.is_finite() && *value >= 0.0),
-                            }
-                        })
-                        .collect()
-                })(&quotes)
-            })
-            .unwrap_or_else(|_| Vec::new())
-    })(provider.opposite());
-
+    timings.other_sort_ms = stage_started.elapsed().as_secs_f64() * 1000.0;
+    timings.total_ms = started.elapsed().as_secs_f64() * 1000.0;
     Ok(AllMarketMonitorSnapshotData {
         rows,
         index_rows,
@@ -1651,6 +1698,7 @@ pub fn get_all_market_monitor_snapshot(
         template_warning_message,
         volume_ratio_status_message,
         volume_ratio_source_statuses,
+        timings,
     })
 }
 

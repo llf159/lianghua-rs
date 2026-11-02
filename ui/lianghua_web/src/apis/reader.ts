@@ -248,6 +248,17 @@ export type VolumeRatioSourceStatus = {
     | "blocked";
 };
 
+export type AllMarketMonitorTimings = {
+  metadata_ms: number;
+  quotes_ms: number;
+  volume_ratio_ms: number;
+  rows_ms: number;
+  templates_ms: number;
+  other_sort_ms: number;
+  indices_ms: number;
+  total_ms: number;
+};
+
 export type AllMarketMonitorSnapshotData = {
   rows: AllMarketMonitorRow[];
   index_rows?: AllMarketIndexRow[];
@@ -262,6 +273,7 @@ export type AllMarketMonitorSnapshotData = {
   template_warning_message?: string | null;
   volume_ratio_status_message?: string | null;
   volume_ratio_source_statuses?: VolumeRatioSourceStatus[];
+  timings?: AllMarketMonitorTimings;
 };
 
 export type IntradayRealtimeRefreshQuery = {

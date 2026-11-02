@@ -2208,3 +2208,26 @@
 .all-market-hit-card .all-market-hit-list {
   min-height: 160px;
 }
+
+.all-market-refresh-timing {
+  position: relative;
+}
+.all-market-refresh-timing summary {
+  cursor: pointer;
+}
+.all-market-refresh-timing > div {
+  position: absolute;
+  z-index: 20;
+  top: 100%;
+  left: 0;
+  display: grid;
+  gap: 4px;
+  width: max-content;
+  max-width: 75vw;
+  padding: 10px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fff;
+  color: #475569;
+  box-shadow: 0 4px 16px #0002;
+}
