@@ -233,6 +233,21 @@ export type AllMarketIndexRow = {
   realtime_amount?: number | null;
 };
 
+export type VolumeRatioSourceStatus = {
+  source: "tencent" | "eastmoney" | "microsoft" | "local";
+  state:
+    | "paused"
+    | "not_ready"
+    | "cooling_down"
+    | "available"
+    | "retrying"
+    | "waiting"
+    | "data_unavailable"
+    | "cache_error"
+    | "incomplete"
+    | "blocked";
+};
+
 export type AllMarketMonitorSnapshotData = {
   rows: AllMarketMonitorRow[];
   index_rows?: AllMarketIndexRow[];
@@ -246,6 +261,7 @@ export type AllMarketMonitorSnapshotData = {
   fetched_count: number;
   template_warning_message?: string | null;
   volume_ratio_status_message?: string | null;
+  volume_ratio_source_statuses?: VolumeRatioSourceStatus[];
 };
 
 export type IntradayRealtimeRefreshQuery = {

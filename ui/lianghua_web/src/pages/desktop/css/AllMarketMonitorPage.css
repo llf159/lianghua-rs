@@ -2153,3 +2153,58 @@
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* 固定短状态与两列来源格，避免网络错误撑宽行情榜或挤空流水。 */
+.all-market-volume-ratio-status {
+  min-width: 0;
+}
+.all-market-volume-ratio-progress {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.all-market-volume-ratio-sources {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 8px;
+}
+.all-market-volume-source {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  min-width: 0;
+  padding: 3px 6px;
+  border-radius: 4px;
+  background: #f1f5f9;
+  color: #64748b;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.all-market-volume-source strong {
+  font-weight: 500;
+}
+.all-market-volume-source.is-available {
+  color: #15803d;
+  background: #f0fdf4;
+}
+.all-market-volume-source:is(
+  .is-retrying,
+  .is-cooling_down,
+  .is-incomplete,
+  .is-cache_error
+) {
+  color: #92400e;
+  background: #fffbeb;
+}
+.all-market-volume-source:is(.is-blocked, .is-data_unavailable) {
+  color: #b42318;
+  background: #fff5f5;
+}
+.all-market-hit-card > :not(.all-market-hit-list) {
+  flex-shrink: 0;
+}
+.all-market-hit-card .all-market-hit-list {
+  min-height: 160px;
+}
