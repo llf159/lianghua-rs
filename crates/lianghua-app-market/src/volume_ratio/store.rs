@@ -16,14 +16,15 @@ enum Command {
 }
 
 pub(super) struct Store {
-    sender: mpsc::Sender<Command>,
+    sender: mpsc::SyncSender<Command>,
     error: Arc<Mutex<Option<String>>>,
     worker: Option<JoinHandle<()>>,
 }
 
 impl Store {
     pub(super) fn new(mut conn: rusqlite::Connection, date: String) -> Result<Self, String> {
-        let (sender, receiver) = mpsc::channel();
+        // Keep the queue bounded even when SQLite is busy or repeatedly failing.
+        let (sender, receiver) = mpsc::sync_channel(4096);
         let error = Arc::new(Mutex::new(None));
         let worker_error = Arc::clone(&error);
         let worker = thread::Builder::new()
@@ -91,8 +92,13 @@ impl Store {
 
     pub(super) fn save(&self, code: String, baseline: SavedBaseline) -> Result<(), String> {
         self.sender
-            .send(Command::Save(code, baseline))
-            .map_err(|_| "量比落盘线程已停止，数据尚未落盘".to_string())
+            .try_send(Command::Save(code, baseline))
+            .map_err(|error| match error {
+                mpsc::TrySendError::Full(_) =>
+                    "量比落盘队列已满，将在后续快照重试".to_string(),
+                mpsc::TrySendError::Disconnected(_) =>
+                    "量比落盘线程已停止，数据尚未落盘".to_string(),
+            })
     }
 
     pub(super) fn error(&self) -> Option<String> {
