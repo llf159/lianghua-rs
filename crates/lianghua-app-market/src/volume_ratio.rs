@@ -172,6 +172,9 @@ struct Cache {
     next_request_at: [Option<Instant>; 3],
     cooldown_until: [Option<Instant>; 3],
     request_interval_ms: [u64; 3],
+    source_cursor: usize,
+    recovery_at: [Option<Instant>; 3],
+    source_successes: [u8; 3],
 }
 
 impl Cache {
@@ -351,17 +354,25 @@ impl Cache {
         });
         let source = (0..if allow_msn { 3 } else { 2 })
             .filter(|&index| attempted & (1 << index) == 0)
-            .min_by_key(|&index| deadlines[index])?;
+            .min_by_key(|&index| {
+                (
+                    deadlines[index].max(now),
+                    (index + 3 - self.source_cursor) % 3,
+                )
+            })?;
         let wait = deadlines[source].saturating_duration_since(now);
         if wait.is_zero() {
             let interval = self.request_interval_ms[source].max(if source == 2 { 40 } else { 60 });
             self.next_request_at[source] = Some(now + Duration::from_millis(interval));
+            self.source_cursor = (source + 1) % 3;
         }
         Some((source, wait))
     }
 
     fn throttle_source(&mut self, source: usize, now: Instant) {
         self.cooldown_until[source] = Some(now + Duration::from_secs(20));
+        self.recovery_at[source] = Some(now + Duration::from_secs(40));
+        self.source_successes[source] = 0;
         self.request_interval_ms[source] = self.request_interval_ms[source]
             .max(if source == 2 { 40 } else { 60 })
             .saturating_mul(2)
@@ -369,6 +380,8 @@ impl Cache {
     }
 
     fn handle_fetch_error(&mut self, source: usize, error: &str, now: Instant) {
+        self.source_successes[source] = 0;
+        self.recovery_at[source] = Some(now + Duration::from_secs(20));
         let status = error
             .split("HTTP状态=")
             .nth(1)
@@ -378,6 +391,25 @@ impl Cache {
             self.throttle_source(source, now);
         }
         // 超时、断连与读取失败只重试该股；没有 HTTP 状态不能推断全源限流。
+    }
+
+    fn handle_fetch_success(&mut self, source: usize, started: Instant, now: Instant) {
+        // 限流前已在途的响应不能作为冷却后恢复的依据。
+        if self.cooldown_until[source].is_some_and(|until| started < until) {
+            return;
+        }
+        let base = if source == 2 { 40 } else { 60 };
+        if self.request_interval_ms[source] <= base {
+            return;
+        }
+        self.source_successes[source] = self.source_successes[source].saturating_add(1);
+        if self.source_successes[source] >= 8
+            && self.recovery_at[source].is_some_and(|at| now >= at)
+        {
+            self.request_interval_ms[source] = (self.request_interval_ms[source] / 2).max(base);
+            self.source_successes[source] = 0;
+            self.recovery_at[source] = Some(now + Duration::from_secs(20));
+        }
     }
 
     fn set_paused(&mut self, paused: bool) {
@@ -724,6 +756,7 @@ pub fn snapshot(
                         }
                         std::thread::sleep(wait.min(Duration::from_millis(100)));
                     };
+                    let started = Instant::now();
                     let result = if let Some(average) = local_average {
                         if source == 0 {
                             fetch_tencent_volume_ratio(&http, &ts_code, average)
@@ -756,7 +789,17 @@ pub fn snapshot(
                         Ok(data)
                     });
                     match result {
-                        Ok(data) => break (source, Ok(data)),
+                        Ok(data) => {
+                            if let Ok(mut state) = cache.lock() {
+                                if state.generation != generation || state.paused {
+                                    return;
+                                }
+                                state.handle_fetch_success(source, started, Instant::now());
+                            } else {
+                                return;
+                            }
+                            break (source, Ok(data));
+                        }
                         Err(error) if local_average.is_none() => break (source, Err(error)),
                         Err(error) => {
                             if let Ok(mut state) = cache.lock() {
@@ -1211,6 +1254,67 @@ mod tests {
         assert!(next_day.entries.is_empty());
         drop(next_day);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn ready_sources_rotate_and_backoff_recovers_only_after_stable_successes() {
+        let now = Instant::now();
+        let mut cache = Cache::default();
+        // 旧截止时间均已到期：按轮转公平选择，不能永远偏向最旧时间戳。
+        cache.next_request_at = [Some(now - Duration::from_secs(1)); 3];
+        cache.source_cursor = 2;
+        assert_eq!(
+            cache.reserve_source(now, true, 0),
+            Some((2, Duration::ZERO))
+        );
+        assert_eq!(
+            cache.reserve_source(now, true, 0),
+            Some((0, Duration::ZERO))
+        );
+        assert_eq!(
+            cache.reserve_source(now, true, 0),
+            Some((1, Duration::ZERO))
+        );
+        assert_eq!(
+            cache.reserve_source(now, true, 0),
+            Some((2, Duration::from_millis(40)))
+        );
+        // 等待不会预占请求额度；再次调用仍是同一截止时间。
+        assert_eq!(
+            cache.next_request_at[2],
+            Some(now + Duration::from_millis(40))
+        );
+        cache.throttle_source(2, now);
+        for _ in 0..8 {
+            cache.handle_fetch_success(2, now, now + Duration::from_secs(41));
+        }
+        assert_eq!(cache.source_successes[2], 0);
+        assert_eq!(cache.request_interval_ms[2], 80);
+        for _ in 0..8 {
+            cache.handle_fetch_success(
+                2,
+                now + Duration::from_secs(21),
+                now + Duration::from_secs(22),
+            );
+        }
+        assert_eq!(cache.request_interval_ms[2], 80);
+        cache.handle_fetch_error(2, "响应缺竞价", now + Duration::from_secs(30));
+        for _ in 0..8 {
+            cache.handle_fetch_success(
+                2,
+                now + Duration::from_secs(41),
+                now + Duration::from_secs(41),
+            );
+        }
+        assert_eq!(cache.request_interval_ms[2], 80);
+        cache.handle_fetch_success(
+            2,
+            now + Duration::from_secs(50),
+            now + Duration::from_secs(50),
+        );
+        assert_eq!(cache.request_interval_ms[2], 40);
+        assert_eq!(cache.request_interval_ms[0], 0);
+        assert_eq!(cache.request_interval_ms[1], 0);
     }
 
     #[test]
