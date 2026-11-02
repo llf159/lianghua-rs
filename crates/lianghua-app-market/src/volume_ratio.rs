@@ -968,7 +968,9 @@ pub fn snapshot(
             "blocked"
         } else if state.local_error.is_some() {
             "data_unavailable"
-        } else if state.persistence_error.is_some() {
+        } else if state.persistence_error.is_some()
+            || state.store.as_ref().and_then(store::Store::error).is_some()
+        {
             "cache_error"
         } else if quotes.iter().any(|(code, quote)| {
             quote.date.replace('-', "") == trade_date && !state.local_averages.contains_key(code)
