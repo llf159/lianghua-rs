@@ -257,8 +257,11 @@ pub fn resolve_strategies(
     dav.release()?;
     result.uploaded = 1;
     result.downloaded = 1;
+    result.uploaded_paths.push(bundle.into());
+    result.downloaded_paths.push(bundle.into());
     result.uploaded_bytes = dav.uploaded_bytes;
     result.downloaded_bytes = dav.downloaded_bytes;
     result.transferred_bytes = result.uploaded_bytes + result.downloaded_bytes;
+    result.items = cloud_items(&dav.manifest, &state);
     Ok(result)
 }

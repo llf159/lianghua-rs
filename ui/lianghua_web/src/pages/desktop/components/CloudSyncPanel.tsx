@@ -92,11 +92,13 @@ export default function CloudSyncPanel({
           kind === "download",
         );
         setConflicts(result.conflicts);
+        const paths = (values: string[]) =>
+          values.map((path) => `${cloudPathLabel(path)}（${path}）`).join("、");
         setNotice(
-          `${kind === "download" ? "下载完成" : kind === "resolve" ? "冲突已解决" : kind === "restore" ? "版本已恢复" : "同步完成"} · 上传 ${result.uploaded} 项 · 接收 ${result.downloaded} 项${result.skipped ? ` · 跳过 ${result.skipped} 项` : ""} · 上传 ${bytes(result.uploadedBytes)} / 下载 ${bytes(result.downloadedBytes)}${result.warnings.length ? `；${result.warnings.join("；")}` : ""}`,
+          `${kind === "download" ? "下载完成" : kind === "resolve" ? "冲突已解决" : kind === "restore" ? "版本已恢复" : "同步完成"} · 上传 ${result.uploaded} 项${result.uploadedPaths.length ? `：${paths(result.uploadedPaths)}` : ""} · 接收 ${result.downloaded} 项${result.downloadedPaths.length ? `：${paths(result.downloadedPaths)}` : ""}${result.skipped ? ` · 跳过 ${result.skipped} 项` : ""} · 上传 ${bytes(result.uploadedBytes)} / 下载 ${bytes(result.downloadedBytes)}${result.warnings.length ? `；${result.warnings.join("；")}` : ""}`,
         );
         onSynced();
-        if (manager || kind === "resolve") setItems(await listCloudData());
+        setItems(result.items);
       }
       setSelected(null);
       setAction(null);
@@ -584,15 +586,13 @@ export default function CloudSyncPanel({
               versionId={reviewItem.version.id}
               disabled={disabled}
               onBusyChange={onReviewBusy}
-              onResolved={() => {
+              onResolved={(items) => {
                 setReviewItem(null);
                 setConflicts((paths) =>
                   paths.filter((path) => path !== "bundles/strategies.zip"),
                 );
+                setItems(items);
                 onSynced();
-                void listCloudData()
-                  .then(setItems)
-                  .catch((reason) => setError(String(reason)));
               }}
             />
           </section>

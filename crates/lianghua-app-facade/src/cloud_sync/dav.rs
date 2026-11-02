@@ -67,13 +67,14 @@ impl Dav {
         for attempt in 0..3 {
             if !cfg!(test) {
                 // 所有连接共享预算，反复点击同步也不能重复领取突发额度。
-                // 空闲时最多连续 8 个请求，之后每 3.2 秒恢复一次请求额度。
-                static REQUEST_PACE: Mutex<(Option<Instant>, f64)> = Mutex::new((None, 8.0));
+                // 冲突处理会跨多个命令连续读取目录和版本；突发额度需覆盖一整轮，
+                // 持续请求仍按 3.2 秒恢复一次，不突破每 30 分钟 600 次的预算。
+                static REQUEST_PACE: Mutex<(Option<Instant>, f64)> = Mutex::new((None, 16.0));
                 let mut pace = REQUEST_PACE
                     .lock()
                     .map_err(|_| "请求限速状态异常，请重启应用")?;
                 if let Some(last) = pace.0 {
-                    pace.1 = (pace.1 + last.elapsed().as_secs_f64() / 3.2).min(8.0);
+                    pace.1 = (pace.1 + last.elapsed().as_secs_f64() / 3.2).min(16.0);
                 }
                 if pace.1 < 1.0 {
                     std::thread::sleep(Duration::from_secs_f64((1.0 - pace.1) * 3.2));
@@ -255,7 +256,17 @@ impl Dav {
             self.locked = false;
             return Err(Self::error(response.status()));
         }
-        // 部分 DAV 服务 PUT 不返回 ETag，重新 GET 并核对锁的所有者。
+        // PUT 返回强 ETag 时它已经代表刚提交的资源；不支持的 DAV 服务仍回读校验。
+        if let Some(etag) = response
+            .headers()
+            .get(header::ETAG)
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| !value.starts_with("W/"))
+        {
+            self.etag = Some(etag.to_string());
+            self.renewed = Instant::now();
+            return Ok(());
+        }
         let expected = self.manifest.clone();
         self.read_manifest()?;
         if self.manifest != expected {
@@ -280,14 +291,8 @@ impl Dav {
     pub fn upload(&mut self, hash: &str, bytes: &[u8]) -> Result<(), String> {
         self.heartbeat()?;
         let path = format!("objects/{hash}.gz");
-        // 补偿上传成功但目录提交前中断留下的对象，避免重试再耗上传额度。
-        let existing = self.request(Method::HEAD, &path, None, None)?;
-        if existing.status().is_success() {
-            return Ok(());
-        }
-        if existing.status() != StatusCode::NOT_FOUND {
-            return Err(Self::error(existing.status()));
-        }
+        // 对象按内容哈希寻址，重试覆盖同一对象不会改变内容；直接 PUT 省去一次
+        // HEAD。目录已引用的哈希由调用方跳过，只有中断残留时可能多传一次。
         let response = self.request(Method::PUT, &path, Some(bytes), None)?;
         if !response.status().is_success() {
             return Err(Self::error(response.status()));

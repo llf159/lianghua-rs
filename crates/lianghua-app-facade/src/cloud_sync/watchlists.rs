@@ -300,6 +300,7 @@ pub(super) fn transfer_bundle(
             );
             dav.persist()?;
             result.uploaded = 1;
+            result.uploaded_paths.push(bundle.into());
             version
         };
         last_modified = Some(version.created_at.clone());
@@ -338,6 +339,7 @@ pub(super) fn transfer_bundle(
         )?;
         super::apply(app_data, source, bundle, &bytes, &mut result)?;
         result.downloaded = 1;
+        result.downloaded_paths.push(bundle.into());
     }
     if let Some(version) = synced_version {
         if mode == TransferMode::Upload {

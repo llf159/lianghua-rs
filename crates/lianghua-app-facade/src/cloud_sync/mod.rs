@@ -305,6 +305,9 @@ pub struct SyncResult {
     pub downloaded_bytes: u64,
     pub settings: BTreeMap<String, String>,
     pub warnings: Vec<String>,
+    pub uploaded_paths: Vec<String>,
+    pub downloaded_paths: Vec<String>,
+    pub items: Vec<CloudItem>,
 }
 
 fn replacement_path(path: &str) -> Option<&'static str> {
@@ -330,18 +333,22 @@ pub fn list_cloud(app_data: &Path, source: &Path) -> Result<Vec<CloudItem>, Stri
     };
     let mut dav = dav::Dav::new(&config)?;
     dav.read_manifest()?;
+    Ok(cloud_items(&dav.manifest, &state))
+}
+
+fn cloud_items(manifest: &Manifest, state: &SyncState) -> Vec<CloudItem> {
     let mut items = Vec::new();
-    for (path, versions) in &dav.manifest.entries {
+    for (path, versions) in &manifest.entries {
         let superseded =
-            replacement_path(path).is_some_and(|group| !dav.manifest.heads(group).is_empty());
+            replacement_path(path).is_some_and(|group| !manifest.heads(group).is_empty());
         let heads = if superseded {
             Vec::new()
         } else {
-            dav.manifest.heads(path)
+            manifest.heads(path)
         };
         for version in versions
             .iter()
-            .filter(|v| !dav.manifest.deleted.contains(&v.id))
+            .filter(|v| !manifest.deleted.contains(&v.id))
         {
             items.push(CloudItem {
                 path: path.clone(),
@@ -360,7 +367,7 @@ pub fn list_cloud(app_data: &Path, source: &Path) -> Result<Vec<CloudItem>, Stri
             .cmp(&b.path)
             .then(b.version.created_at.cmp(&a.version.created_at))
     });
-    Ok(items)
+    items
 }
 
 fn local_snapshots(
@@ -706,6 +713,7 @@ pub fn sync_scoped(
             },
         );
         result.uploaded += 1;
+        result.uploaded_paths.push(path.clone());
     }
     if !download_only && !matches!(scope, SyncScope::Watchlists) {
         dav.manifest.prune();
@@ -811,6 +819,7 @@ pub fn sync_scoped(
             &serde_json::to_vec(&state).map_err(|e| e.to_string())?,
         )?;
         result.downloaded += 1;
+        result.downloaded_paths.push(path.clone());
     }
     atomic_write(
         &state_path,
@@ -839,6 +848,7 @@ pub fn sync_scoped(
     result.uploaded_bytes = dav.uploaded_bytes;
     result.downloaded_bytes = dav.downloaded_bytes;
     result.transferred_bytes = dav.uploaded_bytes + dav.downloaded_bytes;
+    result.items = cloud_items(&dav.manifest, &state);
     Ok(result)
 }
 
@@ -891,6 +901,8 @@ pub fn restore(
                 current.len() as u64,
                 compressed.len() as u64,
             );
+            result.uploaded = 1;
+            result.uploaded_paths.push(path.into());
         }
     }
     let parents = dav.manifest.heads(path).into_iter().map(|v| v.id).collect();
@@ -929,10 +941,12 @@ pub fn restore(
         &serde_json::to_vec(&state).map_err(|e| e.to_string())?,
     )?;
     result.downloaded = 1;
+    result.downloaded_paths.push(path.into());
     dav.release()?;
     result.uploaded_bytes = dav.uploaded_bytes;
     result.downloaded_bytes = dav.downloaded_bytes;
     result.transferred_bytes = dav.uploaded_bytes + dav.downloaded_bytes;
+    result.items = cloud_items(&dav.manifest, &state);
     Ok(result)
 }
 

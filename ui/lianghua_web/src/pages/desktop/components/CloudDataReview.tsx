@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import {
   previewCloudData,
   resolveCloudStrategies,
+  type CloudItem,
   type CloudPreview,
 } from "../../../apis/cloudSync";
 
@@ -111,7 +112,7 @@ export default function CloudDataReview({
   versionId?: string;
   disabled: boolean;
   onBusyChange: (busy: boolean) => void;
-  onResolved: () => void;
+  onResolved: (items: CloudItem[]) => void;
   onLoaded?: (preview: CloudPreview) => void;
 }) {
   const [preview, setPreview] = useState<CloudPreview | null>(null);
@@ -221,14 +222,14 @@ export default function CloudDataReview({
     setError("");
     setNotice("");
     try {
-      await resolveCloudStrategies(preview, selections);
+      const result = await resolveCloudStrategies(preview, selections);
       setNotice(
         "已按所选来源合并。各端不同的当前策略和历史资产均已保留为备份。",
       );
       setPreview(null);
       setLoading(true);
       setRevision((value) => value + 1);
-      onResolved();
+      onResolved(result.items);
     } catch (reason) {
       setError(String(reason));
     } finally {

@@ -45,6 +45,9 @@ export type CloudSyncResult = {
   transferredBytes: number;
   settings: Record<string, string>;
   warnings: string[];
+  uploadedPaths: string[];
+  downloadedPaths: string[];
+  items: CloudItem[];
 };
 export function getCloudConfig() {
   return invoke<CloudConfig>("get_cloud_sync_config");

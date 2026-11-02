@@ -259,7 +259,13 @@ fn two_devices_keep_conflicts_deduplicate_and_recover() {
     );
     let selected = conflict_items
         .into_iter()
-        .find(|v| v.version.hash == digest(&local_snapshots(&app_a, &source_a, &BTreeMap::new()).unwrap()["bundles/strategies.zip"]))
+        .find(|v| {
+            v.version.hash
+                == digest(
+                    &local_snapshots(&app_a, &source_a, &BTreeMap::new()).unwrap()
+                        ["bundles/strategies.zip"],
+                )
+        })
         .unwrap();
     restore(
         &app_b,
