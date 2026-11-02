@@ -249,17 +249,16 @@ fn load_cyq_chen_group_rows(
     Ok(rows_map)
 }
 
-pub fn compute_cyq_chen_stock_group_batch(
+fn compute_cyq_chen_loaded_stock_batch(
     worker_reader: &DataReader,
     state_conn: Option<&Connection>,
-    load_start_date: &str,
     start_date: &str,
     end_date: &str,
     chip_config: &CompiledChipChangeConfig,
     config: ChenChipConfig,
     st_list: &HashSet<String>,
     total_share_map: &HashMap<String, f64>,
-    ts_group: &[String],
+    rows: impl IntoIterator<Item = (String, RowData)>,
     on_stock_done: Option<&dyn Fn(&str)>,
     checkpoint_recovery: Option<&CyqChenCheckpointRecovery<'_>>,
 ) -> Result<CyqChenWriteBatch, String> {
@@ -268,20 +267,9 @@ pub fn compute_cyq_chen_stock_group_batch(
         .max(estimate_chen_chip_expression_warmup(chip_config)?)
         .max(usize::from(state_conn.is_some()));
     let needs_main_ratio_history = chip_config.sell_uses_main_ratio_history;
-    let mut rows_map = load_cyq_chen_group_rows(
-        worker_reader,
-        ts_group,
-        load_start_date,
-        start_date,
-        end_date,
-        lookback,
-    )?;
     let mut batch = CyqChenWriteBatch::default();
-    for ts_code in ts_group {
+    for (ts_code, row_data) in rows {
         lianghua_model::task::checkpoint()?;
-        let row_data = rows_map
-            .remove(ts_code)
-            .ok_or_else(|| format!("缺少已加载行情: {ts_code}"))?;
 
         let stock = (|mut row_data: RowData,
                       state_conn: Option<&Connection>,
@@ -580,7 +568,7 @@ pub fn compute_cyq_chen_stock_group_batch(
         })(
             row_data,
             state_conn,
-            ts_code,
+            &ts_code,
             start_date,
             end_date,
             chip_config,
@@ -593,10 +581,164 @@ pub fn compute_cyq_chen_stock_group_batch(
             batch.stocks.push(stock);
         }
         if let Some(on_stock_done) = on_stock_done {
-            on_stock_done(ts_code);
+            on_stock_done(&ts_code);
         }
     }
     Ok(batch)
+}
+
+pub fn compute_cyq_chen_stock_group_batch(
+    worker_reader: &DataReader,
+    state_conn: Option<&Connection>,
+    load_start_date: &str,
+    start_date: &str,
+    end_date: &str,
+    chip_config: &CompiledChipChangeConfig,
+    config: ChenChipConfig,
+    st_list: &HashSet<String>,
+    total_share_map: &HashMap<String, f64>,
+    ts_group: &[String],
+    on_stock_done: Option<&dyn Fn(&str)>,
+    checkpoint_recovery: Option<&CyqChenCheckpointRecovery<'_>>,
+) -> Result<CyqChenWriteBatch, String> {
+    let lookback = config
+        .warmup_days
+        .max(estimate_chen_chip_expression_warmup(chip_config)?)
+        .max(usize::from(state_conn.is_some()));
+    let mut rows = load_cyq_chen_group_rows(
+        worker_reader,
+        ts_group,
+        load_start_date,
+        start_date,
+        end_date,
+        lookback,
+    )?;
+    let rows = ts_group
+        .iter()
+        .filter_map(|ts_code| rows.remove(ts_code).map(|row| (ts_code.clone(), row)));
+    compute_cyq_chen_loaded_stock_batch(
+        worker_reader,
+        state_conn,
+        start_date,
+        end_date,
+        chip_config,
+        config,
+        st_list,
+        total_share_map,
+        rows,
+        on_stock_done,
+        checkpoint_recovery,
+    )
+}
+
+pub(super) fn compute_prepared_cyq_chen_incremental_stock_group_batch(
+    worker_reader: &DataReader,
+    state_conn: &Connection,
+    load_start_date: &str,
+    start_date: &str,
+    end_date: &str,
+    chip_config: &CompiledChipChangeConfig,
+    config: ChenChipConfig,
+    st_list: &HashSet<String>,
+    total_share_map: &HashMap<String, f64>,
+    ts_group: &[String],
+    on_stock_done: Option<&dyn Fn(&str)>,
+    checkpoint_recovery: Option<&CyqChenCheckpointRecovery<'_>>,
+    on_batch: &mut dyn FnMut(PreparedCyqChenWriteBatch) -> Result<(), String>,
+) -> Result<(), String> {
+    let lookback = config
+        .warmup_days
+        .max(estimate_chen_chip_expression_warmup(chip_config)?)
+        .max(1);
+    let mut seen = HashSet::with_capacity(ts_group.len());
+    let mut deferred = Vec::new();
+    let mut handle_row = |ts_code: String,
+                          row: Result<RowData, String>,
+                          allow_defer: bool,
+                          seen: &mut HashSet<String>,
+                          deferred: &mut Vec<(String, RowData)>|
+     -> Result<(), String> {
+        seen.insert(ts_code.clone());
+        let row = row?;
+        let output_rows = row
+            .trade_dates
+            .iter()
+            .filter(|trade_date| {
+                let trade_date = trade_date.as_str();
+                trade_date >= start_date && trade_date <= end_date
+            })
+            .count();
+        if allow_defer
+            && (row.trade_dates.is_empty()
+                || (output_rows > 0
+                    && resolve_first_computable_output_date(&row, start_date, end_date, lookback)
+                        .is_none()))
+        {
+            deferred.push((ts_code, row));
+            return Ok(());
+        }
+
+        let stock_batch = compute_cyq_chen_loaded_stock_batch(
+            worker_reader,
+            Some(state_conn),
+            start_date,
+            end_date,
+            chip_config,
+            config,
+            st_list,
+            total_share_map,
+            std::iter::once((ts_code.clone(), row)),
+            on_stock_done,
+            checkpoint_recovery,
+        )?;
+        let mut prepared = prepare_cyq_chen_batch_rows(stock_batch, config)?;
+        // 无输出股票也必须持久标记，避免下次重复计算。
+        prepared.completed_ts_codes = vec![ts_code];
+        on_batch(prepared)
+    };
+
+    worker_reader.load_batch_streaming(
+        ts_group,
+        DEFAULT_ADJ_TYPE,
+        load_start_date,
+        end_date,
+        |ts_code, row| handle_row(ts_code, row, true, &mut seen, &mut deferred),
+    )?;
+    for ts_code in ts_group {
+        if !seen.contains(ts_code) {
+            deferred.push((
+                ts_code.clone(),
+                RowData {
+                    trade_dates: Vec::new(),
+                    cols: HashMap::new(),
+                },
+            ));
+        }
+    }
+    while let Some((ts_code, row)) = deferred.pop() {
+        let output_rows = row
+            .trade_dates
+            .iter()
+            .filter(|trade_date| {
+                let trade_date = trade_date.as_str();
+                trade_date >= start_date && trade_date <= end_date
+            })
+            .count();
+        let need_rows = if row.trade_dates.is_empty() {
+            lookback.max(60) * 2
+        } else if output_rows > 0 {
+            lookback.saturating_add(output_rows)
+        } else {
+            0
+        };
+        let row = if need_rows > 0 {
+            worker_reader.load_one_tail_rows(&ts_code, DEFAULT_ADJ_TYPE, end_date, need_rows)
+        } else {
+            Ok(row)
+        };
+        handle_row(ts_code, row, false, &mut seen, &mut deferred)?;
+    }
+    Ok(())
 }
 
 pub(super) fn compute_prepared_cyq_chen_stock_group_batch(

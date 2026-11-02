@@ -2,8 +2,9 @@ use super::maintenance_stage::{
     prepare_maintenance_stage, write_cyq_chen_maintenance_batches_from_channel,
 };
 use crate::data::cyq_chen_data::compute::{
-    compute_cyq_chen_stock_group_batch, compute_prepared_cyq_chen_stock_group_batch,
-    finish_cyq_chen_write, query_source_trade_date_range, resolve_cyq_chen_load_start_date,
+    compute_prepared_cyq_chen_incremental_stock_group_batch,
+    compute_prepared_cyq_chen_stock_group_batch, finish_cyq_chen_write,
+    query_source_trade_date_range, resolve_cyq_chen_load_start_date,
     resolve_cyq_chen_rebuild_trade_date_range, source_stock_data_exists,
     write_cyq_chen_batches_from_channel,
 };
@@ -267,7 +268,7 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
         });
 
         let finished_stock_count = std::sync::atomic::AtomicUsize::new(resumed_stocks);
-        let compute_group_size = 64usize.div_ceil(rayon::current_num_threads().max(1)).max(1);
+        let compute_group_size = cyq_chen_streaming_stock_block_size();
         let compute_result = ts_codes.par_chunks(compute_group_size).try_for_each_init(
             || -> Result<(DataReader, Connection), String> {
                 let state_conn = state_db
@@ -310,9 +311,9 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
                         });
                     }
                 };
-                let batch = compute_cyq_chen_stock_group_batch(
+                compute_prepared_cyq_chen_incremental_stock_group_batch(
                     worker_reader,
-                    Some(state_conn),
+                    state_conn,
                     &load_start_date,
                     &start_date,
                     &end_date,
@@ -327,12 +328,11 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
                         first_date: &replay_first_date,
                         report: &checkpoint_recovery,
                     }),
+                    &mut |batch| {
+                        tx.send(CyqChenWriteMessage::PreparedBatch(batch))
+                            .map_err(|e| format!("发送新筹码增量批次失败:{e}"))
+                    },
                 )?;
-                let mut batch = super::compute::prepare_cyq_chen_batch_rows(batch, config)?;
-                // 无输出股票也必须持久标记，避免下次重复计算。
-                batch.completed_ts_codes = ts_group.to_vec();
-                tx.send(CyqChenWriteMessage::PreparedBatch(batch))
-                    .map_err(|e| format!("发送新筹码增量批次失败:{e}"))?;
                 Ok(())
             },
         );
