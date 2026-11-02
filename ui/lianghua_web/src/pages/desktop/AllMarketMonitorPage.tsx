@@ -226,7 +226,7 @@ function isFiniteNumber(value: unknown): value is number {
 
 function fingerprintMonitorRefreshConfig(
   config: MonitorRefreshConfig,
-  realtimeProvider: "sina" | "tencent",
+  realtimeProvider: "sina" | "tencent" | "mixed",
 ) {
   const enabledTemplates = config.templates.filter(
     (template) => template.enabled,
@@ -723,6 +723,10 @@ export default function AllMarketMonitorPage() {
     null,
   );
   const [showParams, setShowParams] = useState(false);
+  const [mixedQuotes, setMixedQuotes] = useState(() =>
+    readLocalStorageBoolean("am_mixed_quotes", true),
+  );
+  const mixedQuotesRef = useRef(mixedQuotes);
   const [refreshSeconds, setRefreshSeconds] = useState(() =>
     Math.min(30, Math.max(1, readLocalStorageNumber("am_refresh_seconds", 1))),
   );
@@ -1143,6 +1147,15 @@ export default function AllMarketMonitorPage() {
     [],
   );
 
+  useEffect(() => {
+    mixedQuotesRef.current = mixedQuotes;
+    try {
+      localStorage.setItem("am_mixed_quotes", String(mixedQuotes));
+    } catch {
+      /* storage unavailable */
+    }
+  }, [mixedQuotes]);
+
   const refreshSnapshot = useCallback(async () => {
     if (
       !sourcePathTrimmed ||
@@ -1156,7 +1169,9 @@ export default function AllMarketMonitorPage() {
     if (enabledRef.current) setLoading(true);
     try {
       const config = refreshConfigRef.current;
-      const realtimeProvider = readStoredRealtimeQuoteProvider();
+      const realtimeProvider = mixedQuotesRef.current
+        ? "mixed"
+        : readStoredRealtimeQuoteProvider();
       const configFingerprint = fingerprintMonitorRefreshConfig(
         config,
         realtimeProvider,
@@ -3397,6 +3412,17 @@ export default function AllMarketMonitorPage() {
             <div className="all-market-params-form">
               <section className="all-market-config-section" aria-label="刷新">
                 <h4 className="all-market-config-heading">刷新</h4>
+                <label className="settings-field">
+                  <span>腾讯 + 新浪分批并发</span>
+                  <input
+                    type="checkbox"
+                    checked={mixedQuotes}
+                    onChange={(event) => setMixedQuotes(event.target.checked)}
+                  />
+                  <small>
+                    新浪量比按本地五日均量计算；关闭后使用全局行情源。
+                  </small>
+                </label>
                 <label className="settings-field">
                   <span>刷新间隔（1–30 秒）</span>
                   <input

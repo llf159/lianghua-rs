@@ -46,3 +46,5 @@ research_runs_v1/
 # Local build caches and database spill files
 /node_modules/
 /.tmp/
+
+!/docs/realtime-monitor.md

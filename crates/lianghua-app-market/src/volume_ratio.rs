@@ -63,6 +63,23 @@ fn load_local_volume_averages(
     Ok(values)
 }
 
+pub(crate) fn current_volume_ratio(
+    quote: &SinaQuote,
+    average_daily_volume: f64,
+    volume_to_hands: f64,
+) -> Option<f64> {
+    let minutes = intraday_trading_minutes(&quote.time)?;
+    if !quote.vol.is_finite()
+        || quote.vol < 0.0
+        || !average_daily_volume.is_finite()
+        || average_daily_volume <= 0.0
+    {
+        return None;
+    }
+    let value = quote.vol * volume_to_hands / (average_daily_volume * minutes / 240.0);
+    value.is_finite().then_some(value)
+}
+
 #[derive(Clone)]
 struct Baseline {
     data: TencentVolumeRatioData,
@@ -78,13 +95,13 @@ impl Baseline {
         let quote_minute = quote.time.replace(':', "");
         let quote_minute = quote_minute.get(..4)?;
         let (minutes, value) = if let Some(minutes) = intraday_trading_minutes(&quote.time) {
-            if !quote.vol.is_finite() || quote.vol < 0.0 {
-                return None;
-            }
             (
                 minutes,
-                quote.vol * self.data.volume_to_hands
-                    / (self.data.average_daily_volume * minutes / 240.0),
+                current_volume_ratio(
+                    quote,
+                    self.data.average_daily_volume,
+                    self.data.volume_to_hands,
+                )?,
             )
         } else {
             // 午休冻结上午值，盘后冻结收盘值，不能把休市时间或盘后量混入计算。
@@ -752,7 +769,7 @@ pub fn snapshot(
             let opening_window_ended = quote.time.as_str() > "09:35:00";
             // MSN 声明延迟 15 分钟；开盘 20 分钟后才可能覆盖完整五分钟。
             let msn_supported = ts_code.ends_with(".SH") || ts_code.ends_with(".SZ");
-            // 分时曲线单位已规范化；实时行情仍来自腾讯，须独立确认手/股单位。
+            // 两个实时源均按手规范化，仍兼容旧缓存及特殊行情的手/股识别。
             let live_volume_to_hands = if quote.vol > 0.0
                 && quote.price > 0.0
                 && quote.amount > 0.0

@@ -41,7 +41,8 @@ use crate::{
         compile_intraday_templates, merge_realtime_quote_into_row_data, normalize_runtime_row_data,
     },
     realtime::{
-        RealtimeFetchMeta, fetch_all_market_realtime_quote_map_for_codes,
+        RealtimeFetchMeta, fetch_all_market_mixed_realtime_quote_map_for_codes,
+        fetch_all_market_realtime_quote_map_for_codes,
         fetch_all_market_tencent_realtime_quote_map_for_codes, normalize_quote_time,
     },
 };
@@ -262,6 +263,7 @@ enum TemplateRuntimeDataMode {
 enum RealtimeQuoteProvider {
     Sina,
     Tencent,
+    Mixed,
 }
 
 impl RealtimeQuoteProvider {
@@ -272,14 +274,15 @@ impl RealtimeQuoteProvider {
         match normalized.as_str() {
             "" | "sina" | "sinajs" => Ok(Self::Sina),
             "tencent" | "qq" | "gtimg" => Ok(Self::Tencent),
-            _ => Err("实时行情源仅支持 sina 或 tencent".to_string()),
+            "mixed" => Ok(Self::Mixed),
+            _ => Err("实时行情源仅支持 sina、tencent 或 mixed".to_string()),
         }
     }
 
     fn opposite(self) -> Self {
         match self {
             Self::Sina => Self::Tencent,
-            Self::Tencent => Self::Sina,
+            Self::Tencent | Self::Mixed => Self::Sina,
         }
     }
 }
@@ -1130,7 +1133,7 @@ pub fn get_all_market_monitor_snapshot(
             let index_rows = (|provider: RealtimeQuoteProvider| -> Vec<AllMarketIndexRow> {
                 let index_ts_codes = default_realtime_index_ts_codes();
                 let quote_result = match provider {
-                    RealtimeQuoteProvider::Sina => {
+                    RealtimeQuoteProvider::Sina | RealtimeQuoteProvider::Mixed => {
                         fetch_all_market_realtime_quote_map_for_codes(&index_ts_codes)
                             .map(|(quotes, _)| quotes)
                     }
@@ -1185,9 +1188,12 @@ pub fn get_all_market_monitor_snapshot(
                         fetch_all_market_realtime_quote_map_for_codes(&ts_codes)?;
                     (quotes, HashMap::new(), HashMap::new(), fetch_meta)
                 }
-                RealtimeQuoteProvider::Tencent => {
-                    let (tencent_quotes, fetch_meta) =
-                        fetch_all_market_tencent_realtime_quote_map_for_codes(&ts_codes)?;
+                RealtimeQuoteProvider::Tencent | RealtimeQuoteProvider::Mixed => {
+                    let (tencent_quotes, fetch_meta) = if provider == RealtimeQuoteProvider::Mixed {
+                        fetch_all_market_mixed_realtime_quote_map_for_codes(&ts_codes)?
+                    } else {
+                        fetch_all_market_tencent_realtime_quote_map_for_codes(&ts_codes)?
+                    };
                     let mut volume_ratio_map = HashMap::with_capacity(tencent_quotes.len());
                     let mut avg_price_map = HashMap::with_capacity(tencent_quotes.len());
                     let mut quotes = HashMap::with_capacity(tencent_quotes.len());
@@ -1228,8 +1234,10 @@ pub fn get_all_market_monitor_snapshot(
     // 手动补齐可以在休市后拉取行情所带日期；分时响应仍严格校验日期。
     let mut volume_ratio_source_statuses = Vec::new();
     let volume_ratios = if (market_active || volume_ratio_fetch_enabled.unwrap_or(false))
-        && matches!(provider, RealtimeQuoteProvider::Tencent)
-    {
+        && matches!(
+            provider,
+            RealtimeQuoteProvider::Tencent | RealtimeQuoteProvider::Mixed
+        ) {
         fetch_meta.quote_trade_date.as_deref().and_then(|date| {
             match super::volume_ratio::snapshot(source_path, &quotes, date) {
                 Ok(snapshot) => Some(snapshot),
@@ -1376,6 +1384,22 @@ pub fn get_all_market_monitor_snapshot(
             Default::default()
         }
     };
+    // Sina has no vendor volume ratio. Current ratio needs daily volume, not a minute download.
+    if provider == RealtimeQuoteProvider::Mixed {
+        for (code, quote) in &quotes {
+            if !volume_ratio_map.contains_key(code)
+                && normalize_quote_trade_date(&quote.date).as_deref()
+                    == fetch_meta.quote_trade_date.as_deref()
+                && let Some(average) = daily_baselines
+                    .rows
+                    .get(code)
+                    .and_then(|row| row.average_volume)
+                && let Some(value) = super::volume_ratio::current_volume_ratio(quote, average, 1.0)
+            {
+                volume_ratio_map.insert(code.clone(), value);
+            }
+        }
+    }
     let mut rows = build_rows(
         &meta,
         &rank_context.ranks,

@@ -1,4 +1,13 @@
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{
+        OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
+
+use rayon::prelude::*;
 
 use reqwest::blocking::Client;
 use serde::Serialize;
@@ -423,6 +432,125 @@ pub fn fetch_all_market_tencent_realtime_quote_map_for_codes(
     Ok((quote_map, fetch_meta))
 }
 
+// Both parsers already normalize stock volume to hands and amount to yuan.
+fn sina_monitor_quote(quote: SinaQuote) -> TencentQuote {
+    let avg_price = (quote.vol.is_finite()
+        && quote.vol > 0.0
+        && quote.amount.is_finite()
+        && quote.amount > 0.0)
+        .then(|| quote.amount / (quote.vol * 100.0))
+        .filter(|value| value.is_finite() && *value > 0.0);
+    TencentQuote {
+        date: quote.date,
+        time: quote.time,
+        ts_code: quote.ts_code,
+        name: quote.name,
+        open: quote.open,
+        high: quote.high,
+        low: quote.low,
+        pre_close: quote.pre_close,
+        price: quote.price,
+        vol: quote.vol,
+        amount: quote.amount,
+        change_pct: quote.change_pct,
+        volume_ratio: None,
+        avg_price,
+    }
+}
+
+fn fetch_monitor_batch(
+    http: &Client,
+    codes: &[String],
+    tencent: bool,
+) -> Result<Vec<TencentQuote>, String> {
+    if tencent {
+        fetch_tencent_quotes(http, codes, TENCENT_REALTIME_BATCH_CAP)
+    } else {
+        fetch_sina_quotes(http, codes, REALTIME_BATCH_CAP)
+            .map(|quotes| quotes.into_iter().map(sina_monitor_quote).collect())
+    }
+}
+
+pub fn fetch_all_market_mixed_realtime_quote_map_for_codes(
+    ts_codes: &[String],
+) -> Result<(HashMap<String, TencentQuote>, RealtimeFetchMeta), String> {
+    static NETWORK: OnceLock<Result<(rayon::ThreadPool, Client), String>> = OnceLock::new();
+    let (pool, http) = NETWORK
+        .get_or_init(|| {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(16)
+                .thread_name(|index| format!("monitor-quote-{index}"))
+                .build()
+                .map_err(|error| format!("创建双源行情线程池失败: {error}"))?;
+            let http = Client::builder()
+                .no_proxy()
+                .connect_timeout(Duration::from_secs(REALTIME_CONNECT_TIMEOUT_SECS))
+                .timeout(Duration::from_secs(REALTIME_REQUEST_TIMEOUT_SECS))
+                .build()
+                .map_err(|error| format!("创建双源行情客户端失败: {error}"))?;
+            Ok((pool, http))
+        })
+        .as_ref()
+        .map_err(Clone::clone)?;
+    let failed_sources = [AtomicBool::new(false), AtomicBool::new(false)];
+    let results = pool.install(|| {
+        ts_codes
+            .par_chunks(REALTIME_BATCH_CAP)
+            .enumerate()
+            .map(|(index, codes)| {
+                if failed_sources
+                    .iter()
+                    .all(|failed| failed.load(Ordering::Relaxed))
+                {
+                    return Err("两个行情源本轮均请求失败，保留上一轮行情".into());
+                }
+                let mut tencent = index % 2 == 0;
+                if failed_sources[usize::from(tencent)].load(Ordering::Relaxed) {
+                    tencent = !tencent;
+                }
+                let (mut quotes, primary_failed) = match fetch_monitor_batch(http, codes, tencent) {
+                    Ok(quotes) => (quotes, false),
+                    Err(_) => {
+                        failed_sources[usize::from(tencent)].store(true, Ordering::Relaxed);
+                        (Vec::new(), true)
+                    }
+                };
+                let received: HashSet<_> =
+                    quotes.iter().map(|quote| quote.ts_code.as_str()).collect();
+                let missing = codes
+                    .iter()
+                    .filter(|code| !received.contains(code.as_str()))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if !missing.is_empty()
+                    && !failed_sources[usize::from(!tencent)].load(Ordering::Relaxed)
+                {
+                    match fetch_monitor_batch(http, &missing, !tencent) {
+                        Ok(fallback) => quotes.extend(fallback),
+                        Err(error) if primary_failed => {
+                            return Err(format!("双源行情请求均失败: {error}"));
+                        }
+                        Err(_) => {
+                            failed_sources[usize::from(!tencent)].store(true, Ordering::Relaxed);
+                        }
+                    }
+                }
+                if primary_failed && quotes.is_empty() {
+                    return Err("两个行情源本轮均请求失败，保留上一轮行情".into());
+                }
+                Ok(quotes)
+            })
+            .collect::<Result<Vec<_>, String>>()
+    })?;
+    let (quote_map, _) =
+        build_tencent_realtime_quote_map_result(ts_codes, results.into_iter().flatten().collect());
+    if !ts_codes.is_empty() && quote_map.is_empty() {
+        return Err("双源行情返回空数据，保留上一轮行情".into());
+    }
+    let fetch_meta = build_tencent_realtime_fetch_meta(ts_codes, &quote_map);
+    Ok((quote_map, fetch_meta))
+}
+
 pub async fn fetch_realtime_quote_map_async(
     ts_codes: &[String],
 ) -> Result<(HashMap<String, SinaQuote>, RealtimeFetchMeta), String> {
@@ -546,6 +674,53 @@ mod tests {
             volume_ratio: Some(1.2),
             avg_price: Some(10.1),
         }
+    }
+
+    #[test]
+    fn sina_monitor_conversion_keeps_hand_units_and_calculates_average_price() {
+        let mut quote = sample_quote("000001.SZ", "2026-11-02", "10:30:00");
+        quote.vol = 1200.0;
+        quote.amount = 1_200_000.0;
+        let converted = super::sina_monitor_quote(quote.clone());
+        assert_eq!(converted.vol, quote.vol);
+        assert_eq!(converted.avg_price, Some(10.0));
+        assert_eq!(converted.volume_ratio, None);
+        assert_eq!(converted.date, quote.date);
+        assert_eq!(
+            crate::volume_ratio::current_volume_ratio(&quote, 4800.0, 1.0),
+            Some(1.0)
+        );
+        quote.vol = 0.0;
+        assert_eq!(super::sina_monitor_quote(quote).avg_price, None);
+    }
+
+    #[test]
+    fn local_volume_ratio_rejects_invalid_input_and_non_trading_time() {
+        let mut quote = sample_quote("000001.SZ", "2026-11-02", "13:30:00");
+        quote.vol = 3000.0;
+        assert_eq!(
+            crate::volume_ratio::current_volume_ratio(&quote, 4800.0, 1.0),
+            Some(1.0)
+        );
+        for time in ["09:29:59", "12:00:00", "15:00:01"] {
+            quote.time = time.into();
+            assert_eq!(
+                crate::volume_ratio::current_volume_ratio(&quote, 4800.0, 1.0),
+                None
+            );
+        }
+        quote.time = "10:30:00".into();
+        for average in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                crate::volume_ratio::current_volume_ratio(&quote, average, 1.0),
+                None
+            );
+        }
+        quote.vol = f64::NAN;
+        assert_eq!(
+            crate::volume_ratio::current_volume_ratio(&quote, 4800.0, 1.0),
+            None
+        );
     }
 
     #[test]

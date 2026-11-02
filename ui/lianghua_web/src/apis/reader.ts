@@ -380,7 +380,7 @@ export async function validateIntradayMonitorTemplateExpression(
 
 export async function getAllMarketMonitorSnapshot(
   sourcePath: string,
-  realtimeProvider?: "sina" | "tencent",
+  realtimeProvider?: "sina" | "tencent" | "mixed",
   sceneStageThreshold?: "observe" | "trigger" | "confirm",
   templateEnabled?: boolean,
   templates?: IntradayMonitorTemplate[],
