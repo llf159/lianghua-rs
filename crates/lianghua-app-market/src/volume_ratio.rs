@@ -5,6 +5,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod store;
+
 use duckdb::{Connection, params};
 use lianghua_data::data::{load_stock_list, load_trade_date_list, source_db_path};
 use lianghua_provider::crawler::{
@@ -152,7 +154,7 @@ impl Entry {
 
 #[derive(Default)]
 struct Cache {
-    store: Option<rusqlite::Connection>,
+    store: Option<store::Store>,
     dirty: HashSet<String>,
     persistence_error: Option<String>,
     source_path: String,
@@ -302,7 +304,7 @@ impl Cache {
             }
         }
         transaction.commit().map_err(|error| error.to_string())?;
-        self.store = Some(conn);
+        self.store = Some(store::Store::new(conn, self.date.clone())?);
         Ok(())
     }
 
@@ -310,38 +312,26 @@ impl Cache {
         if self.dirty.is_empty() {
             return Ok(());
         }
-        let conn = self.store.as_mut().ok_or("量比缓存未打开，数据尚未落盘")?;
-        let transaction = conn
-            .transaction()
-            .map_err(|error| format!("写入量比缓存失败: {error}"))?;
-        {
-            let mut statement = transaction.prepare("INSERT INTO baselines_v2 (code, trade_date, baseline)
-                VALUES (?1, ?2, ?3) ON CONFLICT(code) DO UPDATE SET trade_date=excluded.trade_date, baseline=excluded.baseline")
-                .map_err(|error| error.to_string())?;
-            for code in &self.dirty {
-                let baseline = match self.entries.get(code) {
-                    Some(Entry::Ready(baseline) | Entry::Pending(Some(baseline)))
-                    | Some(Entry::Failed {
-                        baseline: Some(baseline),
-                        ..
-                    }) => baseline,
-                    _ => continue,
-                };
-                let bytes = bincode::serde::encode_to_vec(
-                    (
-                        &baseline.data,
-                        baseline.source,
-                        baseline.observed_opening_high,
-                    ),
-                    bincode::config::legacy(),
-                )
-                .map_err(|error| error.to_string())?;
-                statement
-                    .execute(rusqlite::params![code, self.date, bytes])
-                    .map_err(|error| error.to_string())?;
-            }
+        let store = self.store.as_ref().ok_or("量比缓存未打开，数据尚未落盘")?;
+        for code in &self.dirty {
+            let baseline = match self.entries.get(code) {
+                Some(Entry::Ready(baseline) | Entry::Pending(Some(baseline)))
+                | Some(Entry::Failed {
+                    baseline: Some(baseline),
+                    ..
+                }) => baseline,
+                _ => continue,
+            };
+            // 缓存锁内只复制待写字段并入队；编码与 SQLite 事务都由独立线程执行。
+            store.save(
+                code.clone(),
+                (
+                    baseline.data.clone(),
+                    baseline.source,
+                    baseline.observed_opening_high,
+                ),
+            )?;
         }
-        transaction.commit().map_err(|error| error.to_string())?;
         self.dirty.clear();
         Ok(())
     }
@@ -465,11 +455,19 @@ static WORKERS: OnceLock<Result<(rayon::ThreadPool, reqwest::blocking::Client), 
     OnceLock::new();
 
 pub fn set_fetch_paused(paused: bool) -> Result<(), String> {
-    CACHE
-        .get_or_init(|| Arc::new(Mutex::new(Cache::default())))
-        .lock()
-        .map_err(|_| "量比缓存锁已损坏".to_string())?
-        .set_paused(paused);
+    {
+        let mut state = CACHE
+            .get_or_init(|| Arc::new(Mutex::new(Cache::default())))
+            .lock()
+            .map_err(|_| "量比缓存锁已损坏".to_string())?;
+        state.set_paused(paused);
+        if paused {
+            state.persist()?;
+            if let Some(store) = &state.store {
+                store.flush()?;
+            }
+        }
+    }
     if !paused {
         // 更新列表后直接重新开启即可，无需重启应用才能去掉退市股票。
         super::all_market_monitor::source_meta_cache()
@@ -490,10 +488,15 @@ pub struct VolumeRatioCacheStatus {
 }
 
 pub fn inspect_cache(source_path: &str) -> Result<VolumeRatioCacheStatus, String> {
-    let _state = CACHE
+    let state = CACHE
         .get_or_init(|| Arc::new(Mutex::new(Cache::default())))
         .lock()
         .map_err(|_| "量比缓存锁已损坏")?;
+    if state.source_path == source_path {
+        if let Some(store) = &state.store {
+            store.flush()?;
+        }
+    }
     let path = Path::new(source_path).join("intraday_volume_ratio.sqlite3");
     let mut status = VolumeRatioCacheStatus {
         path: path.to_string_lossy().into_owned(),
@@ -885,7 +888,8 @@ pub fn snapshot(
             None => message,
         });
     }
-    if let Some(error) = &state.persistence_error {
+    let store_error = state.store.as_ref().and_then(store::Store::error);
+    if let Some(error) = store_error.as_ref().or(state.persistence_error.as_ref()) {
         status = Some(format!("{}。落盘提示：{error}", status.unwrap_or_default()));
     }
     Ok(VolumeRatioSnapshot {
@@ -1181,9 +1185,7 @@ mod tests {
             unreachable!()
         };
         assert_eq!(baseline.observed_high, 2.0);
-        restored
-            .store
-            .as_ref()
+        rusqlite::Connection::open(Path::new(&source_path).join("intraday_volume_ratio.sqlite3"))
             .unwrap()
             .execute(
                 "INSERT INTO baselines_v2 VALUES ('broken', '20261013', X'FF')",
@@ -1208,6 +1210,60 @@ mod tests {
         next_day.restore().unwrap();
         assert!(next_day.entries.is_empty());
         drop(next_day);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn background_store_retries_failed_batches_and_preserves_latest_value_on_close() {
+        let directory = std::env::temp_dir().join(format!(
+            "volume-ratio-writer-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("cache.sqlite3");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("PRAGMA journal_mode=WAL;
+            CREATE TABLE baselines_v2 (code TEXT PRIMARY KEY, trade_date TEXT, baseline BLOB);
+            CREATE TRIGGER fail_write BEFORE INSERT ON baselines_v2 BEGIN SELECT RAISE(ABORT, 'blocked'); END;").unwrap();
+        let store = store::Store::new(conn, "20261019".into()).unwrap();
+        let data = TencentVolumeRatioData {
+            trade_date: "20261019".into(),
+            average_daily_volume: 100.0,
+            volume_to_hands: 1.0,
+            points: Vec::new(),
+        };
+        store
+            .save("000001.SZ".into(), (data.clone(), 2, 1.0))
+            .unwrap();
+        assert!(store.flush().unwrap_err().contains("blocked"));
+        assert!(store.error().is_some());
+        let reader = rusqlite::Connection::open(&path).unwrap();
+        reader.execute_batch("DROP TRIGGER fail_write").unwrap();
+        store.flush().unwrap();
+        assert!(store.error().is_none());
+        assert_eq!(
+            reader
+                .query_row("SELECT COUNT(*) FROM baselines_v2", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        store.save("000001.SZ".into(), (data, 2, 3.0)).unwrap();
+        drop(store); // 不等 250ms，关闭仍须提交队列并关闭连接。
+        let bytes: Vec<u8> = reader
+            .query_row("SELECT baseline FROM baselines_v2", [], |r| r.get(0))
+            .unwrap();
+        let ((_, source, high), _) = bincode::serde::decode_from_slice::<
+            (TencentVolumeRatioData, usize, f64),
+            _,
+        >(&bytes, bincode::config::legacy())
+        .unwrap();
+        assert_eq!((source, high), (2, 3.0));
+        drop(reader);
         std::fs::remove_dir_all(directory).unwrap();
     }
 
