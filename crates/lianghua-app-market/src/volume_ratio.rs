@@ -133,7 +133,6 @@ enum Entry {
     Ready(Baseline),
     Failed {
         at: Instant,
-        error: String,
         baseline: Option<Baseline>,
     },
 }
@@ -168,7 +167,9 @@ struct Cache {
     local_error: Option<String>,
     paused: bool,
     preflight_checked: bool,
+    preflight_blocked: bool,
     msn_enabled: bool,
+    source_results: [Option<bool>; 3],
     next_request_at: [Option<Instant>; 3],
     cooldown_until: [Option<Instant>; 3],
     request_interval_ms: [u64; 3],
@@ -380,6 +381,7 @@ impl Cache {
     }
 
     fn handle_fetch_error(&mut self, source: usize, error: &str, now: Instant) {
+        self.source_results[source] = Some(false);
         self.source_successes[source] = 0;
         self.recovery_at[source] = Some(now + Duration::from_secs(20));
         let status = error
@@ -418,6 +420,9 @@ impl Cache {
         }
         self.paused = paused;
         self.preflight_checked = false;
+        if !paused {
+            self.preflight_blocked = false;
+        }
         self.generation += 1;
         self.revision += 1;
         // 中止排队和等待限速的任务，但保留已完成基准及其高点。
@@ -441,10 +446,17 @@ pub struct VolumeRatioValue {
     pub opening_high: Option<f64>,
 }
 
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct VolumeRatioSourceStatus {
+    pub source: &'static str,
+    pub state: &'static str,
+}
+
 pub struct VolumeRatioSnapshot {
     pub values: HashMap<String, VolumeRatioValue>,
     pub revision: u64,
     pub status: Option<String>,
+    pub source_statuses: Vec<VolumeRatioSourceStatus>,
 }
 
 static CACHE: OnceLock<Arc<Mutex<Cache>>> = OnceLock::new();
@@ -588,7 +600,12 @@ pub fn clear_cache(source_path: &str) -> Result<(), String> {
         state.revision += 1;
         state.paused = true;
         state.preflight_checked = false;
+        state.preflight_blocked = false;
         state.entries.clear();
+        state.source_results = [None; 3];
+        state.next_request_at = [None; 3];
+        state.cooldown_until = [None; 3];
+        state.request_interval_ms = [0; 3];
         state.dirty.clear();
         state.local_averages.clear();
         state.local_loaded_at = None;
@@ -639,17 +656,27 @@ pub fn snapshot(
         state.date = trade_date.to_string();
         state.source_path = source_path.to_string();
         state.entries.clear();
+        state.source_results = [None; 3];
+        state.next_request_at = [None; 3];
+        state.cooldown_until = [None; 3];
+        state.request_interval_ms = [0; 3];
         state.revision += 1;
         state.generation += 1;
         state.local_loaded_at = None;
         state.preflight_checked = false;
+        state.preflight_blocked = false;
         state.persistence_error = None;
         if let Err(error) = state.restore() {
             state.persistence_error = Some(error);
         }
     }
     state.last_poll = Some(Instant::now());
-    state.check_before_fetch()?;
+    if let Err(error) = state.check_before_fetch() {
+        state.local_error = Some(error.clone());
+        state.preflight_blocked = true;
+        state.set_paused(true);
+        return Err(error);
+    }
     let now = chrono::Utc::now().with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap());
     // 开关随轮询更新，09:50 前排队的任务也能在门槛到达后使用 MSN。
     state.msn_enabled = now.format("%Y%m%d").to_string() == trade_date
@@ -679,7 +706,6 @@ pub fn snapshot(
     }
     let mut pending = 0;
     let mut failed = 0;
-    let mut first_error = None;
     let mut values = HashMap::new();
     for (ts_code, quote) in quotes {
         if quote.date.replace('-', "") != trade_date {
@@ -727,7 +753,6 @@ pub fn snapshot(
             workers.spawn(move || {
                 // 同一轮每个来源最多尝试一次；拒绝或失败立即交给其他来源。
                 let mut attempted = 0u8;
-                let mut errors = Vec::new();
                 let (source, result) = 'fetch: loop {
                     let source = loop {
                         let (source, wait) = if let Ok(mut state) = cache.lock() {
@@ -745,7 +770,7 @@ pub fn snapshot(
                                 let allow_msn = state.msn_enabled && msn_supported;
                                 match state.reserve_source(Instant::now(), allow_msn, attempted) {
                                     Some(reservation) => reservation,
-                                    None => break 'fetch (0, Err(errors.join("；"))),
+                                    None => break 'fetch (0, Err("各来源暂不可用".to_string())),
                                 }
                             }
                         } else {
@@ -811,13 +836,15 @@ pub fn snapshot(
                                 return;
                             }
                             attempted |= 1 << source;
-                            errors.push(format!("{}: {error}", ["腾讯", "东财", "MSN"][source]));
                         }
                     }
                 };
                 if let Ok(mut state) = cache.lock() {
                     if state.generation != generation {
                         return;
+                    }
+                    if result.is_ok() {
+                        state.source_results[source] = Some(true);
                     }
                     // 请求在途期间仍会更新旧基准的高点，提交时保留最新观测。
                     let previous = match state.entries.remove(&ts_code) {
@@ -840,9 +867,8 @@ pub fn snapshot(
                                 next_point: 0,
                                 loaded_at: Instant::now(),
                             }),
-                            Err(error) => Entry::Failed {
+                            Err(_) => Entry::Failed {
                                 at: Instant::now(),
-                                error,
                                 baseline: previous,
                             },
                         },
@@ -859,10 +885,7 @@ pub fn snapshot(
             match entry {
                 Entry::Ready(_) => {}
                 Entry::Pending(_) => pending += 1,
-                Entry::Failed { error, .. } => {
-                    failed += 1;
-                    first_error.get_or_insert(error.clone());
-                }
+                Entry::Failed { .. } => failed += 1,
             }
             let previous_opening_high = match &*entry {
                 Entry::Ready(baseline)
@@ -891,9 +914,6 @@ pub fn snapshot(
                 values.insert(ts_code.clone(), value);
             } else if ready {
                 failed += 1;
-                first_error.get_or_insert_with(|| {
-                    format!("{ts_code} 已有分时基准，但当前行情的时间或成交量无法计算量比")
-                });
             }
         }
     }
@@ -913,32 +933,56 @@ pub fn snapshot(
             _ => false,
         })
         .count();
-    let mut status = Some(format!(
-        "{}已补齐 {} · 待补齐 {pending} · 失败 {failed}{}",
+    let status = Some(format!(
+        "{}已补齐 {} · 待补齐 {pending} · 待重试 {failed} · 近似 {approximate}",
         if state.paused { "已暂停 · " } else { "" },
         values
             .values()
             .filter(|value| value.opening_high.is_some())
             .count(),
-        first_error
-            .map(|error| format!("。{error}（60 秒后重试）"))
-            .unwrap_or_default()
     ));
-    if approximate > 0 {
-        let message = format!("MSN 近似基准 {approximate} 只。");
-        status = Some(match status {
-            Some(status) => format!("{status}。{message}"),
-            None => message,
-        });
-    }
-    let store_error = state.store.as_ref().and_then(store::Store::error);
-    if let Some(error) = store_error.as_ref().or(state.persistence_error.as_ref()) {
-        status = Some(format!("{}。落盘提示：{error}", status.unwrap_or_default()));
-    }
+    let now = Instant::now();
+    let mut source_statuses: Vec<_> = ["tencent", "eastmoney", "microsoft"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, source)| VolumeRatioSourceStatus {
+            source,
+            state: if state.paused {
+                "paused"
+            } else if index == 2 && !state.msn_enabled {
+                "not_ready"
+            } else if state.cooldown_until[index].is_some_and(|until| until > now) {
+                "cooling_down"
+            } else {
+                match state.source_results[index] {
+                    Some(true) => "available",
+                    Some(false) => "retrying",
+                    None => "waiting",
+                }
+            },
+        })
+        .collect();
+    source_statuses.push(VolumeRatioSourceStatus {
+        source: "local",
+        state: if state.preflight_blocked {
+            "blocked"
+        } else if state.local_error.is_some() {
+            "data_unavailable"
+        } else if state.persistence_error.is_some() {
+            "cache_error"
+        } else if quotes.iter().any(|(code, quote)| {
+            quote.date.replace('-', "") == trade_date && !state.local_averages.contains_key(code)
+        }) {
+            "incomplete"
+        } else {
+            "available"
+        },
+    });
     Ok(VolumeRatioSnapshot {
         values,
         revision: state.revision,
         status,
+        source_statuses,
     })
 }
 
@@ -1656,7 +1700,6 @@ mod tests {
         let expected = baseline.apply_quote(&quote);
         let mut failed = Entry::Failed {
             at: Instant::now(),
-            error: "连接失败".to_string(),
             baseline: Some(baseline),
         };
         assert_eq!(failed.apply_quote(&quote), expected);
