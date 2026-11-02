@@ -12,13 +12,19 @@ export type MarketGroup = {
   leader: AllMarketMonitorRow;
 };
 
+const numberFormats = new Map<number, Intl.NumberFormat>();
+
 export function numeric(value: number | null | undefined, digits = 2) {
-  return value == null || !Number.isFinite(value)
-    ? "—"
-    : value.toLocaleString("zh-CN", {
-        minimumFractionDigits: digits,
-        maximumFractionDigits: digits,
-      });
+  if (value == null || !Number.isFinite(value)) return "—";
+  let formatter = numberFormats.get(digits);
+  if (!formatter) {
+    formatter = new Intl.NumberFormat("zh-CN", {
+      minimumFractionDigits: digits,
+      maximumFractionDigits: digits,
+    });
+    numberFormats.set(digits, formatter);
+  }
+  return formatter.format(value);
 }
 
 export function percent(value: number | null | undefined) {

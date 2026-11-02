@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useState } from "react";
 import {
   amount,
   percent,
@@ -7,7 +7,7 @@ import {
 } from "../../../shared/intradayMarketGroups";
 import "../css/IntradayMarketGroupTable.css";
 
-export default function IntradayMarketGroupTable({
+function IntradayMarketGroupTable({
   groups,
   selection,
   onSelect,
@@ -99,3 +99,5 @@ export default function IntradayMarketGroupTable({
     </div>
   );
 }
+
+export default memo(IntradayMarketGroupTable);

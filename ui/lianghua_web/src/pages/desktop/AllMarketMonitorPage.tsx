@@ -170,10 +170,7 @@ type PrimarySortKey =
   | "realtime_vol_ratio";
 type TemplateDisplayMode = "off" | "mark" | "hits_only";
 type HitPanelMode =
-  | "all"
-  | "realtime_change_pct"
-  | "realtime_vol_ratio"
-  | "speed_pct";
+  "all" | "realtime_change_pct" | "realtime_vol_ratio" | "speed_pct";
 type SpeedPeriod = (typeof SPEED_PERIOD_OPTIONS)[number];
 type BoardFilter = (typeof STOCK_PICK_BOARD_OPTIONS)[number] | "自选";
 type SortKey =
@@ -532,6 +529,19 @@ function createEmptyHitRecordsByPeriod(): SpeedHitRecordsByPeriod {
   };
 }
 
+function MonitorClock() {
+  const [currentTime, setCurrentTime] = useState(() => new Date());
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      setCurrentTime(new Date());
+    }, 1000);
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, []);
+  return <strong>{formatClock(currentTime)}</strong>;
+}
+
 export default function AllMarketMonitorPage() {
   const { excludedConcepts } = useConceptExclusions();
   const [sourcePath, setSourcePath] = useState("");
@@ -696,7 +706,6 @@ export default function AllMarketMonitorPage() {
   const [rankDate, setRankDate] = useState("");
   const [requestedCount, setRequestedCount] = useState(0);
   const [fetchedCount, setFetchedCount] = useState(0);
-  const [currentTime, setCurrentTime] = useState(() => new Date());
   const [hitRecordsByPeriod, setHitRecordsByPeriod] =
     useState<SpeedHitRecordsByPeriod>(() => createEmptyHitRecordsByPeriod());
   const [volumeRatioNewHighTimes, setVolumeRatioNewHighTimes] = useState<
@@ -738,15 +747,17 @@ export default function AllMarketMonitorPage() {
   const [volumeRankMaxText, setVolumeRankMaxText] = useState(() =>
     String(volumeRankMax),
   );
-  const [volumeBoardFilter, setVolumeBoardFilter] = useState<BoardFilter>(() => {
-    const stored = readLocalStorageText("am_volume_board_filter");
-    return stored === "自选" ||
-      STOCK_PICK_BOARD_OPTIONS.includes(
-        stored as (typeof STOCK_PICK_BOARD_OPTIONS)[number],
-      )
-      ? (stored as BoardFilter)
-      : "全部";
-  });
+  const [volumeBoardFilter, setVolumeBoardFilter] = useState<BoardFilter>(
+    () => {
+      const stored = readLocalStorageText("am_volume_board_filter");
+      return stored === "自选" ||
+        STOCK_PICK_BOARD_OPTIONS.includes(
+          stored as (typeof STOCK_PICK_BOARD_OPTIONS)[number],
+        )
+        ? (stored as BoardFilter)
+        : "全部";
+    },
+  );
   const volumeConditionsRef = useRef({
     volumeBodyMin,
     volumeBodyAbsolute,
@@ -1041,15 +1052,6 @@ export default function AllMarketMonitorPage() {
   }, [boardFilter]);
 
   useEffect(() => {
-    const intervalId = window.setInterval(() => {
-      setCurrentTime(new Date());
-    }, 1000);
-    return () => {
-      window.clearInterval(intervalId);
-    };
-  }, []);
-
-  useEffect(() => {
     if (!showParams) return;
 
     function onKeyDown(event: KeyboardEvent) {
@@ -1181,11 +1183,13 @@ export default function AllMarketMonitorPage() {
       );
       if (!enabledRef.current && !volumeRatioEnabledRef.current) return;
       const receivedAt = performance.now();
-      refreshTimingRef.current = result.timings ? {
-        backend: result.timings,
-        requestMs: receivedAt - requestStarted,
-        receivedAt,
-      } : null;
+      refreshTimingRef.current = result.timings
+        ? {
+            backend: result.timings,
+            requestMs: receivedAt - requestStarted,
+            receivedAt,
+          }
+        : null;
       if (enabledRef.current) {
         setMarketStatus(result.market_status_message ?? "");
       }
@@ -1201,9 +1205,13 @@ export default function AllMarketMonitorPage() {
       }
       setVolumeRatioStatus(
         result.volume_ratio_status_message ??
-          (sourceStatuses.some((item) => item.source === "local" && item.state === "blocked")
+          (sourceStatuses.some(
+            (item) => item.source === "local" && item.state === "blocked",
+          )
             ? "本地检查未通过 · 拉取已暂停"
-            : volumeRatioEnabledRef.current ? "等待分时数据" : ""),
+            : volumeRatioEnabledRef.current
+              ? "等待分时数据"
+              : ""),
       );
       if (enabledRef.current && result.market_active === false) {
         if (!volumeRatioEnabledRef.current) {
@@ -1537,19 +1545,11 @@ export default function AllMarketMonitorPage() {
 
     setHitRecordsByPeriod((prevByPeriod) => {
       const nextByPeriod = createEmptyHitRecordsByPeriod();
+      const nextRowsByCode = new Map(rows.map((row) => [row.ts_code, row]));
 
       for (const period of SPEED_PERIOD_OPTIONS) {
         const periodSpeedMap =
           speedMapsByPeriod.get(period) ?? new Map<string, number>();
-        const nextRowsByCode = new Map(
-          rows.map((row) => [
-            row.ts_code,
-            {
-              ...row,
-              speed_pct: periodSpeedMap.get(row.ts_code) ?? null,
-            } satisfies DisplayRow,
-          ]),
-        );
         const nextRecords = new Map<string, SpeedHitRecord>();
 
         for (const record of prevByPeriod[period]) {
@@ -1557,14 +1557,15 @@ export default function AllMarketMonitorPage() {
           if (!latestRow) continue;
           nextRecords.set(record.ts_code, {
             ...latestRow,
+            speed_pct: periodSpeedMap.get(latestRow.ts_code) ?? null,
             hit_at: record.hit_at,
             hit_speed_pct: record.hit_speed_pct,
             hit_speed_threshold_pct: record.hit_speed_threshold_pct,
           });
         }
 
-        for (const row of nextRowsByCode.values()) {
-          const speedPct = row.speed_pct;
+        for (const row of rows) {
+          const speedPct = periodSpeedMap.get(row.ts_code);
           const effectiveThresholdPct = getEffectiveSpeedThresholdPct(
             row,
             speedThresholdPct,
@@ -1577,6 +1578,7 @@ export default function AllMarketMonitorPage() {
           ) {
             nextRecords.set(row.ts_code, {
               ...row,
+              speed_pct: speedPct,
               hit_at: capturedAt,
               hit_speed_pct: speedPct,
               hit_speed_threshold_pct: effectiveThresholdPct,
@@ -1592,6 +1594,19 @@ export default function AllMarketMonitorPage() {
       return nextByPeriod;
     });
   }, [rows, speedMapsByPeriod, speedMinTicks, speedThresholdPct]);
+
+  const conceptNames = useMemo(
+    () => new Map<string, string[]>(),
+    [excludedConcepts, sourcePathTrimmed],
+  );
+
+  const selectMarketGroup = useCallback((group: MarketGroup) => {
+    setGroupSelection((previous) =>
+      previous?.name === group.name && previous.kind === group.kind
+        ? null
+        : { name: group.name, kind: group.kind },
+    );
+  }, []);
 
   const marketGroups = useMemo(() => {
     const latestDate = rows.reduce(
@@ -1612,14 +1627,20 @@ export default function AllMarketMonitorPage() {
         isFiniteNumber(row.realtime_change_pct),
     );
     return {
-      concept: summarizeGroups(validRows, "concept", (row) =>
-        filterConceptItems(splitConceptText(row.concept), excludedConcepts),
-      ),
+      concept: summarizeGroups(validRows, "concept", (row) => {
+        const text = row.concept ?? "";
+        let names = conceptNames.get(text);
+        if (!names) {
+          names = filterConceptItems(splitConceptText(text), excludedConcepts);
+          conceptNames.set(text, names);
+        }
+        return names;
+      }),
       industry: summarizeGroups(validRows, "industry", (row) => [
         row.industry?.trim() ?? "",
       ]),
     };
-  }, [rows, excludedConcepts]);
+  }, [rows, excludedConcepts, conceptNames]);
   const selectedGroup = groupSelection
     ? marketGroups[groupSelection.kind].find(
         (group) => group.name === groupSelection.name,
@@ -2007,6 +2028,349 @@ export default function AllMarketMonitorPage() {
     setSortDirection(null);
   }
 
+  const tableBody = useMemo(
+    () => (
+      <tbody>
+        {displayRows.map((row) => {
+          const conceptText = formatConceptText(
+            row.concept ?? "",
+            excludedConcepts,
+          );
+          const rank5dHighlighted = isRankHighlight(
+            row.best_rank_5d,
+            rankHighlightThreshold,
+          );
+          const rankSimHighlighted = isRankHighlight(
+            row.similarity_rank,
+            rankHighlightThreshold,
+          );
+          const volumeRatioAlert =
+            isFiniteNumber(volumeRatioThreshold) &&
+            isFiniteNumber(row.realtime_vol_ratio) &&
+            row.realtime_vol_ratio > volumeRatioThreshold;
+          const templateHit =
+            templateEnabled && getTemplateHits(row).length > 0;
+
+          return (
+            <tr
+              key={row.ts_code}
+              className={templateHit ? "is-template-hit" : undefined}
+            >
+              <td className="all-market-name-cell">
+                <div className="all-market-stock-id">
+                  <DetailsLink
+                    tsCode={row.ts_code}
+                    tradeDate={rankDate || row.realtime_trade_date || undefined}
+                    sourcePath={sourcePathTrimmed || undefined}
+                    autoIntraday
+                    className="all-market-stock-link"
+                    title={`查看 ${row.name || row.ts_code} 详情`}
+                    navigationItems={navigationItems}
+                  >
+                    {row.name || "--"}
+                  </DetailsLink>
+                  <span className="all-market-stock-code">{row.ts_code}</span>
+                </div>
+                {compactMode ? (
+                  <div className="all-market-compact-primary-list">
+                    <span
+                      className={
+                        rank5dHighlighted
+                          ? "all-market-compact-item is-highlight"
+                          : "all-market-compact-item"
+                      }
+                    >
+                      5日 {formatNumber(row.best_rank_5d, 0)}
+                    </span>
+                    <span
+                      className={
+                        rankSimHighlighted
+                          ? "all-market-compact-item is-highlight"
+                          : "all-market-compact-item"
+                      }
+                    >
+                      相似 {formatNumber(row.similarity_rank, 0)}
+                    </span>
+                    <span
+                      className={`all-market-compact-item ${getPercentClassName(
+                        row.return_5d_pct,
+                      )}`}
+                    >
+                      五日 {formatPercent(row.return_5d_pct)}
+                    </span>
+                    {showOtherSortColumn ? (
+                      <span className="all-market-compact-item">
+                        其他 {formatNumber(row.other_sort_value)}
+                      </span>
+                    ) : null}
+                    <span
+                      className={`all-market-compact-item all-market-compact-realtime-start ${getRealtimeChangeCellClassName(
+                        row.realtime_change_pct,
+                      )}`}
+                    >
+                      涨幅 {formatPercent(row.realtime_change_pct)}
+                      {changePctNewHighTimes.has(row.ts_code) ? (
+                        <span className="all-market-record-high-badge">
+                          新高
+                        </span>
+                      ) : null}
+                    </span>
+                    <span
+                      className={`all-market-compact-item ${getPercentClassName(
+                        row.speed_pct,
+                      )}`}
+                    >
+                      涨速 {formatPercent(row.speed_pct)}
+                    </span>
+                    <span
+                      className={
+                        volumeRatioAlert
+                          ? "all-market-compact-item is-volume-alert"
+                          : "all-market-compact-item"
+                      }
+                    >
+                      量比 {formatNumber(row.realtime_vol_ratio)}
+                      {volumeRatioNewHighTimes.has(row.ts_code) ? (
+                        <span className="all-market-record-high-badge">
+                          新高
+                        </span>
+                      ) : null}
+                    </span>
+                    <span
+                      className={
+                        isAboveAvgPrice(row)
+                          ? "all-market-compact-item is-yes"
+                          : "all-market-compact-item"
+                      }
+                    >
+                      均线 {formatAboveAvgPrice(row)}
+                    </span>
+                    <span
+                      className={`all-market-compact-item all-market-compact-open-change ${getPercentClassName(
+                        row.realtime_change_open_pct,
+                      )}`}
+                    >
+                      实体 {formatPercent(row.realtime_change_open_pct)}
+                    </span>
+                  </div>
+                ) : null}
+              </td>
+              {!compactMode ? (
+                <>
+                  <td
+                    className={
+                      rank5dHighlighted
+                        ? "all-market-rank-cell all-market-basic-col is-highlight"
+                        : "all-market-rank-cell all-market-basic-col"
+                    }
+                  >
+                    {formatNumber(row.best_rank_5d, 0)}
+                  </td>
+                  <td
+                    className={
+                      rankSimHighlighted
+                        ? "all-market-rank-cell all-market-basic-col is-highlight"
+                        : "all-market-rank-cell all-market-basic-col"
+                    }
+                  >
+                    {formatNumber(row.similarity_rank, 0)}
+                  </td>
+                  <td
+                    className={`all-market-basic-col ${getPercentClassName(
+                      row.return_5d_pct,
+                    )}`}
+                  >
+                    {formatPercent(row.return_5d_pct)}
+                  </td>
+                  {showOtherSortColumn ? (
+                    <td className="all-market-other-sort-col all-market-basic-col">
+                      {formatNumber(row.other_sort_value)}
+                    </td>
+                  ) : null}
+                  <td
+                    className={`all-market-realtime-change-col ${getRealtimeChangeCellClassName(
+                      row.realtime_change_pct,
+                    )}`}
+                  >
+                    <span>{formatPercent(row.realtime_change_pct)}</span>
+                    {changePctNewHighTimes.has(row.ts_code) ? (
+                      <span
+                        className="all-market-record-high-badge"
+                        title="当前涨幅高于监控记录"
+                      >
+                        新高
+                      </span>
+                    ) : null}
+                  </td>
+                  <td
+                    className={`all-market-speed-col ${getPercentClassName(
+                      row.speed_pct,
+                    )}`}
+                  >
+                    {formatPercent(row.speed_pct)}
+                  </td>
+                  <td
+                    className={
+                      volumeRatioAlert
+                        ? "all-market-volume-col all-market-volume-ratio-cell is-alert"
+                        : "all-market-volume-col all-market-volume-ratio-cell"
+                    }
+                  >
+                    <span>{formatNumber(row.realtime_vol_ratio)}</span>
+                    {volumeRatioNewHighTimes.has(row.ts_code) ? (
+                      <span
+                        className="all-market-record-high-badge"
+                        title="量比突破开盘五分钟基准及日内已记录高点"
+                      >
+                        新高
+                      </span>
+                    ) : null}
+                  </td>
+                  <td
+                    className={
+                      isAboveAvgPrice(row)
+                        ? "all-market-above-avg-cell all-market-basic-col is-yes"
+                        : "all-market-above-avg-cell all-market-basic-col"
+                    }
+                    title={
+                      isFiniteNumber(row.realtime_avg_price)
+                        ? `日内均价 ${formatNumber(row.realtime_avg_price)}`
+                        : "日内均价 --"
+                    }
+                  >
+                    {formatAboveAvgPrice(row)}
+                  </td>
+                  <td
+                    className={`all-market-basic-col ${getPercentClassName(
+                      row.realtime_change_open_pct,
+                    )}`}
+                  >
+                    {formatPercent(row.realtime_change_open_pct)}
+                  </td>
+                  <td
+                    className="all-market-scene-marker-cell all-market-info-group-start all-market-scene-col all-market-basic-col"
+                    title={row.scene_marker ?? "--"}
+                  >
+                    {row.scene_marker ?? "--"}
+                  </td>
+                  <td className="all-market-template-cell all-market-template-col all-market-basic-col">
+                    {getTemplateHits(row).length > 0 ? (
+                      <>
+                        <button
+                          type="button"
+                          className="all-market-template-trigger-btn"
+                          title={getTemplateHits(row)
+                            .map((hit) => hit.template_name)
+                            .join("、")}
+                          onClick={() =>
+                            setOpenTemplateTsCode((value) =>
+                              value === row.ts_code ? null : row.ts_code,
+                            )
+                          }
+                        >
+                          {formatTemplateHitText(row)}
+                        </button>
+                        {openTemplateTsCode === row.ts_code ? (
+                          <div
+                            className="all-market-template-popover"
+                            role="dialog"
+                            onClick={(event) => event.stopPropagation()}
+                          >
+                            <div className="all-market-template-popover-head">
+                              <strong>{row.name || row.ts_code}</strong>
+                              <button
+                                type="button"
+                                aria-label="关闭"
+                                onClick={() => setOpenTemplateTsCode(null)}
+                              >
+                                ×
+                              </button>
+                            </div>
+                            <ul>
+                              {getTemplateHits(row).map((hit) => (
+                                <li key={hit.template_id}>
+                                  {hit.template_name || "未命名模板"}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        ) : null}
+                      </>
+                    ) : (
+                      "--"
+                    )}
+                  </td>
+                  <td className="all-market-mv-col all-market-basic-col">
+                    {formatNumber(row.total_mv_yi)}
+                  </td>
+                  <td
+                    className="all-market-concept-cell all-market-concept-col all-market-basic-col"
+                    title={conceptText}
+                  >
+                    {conceptText}
+                  </td>
+                </>
+              ) : null}
+              {compactMode ? (
+                <td className="all-market-compact-basic-cell">
+                  <div className="all-market-compact-basic-list">
+                    <span
+                      className="all-market-compact-item all-market-compact-group-start"
+                      title={row.scene_marker ?? "--"}
+                    >
+                      场景 {row.scene_marker ?? "--"}
+                    </span>
+                    <span
+                      className="all-market-compact-item all-market-compact-template-hits"
+                      title={
+                        getTemplateHits(row).length > 0
+                          ? getTemplateHits(row)
+                              .map((hit) => hit.template_name || "未命名模板")
+                              .join("、")
+                          : "--"
+                      }
+                    >
+                      模板{" "}
+                      {getTemplateHits(row).length > 0
+                        ? getTemplateHits(row)
+                            .map((hit) => hit.template_name || "未命名模板")
+                            .join("、")
+                        : "--"}
+                    </span>
+                    <span className="all-market-compact-item">
+                      市值 {formatNumber(row.total_mv_yi)}
+                    </span>
+                    <span
+                      className="all-market-compact-item all-market-compact-concept"
+                      title={conceptText}
+                    >
+                      概念 {conceptText || "--"}
+                    </span>
+                  </div>
+                </td>
+              ) : null}
+            </tr>
+          );
+        })}
+      </tbody>
+    ),
+    [
+      displayRows,
+      excludedConcepts,
+      rankHighlightThreshold,
+      volumeRatioThreshold,
+      templateEnabled,
+      rankDate,
+      sourcePathTrimmed,
+      navigationItems,
+      showOtherSortColumn,
+      changePctNewHighTimes,
+      volumeRatioNewHighTimes,
+      openTemplateTsCode,
+      compactMode,
+    ],
+  );
+
   const statusText = enabled
     ? loading
       ? "抓取中"
@@ -2028,16 +2392,61 @@ export default function AllMarketMonitorPage() {
               </span>
               {refreshTiming ? (
                 <details className="all-market-refresh-timing">
-                  <summary>本轮 {((refreshTiming.requestMs + (refreshTiming.viewMs ?? 0)) / 1000).toFixed(2)} 秒</summary>
+                  <summary>
+                    本轮{" "}
+                    {(
+                      (refreshTiming.requestMs + (refreshTiming.viewMs ?? 0)) /
+                      1000
+                    ).toFixed(2)}{" "}
+                    秒
+                  </summary>
                   <div>
-                    <span>股票行情请求（含解析）：{refreshTiming.backend.quotes_ms.toFixed(0)} ms</span>
-                    <span>量比及交易状态：{refreshTiming.backend.volume_ratio_ms.toFixed(0)} ms</span>
-                    <span>本地资料及日线：{(refreshTiming.backend.metadata_ms + refreshTiming.backend.rows_ms).toFixed(0)} ms</span>
-                    <span>模板及其他排序：{(refreshTiming.backend.templates_ms + refreshTiming.backend.other_sort_ms).toFixed(0)} ms</span>
-                    <span title="股票与指数请求并行执行，不能将两项耗时相加">指数请求（含解析）：{refreshTiming.backend.indices_ms.toFixed(0)} ms</span>
-                    <span>后端合计：{refreshTiming.backend.total_ms.toFixed(0)} ms</span>
-                    <span title="包含任务排队、仓库锁等待、结果序列化和传输">调用额外等待：{Math.max(0, refreshTiming.requestMs - refreshTiming.backend.total_ms).toFixed(0)} ms</span>
-                    <span title="收到结果至提交界面后的下一动画帧，包含前端计算、React 更新与帧等待，并非纯 CPU 耗时">界面更新：{refreshTiming.viewMs == null ? "本轮未更新表格" : `${refreshTiming.viewMs.toFixed(0)} ms`}</span>
+                    <span>
+                      股票行情请求（含解析）：
+                      {refreshTiming.backend.quotes_ms.toFixed(0)} ms
+                    </span>
+                    <span>
+                      量比及交易状态：
+                      {refreshTiming.backend.volume_ratio_ms.toFixed(0)} ms
+                    </span>
+                    <span>
+                      本地资料及日线：
+                      {(
+                        refreshTiming.backend.metadata_ms +
+                        refreshTiming.backend.rows_ms
+                      ).toFixed(0)}{" "}
+                      ms
+                    </span>
+                    <span>
+                      模板及其他排序：
+                      {(
+                        refreshTiming.backend.templates_ms +
+                        refreshTiming.backend.other_sort_ms
+                      ).toFixed(0)}{" "}
+                      ms
+                    </span>
+                    <span title="股票与指数请求并行执行，不能将两项耗时相加">
+                      指数请求（含解析）：
+                      {refreshTiming.backend.indices_ms.toFixed(0)} ms
+                    </span>
+                    <span>
+                      后端合计：{refreshTiming.backend.total_ms.toFixed(0)} ms
+                    </span>
+                    <span title="包含任务排队、仓库锁等待、结果序列化和传输">
+                      调用额外等待：
+                      {Math.max(
+                        0,
+                        refreshTiming.requestMs -
+                          refreshTiming.backend.total_ms,
+                      ).toFixed(0)}{" "}
+                      ms
+                    </span>
+                    <span title="收到结果至提交界面后的下一动画帧，包含前端计算、React 更新与帧等待，并非纯 CPU 耗时">
+                      界面更新：
+                      {refreshTiming.viewMs == null
+                        ? "本轮未更新表格"
+                        : `${refreshTiming.viewMs.toFixed(0)} ms`}
+                    </span>
                   </div>
                 </details>
               ) : null}
@@ -2282,13 +2691,7 @@ export default function AllMarketMonitorPage() {
             <IntradayMarketGroupTable
               groups={marketGroups[kind]}
               selection={groupSelection}
-              onSelect={(group) =>
-                setGroupSelection((previous) =>
-                  previous?.name === group.name && previous.kind === group.kind
-                    ? null
-                    : { name: group.name, kind: group.kind },
-                )
-              }
+              onSelect={selectMarketGroup}
             />
           </section>
         ))}
@@ -2364,7 +2767,7 @@ export default function AllMarketMonitorPage() {
               </span>
               <span className="all-market-time-pill is-current">
                 <small>当前</small>
-                <strong>{formatClock(currentTime)}</strong>
+                <MonitorClock />
               </span>
             </div>
           </div>
@@ -2489,333 +2892,7 @@ export default function AllMarketMonitorPage() {
                     </th>
                   </tr>
                 </thead>
-                <tbody>
-                  {displayRows.map((row) => {
-                    const conceptText = formatConceptText(
-                      row.concept ?? "",
-                      excludedConcepts,
-                    );
-                    const rank5dHighlighted = isRankHighlight(
-                      row.best_rank_5d,
-                      rankHighlightThreshold,
-                    );
-                    const rankSimHighlighted = isRankHighlight(
-                      row.similarity_rank,
-                      rankHighlightThreshold,
-                    );
-                    const volumeRatioAlert =
-                      isFiniteNumber(volumeRatioThreshold) &&
-                      isFiniteNumber(row.realtime_vol_ratio) &&
-                      row.realtime_vol_ratio > volumeRatioThreshold;
-                    const templateHit =
-                      templateEnabled && getTemplateHits(row).length > 0;
-
-                    return (
-                      <tr
-                        key={row.ts_code}
-                        className={templateHit ? "is-template-hit" : undefined}
-                      >
-                        <td className="all-market-name-cell">
-                          <div className="all-market-stock-id">
-                            <DetailsLink
-                              tsCode={row.ts_code}
-                              tradeDate={
-                                rankDate || row.realtime_trade_date || undefined
-                              }
-                              sourcePath={sourcePathTrimmed || undefined}
-                              autoIntraday
-                              className="all-market-stock-link"
-                              title={`查看 ${row.name || row.ts_code} 详情`}
-                              navigationItems={navigationItems}
-                            >
-                              {row.name || "--"}
-                            </DetailsLink>
-                            <span className="all-market-stock-code">
-                              {row.ts_code}
-                            </span>
-                          </div>
-                          <div className="all-market-compact-primary-list">
-                            <span
-                              className={
-                                rank5dHighlighted
-                                  ? "all-market-compact-item is-highlight"
-                                  : "all-market-compact-item"
-                              }
-                            >
-                              5日 {formatNumber(row.best_rank_5d, 0)}
-                            </span>
-                            <span
-                              className={
-                                rankSimHighlighted
-                                  ? "all-market-compact-item is-highlight"
-                                  : "all-market-compact-item"
-                              }
-                            >
-                              相似 {formatNumber(row.similarity_rank, 0)}
-                            </span>
-                            <span
-                              className={`all-market-compact-item ${getPercentClassName(
-                                row.return_5d_pct,
-                              )}`}
-                            >
-                              五日 {formatPercent(row.return_5d_pct)}
-                            </span>
-                            {showOtherSortColumn ? (
-                              <span className="all-market-compact-item">
-                                其他 {formatNumber(row.other_sort_value)}
-                              </span>
-                            ) : null}
-                            <span
-                              className={`all-market-compact-item all-market-compact-realtime-start ${getRealtimeChangeCellClassName(
-                                row.realtime_change_pct,
-                              )}`}
-                            >
-                              涨幅 {formatPercent(row.realtime_change_pct)}
-                              {changePctNewHighTimes.has(row.ts_code) ? (
-                                <span className="all-market-record-high-badge">
-                                  新高
-                                </span>
-                              ) : null}
-                            </span>
-                            <span
-                              className={`all-market-compact-item ${getPercentClassName(
-                                row.speed_pct,
-                              )}`}
-                            >
-                              涨速 {formatPercent(row.speed_pct)}
-                            </span>
-                            <span
-                              className={
-                                volumeRatioAlert
-                                  ? "all-market-compact-item is-volume-alert"
-                                  : "all-market-compact-item"
-                              }
-                            >
-                              量比 {formatNumber(row.realtime_vol_ratio)}
-                              {volumeRatioNewHighTimes.has(row.ts_code) ? (
-                                <span className="all-market-record-high-badge">
-                                  新高
-                                </span>
-                              ) : null}
-                            </span>
-                            <span
-                              className={
-                                isAboveAvgPrice(row)
-                                  ? "all-market-compact-item is-yes"
-                                  : "all-market-compact-item"
-                              }
-                            >
-                              均线 {formatAboveAvgPrice(row)}
-                            </span>
-                            <span
-                              className={`all-market-compact-item all-market-compact-open-change ${getPercentClassName(
-                                row.realtime_change_open_pct,
-                              )}`}
-                            >
-                              实体 {formatPercent(row.realtime_change_open_pct)}
-                            </span>
-                          </div>
-                        </td>
-                        <td
-                          className={
-                            rank5dHighlighted
-                              ? "all-market-rank-cell all-market-basic-col is-highlight"
-                              : "all-market-rank-cell all-market-basic-col"
-                          }
-                        >
-                          {formatNumber(row.best_rank_5d, 0)}
-                        </td>
-                        <td
-                          className={
-                            rankSimHighlighted
-                              ? "all-market-rank-cell all-market-basic-col is-highlight"
-                              : "all-market-rank-cell all-market-basic-col"
-                          }
-                        >
-                          {formatNumber(row.similarity_rank, 0)}
-                        </td>
-                        <td
-                          className={`all-market-basic-col ${getPercentClassName(
-                            row.return_5d_pct,
-                          )}`}
-                        >
-                          {formatPercent(row.return_5d_pct)}
-                        </td>
-                        {showOtherSortColumn ? (
-                          <td className="all-market-other-sort-col all-market-basic-col">
-                            {formatNumber(row.other_sort_value)}
-                          </td>
-                        ) : null}
-                        <td
-                          className={`all-market-realtime-change-col ${getRealtimeChangeCellClassName(
-                            row.realtime_change_pct,
-                          )}`}
-                        >
-                          <span>{formatPercent(row.realtime_change_pct)}</span>
-                          {changePctNewHighTimes.has(row.ts_code) ? (
-                            <span
-                              className="all-market-record-high-badge"
-                              title="当前涨幅高于监控记录"
-                            >
-                              新高
-                            </span>
-                          ) : null}
-                        </td>
-                        <td
-                          className={`all-market-speed-col ${getPercentClassName(
-                            row.speed_pct,
-                          )}`}
-                        >
-                          {formatPercent(row.speed_pct)}
-                        </td>
-                        <td
-                          className={
-                            volumeRatioAlert
-                              ? "all-market-volume-col all-market-volume-ratio-cell is-alert"
-                              : "all-market-volume-col all-market-volume-ratio-cell"
-                          }
-                        >
-                          <span>{formatNumber(row.realtime_vol_ratio)}</span>
-                          {volumeRatioNewHighTimes.has(row.ts_code) ? (
-                            <span
-                              className="all-market-record-high-badge"
-                              title="量比突破开盘五分钟基准及日内已记录高点"
-                            >
-                              新高
-                            </span>
-                          ) : null}
-                        </td>
-                        <td
-                          className={
-                            isAboveAvgPrice(row)
-                              ? "all-market-above-avg-cell all-market-basic-col is-yes"
-                              : "all-market-above-avg-cell all-market-basic-col"
-                          }
-                          title={
-                            isFiniteNumber(row.realtime_avg_price)
-                              ? `日内均价 ${formatNumber(row.realtime_avg_price)}`
-                              : "日内均价 --"
-                          }
-                        >
-                          {formatAboveAvgPrice(row)}
-                        </td>
-                        <td
-                          className={`all-market-basic-col ${getPercentClassName(
-                            row.realtime_change_open_pct,
-                          )}`}
-                        >
-                          {formatPercent(row.realtime_change_open_pct)}
-                        </td>
-                        <td
-                          className="all-market-scene-marker-cell all-market-info-group-start all-market-scene-col all-market-basic-col"
-                          title={row.scene_marker ?? "--"}
-                        >
-                          {row.scene_marker ?? "--"}
-                        </td>
-                        <td className="all-market-template-cell all-market-template-col all-market-basic-col">
-                          {getTemplateHits(row).length > 0 ? (
-                            <>
-                              <button
-                                type="button"
-                                className="all-market-template-trigger-btn"
-                                title={getTemplateHits(row)
-                                  .map((hit) => hit.template_name)
-                                  .join("、")}
-                                onClick={() =>
-                                  setOpenTemplateTsCode((value) =>
-                                    value === row.ts_code ? null : row.ts_code,
-                                  )
-                                }
-                              >
-                                {formatTemplateHitText(row)}
-                              </button>
-                              {openTemplateTsCode === row.ts_code ? (
-                                <div
-                                  className="all-market-template-popover"
-                                  role="dialog"
-                                  onClick={(event) => event.stopPropagation()}
-                                >
-                                  <div className="all-market-template-popover-head">
-                                    <strong>{row.name || row.ts_code}</strong>
-                                    <button
-                                      type="button"
-                                      aria-label="关闭"
-                                      onClick={() =>
-                                        setOpenTemplateTsCode(null)
-                                      }
-                                    >
-                                      ×
-                                    </button>
-                                  </div>
-                                  <ul>
-                                    {getTemplateHits(row).map((hit) => (
-                                      <li key={hit.template_id}>
-                                        {hit.template_name || "未命名模板"}
-                                      </li>
-                                    ))}
-                                  </ul>
-                                </div>
-                              ) : null}
-                            </>
-                          ) : (
-                            "--"
-                          )}
-                        </td>
-                        <td className="all-market-mv-col all-market-basic-col">
-                          {formatNumber(row.total_mv_yi)}
-                        </td>
-                        <td
-                          className="all-market-concept-cell all-market-concept-col all-market-basic-col"
-                          title={conceptText}
-                        >
-                          {conceptText}
-                        </td>
-                        <td className="all-market-compact-basic-cell">
-                          <div className="all-market-compact-basic-list">
-                            <span
-                              className="all-market-compact-item all-market-compact-group-start"
-                              title={row.scene_marker ?? "--"}
-                            >
-                              场景 {row.scene_marker ?? "--"}
-                            </span>
-                            <span
-                              className="all-market-compact-item all-market-compact-template-hits"
-                              title={
-                                getTemplateHits(row).length > 0
-                                  ? getTemplateHits(row)
-                                      .map(
-                                        (hit) =>
-                                          hit.template_name || "未命名模板",
-                                      )
-                                      .join("、")
-                                  : "--"
-                              }
-                            >
-                              模板{" "}
-                              {getTemplateHits(row).length > 0
-                                ? getTemplateHits(row)
-                                    .map(
-                                      (hit) =>
-                                        hit.template_name || "未命名模板",
-                                    )
-                                    .join("、")
-                                : "--"}
-                            </span>
-                            <span className="all-market-compact-item">
-                              市值 {formatNumber(row.total_mv_yi)}
-                            </span>
-                            <span
-                              className="all-market-compact-item all-market-compact-concept"
-                              title={conceptText}
-                            >
-                              概念 {conceptText || "--"}
-                            </span>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
+                {tableBody}
               </table>
             ) : (
               <div className="all-market-empty-state">
@@ -2835,7 +2912,9 @@ export default function AllMarketMonitorPage() {
               <div>
                 <h3>异动流水</h3>
               </div>
-              <strong title="最新在前，同股同类合并计次">{visibleEvents.length}</strong>
+              <strong title="最新在前，同股同类合并计次">
+                {visibleEvents.length}
+              </strong>
             </div>
             <div className="all-market-volume-ratio-row">
               <div
@@ -3147,9 +3226,7 @@ export default function AllMarketMonitorPage() {
               })}
               {!visibleEvents.length ? (
                 <div className="all-market-hit-empty">
-                  {rows.length === 0
-                    ? "等待监控异动"
-                    : "当前筛选下暂无异动。"}
+                  {rows.length === 0 ? "等待监控异动" : "当前筛选下暂无异动。"}
                 </div>
               ) : null}
             </div>
@@ -3341,7 +3418,10 @@ export default function AllMarketMonitorPage() {
                   />
                 </label>
               </section>
-              <section className="all-market-config-section" aria-label="涨速异动">
+              <section
+                className="all-market-config-section"
+                aria-label="涨速异动"
+              >
                 <h4 className="all-market-config-heading">涨速异动</h4>
                 <label className="settings-field">
                   <span>涨速周期</span>
@@ -3380,11 +3460,16 @@ export default function AllMarketMonitorPage() {
                     step="1"
                     inputMode="numeric"
                     value={speedMinTicksText}
-                    onChange={(event) => setSpeedMinTicksText(event.target.value)}
+                    onChange={(event) =>
+                      setSpeedMinTicksText(event.target.value)
+                    }
                   />
                 </label>
               </section>
-              <section className="all-market-config-section" aria-label="量比异动">
+              <section
+                className="all-market-config-section"
+                aria-label="量比异动"
+              >
                 <h4 className="all-market-config-heading">量比异动</h4>
                 <label className="settings-field">
                   <span>板块范围</span>
@@ -3439,7 +3524,9 @@ export default function AllMarketMonitorPage() {
                     }}
                     onBlur={() => setVolumeRankMaxText(String(volumeRankMax))}
                   />
-                  <small title="缺失排名不通过">5日优 / 相似榜任一满足；0 不限</small>
+                  <small title="缺失排名不通过">
+                    5日优 / 相似榜任一满足；0 不限
+                  </small>
                 </label>
                 <label className="settings-field">
                   <span>排序 / 高亮阈值</span>
@@ -3479,7 +3566,10 @@ export default function AllMarketMonitorPage() {
                 <p className="settings-section-note all-market-param-expression">
                   满足筛选条件，突破开盘 5 分钟量比高点并创日内新高时触发。
                 </p>
-                <div className="all-market-param-expression" title="监控运行时通知，同轮异动合并发送">
+                <div
+                  className="all-market-param-expression"
+                  title="监控运行时通知，同轮异动合并发送"
+                >
                   <label className="all-market-setting-switch">
                     <input
                       type="checkbox"
@@ -3521,7 +3611,10 @@ export default function AllMarketMonitorPage() {
                   ) : null}
                 </div>
               </section>
-              <section className="all-market-config-section" aria-label="展示与排序">
+              <section
+                className="all-market-config-section"
+                aria-label="展示与排序"
+              >
                 <h4 className="all-market-config-heading">展示与排序</h4>
                 <label className="settings-field">
                   <span>排名高亮阈值</span>
@@ -3594,7 +3687,9 @@ export default function AllMarketMonitorPage() {
                   <input
                     type="checkbox"
                     checked={sideListVisible}
-                    onChange={(event) => setSideListVisible(event.target.checked)}
+                    onChange={(event) =>
+                      setSideListVisible(event.target.checked)
+                    }
                   />
                   <span>显示侧边名单</span>
                 </label>

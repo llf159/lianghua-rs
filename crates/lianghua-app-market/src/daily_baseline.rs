@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, OnceLock},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use duckdb::{Connection, params};
@@ -25,14 +25,16 @@ struct CacheEntry {
     trade_date: String,
     loaded_at: Instant,
     data: Result<Arc<DailyBaselines>, String>,
+    source_signature: [Option<(u64, SystemTime)>; 2],
 }
+
+static CACHE: OnceLock<Mutex<HashMap<String, CacheEntry>>> = OnceLock::new();
 
 pub(crate) fn load(
     source_path: &str,
     trade_date: &str,
     force_reload: bool,
 ) -> Result<Arc<DailyBaselines>, String> {
-    static CACHE: OnceLock<Mutex<HashMap<String, CacheEntry>>> = OnceLock::new();
     let mut cache = CACHE
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
@@ -45,6 +47,23 @@ pub(crate) fn load(
         return entry.data.clone();
     }
 
+    // Check the small database identity every 60s; unchanged input needs no SQL scan.
+    let path = source_db_path(source_path);
+    let source_signature = [path.clone(), path.with_extension("db.wal")].map(|path| {
+        std::fs::metadata(path)
+            .ok()
+            .and_then(|metadata| Some((metadata.len(), metadata.modified().ok()?)))
+    });
+    if !force_reload
+        && source_signature[0].is_some()
+        && let Some(entry) = cache.get_mut(source_path)
+        && entry.trade_date == trade_date
+        && entry.source_signature == source_signature
+        && entry.data.is_ok()
+    {
+        entry.loaded_at = Instant::now();
+        return entry.data.clone();
+    }
     let data = (|| {
         let conn = open_db_readonly(source_db_path(source_path))
             .map_err(|e| format!("打开监控日线基准库失败: {e}"))?;
@@ -59,6 +78,7 @@ pub(crate) fn load(
             trade_date: trade_date.to_string(),
             loaded_at: Instant::now(),
             data: data.clone(),
+            source_signature,
         },
     );
     data
@@ -117,6 +137,61 @@ fn query(conn: &Connection, trade_date: &str) -> Result<HashMap<String, DailyBas
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unchanged_database_reuses_small_summary_and_changed_database_reloads() {
+        let directory = std::env::temp_dir().join(format!(
+            "monitor-baseline-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let source = directory.to_str().unwrap();
+        {
+            let conn = Connection::open(source_db_path(source)).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE stock_data(ts_code VARCHAR, trade_date VARCHAR,
+                adj_type VARCHAR, close VARCHAR, vol VARCHAR);
+                INSERT INTO stock_data SELECT 'test', '2026100' || i::VARCHAR, 'qfq',
+                    i::VARCHAR, '100' FROM range(1,7) t(i);",
+            )
+            .unwrap();
+        }
+        let first = load(source, "20261007", false).unwrap();
+        CACHE
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .get_mut(source)
+            .unwrap()
+            .loaded_at = Instant::now() - Duration::from_secs(61);
+        let reused = load(source, "20261007", false).unwrap();
+        assert!(Arc::ptr_eq(&first, &reused));
+        {
+            let conn = Connection::open(source_db_path(source)).unwrap();
+            conn.execute_batch("INSERT INTO stock_data VALUES ('test','20261007','qfq','9','200')")
+                .unwrap();
+        }
+        CACHE
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .get_mut(source)
+            .unwrap()
+            .loaded_at = Instant::now() - Duration::from_secs(61);
+        let changed = load(source, "20261007", false).unwrap();
+        assert!(!Arc::ptr_eq(&first, &changed));
+        assert_eq!(changed.rows["test"].latest_close, Some(9.0));
+        let forced = load(source, "20261007", true).unwrap();
+        assert!(!Arc::ptr_eq(&changed, &forced));
+        CACHE.get().unwrap().lock().unwrap().remove(source);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn combined_baselines_use_five_traded_bars_across_suspensions() {
