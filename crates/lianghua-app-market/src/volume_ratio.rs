@@ -735,11 +735,18 @@ pub fn snapshot(
     }
     let mut pending = 0;
     let mut failed = 0;
+    let mut skipped = 0;
     let mut values = HashMap::new();
     for (ts_code, quote) in quotes {
         if quote.date.replace('-', "") != trade_date {
             continue;
         }
+        // 新股等缺少五根有效日线时没有计算分母，换源或重试也无法补齐。
+        // 日线基准更新后会自动重新纳入，无需向网络工作队列提交失败任务。
+        let Some(local_average) = state.local_averages.get(ts_code).copied() else {
+            skipped += 1;
+            continue;
+        };
         let retry = match state.entries.get(ts_code) {
             None => true,
             Some(Entry::Failed { at, .. }) => at.elapsed() >= Duration::from_secs(60),
@@ -764,8 +771,6 @@ pub fn snapshot(
             let date = trade_date.to_string();
             let http = http.clone();
             let generation = state.generation;
-            let local_average = state.local_averages.get(&ts_code).copied();
-            let local_error = state.local_error.clone();
             let opening_window_ended = quote.time.as_str() > "09:35:00";
             // MSN 声明延迟 15 分钟；开盘 20 分钟后才可能覆盖完整五分钟。
             let msn_supported = ts_code.ends_with(".SH") || ts_code.ends_with(".SZ");
@@ -788,19 +793,18 @@ pub fn snapshot(
                             if state.generation != generation || state.paused {
                                 return;
                             }
-                            if state.last_poll.is_none_or(|at| at.elapsed() >= Duration::from_secs(60)) {
+                            if state
+                                .last_poll
+                                .is_none_or(|at| at.elapsed() >= Duration::from_secs(60))
+                            {
                                 state.entries.remove(&ts_code);
                                 state.revision += 1;
                                 return;
                             }
-                            if local_average.is_none() {
-                                (0, Duration::ZERO)
-                            } else {
-                                let allow_msn = state.msn_enabled && msn_supported;
-                                match state.reserve_source(Instant::now(), allow_msn, attempted) {
-                                    Some(reservation) => reservation,
-                                    None => break 'fetch (0, Err("各来源暂不可用".to_string())),
-                                }
+                            let allow_msn = state.msn_enabled && msn_supported;
+                            match state.reserve_source(Instant::now(), allow_msn, attempted) {
+                                Some(reservation) => reservation,
+                                None => break 'fetch (0, Err("各来源暂不可用".to_string())),
                             }
                         } else {
                             return;
@@ -811,37 +815,32 @@ pub fn snapshot(
                         std::thread::sleep(wait.min(Duration::from_millis(100)));
                     };
                     let started = Instant::now();
-                    let result = if let Some(average) = local_average {
+                    let result =
                         if source == 0 {
-                            fetch_tencent_volume_ratio(&http, &ts_code, average)
+                            fetch_tencent_volume_ratio(&http, &ts_code, local_average)
                         } else if source == 2 {
-                            fetch_msn_volume_ratio(&http, &ts_code, average)
+                            fetch_msn_volume_ratio(&http, &ts_code, local_average)
                         } else {
                             fetch_eastmoney_intraday_text(&http, &ts_code).and_then(|raw| {
-                                lianghua_provider::crawler::volume_ratio::parse_eastmoney_volume_ratio(
-                                    &raw, &ts_code, average,
-                                )
-                            })
+                            lianghua_provider::crawler::volume_ratio::parse_eastmoney_volume_ratio(
+                                &raw, &ts_code, local_average,
+                            )
+                        })
                         }
-                    } else {
-                        Err(local_error.clone().unwrap_or_else(|| {
-                            format!("{ts_code} 本地日线不足 {date} 前五根有成交行情，请先更新日线")
-                        }))
-                    }
-                    .and_then(|mut data| {
-                        if data.trade_date != date {
-                            return Err(format!(
-                                "分时日期 {} 与行情日期 {date} 不一致",
-                                data.trade_date
-                            ));
-                        }
-                        if opening_window_ended && !data.opening_window_complete() {
-                            return Err("分时未完整覆盖 09:30–09:35 开盘窗口".to_string());
-                        }
-                        // 三个源的曲线都已换算为量比；实时量单位独立于曲线源。
-                        data.volume_to_hands = live_volume_to_hands;
-                        Ok(data)
-                    });
+                        .and_then(|mut data| {
+                            if data.trade_date != date {
+                                return Err(format!(
+                                    "分时日期 {} 与行情日期 {date} 不一致",
+                                    data.trade_date
+                                ));
+                            }
+                            if opening_window_ended && !data.opening_window_complete() {
+                                return Err("分时未完整覆盖 09:30–09:35 开盘窗口".to_string());
+                            }
+                            // 三个源的曲线都已换算为量比；实时量单位独立于曲线源。
+                            data.volume_to_hands = live_volume_to_hands;
+                            Ok(data)
+                        });
                     match result {
                         Ok(data) => {
                             if let Ok(mut state) = cache.lock() {
@@ -854,7 +853,6 @@ pub fn snapshot(
                             }
                             break (source, Ok(data));
                         }
-                        Err(error) if local_average.is_none() => break (source, Err(error)),
                         Err(error) => {
                             if let Ok(mut state) = cache.lock() {
                                 if state.generation != generation || state.paused {
@@ -963,7 +961,7 @@ pub fn snapshot(
         })
         .count();
     let status = Some(format!(
-        "{}已补齐 {} · 待补齐 {pending} · 待重试 {failed} · 近似 {approximate}",
+        "{}已补齐 {} · 待补齐 {pending} · 待重试 {failed} · 本地不足已跳过 {skipped} · 近似 {approximate}",
         if state.paused { "已暂停 · " } else { "" },
         values
             .values()
@@ -1156,7 +1154,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_management_counts_wal_data_and_cancels_live_tasks() {
+    fn cache_management_counts_wal_data_cancels_tasks_and_skips_missing_local_averages() {
         let directory = std::env::temp_dir().join(format!(
             "volume-ratio-manage-{}-{}",
             std::process::id(),
@@ -1217,6 +1215,74 @@ mod tests {
         clear_cache(source).unwrap();
         assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
         std::fs::remove_dir(directory).unwrap();
+
+        let cache = CACHE.get_or_init(|| Arc::new(Mutex::new(Cache::default())));
+        *cache.lock().unwrap() = Cache {
+            source_path: "volume-ratio-skip-test".into(),
+            date: "20261028".into(),
+            preflight_checked: true,
+            local_loaded_at: Some(Instant::now()),
+            local_averages: HashMap::from([("000001.SZ".into(), 2400.0)]),
+            entries: HashMap::from([(
+                "000001.SZ".into(),
+                Entry::Ready(Baseline {
+                    data: TencentVolumeRatioData {
+                        trade_date: "20261028".into(),
+                        average_daily_volume: 2400.0,
+                        volume_to_hands: 1.0,
+                        points: ["0930", "0931", "0932", "0933", "0934", "0935"]
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, time)| TencentVolumeRatioPoint {
+                                time: time.into(),
+                                trading_minutes: (index as f64).max(1.0),
+                                volume_ratio: 2.0,
+                            })
+                            .collect(),
+                    },
+                    source: 0,
+                    observed_high: 2.0,
+                    observed_opening_high: 2.0,
+                    next_point: 0,
+                    loaded_at: Instant::now(),
+                }),
+            )]),
+            ..Default::default()
+        };
+        let quotes = ["000001.SZ", "001999.SZ"]
+            .into_iter()
+            .map(|code| {
+                (
+                    code.into(),
+                    SinaQuote {
+                        ts_code: code.into(),
+                        name: String::new(),
+                        date: "20261028".into(),
+                        time: "09:43:00".into(),
+                        vol: 100.0,
+                        price: 10.0,
+                        open: 10.0,
+                        high: 10.0,
+                        low: 10.0,
+                        pre_close: 10.0,
+                        amount: 100000.0,
+                        change_pct: None,
+                    },
+                )
+            })
+            .collect();
+        for _ in 0..2 {
+            let result = snapshot("volume-ratio-skip-test", &quotes, "20261028").unwrap();
+            assert!(result.values["000001.SZ"].opening_high.is_some());
+            assert!(!result.values.contains_key("001999.SZ"));
+            let status = result.status.unwrap();
+            assert!(status.contains("已补齐 1 · 待补齐 0 · 待重试 0"));
+            assert!(status.contains("本地不足已跳过 1"));
+            let state = cache.lock().unwrap();
+            assert!(!state.entries.contains_key("001999.SZ"));
+            assert!(!state.paused);
+        }
+        *cache.lock().unwrap() = Cache::default();
     }
 
     #[test]

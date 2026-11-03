@@ -1,8 +1,15 @@
 import {
+  memo,
   useCallback,
   useDeferredValue,
   useEffect,
+  useEffectEvent,
   useLayoutEffect,
+  useImperativeHandle,
+  type Ref,
+  type Dispatch,
+  type SetStateAction,
+  type RefObject,
   useMemo,
   useRef,
   useState,
@@ -218,6 +225,11 @@ type TooltipSection = {
   variant?: "default" | "ohlc";
 };
 
+type ChartPointerInput = Pick<
+  ReactPointerEvent<HTMLDivElement>,
+  "currentTarget" | "pointerId" | "pointerType" | "clientX" | "clientY"
+>;
+
 type ChartPointerSnapshot = {
   cursorXPercent: number;
   cursorYPercent: number;
@@ -354,7 +366,9 @@ function formatFieldValue(value: unknown) {
   return String(value);
 }
 
-function getStrategyRuleScore(row: DetailStrategyTriggerRow | null | undefined) {
+function getStrategyRuleScore(
+  row: DetailStrategyTriggerRow | null | undefined,
+) {
   return typeof row?.rule_score === "number" && Number.isFinite(row.rule_score)
     ? row.rule_score
     : 0;
@@ -485,7 +499,10 @@ function formatTooltipValue(row: DetailKlineRow, tooltip: DetailChartTooltip) {
   return formatFieldValue(value);
 }
 
-function getSeriesColor(seriesIndex: number, series?: DetailChartSeries | null) {
+function getSeriesColor(
+  seriesIndex: number,
+  series?: DetailChartSeries | null,
+) {
   return series?.color ?? getFallbackSeriesColor(seriesIndex);
 }
 
@@ -714,7 +731,10 @@ function resolveIntervalRestore(
     startAbsoluteIndex,
     endAbsoluteIndex,
   );
-  const normalizedEndAbsoluteIndex = Math.max(startAbsoluteIndex, endAbsoluteIndex);
+  const normalizedEndAbsoluteIndex = Math.max(
+    startAbsoluteIndex,
+    endAbsoluteIndex,
+  );
   const resolvedStartTradeDate =
     items[normalizedStartAbsoluteIndex]?.trade_date?.trim() ?? "";
   const resolvedEndTradeDate =
@@ -1154,10 +1174,7 @@ function getCyqSnapshotMaxChip(
   );
 }
 
-function findCyqPeakBin(
-  bins: DetailCyqBin[],
-  holderView: DetailCyqHolderView,
-) {
+function findCyqPeakBin(bins: DetailCyqBin[], holderView: DetailCyqHolderView) {
   return bins.reduce<DetailCyqBin | null>((peak, bin) => {
     const value = getCyqBinChipValue(bin, holderView);
     if (!Number.isFinite(value)) {
@@ -1250,7 +1267,10 @@ function getDetailCyqProfitRatio(snapshot: DetailCyqSnapshot | null) {
   }
   const profitChips = snapshot.bins
     .filter((bin) => bin.price <= snapshot.close)
-    .reduce((sum, bin) => sum + Math.max(getCyqBinChipValue(bin, "mixed"), 0), 0);
+    .reduce(
+      (sum, bin) => sum + Math.max(getCyqBinChipValue(bin, "mixed"), 0),
+      0,
+    );
   return profitChips / totalChips;
 }
 
@@ -1288,7 +1308,10 @@ function getDetailCyqMainProfitRatio(snapshot: DetailCyqSnapshot | null) {
   }
   const profitChips = snapshot.bins
     .filter((bin) => bin.price <= snapshot.close)
-    .reduce((sum, bin) => sum + Math.max(getCyqBinChipValue(bin, "main"), 0), 0);
+    .reduce(
+      (sum, bin) => sum + Math.max(getCyqBinChipValue(bin, "main"), 0),
+      0,
+    );
   return profitChips / mainTotal;
 }
 
@@ -1528,11 +1551,15 @@ function buildDetailCyqSummaryItems(
   ];
 }
 
-function renderCyqSummaryPanel(
-  snapshot: DetailCyqSnapshot | null,
-  holderView: DetailCyqHolderView,
-  isIndicatorSlot = false,
-) {
+const DetailCyqSummaryPanel = memo(function DetailCyqSummaryPanel({
+  snapshot,
+  holderView,
+  isIndicatorSlot,
+}: {
+  snapshot: DetailCyqSnapshot | null;
+  holderView: DetailCyqHolderView;
+  isIndicatorSlot: boolean;
+}) {
   const items = buildDetailCyqSummaryItems(snapshot, holderView);
   if (items.length === 0) {
     return null;
@@ -1566,7 +1593,7 @@ function renderCyqSummaryPanel(
       ))}
     </div>
   );
-}
+});
 
 function getCyqBinMainRetailTotal(bin: DetailCyqBin) {
   const main =
@@ -1770,7 +1797,9 @@ function buildSceneRuleScoreBundle(rows: DetailStrategyTriggerRow[]) {
   return { byScene, triggeredScenes, assignedTotal };
 }
 
-function buildSceneRuleScoreMap(detail: StockDetailPageData | null | undefined) {
+function buildSceneRuleScoreMap(
+  detail: StockDetailPageData | null | undefined,
+) {
   return buildSceneRuleScoreBundle([
     ...(detail?.strategy_triggers?.triggered ?? []),
     ...(detail?.strategy_triggers?.untriggered ?? []),
@@ -2082,7 +2111,9 @@ function buildChartPanelHeights(
   }
 
   void kline;
-  const matchedMainPanelIndex = panels.findIndex((panel) => isMainChartPanel(panel));
+  const matchedMainPanelIndex = panels.findIndex((panel) =>
+    isMainChartPanel(panel),
+  );
   const mainPanelIndex = matchedMainPanelIndex >= 0 ? matchedMainPanelIndex : 0;
 
   return panels.map((_, index) => {
@@ -2526,12 +2557,11 @@ function buildChartPointerSnapshot(
     return null;
   }
 
-  const viewportRect = viewport.getBoundingClientRect();
-  if (viewportRect.width <= 0 || viewportRect.height <= 0) {
+  const svgRect = getChartViewportContentRect(viewport);
+  if (svgRect.width <= 0 || svgRect.height <= 0) {
     return null;
   }
 
-  const svgRect = getChartViewportContentRect(viewport);
   const chartXPercent = clampNumber(
     ((clientX - svgRect.left) / svgRect.width) * 100,
     0,
@@ -2596,14 +2626,10 @@ function detectChartIntervalDragTarget(
   }
 
   const klinePlotWidth = getChartKlinePlotWidth(reserveCyqPanelWidth);
-  const step = layoutSlotCount > 0 ? klinePlotWidth / layoutSlotCount : klinePlotWidth;
+  const step =
+    layoutSlotCount > 0 ? klinePlotWidth / layoutSlotCount : klinePlotWidth;
   const xAt = (itemIndex: number) =>
-    getChartItemX(
-      itemIndex,
-      itemCount,
-      layoutSlotCount,
-      reserveCyqPanelWidth,
-    );
+    getChartItemX(itemIndex, itemCount, layoutSlotCount, reserveCyqPanelWidth);
   const bounds = buildIntervalSelectionBounds(
     startVisibleIndex,
     endVisibleIndex,
@@ -2716,8 +2742,11 @@ function buildChartExtremaOverlayPoints(
   xAt: (itemIndex: number) => number,
   yAt: (value: number) => number,
 ): ChartExtremaOverlayPoint[] {
-  let highPoint: { itemIndex: number; value: number; tradeDate: string } | null =
-    null;
+  let highPoint: {
+    itemIndex: number;
+    value: number;
+    tradeDate: string;
+  } | null = null;
   let lowPoint: { itemIndex: number; value: number; tradeDate: string } | null =
     null;
 
@@ -2786,6 +2815,218 @@ function renderChartExtremaOverlayPoint(point: ChartExtremaOverlayPoint) {
   );
 }
 
+const DetailChartStaticSvg = memo(function DetailChartStaticSvg({
+  panelKey,
+  domain,
+  gridValues,
+  plotHeight,
+  klinePlotRight,
+  dateTickIndices,
+  items,
+  xAt,
+  annotationLines,
+  referenceVisibleIndex,
+  zeroY,
+  svgContent,
+}: {
+  panelKey: string;
+  domain: { min: number; max: number };
+  gridValues: number[];
+  plotHeight: number;
+  klinePlotRight: number;
+  dateTickIndices: number[];
+  items: DetailKlineRow[];
+  xAt: (index: number) => number;
+  annotationLines: DetailAnnotationRenderData["lines"];
+  referenceVisibleIndex: number;
+  zeroY: number | null;
+  svgContent: ReactNode;
+}) {
+  return (
+    <g className="details-chart-static-layer">
+      {gridValues.map((value) => {
+        const y =
+          CHART_MARGIN.top +
+          ((domain.max - value) / (domain.max - domain.min)) * plotHeight;
+
+        return (
+          <g key={`${panelKey}-tick-${value}`}>
+            <line
+              className="details-chart-grid-line"
+              x1={CHART_MARGIN.left}
+              y1={y}
+              x2={klinePlotRight}
+              y2={y}
+            />
+          </g>
+        );
+      })}
+
+      {dateTickIndices.map((itemIndex) => (
+        <line
+          className="details-chart-vertical-line"
+          key={`${panelKey}-guide-${items[itemIndex]?.trade_date ?? itemIndex}`}
+          x1={xAt(itemIndex)}
+          y1={CHART_MARGIN.top}
+          x2={xAt(itemIndex)}
+          y2={CHART_VIEWBOX_HEIGHT - CHART_MARGIN.bottom}
+        />
+      ))}
+
+      {renderDetailAnnotationSvgLines(
+        annotationLines,
+        CHART_MARGIN.top,
+        CHART_VIEWBOX_HEIGHT - CHART_MARGIN.bottom,
+      )}
+
+      {referenceVisibleIndex >= 0 ? (
+        <line
+          className="details-chart-reference-line"
+          x1={xAt(referenceVisibleIndex)}
+          y1={CHART_MARGIN.top}
+          x2={xAt(referenceVisibleIndex)}
+          y2={CHART_VIEWBOX_HEIGHT - CHART_MARGIN.bottom}
+        />
+      ) : null}
+
+      {zeroY !== null ? (
+        <line
+          className="details-chart-zero-line"
+          x1={CHART_MARGIN.left}
+          y1={zeroY}
+          x2={klinePlotRight}
+          y2={zeroY}
+        />
+      ) : null}
+
+      {svgContent}
+    </g>
+  );
+});
+
+const DetailChartFocusOverlay = memo(function DetailChartFocusOverlay({
+  focusXPercent,
+  cursorYPercent,
+  pinned,
+  tradeDate,
+  tooltipSections,
+}: {
+  focusXPercent: number | null;
+  cursorYPercent: number | null;
+  pinned: boolean;
+  tradeDate: string | undefined;
+  tooltipSections: TooltipSection[];
+}) {
+  const tooltipHorizontalClass =
+    (focusXPercent ?? 0) > CHART_TOOLTIP_LEFT_THRESHOLD
+      ? "details-chart-tooltip-left"
+      : "details-chart-tooltip-right";
+  return (
+    <div className="details-chart-overlay-layer" aria-hidden="true">
+      {focusXPercent !== null ? (
+        <div
+          className="details-chart-crosshair-vertical"
+          style={{ left: `${focusXPercent}%` }}
+        />
+      ) : null}
+
+      {cursorYPercent !== null ? (
+        <>
+          <div
+            className="details-chart-crosshair-horizontal"
+            style={{ top: `${cursorYPercent}%` }}
+          />
+          {tooltipSections.length > 0 ? (
+            <div
+              className={[
+                "details-chart-tooltip",
+                tooltipHorizontalClass,
+                pinned ? "details-chart-tooltip-pinned" : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
+              style={{
+                left: `${focusXPercent}%`,
+                top: `${cursorYPercent}%`,
+              }}
+            >
+              <div className="details-chart-tooltip-head">
+                <strong>{tradeDate ?? "--"}</strong>
+              </div>
+              <div className="details-chart-tooltip-body">
+                {tooltipSections.map((section) => (
+                  <div
+                    className={[
+                      "details-chart-tooltip-grid",
+                      section.variant === "ohlc"
+                        ? "details-chart-tooltip-grid-ohlc"
+                        : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
+                    key={section.key}
+                  >
+                    {section.rows.map((row) => (
+                      <div
+                        className="details-chart-tooltip-row"
+                        key={`${section.key}-${row.label}`}
+                      >
+                        <span>{row.label}</span>
+                        <strong>{row.value}</strong>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+        </>
+      ) : null}
+    </div>
+  );
+});
+
+const DetailChartPanelHeader = memo(function DetailChartPanelHeader({
+  panel,
+  headerSeries,
+  seriesKeys,
+  headerRuntimeRow,
+}: {
+  panel: DetailKlinePanel;
+  headerSeries: DetailChartSeries[];
+  seriesKeys: string[];
+  headerRuntimeRow: DetailKlineRow | null;
+}) {
+  return (
+    <header className="details-chart-panel-head">
+      <div className="details-chart-panel-head-main">
+        <strong>{panel.label}</strong>
+        {headerSeries.length > 0 ? (
+          <div className="details-chart-panel-head-series">
+            {headerSeries.map((series, seriesIndex) => (
+              <span
+                className="details-chart-panel-head-series-tag"
+                key={`${panel.key}-${series.key}`}
+                style={{ color: getSeriesColor(seriesIndex, series) }}
+              >
+                <span className="details-chart-panel-head-series-label">
+                  {formatSeriesLabel(series.key, series)}
+                </span>
+                <strong className="details-chart-panel-head-series-value">
+                  {buildSeriesRuntimeValue(headerRuntimeRow, series)}
+                </strong>
+              </span>
+            ))}
+          </div>
+        ) : (
+          <small>{seriesKeys.length > 0 ? seriesKeys.join(" / ") : "--"}</small>
+        )}
+      </div>
+      <span>{resolveChartPanelRenderKind(panel)}</span>
+    </header>
+  );
+});
+
 function DetailChartPanel({
   panel,
   items,
@@ -2807,7 +3048,6 @@ function DetailChartPanel({
   onChartDoubleClick,
   isCyqPanelVisible,
   selectedCyqSnapshot,
-  selectedCyqTradeDate,
   cyqScaleMaxChip,
   reserveCyqPanelWidthForAllPanels,
   cyqHolderView,
@@ -2858,7 +3098,6 @@ function DetailChartPanel({
   ) => void;
   isCyqPanelVisible: boolean;
   selectedCyqSnapshot: DetailCyqSnapshot | null;
-  selectedCyqTradeDate: string | null;
   cyqScaleMaxChip: number;
   reserveCyqPanelWidthForAllPanels: boolean;
   cyqHolderView: DetailCyqHolderView;
@@ -3397,10 +3636,6 @@ function DetailChartPanel({
     referenceTradeDate !== null
       ? items.findIndex((item) => item.trade_date === referenceTradeDate)
       : -1;
-  const tooltipHorizontalClass =
-    (focusXPercent ?? 0) > CHART_TOOLTIP_LEFT_THRESHOLD
-      ? "details-chart-tooltip-left"
-      : "details-chart-tooltip-right";
   const activeIntervalSelection = isInteractivePricePanel(panel)
     ? (chartIntervalDraftSelection ?? chartIntervalSelection)
     : null;
@@ -3441,10 +3676,13 @@ function DetailChartPanel({
     chartIntervalPanelOpen &&
     intervalStatsSections.length > 0
   );
-  const tooltipSections =
-    showDefaultTooltip && isActivePanel && activeVisibleIndex !== null
-      ? buildDetailTooltipRows(panel, items[activeVisibleIndex] ?? null)
-      : [];
+  const tooltipSections = useMemo(
+    () =>
+      showDefaultTooltip && isActivePanel && activeVisibleIndex !== null
+        ? buildDetailTooltipRows(panel, items[activeVisibleIndex] ?? null)
+        : [],
+    [showDefaultTooltip, isActivePanel, activeVisibleIndex, panel, items],
+  );
   const headerRuntimeRow =
     isActivePanel && activeVisibleIndex !== null
       ? (items[activeVisibleIndex] ?? null)
@@ -3491,9 +3729,8 @@ function DetailChartPanel({
 
         if (visibleCyqBins.length > 0 && maxChip > 0) {
           cyqSvgContent = (
-            <g
-              key={`${panel.key}-cyq-${selectedCyqTradeDate ?? selectedCyqSnapshot.trade_date}`}
-            >
+            // Bins are stateless drawing slots; reuse them when the selected date changes.
+            <g key={`${panel.key}-cyq`}>
               <line
                 className="details-chart-cyq-divider"
                 x1={chipPanelLeft}
@@ -3553,7 +3790,7 @@ function DetailChartPanel({
                   const titleText = `混合 ${formatCyqRatio(chipPct)}；主力 ${formatCyqRatio(mainRatio)}，散户 ${formatCyqRatio(retailRatio)}`;
 
                   return (
-                    <g key={`${selectedCyqSnapshot.trade_date}-${binIndex}`}>
+                    <g key={binIndex}>
                       <title>{titleText}</title>
                       {retailWidth > 0 ? (
                         <rect
@@ -3601,7 +3838,7 @@ function DetailChartPanel({
                         ? "details-chart-cyq-bar cyq-chen-chip-peak-bar"
                         : "details-chart-cyq-bar"
                     }
-                    key={`${selectedCyqSnapshot.trade_date}-${binIndex}`}
+                    key={binIndex}
                     x={chipPanelRight - safeBarWidth}
                     y={yTop}
                     width={safeBarWidth}
@@ -3627,7 +3864,6 @@ function DetailChartPanel({
     domain,
     showCyqPanel,
     selectedCyqSnapshot,
-    selectedCyqTradeDate,
     items,
     activeVisibleIndex,
     cyqScaleMaxChip,
@@ -3639,34 +3875,12 @@ function DetailChartPanel({
   ]);
   return (
     <section className="details-chart-panel" key={panel.key}>
-      <header className="details-chart-panel-head">
-        <div className="details-chart-panel-head-main">
-          <strong>{panel.label}</strong>
-          {headerSeries.length > 0 ? (
-            <div className="details-chart-panel-head-series">
-              {headerSeries.map((series, seriesIndex) => (
-                <span
-                  className="details-chart-panel-head-series-tag"
-                  key={`${panel.key}-${series.key}`}
-                  style={{ color: getSeriesColor(seriesIndex, series) }}
-                >
-                  <span className="details-chart-panel-head-series-label">
-                    {formatSeriesLabel(series.key, series)}
-                  </span>
-                  <strong className="details-chart-panel-head-series-value">
-                    {buildSeriesRuntimeValue(headerRuntimeRow, series)}
-                  </strong>
-                </span>
-              ))}
-            </div>
-          ) : (
-            <small>
-              {seriesKeys.length > 0 ? seriesKeys.join(" / ") : "--"}
-            </small>
-          )}
-        </div>
-        <span>{resolveChartPanelRenderKind(panel)}</span>
-      </header>
+      <DetailChartPanelHeader
+        panel={panel}
+        headerSeries={headerSeries}
+        seriesKeys={seriesKeys}
+        headerRuntimeRow={headerRuntimeRow}
+      />
 
       <div
         className="details-chart-viewport"
@@ -3694,62 +3908,20 @@ function DetailChartPanel({
             viewBox={`0 0 ${CHART_VIEWBOX_WIDTH} ${CHART_VIEWBOX_HEIGHT}`}
             preserveAspectRatio="none"
           >
-            {gridValues.map((value) => {
-              const y =
-                CHART_MARGIN.top +
-                ((domain.max - value) / (domain.max - domain.min)) * plotHeight;
-
-              return (
-                <g key={`${panel.key}-tick-${value}`}>
-                  <line
-                    className="details-chart-grid-line"
-                    x1={CHART_MARGIN.left}
-                    y1={y}
-                    x2={klinePlotRight}
-                    y2={y}
-                  />
-                </g>
-              );
-            })}
-
-            {dateTickIndices.map((itemIndex) => (
-              <line
-                className="details-chart-vertical-line"
-                key={`${panel.key}-guide-${items[itemIndex]?.trade_date ?? itemIndex}`}
-                x1={xAt(itemIndex)}
-                y1={CHART_MARGIN.top}
-                x2={xAt(itemIndex)}
-                y2={CHART_VIEWBOX_HEIGHT - CHART_MARGIN.bottom}
-              />
-            ))}
-
-            {renderDetailAnnotationSvgLines(
-              annotationRenderData.lines,
-              CHART_MARGIN.top,
-              CHART_VIEWBOX_HEIGHT - CHART_MARGIN.bottom,
-            )}
-
-            {referenceVisibleIndex >= 0 ? (
-              <line
-                className="details-chart-reference-line"
-                x1={xAt(referenceVisibleIndex)}
-                y1={CHART_MARGIN.top}
-                x2={xAt(referenceVisibleIndex)}
-                y2={CHART_VIEWBOX_HEIGHT - CHART_MARGIN.bottom}
-              />
-            ) : null}
-
-            {zeroY !== null ? (
-              <line
-                className="details-chart-zero-line"
-                x1={CHART_MARGIN.left}
-                y1={zeroY}
-                x2={klinePlotRight}
-                y2={zeroY}
-              />
-            ) : null}
-
-            {svgContent}
+            <DetailChartStaticSvg
+              panelKey={panel.key}
+              domain={domain}
+              gridValues={gridValues}
+              plotHeight={plotHeight}
+              klinePlotRight={klinePlotRight}
+              dateTickIndices={dateTickIndices}
+              items={items}
+              xAt={xAt}
+              annotationLines={annotationRenderData.lines}
+              referenceVisibleIndex={referenceVisibleIndex}
+              zeroY={zeroY}
+              svgContent={svgContent}
+            />
             {cyqSvgContent}
           </svg>
         ) : (
@@ -3789,69 +3961,16 @@ function DetailChartPanel({
               }}
             />
           ) : null}
-
-          {focusXPercent !== null ? (
-            <div
-              className="details-chart-crosshair-vertical"
-              style={{ left: `${focusXPercent}%` }}
-            />
-          ) : null}
-
-          {isActivePanel && chartFocus ? (
-            <>
-              <div
-                className="details-chart-crosshair-horizontal"
-                style={{ top: `${chartFocus.cursorYPercent}%` }}
-              />
-              {tooltipSections.length > 0 ? (
-                <div
-                  className={[
-                    "details-chart-tooltip",
-                    tooltipHorizontalClass,
-                    chartFocus.pinned ? "details-chart-tooltip-pinned" : "",
-                  ]
-                    .filter(Boolean)
-                    .join(" ")}
-                  style={{
-                    left: `${focusXPercent ?? chartFocus.cursorXPercent}%`,
-                    top: `${chartFocus.cursorYPercent}%`,
-                  }}
-                >
-                  <div className="details-chart-tooltip-head">
-                    <strong>
-                      {items[activeVisibleIndex ?? 0]?.trade_date ?? "--"}
-                    </strong>
-                  </div>
-                  <div className="details-chart-tooltip-body">
-                    {tooltipSections.map((section) => (
-                      <div
-                        className={[
-                          "details-chart-tooltip-grid",
-                          section.variant === "ohlc"
-                            ? "details-chart-tooltip-grid-ohlc"
-                            : "",
-                        ]
-                          .filter(Boolean)
-                          .join(" ")}
-                        key={section.key}
-                      >
-                        {section.rows.map((row) => (
-                          <div
-                            className="details-chart-tooltip-row"
-                            key={`${section.key}-${row.label}`}
-                          >
-                            <span>{row.label}</span>
-                            <strong>{row.value}</strong>
-                          </div>
-                        ))}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ) : null}
-            </>
-          ) : null}
         </div>
+        <DetailChartFocusOverlay
+          focusXPercent={focusXPercent}
+          cursorYPercent={
+            isActivePanel && chartFocus ? chartFocus.cursorYPercent : null
+          }
+          pinned={isActivePanel && chartFocus ? chartFocus.pinned : false}
+          tradeDate={items[activeVisibleIndex ?? 0]?.trade_date}
+          tooltipSections={tooltipSections}
+        />
 
         {isMainPanel &&
         isInteractivePricePanel(panel) &&
@@ -4193,7 +4312,9 @@ function SceneOverviewTableSection({
         contribution_pct: {
           value: (item: SceneOverviewItem) => item.contributionPctDisplay,
         },
-      }) satisfies Partial<Record<SceneOverviewSortKey, SortDefinition<SceneOverviewItem>>>,
+      }) satisfies Partial<
+        Record<SceneOverviewSortKey, SortDefinition<SceneOverviewItem>>
+      >,
     [],
   );
   const { sortKey, sortDirection, sortedRows, toggleSort } = useTableSort<
@@ -4221,7 +4342,9 @@ function SceneOverviewTableSection({
         </colgroup>
         <thead>
           <tr>
-            <th aria-sort={getAriaSort(sortKey === "scene_name", sortDirection)}>
+            <th
+              aria-sort={getAriaSort(sortKey === "scene_name", sortDirection)}
+            >
               <TableSortButton
                 label="场景"
                 isActive={sortKey === "scene_name"}
@@ -4231,7 +4354,9 @@ function SceneOverviewTableSection({
               />
             </th>
             <th>状态</th>
-            <th aria-sort={getAriaSort(sortKey === "scene_rank", sortDirection)}>
+            <th
+              aria-sort={getAriaSort(sortKey === "scene_rank", sortDirection)}
+            >
               <TableSortButton
                 label="全市场截面排名"
                 isActive={sortKey === "scene_rank"}
@@ -4240,7 +4365,9 @@ function SceneOverviewTableSection({
                 title="按全市场截面排名排序"
               />
             </th>
-            <th aria-sort={getAriaSort(sortKey === "stage_score", sortDirection)}>
+            <th
+              aria-sort={getAriaSort(sortKey === "stage_score", sortDirection)}
+            >
               <TableSortButton
                 label="阶段分"
                 isActive={sortKey === "stage_score"}
@@ -4249,7 +4376,9 @@ function SceneOverviewTableSection({
                 title="按阶段分排序"
               />
             </th>
-            <th aria-sort={getAriaSort(sortKey === "risk_score", sortDirection)}>
+            <th
+              aria-sort={getAriaSort(sortKey === "risk_score", sortDirection)}
+            >
               <TableSortButton
                 label="风险分"
                 isActive={sortKey === "risk_score"}
@@ -4276,7 +4405,12 @@ function SceneOverviewTableSection({
                 title="按距今排序"
               />
             </th>
-            <th aria-sort={getAriaSort(sortKey === "scene_rule_score", sortDirection)}>
+            <th
+              aria-sort={getAriaSort(
+                sortKey === "scene_rule_score",
+                sortDirection,
+              )}
+            >
               <TableSortButton
                 label="scene得分"
                 isActive={sortKey === "scene_rule_score"}
@@ -4285,7 +4419,12 @@ function SceneOverviewTableSection({
                 title="按 scene 得分排序"
               />
             </th>
-            <th aria-sort={getAriaSort(sortKey === "contribution_pct", sortDirection)}>
+            <th
+              aria-sort={getAriaSort(
+                sortKey === "contribution_pct",
+                sortDirection,
+              )}
+            >
               <TableSortButton
                 label="scene贡献占比"
                 isActive={sortKey === "contribution_pct"}
@@ -4551,6 +4690,1974 @@ function SimilaritySection({
   );
 }
 
+type DetailChartHandle = {
+  resetInterval: (selecting: boolean) => void;
+};
+
+function DetailChart({
+  ref,
+  kline,
+  sourcePathTrimmed,
+  resolvedTsCode,
+  resolvedTradeDate,
+  quoteTradeDate,
+  overviewName,
+  watermarkConcept,
+  detailLoading,
+  detailIndicatorsLoading,
+  detailIndicatorsNotice,
+  pendingIntervalRestore,
+  setPendingIntervalRestore,
+  setActiveIntervalContext,
+  chartCardRef,
+  pendingPageScrollRef,
+  watchActions,
+  watchNotes,
+}: {
+  ref: Ref<DetailChartHandle>;
+  kline: DetailKlinePayload | null | undefined;
+  sourcePathTrimmed: string;
+  resolvedTsCode: string;
+  resolvedTradeDate: string;
+  quoteTradeDate: string | null | undefined;
+  overviewName: string | undefined;
+  watermarkConcept: string;
+  detailLoading: boolean;
+  detailIndicatorsLoading: boolean;
+  detailIndicatorsNotice: string;
+  pendingIntervalRestore: IntervalRestoreRequest | null;
+  setPendingIntervalRestore: Dispatch<
+    SetStateAction<IntervalRestoreRequest | null>
+  >;
+  setActiveIntervalContext: Dispatch<
+    SetStateAction<IntervalRestoreRequest | null>
+  >;
+  chartCardRef: RefObject<HTMLElement | null>;
+  pendingPageScrollRef: RefObject<ScrollSnapshot | null>;
+  watchActions: ReactNode;
+  watchNotes: ReactNode;
+}) {
+  const [defaultVisibleBars] = useState(() =>
+    readStoredChartDefaultVisibleBars(),
+  );
+  const [visibleBarCount, setVisibleBarCount] = useState(defaultVisibleBars);
+  const [visibleStartIndex, setVisibleStartIndex] = useState(0);
+  const [chartFocus, setChartFocusImmediate] = useState<ChartFocus | null>(
+    null,
+  );
+  const chartFocusRef = useRef<ChartFocus | null>(null);
+  const setChartFocus = useCallback((focus: ChartFocus | null) => {
+    chartFocusRef.current = focus;
+    setChartFocusImmediate((current) => {
+      if (!current || !focus) return current === focus ? current : focus;
+      return current.absoluteIndex === focus.absoluteIndex &&
+        current.panelKey === focus.panelKey &&
+        current.cursorXPercent === focus.cursorXPercent &&
+        current.cursorYPercent === focus.cursorYPercent &&
+        current.pinned === focus.pinned
+        ? current
+        : focus;
+    });
+  }, []);
+
+  const [detailCyqWindows, setDetailCyqWindows] = useState<
+    StockDetailCyqData[]
+  >([]);
+  const [detailCyqModel, setDetailCyqModel] = useState<DetailCyqModel>(() =>
+    readStoredDetailCyqModel(),
+  );
+  const [detailCyqHolderView, setDetailCyqHolderView] =
+    useState<DetailCyqHolderView>("mixed");
+  const [detailCyqVisible, setDetailCyqVisible] = useState(false);
+  const [detailCyqLoading, setDetailCyqLoading] = useState(false);
+  const [detailCyqError, setDetailCyqError] = useState("");
+
+  const [chartLayoutWidth, setChartLayoutWidth] = useState(() =>
+    typeof window === "undefined" ? CHART_VIEWBOX_WIDTH : window.innerWidth,
+  );
+  const [chartMainWidthRatio, setChartMainWidthRatio] = useState(() =>
+    readStoredChartMainWidthRatio(),
+  );
+  const [chartMainHeightMode, setChartMainHeightMode] =
+    useState<ChartMainHeightMode>(() => readStoredChartMainHeightMode());
+  const [chartMainPercentPixels, setChartMainPercentPixels] = useState(() =>
+    readStoredChartMainPercentPixels(),
+  );
+  const [chartMainPercentMinHeight, setChartMainPercentMinHeight] = useState(
+    () => readStoredChartMainPercentMinHeight(),
+  );
+  const [chartMainPercentMaxHeight, setChartMainPercentMaxHeight] = useState(
+    () => readStoredChartMainPercentMaxHeight(),
+  );
+  const [chartIndicatorWidthRatio, setChartIndicatorWidthRatio] = useState(() =>
+    readStoredChartIndicatorWidthRatio(),
+  );
+
+  const [chartIntervalNotice, setChartIntervalNotice] = useState("");
+  const [chartIntervalMode, setChartIntervalMode] = useState(false);
+  const [chartIntervalSelection, setChartIntervalSelection] =
+    useState<ResolvedIntervalRestore | null>(null);
+  const [chartIntervalDraftSelection, setChartIntervalDraftSelection] =
+    useState<ResolvedIntervalRestore | null>(null);
+  const [chartIntervalPanelOpen, setChartIntervalPanelOpen] = useState(false);
+  const chartDragRef = useRef<ChartDragState | null>(null);
+  const chartPointerFrameRef = useRef<number | null>(null);
+  const pendingChartPointerRef = useRef<{
+    panelKey: string;
+    event: ChartPointerInput;
+  } | null>(null);
+  const cancelChartPointerMove = useCallback(() => {
+    if (chartPointerFrameRef.current !== null) {
+      window.cancelAnimationFrame(chartPointerFrameRef.current);
+      chartPointerFrameRef.current = null;
+    }
+    pendingChartPointerRef.current = null;
+  }, []);
+  useEffect(() => cancelChartPointerMove, [cancelChartPointerMove]);
+  const chartTouchPointersRef = useRef<Map<number, ChartTouchPointer>>(
+    new Map(),
+  );
+  const chartPinchRef = useRef<ChartPinchState | null>(null);
+
+  const detailCyqRequestKeyRef = useRef("");
+  const detailCyqRequestIdRef = useRef(0);
+  const detailCyqFailedRequestKeyRef = useRef("");
+
+  useEffect(() => {
+    function refreshDetailCyqModel() {
+      setDetailCyqModel(readStoredDetailCyqModel());
+    }
+
+    window.addEventListener("focus", refreshDetailCyqModel);
+    window.addEventListener("storage", refreshDetailCyqModel);
+    return () => {
+      window.removeEventListener("focus", refreshDetailCyqModel);
+      window.removeEventListener("storage", refreshDetailCyqModel);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (detailCyqModel === "legacy") {
+      setDetailCyqHolderView("mixed");
+    }
+  }, [detailCyqModel]);
+
+  const loadDetailCyq = useCallback(
+    async (
+      nextSourcePath: string,
+      nextTsCode: string,
+      nextModel: DetailCyqModel,
+      nextTradeDate: string,
+    ) => {
+      const normalizedSourcePath = nextSourcePath.trim();
+      const normalizedTsCode = nextTsCode.trim();
+      if (normalizedSourcePath === "" || normalizedTsCode === "") {
+        setDetailCyqWindows([]);
+        setDetailCyqError("");
+        return null;
+      }
+
+      const requestKey = `${normalizedSourcePath}|${normalizedTsCode}|${nextModel}|${nextTradeDate}`;
+      if (
+        detailCyqRequestKeyRef.current !== "" ||
+        detailCyqFailedRequestKeyRef.current === requestKey
+      ) {
+        return null;
+      }
+
+      const requestId = ++detailCyqRequestIdRef.current;
+      detailCyqRequestKeyRef.current = requestKey;
+      setDetailCyqLoading(true);
+      setDetailCyqError("");
+      detailCyqFailedRequestKeyRef.current = "";
+
+      try {
+        const cyq = await getStockDetailCyq({
+          sourcePath: normalizedSourcePath,
+          tsCode: normalizedTsCode,
+          chipModel: nextModel,
+          tradeDate: nextTradeDate,
+        });
+        if (detailCyqRequestIdRef.current !== requestId) {
+          return null;
+        }
+        // Keep at most three batch windows; cursor movement does not cancel a running query.
+        setDetailCyqWindows((current) => [cyq, ...current].slice(0, 3));
+        return cyq;
+      } catch (error) {
+        if (detailCyqRequestIdRef.current === requestId) {
+          detailCyqFailedRequestKeyRef.current = requestKey;
+          setDetailCyqError(`读取筹码分布失败: ${String(error)}`);
+        }
+        return null;
+      } finally {
+        if (detailCyqRequestIdRef.current === requestId) {
+          detailCyqRequestKeyRef.current = "";
+          setDetailCyqLoading(false);
+        }
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    detailCyqRequestIdRef.current += 1;
+    detailCyqRequestKeyRef.current = "";
+    detailCyqFailedRequestKeyRef.current = "";
+    setDetailCyqWindows([]);
+    setDetailCyqError("");
+    setDetailCyqLoading(false);
+  }, [detailCyqModel, resolvedTsCode, sourcePathTrimmed]);
+
+  const allChartItems = kline?.items ?? EMPTY_KLINE_ROWS;
+  const selectedCyqTradeDate =
+    chartFocus &&
+    chartFocus.absoluteIndex >= 0 &&
+    chartFocus.absoluteIndex < allChartItems.length
+      ? (allChartItems[chartFocus.absoluteIndex]?.trade_date ?? null)
+      : (allChartItems[allChartItems.length - 1]?.trade_date ??
+        (resolvedTradeDate !== "--" ? resolvedTradeDate : null));
+  const detailCyqData = useMemo(() => {
+    const windows = detailCyqWindows.filter(
+      (data) =>
+        data.resolved_ts_code === resolvedTsCode &&
+        data.model === detailCyqModel,
+    );
+    return (
+      windows.find(
+        (data) =>
+          selectedCyqTradeDate &&
+          isCyqWindowCovered(data, selectedCyqTradeDate),
+      ) ??
+      windows[0] ??
+      null
+    );
+  }, [detailCyqWindows, resolvedTsCode, detailCyqModel, selectedCyqTradeDate]);
+  const detailCyqSnapshots =
+    detailCyqData?.resolved_ts_code === resolvedTsCode &&
+    detailCyqData.model === detailCyqModel
+      ? detailCyqData.snapshots
+      : EMPTY_CYQ_SNAPSHOTS;
+  const totalChartItems = allChartItems.length;
+  const minVisibleBars =
+    totalChartItems === 0 ? 0 : Math.min(MIN_VISIBLE_BARS, totalChartItems);
+  const effectiveVisibleBarCount =
+    totalChartItems === 0
+      ? 0
+      : clampNumber(visibleBarCount, minVisibleBars, totalChartItems);
+  const maxVisibleStart = Math.max(
+    totalChartItems - effectiveVisibleBarCount,
+    0,
+  );
+  const effectiveVisibleStart = clampNumber(
+    visibleStartIndex,
+    0,
+    maxVisibleStart,
+  );
+  const chartItems = useMemo(
+    () =>
+      allChartItems.slice(
+        effectiveVisibleStart,
+        effectiveVisibleStart + effectiveVisibleBarCount,
+      ),
+    [allChartItems, effectiveVisibleStart, effectiveVisibleBarCount],
+  );
+  useEffect(() => {
+    if (
+      !detailCyqVisible ||
+      !selectedCyqTradeDate ||
+      resolvedTsCode === "--" ||
+      !sourcePathTrimmed
+    ) {
+      return;
+    }
+    if (
+      detailCyqData?.resolved_ts_code === resolvedTsCode &&
+      detailCyqData.model === detailCyqModel &&
+      isCyqWindowCovered(detailCyqData, selectedCyqTradeDate)
+    ) {
+      return;
+    }
+    if (detailCyqLoading) return;
+    // Debounce before starting, then let the single in-flight batch finish and cache it.
+    const timer = window.setTimeout(() => {
+      void loadDetailCyq(
+        sourcePathTrimmed,
+        resolvedTsCode,
+        detailCyqModel,
+        selectedCyqTradeDate,
+      );
+    }, 120);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [
+    detailCyqData,
+    detailCyqLoading,
+    detailCyqSnapshots,
+    detailCyqVisible,
+    detailCyqModel,
+    loadDetailCyq,
+    resolvedTsCode,
+    selectedCyqTradeDate,
+    sourcePathTrimmed,
+  ]);
+  const selectedCyqSnapshot = useMemo(() => {
+    const index = findCyqSnapshotIndexForTradeDate(
+      detailCyqSnapshots,
+      selectedCyqTradeDate,
+    );
+    if (
+      (detailCyqData?.has_earlier_snapshots &&
+        index < DETAIL_CYQ_SCALE_WINDOW_DAYS - 1) ||
+      (detailCyqData?.has_later_snapshots &&
+        selectedCyqTradeDate &&
+        selectedCyqTradeDate >
+          detailCyqSnapshots[detailCyqSnapshots.length - 1]?.trade_date)
+    ) {
+      return null;
+    }
+    return findCyqSnapshotForTradeDate(
+      detailCyqSnapshots,
+      selectedCyqTradeDate,
+    );
+  }, [
+    detailCyqData?.has_earlier_snapshots,
+    detailCyqData?.has_later_snapshots,
+    detailCyqSnapshots,
+    selectedCyqTradeDate,
+  ]);
+  const cyqScaleMaxChips = useMemo(() => {
+    const mixedMaxima = detailCyqSnapshots.map((snapshot) =>
+      getCyqSnapshotMaxChip(snapshot, "mixed"),
+    );
+    const holderMaxima =
+      detailCyqHolderView === "mixed"
+        ? mixedMaxima
+        : detailCyqSnapshots.map((snapshot) =>
+            getCyqSnapshotMaxChip(snapshot, detailCyqHolderView),
+          );
+    return mixedMaxima.map((_, index) => {
+      const start = Math.max(0, index - DETAIL_CYQ_SCALE_WINDOW_DAYS + 1);
+      const mixedMax = Math.max(...mixedMaxima.slice(start, index + 1));
+      return mixedMax > 0
+        ? mixedMax
+        : Math.max(...holderMaxima.slice(start, index + 1));
+    });
+  }, [detailCyqHolderView, detailCyqSnapshots]);
+  const cyqScaleMaxChip =
+    cyqScaleMaxChips[
+      findCyqSnapshotIndexForTradeDate(detailCyqSnapshots, selectedCyqTradeDate)
+    ] ?? 0;
+  const chartLayoutSlotCount = getChartLayoutSlotCount(
+    chartItems.length,
+    totalChartItems,
+  );
+  const panels = useMemo(
+    () => (kline?.panels?.length ? kline.panels : buildDefaultPanels()),
+    [kline?.panels],
+  );
+  const annotationProviderContext = useMemo(
+    () => ({
+      sourcePath: sourcePathTrimmed,
+      tsCode: resolvedTsCode !== "--" ? resolvedTsCode : undefined,
+      startTradeDate: allChartItems[0]?.trade_date,
+      endTradeDate: allChartItems[allChartItems.length - 1]?.trade_date,
+      indicator: {
+        panels,
+        rows: allChartItems,
+      },
+    }),
+    [allChartItems, panels, resolvedTsCode, sourcePathTrimmed],
+  );
+  const { layers: annotationLayers } = useDetailAnnotationProviders(
+    DETAIL_ANNOTATION_PROVIDERS,
+    annotationProviderContext,
+  );
+  const {
+    shouldReserveCyqPanelWidth,
+    shouldUseCyqSummaryIndicatorSlot,
+    chartShellHeight,
+    chartTemplateRows,
+    cyqSummaryOverlayStyle,
+  } = useMemo(() => {
+    const indicatorPanelCount = panels.filter(
+      (panel) => !isMainChartPanel(panel),
+    ).length;
+    const shouldReserveCyqPanelWidth =
+      detailCyqVisible &&
+      panels.some((panel) => isInteractivePricePanel(panel));
+    const shouldUseCyqSummaryIndicatorSlot =
+      shouldReserveCyqPanelWidth && indicatorPanelCount === 0;
+    const fixedChartMainPanelHeight = chartLayoutWidth * chartMainWidthRatio;
+    const mainChartPanel =
+      panels.find((panel) => isMainChartPanel(panel)) ?? panels[0] ?? null;
+    const chartMainPanelHeight =
+      chartMainHeightMode === "percent"
+        ? buildPercentScaledMainPanelHeight(
+            mainChartPanel,
+            chartItems,
+            chartMainPercentPixels,
+            chartMainPercentMinHeight,
+            chartMainPercentMaxHeight,
+            fixedChartMainPanelHeight,
+          )
+        : fixedChartMainPanelHeight;
+    const chartIndicatorPanelBaseHeight =
+      (chartLayoutWidth * chartIndicatorWidthRatio) /
+      DEFAULT_INDICATOR_PANEL_COUNT;
+    const chartPanelHeights = buildChartPanelHeights(
+      kline,
+      panels,
+      chartMainPanelHeight,
+      chartIndicatorPanelBaseHeight,
+    );
+    const cyqSummaryIndicatorSlotHeight = shouldUseCyqSummaryIndicatorSlot
+      ? chartIndicatorPanelBaseHeight
+      : 0;
+    const chartPanelGapTotal =
+      Math.max(
+        0,
+        panels.length - 1 + (shouldUseCyqSummaryIndicatorSlot ? 1 : 0),
+      ) * CHART_PANEL_GAP_PX;
+    const chartShellHeight =
+      chartPanelHeights.reduce((sum, panelHeight) => sum + panelHeight, 0) +
+      cyqSummaryIndicatorSlotHeight +
+      chartPanelGapTotal;
+    const chartTemplateRows = [
+      buildChartTemplateRows(
+        kline,
+        panels,
+        chartMainPanelHeight,
+        chartIndicatorPanelBaseHeight,
+      ),
+      shouldUseCyqSummaryIndicatorSlot
+        ? `${cyqSummaryIndicatorSlotHeight.toFixed(2)}px`
+        : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+    const cyqSummaryPlotWidth =
+      CHART_VIEWBOX_WIDTH - CHART_MARGIN.left - CHART_MARGIN.right;
+    const cyqSummaryPanelWidth =
+      cyqSummaryPlotWidth * CHART_CYQ_PANEL_WIDTH_RATIO;
+    const cyqSummaryPanelLeft =
+      CHART_VIEWBOX_WIDTH - CHART_MARGIN.right - cyqSummaryPanelWidth;
+    const cyqSummaryOverlayStyle = {
+      "--details-cyq-summary-top": `${chartMainPanelHeight + CHART_PANEL_GAP_PX}px`,
+      "--details-cyq-summary-left": shouldUseCyqSummaryIndicatorSlot
+        ? "0px"
+        : `${(cyqSummaryPanelLeft / CHART_VIEWBOX_WIDTH) * 100}%`,
+      "--details-cyq-summary-right": shouldUseCyqSummaryIndicatorSlot
+        ? "0px"
+        : `${(CHART_MARGIN.right / CHART_VIEWBOX_WIDTH) * 100}%`,
+      "--details-cyq-summary-height": `${cyqSummaryIndicatorSlotHeight.toFixed(2)}px`,
+    } as CSSProperties;
+    return {
+      shouldReserveCyqPanelWidth,
+      shouldUseCyqSummaryIndicatorSlot,
+      chartShellHeight,
+      chartTemplateRows,
+      cyqSummaryOverlayStyle,
+    };
+  }, [
+    panels,
+    kline,
+    chartItems,
+    detailCyqVisible,
+    chartLayoutWidth,
+    chartMainWidthRatio,
+    chartMainHeightMode,
+    chartMainPercentPixels,
+    chartMainPercentMinHeight,
+    chartMainPercentMaxHeight,
+    chartIndicatorWidthRatio,
+  ]);
+  const shouldShowCyqSummary =
+    detailCyqVisible &&
+    shouldReserveCyqPanelWidth &&
+    selectedCyqSnapshot !== null;
+  const watermarkName = kline?.watermark_name ?? overviewName ?? "个股详情";
+  const watermarkCode = kline?.watermark_code ?? splitTsCode(resolvedTsCode);
+
+  const chartAnchorTradeDate = quoteTradeDate?.trim() || resolvedTradeDate;
+
+  const chartRangeText =
+    chartItems.length > 0
+      ? `${chartItems[0].trade_date} -> ${chartItems[chartItems.length - 1].trade_date}`
+      : "--";
+  const cyqToggleTitle = detailCyqLoading
+    ? "筹码分布加载中..."
+    : detailCyqError
+      ? detailCyqError
+      : detailCyqVisible
+        ? `隐藏${detailCyqModel === "chen" ? "新" : "旧"}筹码分布${selectedCyqTradeDate ? `（${selectedCyqTradeDate}）` : ""}`
+        : `显示${detailCyqModel === "chen" ? "新" : "旧"}筹码分布`;
+
+  const intervalStatsSections = useMemo(
+    () => buildIntervalStatsSections(allChartItems, chartIntervalSelection),
+    [allChartItems, chartIntervalSelection],
+  );
+  const chartIntervalSelecting =
+    chartIntervalMode && chartIntervalSelection === null;
+  const chartIntervalButtonLabel = chartIntervalSelection
+    ? "关闭区间"
+    : chartIntervalSelecting
+      ? "选择区间中..."
+      : "区间统计";
+
+  const closeChartIntervalPanel = useCallback(() => {
+    setChartIntervalMode(false);
+    setChartIntervalSelection(null);
+    setChartIntervalDraftSelection(null);
+    setChartIntervalPanelOpen(false);
+    setActiveIntervalContext(null);
+    setPendingIntervalRestore(null);
+    setChartIntervalNotice("");
+  }, [setActiveIntervalContext, setPendingIntervalRestore]);
+
+  const openChartIntervalMode = useCallback(() => {
+    if (totalChartItems === 0) {
+      return;
+    }
+
+    setChartIntervalMode(true);
+    setChartFocus(null);
+    setChartIntervalDraftSelection(null);
+    setChartIntervalNotice("");
+    if (chartIntervalSelection) {
+      setChartIntervalPanelOpen(true);
+      return;
+    }
+
+    setChartIntervalPanelOpen(false);
+    setChartIntervalNotice("请在主K图上拖拽选择区间");
+  }, [chartIntervalSelection, totalChartItems, setChartFocus]);
+
+  const toggleChartIntervalMode = useCallback(() => {
+    if (
+      chartIntervalMode ||
+      chartIntervalSelection ||
+      chartIntervalDraftSelection
+    ) {
+      closeChartIntervalPanel();
+      return;
+    }
+
+    setChartIntervalMode(true);
+    setChartFocus(null);
+    setChartIntervalPanelOpen(false);
+    setChartIntervalNotice("请在主K图上拖拽选择区间");
+  }, [
+    chartIntervalDraftSelection,
+    chartIntervalMode,
+    chartIntervalSelection,
+    closeChartIntervalPanel,
+    setChartFocus,
+  ]);
+
+  useEffect(() => {
+    if (pendingIntervalRestore && detailLoading) {
+      return;
+    }
+
+    cancelChartPointerMove();
+    if (totalChartItems === 0) {
+      chartDragRef.current = null;
+      setVisibleBarCount(defaultVisibleBars);
+      setVisibleStartIndex(0);
+      setChartFocus(null);
+      setChartIntervalSelection(null);
+      setChartIntervalDraftSelection(null);
+      setChartIntervalPanelOpen(false);
+      if (pendingIntervalRestore) {
+        setChartIntervalNotice("区间超出当前图表窗口，已回退为单参考日。");
+        setActiveIntervalContext(null);
+        setChartIntervalMode(false);
+        setPendingIntervalRestore(null);
+      }
+      return;
+    }
+
+    const nextVisibleBarCount = clampNumber(
+      defaultVisibleBars,
+      Math.min(MIN_VISIBLE_BARS, totalChartItems),
+      totalChartItems,
+    );
+    const referenceIndex = allChartItems.findIndex(
+      (item) => item.trade_date === chartAnchorTradeDate,
+    );
+    const nextVisibleStart =
+      referenceIndex >= 0
+        ? clampNumber(
+            referenceIndex - Math.floor(nextVisibleBarCount / 2),
+            0,
+            totalChartItems - nextVisibleBarCount,
+          )
+        : Math.max(totalChartItems - nextVisibleBarCount, 0);
+
+    if (pendingIntervalRestore) {
+      const resolvedIntervalRestore = resolveIntervalRestore(
+        allChartItems,
+        pendingIntervalRestore,
+      );
+      if (resolvedIntervalRestore) {
+        const intervalBarCount =
+          resolvedIntervalRestore.endAbsoluteIndex -
+          resolvedIntervalRestore.startAbsoluteIndex +
+          1;
+        const restoredVisibleBarCount = clampNumber(
+          Math.max(defaultVisibleBars, intervalBarCount + 20),
+          Math.min(MIN_VISIBLE_BARS, totalChartItems),
+          totalChartItems,
+        );
+        const intervalMidpoint = Math.floor(
+          (resolvedIntervalRestore.startAbsoluteIndex +
+            resolvedIntervalRestore.endAbsoluteIndex) /
+            2,
+        );
+        const restoredVisibleStart = clampNumber(
+          intervalMidpoint - Math.floor(restoredVisibleBarCount / 2),
+          0,
+          totalChartItems - restoredVisibleBarCount,
+        );
+
+        chartDragRef.current = null;
+        setVisibleBarCount(restoredVisibleBarCount);
+        setVisibleStartIndex(restoredVisibleStart);
+        setChartFocus(null);
+        setActiveIntervalContext({
+          startTradeDate: resolvedIntervalRestore.startTradeDate,
+          endTradeDate: resolvedIntervalRestore.endTradeDate,
+        });
+        setChartIntervalMode(true);
+        setChartIntervalSelection(resolvedIntervalRestore);
+        setChartIntervalDraftSelection(null);
+        setChartIntervalPanelOpen(true);
+        setChartIntervalNotice(
+          buildIntervalRestoreNotice(
+            pendingIntervalRestore,
+            resolvedIntervalRestore,
+          ),
+        );
+        setPendingIntervalRestore(null);
+        return;
+      }
+
+      setChartIntervalNotice("区间超出当前图表窗口，已回退为单参考日。");
+      setActiveIntervalContext(null);
+      setChartIntervalMode(false);
+      setChartIntervalSelection(null);
+      setChartIntervalDraftSelection(null);
+      setChartIntervalPanelOpen(false);
+      setPendingIntervalRestore(null);
+    }
+
+    chartDragRef.current = null;
+    setVisibleBarCount(nextVisibleBarCount);
+    setVisibleStartIndex(nextVisibleStart);
+    setChartFocus(null);
+  }, [
+    cancelChartPointerMove,
+    setChartFocus,
+    allChartItems,
+    resolvedTradeDate,
+    resolvedTsCode,
+    detailLoading,
+    quoteTradeDate,
+    pendingIntervalRestore,
+    setPendingIntervalRestore,
+    setActiveIntervalContext,
+    chartAnchorTradeDate,
+    defaultVisibleBars,
+    totalChartItems,
+  ]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const updateChartLayoutWidth = () => {
+      const cardWidth = chartCardRef.current?.getBoundingClientRect().width;
+      const nextWidth =
+        typeof cardWidth === "number" && cardWidth > 0
+          ? cardWidth
+          : window.innerWidth;
+      setChartLayoutWidth(nextWidth);
+    };
+
+    updateChartLayoutWidth();
+    window.addEventListener("resize", updateChartLayoutWidth);
+
+    const card = chartCardRef.current;
+    const observer =
+      typeof ResizeObserver === "undefined" || !card
+        ? null
+        : new ResizeObserver(() => {
+            updateChartLayoutWidth();
+          });
+    if (observer && card) {
+      observer.observe(card);
+    }
+
+    return () => {
+      window.removeEventListener("resize", updateChartLayoutWidth);
+      observer?.disconnect();
+    };
+  }, [chartCardRef]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const onStorage = (event: StorageEvent) => {
+      if (
+        event.key === null ||
+        event.key === "lh_chart_main_width_ratio_v1" ||
+        event.key === "lh_chart_indicator_width_ratio_v1" ||
+        event.key === "lh_chart_main_height_mode_v1" ||
+        event.key === "lh_chart_main_percent_pixels_v1" ||
+        event.key === "lh_chart_main_percent_min_height_v1" ||
+        event.key === "lh_chart_main_percent_max_height_v1"
+      ) {
+        setChartMainWidthRatio(readStoredChartMainWidthRatio());
+        setChartIndicatorWidthRatio(readStoredChartIndicatorWidthRatio());
+        setChartMainHeightMode(readStoredChartMainHeightMode());
+        setChartMainPercentPixels(readStoredChartMainPercentPixels());
+        setChartMainPercentMinHeight(readStoredChartMainPercentMinHeight());
+        setChartMainPercentMaxHeight(readStoredChartMainPercentMaxHeight());
+      }
+    };
+
+    setChartMainWidthRatio(readStoredChartMainWidthRatio());
+    setChartIndicatorWidthRatio(readStoredChartIndicatorWidthRatio());
+    setChartMainHeightMode(readStoredChartMainHeightMode());
+    setChartMainPercentPixels(readStoredChartMainPercentPixels());
+    setChartMainPercentMinHeight(readStoredChartMainPercentMinHeight());
+    setChartMainPercentMaxHeight(readStoredChartMainPercentMaxHeight());
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener("storage", onStorage);
+    };
+  }, []);
+
+  useLayoutEffect(() => {
+    if (detailLoading) {
+      return;
+    }
+
+    const pendingScroll = pendingPageScrollRef.current;
+    if (!pendingScroll) {
+      return;
+    }
+
+    const contentElement = getContentScrollElement();
+    const chartRect = chartCardRef.current?.getBoundingClientRect();
+    const currentChartEdgeOffset =
+      pendingScroll.chartEdge === "bottom"
+        ? chartRect?.bottom
+        : pendingScroll.chartEdge === "top"
+          ? chartRect?.top
+          : undefined;
+    const scrollDelta =
+      currentChartEdgeOffset !== undefined &&
+      pendingScroll.chartEdgeViewportOffset !== null
+        ? currentChartEdgeOffset - pendingScroll.chartEdgeViewportOffset
+        : null;
+    if (contentElement) {
+      contentElement.scrollTo({
+        left: pendingScroll.left,
+        top:
+          scrollDelta === null
+            ? pendingScroll.top
+            : contentElement.scrollTop + scrollDelta,
+      });
+    } else {
+      window.scrollTo(
+        pendingScroll.left,
+        scrollDelta === null ? pendingScroll.top : window.scrollY + scrollDelta,
+      );
+    }
+    if (!detailIndicatorsLoading) {
+      pendingPageScrollRef.current = null;
+    }
+  }, [
+    chartCardRef,
+    pendingPageScrollRef,
+    chartShellHeight,
+    detailIndicatorsLoading,
+    detailLoading,
+    resolvedTradeDate,
+    resolvedTsCode,
+  ]);
+
+  function setChartZoom(nextCount: number) {
+    if (totalChartItems === 0) {
+      return;
+    }
+
+    const resolvedCount = clampNumber(
+      nextCount,
+      minVisibleBars,
+      totalChartItems,
+    );
+    const currentEnd = effectiveVisibleStart + effectiveVisibleBarCount;
+    setVisibleBarCount(resolvedCount);
+    setVisibleStartIndex(
+      clampNumber(
+        currentEnd - resolvedCount,
+        0,
+        totalChartItems - resolvedCount,
+      ),
+    );
+  }
+
+  function setChartZoomAnchored(
+    nextCount: number,
+    anchorAbsoluteIndex: number,
+    anchorRatio: number,
+  ) {
+    if (totalChartItems === 0) {
+      return;
+    }
+
+    const resolvedCount = clampNumber(
+      Math.round(nextCount),
+      minVisibleBars,
+      totalChartItems,
+    );
+    const nextMaxVisibleStart = Math.max(totalChartItems - resolvedCount, 0);
+    const resolvedAnchorRatio = clampNumber(anchorRatio, 0, 1);
+    const nextVisibleStart = clampNumber(
+      Math.round(
+        anchorAbsoluteIndex -
+          resolvedAnchorRatio * Math.max(resolvedCount - 1, 0),
+      ),
+      0,
+      nextMaxVisibleStart,
+    );
+
+    setVisibleBarCount(resolvedCount);
+    setVisibleStartIndex(nextVisibleStart);
+  }
+
+  function getChartTouchPointers(panelKey: string) {
+    return [...chartTouchPointersRef.current.values()].filter(
+      (pointer) => pointer.panelKey === panelKey,
+    );
+  }
+
+  function getChartPointerDistance(
+    firstPointer: ChartTouchPointer,
+    secondPointer: ChartTouchPointer,
+  ) {
+    return Math.hypot(
+      secondPointer.clientX - firstPointer.clientX,
+      secondPointer.clientY - firstPointer.clientY,
+    );
+  }
+
+  function startChartPinch(
+    panelKey: string,
+    viewport: HTMLDivElement,
+    pointers: ChartTouchPointer[],
+  ) {
+    if (totalChartItems === 0 || pointers.length < 2) {
+      return false;
+    }
+
+    const [firstPointer, secondPointer] = pointers;
+    const midpointX = (firstPointer.clientX + secondPointer.clientX) / 2;
+    const anchor = resolveChartAnchorFromClientX(
+      viewport,
+      midpointX,
+      chartItems.length,
+      chartLayoutSlotCount,
+      shouldReserveCyqPanelWidth,
+    );
+    if (!anchor) {
+      return false;
+    }
+
+    chartPinchRef.current = {
+      panelKey,
+      pointerIds: [firstPointer.pointerId, secondPointer.pointerId],
+      startDistance: Math.max(
+        getChartPointerDistance(firstPointer, secondPointer),
+        CHART_PINCH_MIN_DISTANCE,
+      ),
+      startVisibleBarCount: effectiveVisibleBarCount,
+      startAnchorAbsoluteIndex: effectiveVisibleStart + anchor.visiblePosition,
+      startAnchorRatio: anchor.visibleRatio,
+    };
+    chartDragRef.current = null;
+    setChartFocus(null);
+    setChartIntervalDraftSelection(null);
+    setChartIntervalPanelOpen(false);
+    return true;
+  }
+
+  function updateChartPinchZoom(pointerId: number) {
+    const pinchState = chartPinchRef.current;
+    if (!pinchState || !pinchState.pointerIds.includes(pointerId)) {
+      return false;
+    }
+
+    const [firstPointerId, secondPointerId] = pinchState.pointerIds;
+    const firstPointer = chartTouchPointersRef.current.get(firstPointerId);
+    const secondPointer = chartTouchPointersRef.current.get(secondPointerId);
+    if (!firstPointer || !secondPointer) {
+      chartPinchRef.current = null;
+      return true;
+    }
+
+    const distance = Math.max(
+      getChartPointerDistance(firstPointer, secondPointer),
+      CHART_PINCH_MIN_DISTANCE,
+    );
+    const scale = distance / pinchState.startDistance;
+    if (!Number.isFinite(scale) || scale <= 0) {
+      return true;
+    }
+
+    setChartZoomAnchored(
+      pinchState.startVisibleBarCount / scale,
+      pinchState.startAnchorAbsoluteIndex,
+      pinchState.startAnchorRatio,
+    );
+    return true;
+  }
+
+  function zoomChartFromWheel(
+    viewport: HTMLDivElement,
+    clientX: number,
+    deltaY: number,
+  ) {
+    const anchor = resolveChartAnchorFromClientX(
+      viewport,
+      clientX,
+      chartItems.length,
+      chartLayoutSlotCount,
+      shouldReserveCyqPanelWidth,
+    );
+    if (!anchor) {
+      return false;
+    }
+
+    setChartZoomAnchored(
+      effectiveVisibleBarCount * Math.exp(deltaY * CHART_WHEEL_ZOOM_FACTOR),
+      effectiveVisibleStart + anchor.visiblePosition,
+      anchor.visibleRatio,
+    );
+    return true;
+  }
+
+  const handleNativeChartWheel = useEffectEvent((event: WheelEvent) => {
+    if (!event.ctrlKey && !event.metaKey) return;
+
+    const targetElement = event.target instanceof Element ? event.target : null;
+    const viewport =
+      targetElement?.closest<HTMLDivElement>(".details-chart-viewport") ?? null;
+    if (!viewport || !chartCardRef.current?.contains(viewport)) return;
+
+    event.preventDefault();
+    if (totalChartItems === 0) return;
+    zoomChartFromWheel(viewport, event.clientX, event.deltaY);
+  });
+
+  useEffect(() => {
+    const chartCard = chartCardRef.current;
+    if (!chartCard) return;
+
+    chartCard.addEventListener("wheel", handleNativeChartWheel, {
+      passive: false,
+    });
+    return () => {
+      chartCard.removeEventListener("wheel", handleNativeChartWheel);
+    };
+  }, [chartCardRef]);
+
+  function buildChartFocus(
+    panelKey: string,
+    viewport: HTMLDivElement,
+    clientX: number,
+    clientY: number,
+    pinned: boolean,
+  ) {
+    const pointer = buildChartPointerSnapshot(
+      viewport,
+      clientX,
+      clientY,
+      chartItems.length,
+      chartLayoutSlotCount,
+      shouldReserveCyqPanelWidth,
+    );
+    if (!pointer) {
+      return null;
+    }
+
+    return {
+      absoluteIndex: effectiveVisibleStart + pointer.visibleIndex,
+      panelKey,
+      cursorXPercent: pointer.cursorXPercent,
+      cursorYPercent: pointer.cursorYPercent,
+      pinned,
+    };
+  }
+
+  function buildChartIntervalSelection(
+    viewport: HTMLDivElement,
+    clientX: number,
+    clientY: number,
+    anchorAbsoluteIndex: number,
+  ) {
+    const pointer = buildChartPointerSnapshot(
+      viewport,
+      clientX,
+      clientY,
+      chartItems.length,
+      chartLayoutSlotCount,
+      shouldReserveCyqPanelWidth,
+    );
+    if (!pointer) {
+      return null;
+    }
+
+    return buildIntervalSelectionFromAbsoluteIndices(
+      allChartItems,
+      anchorAbsoluteIndex,
+      effectiveVisibleStart + pointer.visibleIndex,
+    );
+  }
+
+  function buildAdjustedChartIntervalSelection(
+    viewport: HTMLDivElement,
+    clientX: number,
+    clientY: number,
+    fixedAbsoluteIndex: number,
+    side: ChartIntervalAdjustSide,
+  ) {
+    const pointer = buildChartPointerSnapshot(
+      viewport,
+      clientX,
+      clientY,
+      chartItems.length,
+      chartLayoutSlotCount,
+      shouldReserveCyqPanelWidth,
+    );
+    if (!pointer) {
+      return null;
+    }
+
+    const pointerAbsoluteIndex = effectiveVisibleStart + pointer.visibleIndex;
+    const nextStartAbsoluteIndex =
+      side === "start"
+        ? Math.min(pointerAbsoluteIndex, fixedAbsoluteIndex)
+        : fixedAbsoluteIndex;
+    const nextEndAbsoluteIndex =
+      side === "end"
+        ? Math.max(pointerAbsoluteIndex, fixedAbsoluteIndex)
+        : fixedAbsoluteIndex;
+
+    return buildIntervalSelectionFromAbsoluteIndices(
+      allChartItems,
+      nextStartAbsoluteIndex,
+      nextEndAbsoluteIndex,
+    );
+  }
+
+  function buildMovedChartIntervalSelection(
+    viewport: HTMLDivElement,
+    clientX: number,
+    clientY: number,
+    anchorAbsoluteIndex: number,
+    moveSelectionStartAbsoluteIndex: number,
+    moveSelectionEndAbsoluteIndex: number,
+  ) {
+    const pointer = buildChartPointerSnapshot(
+      viewport,
+      clientX,
+      clientY,
+      chartItems.length,
+      chartLayoutSlotCount,
+      shouldReserveCyqPanelWidth,
+    );
+    if (!pointer || allChartItems.length === 0) {
+      return null;
+    }
+
+    const pointerAbsoluteIndex = effectiveVisibleStart + pointer.visibleIndex;
+    const delta = pointerAbsoluteIndex - anchorAbsoluteIndex;
+    const span = Math.max(
+      0,
+      moveSelectionEndAbsoluteIndex - moveSelectionStartAbsoluteIndex,
+    );
+    const maxStartAbsoluteIndex = Math.max(0, allChartItems.length - 1 - span);
+    const nextStartAbsoluteIndex = clampNumber(
+      moveSelectionStartAbsoluteIndex + delta,
+      0,
+      maxStartAbsoluteIndex,
+    );
+    const nextEndAbsoluteIndex = nextStartAbsoluteIndex + span;
+
+    return buildIntervalSelectionFromAbsoluteIndices(
+      allChartItems,
+      nextStartAbsoluteIndex,
+      nextEndAbsoluteIndex,
+    );
+  }
+
+  function onChartPointerDown(
+    panelKey: string,
+    event: ReactPointerEvent<HTMLDivElement>,
+  ) {
+    flushChartPointerMove();
+    if (event.pointerType === "mouse" && event.button !== 0) {
+      return;
+    }
+
+    const rect = event.currentTarget.getBoundingClientRect();
+    if (rect.width <= 0) {
+      return;
+    }
+
+    if (event.pointerType === "touch") {
+      chartTouchPointersRef.current.set(event.pointerId, {
+        pointerId: event.pointerId,
+        panelKey,
+        clientX: event.clientX,
+        clientY: event.clientY,
+      });
+      try {
+        event.currentTarget.setPointerCapture(event.pointerId);
+      } catch {
+        // Ignore browsers that do not support pointer capture for this target.
+      }
+
+      const touchPointers = getChartTouchPointers(panelKey);
+      if (touchPointers.length >= 2) {
+        event.preventDefault();
+        startChartPinch(
+          panelKey,
+          event.currentTarget,
+          touchPointers.slice(0, 2),
+        );
+        return;
+      }
+    }
+
+    const isTouchPointer = event.pointerType !== "mouse";
+    let anchorAbsoluteIndex: number | undefined;
+    let moveSelectionStartAbsoluteIndex: number | undefined;
+    let moveSelectionEndAbsoluteIndex: number | undefined;
+    let intervalStartedOutsideSelection = false;
+    const mode =
+      panelKey === "price" && chartIntervalMode
+        ? (() => {
+            const dragTarget = detectChartIntervalDragTarget(
+              event.currentTarget,
+              event.clientX,
+              chartIntervalSelection,
+              effectiveVisibleStart,
+              chartItems.length,
+              chartLayoutSlotCount,
+              shouldReserveCyqPanelWidth,
+            );
+            if (dragTarget && chartIntervalSelection && dragTarget !== "move") {
+              anchorAbsoluteIndex =
+                dragTarget === "start"
+                  ? chartIntervalSelection.endAbsoluteIndex
+                  : chartIntervalSelection.startAbsoluteIndex;
+              setChartIntervalDraftSelection(chartIntervalSelection);
+              setChartIntervalPanelOpen(false);
+              setChartFocus(null);
+              return dragTarget === "start"
+                ? "interval-adjust-start"
+                : "interval-adjust-end";
+            }
+
+            if (dragTarget === "move" && chartIntervalSelection) {
+              const pointer = buildChartPointerSnapshot(
+                event.currentTarget,
+                event.clientX,
+                event.clientY,
+                chartItems.length,
+                chartLayoutSlotCount,
+                shouldReserveCyqPanelWidth,
+              );
+              if (!pointer) {
+                return "interval-select" as const;
+              }
+
+              anchorAbsoluteIndex =
+                effectiveVisibleStart + pointer.visibleIndex;
+              moveSelectionStartAbsoluteIndex =
+                chartIntervalSelection.startAbsoluteIndex;
+              moveSelectionEndAbsoluteIndex =
+                chartIntervalSelection.endAbsoluteIndex;
+              setChartIntervalDraftSelection(chartIntervalSelection);
+              setChartIntervalPanelOpen(false);
+              setChartFocus(null);
+              return "interval-move" as const;
+            }
+
+            const pointer = buildChartPointerSnapshot(
+              event.currentTarget,
+              event.clientX,
+              event.clientY,
+              chartItems.length,
+              chartLayoutSlotCount,
+              shouldReserveCyqPanelWidth,
+            );
+            if (!pointer) {
+              return "interval-select" as const;
+            }
+
+            anchorAbsoluteIndex = effectiveVisibleStart + pointer.visibleIndex;
+            const intervalSelection = buildIntervalSelectionFromAbsoluteIndices(
+              allChartItems,
+              anchorAbsoluteIndex,
+              anchorAbsoluteIndex,
+            );
+            intervalStartedOutsideSelection = chartIntervalSelection !== null;
+            if (intervalSelection && !intervalStartedOutsideSelection) {
+              setChartIntervalDraftSelection(intervalSelection);
+              setChartIntervalPanelOpen(false);
+              setChartFocus(null);
+            }
+            return "interval-select" as const;
+          })()
+        : chartFocus?.pinned
+          ? isTouchPointer &&
+            !isPointerNearChartFocus(
+              panelKey,
+              event.currentTarget,
+              event.clientX,
+              event.clientY,
+              chartFocus,
+            )
+            ? "dismiss"
+            : "focus"
+          : maxVisibleStart > 0
+            ? "pan"
+            : "tap";
+
+    if (mode === "interval-select" && anchorAbsoluteIndex === undefined) {
+      setChartIntervalDraftSelection(null);
+      return;
+    }
+    if (
+      (mode === "interval-adjust-start" || mode === "interval-adjust-end") &&
+      anchorAbsoluteIndex === undefined
+    ) {
+      setChartIntervalDraftSelection(null);
+      return;
+    }
+    if (
+      mode === "interval-move" &&
+      (anchorAbsoluteIndex === undefined ||
+        moveSelectionStartAbsoluteIndex === undefined ||
+        moveSelectionEndAbsoluteIndex === undefined)
+    ) {
+      setChartIntervalDraftSelection(null);
+      return;
+    }
+
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Ignore browsers that do not support pointer capture for this target.
+    }
+
+    chartDragRef.current = {
+      pointerId: event.pointerId,
+      panelKey,
+      mode,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startVisibleStart: effectiveVisibleStart,
+      barsPerPixel: effectiveVisibleBarCount / rect.width,
+      maxVisibleStart,
+      moved: false,
+      anchorAbsoluteIndex,
+      moveSelectionStartAbsoluteIndex,
+      moveSelectionEndAbsoluteIndex,
+      intervalStartedOutsideSelection,
+    };
+  }
+
+  function onChartPointerMove(
+    panelKey: string,
+    event: ReactPointerEvent<HTMLDivElement>,
+  ) {
+    if (event.pointerType === "touch") {
+      const trackedPointer = chartTouchPointersRef.current.get(event.pointerId);
+      if (trackedPointer) {
+        chartTouchPointersRef.current.set(event.pointerId, {
+          ...trackedPointer,
+          clientX: event.clientX,
+          clientY: event.clientY,
+        });
+      }
+    }
+
+    if (chartPinchRef.current?.pointerIds.includes(event.pointerId)) {
+      event.preventDefault();
+    } else {
+      const dragState = chartDragRef.current;
+      if (!dragState) {
+        if (event.pointerType !== "mouse" || !chartFocusRef.current?.pinned) {
+          return;
+        }
+      } else {
+        if (
+          dragState.pointerId !== event.pointerId ||
+          dragState.panelKey !== panelKey
+        ) {
+          return;
+        }
+        const moveX = event.clientX - dragState.startClientX;
+        const moveY = event.clientY - dragState.startClientY;
+        const absMoveX = Math.abs(moveX);
+        const absMoveY = Math.abs(moveY);
+        if (
+          event.pointerType === "touch" &&
+          !dragState.moved &&
+          absMoveY >= CHART_POINTER_DRAG_THRESHOLD &&
+          absMoveY > absMoveX * CHART_TOUCH_VERTICAL_SCROLL_RATIO
+        ) {
+          if (
+            dragState.mode === "interval-select" ||
+            dragState.mode === "interval-adjust-start" ||
+            dragState.mode === "interval-adjust-end"
+          ) {
+            setChartIntervalDraftSelection(null);
+          }
+          clearChartPointerState(event);
+          return;
+        }
+
+        const moveDistance = Math.hypot(moveX, moveY);
+        if (!dragState.moved && moveDistance >= CHART_POINTER_DRAG_THRESHOLD) {
+          dragState.moved = true;
+        }
+      }
+    }
+
+    pendingChartPointerRef.current = {
+      panelKey,
+      event: {
+        currentTarget: event.currentTarget,
+        pointerId: event.pointerId,
+        pointerType: event.pointerType,
+        clientX: event.clientX,
+        clientY: event.clientY,
+      },
+    };
+    if (chartPointerFrameRef.current === null) {
+      chartPointerFrameRef.current = window.requestAnimationFrame(
+        flushChartPointerMove,
+      );
+    }
+  }
+
+  function flushChartPointerMove() {
+    const pending = pendingChartPointerRef.current;
+    cancelChartPointerMove();
+    if (!pending) return;
+    const { panelKey, event } = pending;
+    if (event.pointerType === "touch" && updateChartPinchZoom(event.pointerId))
+      return;
+
+    const dragState = chartDragRef.current;
+    if (!dragState) {
+      if (event.pointerType !== "mouse" || !chartFocusRef.current?.pinned) {
+        return;
+      }
+
+      const nextFocus = buildChartFocus(
+        panelKey,
+        event.currentTarget,
+        event.clientX,
+        event.clientY,
+        true,
+      );
+      if (!nextFocus) {
+        return;
+      }
+
+      setChartFocus(nextFocus);
+      return;
+    }
+
+    if (
+      dragState.pointerId !== event.pointerId ||
+      dragState.panelKey !== panelKey
+    ) {
+      return;
+    }
+
+    if (dragState.mode === "pan") {
+      if (!dragState.moved) {
+        return;
+      }
+
+      const deltaBars = Math.round(
+        (event.clientX - dragState.startClientX) * dragState.barsPerPixel,
+      );
+      const nextVisibleStart = clampNumber(
+        dragState.startVisibleStart - deltaBars,
+        0,
+        dragState.maxVisibleStart,
+      );
+
+      setVisibleStartIndex(nextVisibleStart);
+      return;
+    }
+
+    if (dragState.mode === "interval-select") {
+      if (dragState.intervalStartedOutsideSelection && !dragState.moved) {
+        return;
+      }
+
+      const nextIntervalSelection = buildChartIntervalSelection(
+        event.currentTarget,
+        event.clientX,
+        event.clientY,
+        dragState.anchorAbsoluteIndex ?? effectiveVisibleStart,
+      );
+      if (!nextIntervalSelection) {
+        return;
+      }
+
+      if (dragState.intervalStartedOutsideSelection) {
+        setChartIntervalPanelOpen(false);
+        setChartFocus(null);
+      }
+      setChartIntervalDraftSelection(nextIntervalSelection);
+      return;
+    }
+
+    if (
+      dragState.mode === "interval-adjust-start" ||
+      dragState.mode === "interval-adjust-end"
+    ) {
+      const nextIntervalSelection = buildAdjustedChartIntervalSelection(
+        event.currentTarget,
+        event.clientX,
+        event.clientY,
+        dragState.anchorAbsoluteIndex ?? effectiveVisibleStart,
+        dragState.mode === "interval-adjust-start" ? "start" : "end",
+      );
+      if (!nextIntervalSelection) {
+        return;
+      }
+
+      setChartIntervalDraftSelection(nextIntervalSelection);
+      return;
+    }
+
+    if (dragState.mode === "interval-move") {
+      const moveSelectionStartAbsoluteIndex =
+        dragState.moveSelectionStartAbsoluteIndex;
+      const moveSelectionEndAbsoluteIndex =
+        dragState.moveSelectionEndAbsoluteIndex;
+      if (
+        moveSelectionStartAbsoluteIndex === undefined ||
+        moveSelectionEndAbsoluteIndex === undefined
+      ) {
+        return;
+      }
+
+      const nextIntervalSelection = buildMovedChartIntervalSelection(
+        event.currentTarget,
+        event.clientX,
+        event.clientY,
+        dragState.anchorAbsoluteIndex ?? effectiveVisibleStart,
+        moveSelectionStartAbsoluteIndex,
+        moveSelectionEndAbsoluteIndex,
+      );
+      if (!nextIntervalSelection) {
+        return;
+      }
+
+      setChartIntervalDraftSelection(nextIntervalSelection);
+      return;
+    }
+
+    if (dragState.mode === "dismiss") {
+      return;
+    }
+
+    if (dragState.mode !== "focus" || !dragState.moved) {
+      return;
+    }
+
+    const nextFocus = buildChartFocus(
+      panelKey,
+      event.currentTarget,
+      event.clientX,
+      event.clientY,
+      true,
+    );
+    if (!nextFocus) {
+      return;
+    }
+
+    setChartFocus(nextFocus);
+  }
+
+  function clearChartPointerState(
+    event: Pick<ChartPointerInput, "currentTarget" | "pointerId">,
+  ) {
+    cancelChartPointerMove();
+    try {
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+    } catch {
+      // Ignore stale pointer capture state during cleanup.
+    }
+    chartTouchPointersRef.current.delete(event.pointerId);
+    chartDragRef.current = null;
+  }
+
+  function onChartPointerUp(
+    panelKey: string,
+    event: ReactPointerEvent<HTMLDivElement>,
+  ) {
+    // Commit the release coordinates even when the next animation frame has not run.
+    if (
+      chartDragRef.current?.pointerId === event.pointerId ||
+      chartPinchRef.current?.pointerIds.includes(event.pointerId)
+    ) {
+      onChartPointerMove(panelKey, event);
+    }
+    flushChartPointerMove();
+    const pinchState = chartPinchRef.current;
+    if (pinchState?.pointerIds.includes(event.pointerId)) {
+      event.preventDefault();
+      chartPinchRef.current = null;
+      clearChartPointerState(event);
+      return;
+    }
+
+    const dragState = chartDragRef.current;
+    clearChartPointerState(event);
+
+    if (
+      !dragState ||
+      dragState.pointerId !== event.pointerId ||
+      dragState.panelKey !== panelKey
+    ) {
+      return;
+    }
+
+    if (dragState.mode === "dismiss") {
+      if (!dragState.moved) {
+        setChartFocus(null);
+      }
+      return;
+    }
+
+    if (dragState.mode === "interval-select") {
+      if (dragState.intervalStartedOutsideSelection && !dragState.moved) {
+        closeChartIntervalPanel();
+        return;
+      }
+
+      const nextIntervalSelection = buildChartIntervalSelection(
+        event.currentTarget,
+        event.clientX,
+        event.clientY,
+        dragState.anchorAbsoluteIndex ?? effectiveVisibleStart,
+      );
+      if (nextIntervalSelection) {
+        setChartIntervalDraftSelection(null);
+        setChartIntervalSelection(nextIntervalSelection);
+        setActiveIntervalContext({
+          startTradeDate: nextIntervalSelection.startTradeDate,
+          endTradeDate: nextIntervalSelection.endTradeDate,
+        });
+        setChartIntervalMode(true);
+        setChartIntervalPanelOpen(true);
+        setChartIntervalNotice("");
+      }
+      return;
+    }
+
+    if (
+      dragState.mode === "interval-adjust-start" ||
+      dragState.mode === "interval-adjust-end"
+    ) {
+      const nextIntervalSelection = buildAdjustedChartIntervalSelection(
+        event.currentTarget,
+        event.clientX,
+        event.clientY,
+        dragState.anchorAbsoluteIndex ?? effectiveVisibleStart,
+        dragState.mode === "interval-adjust-start" ? "start" : "end",
+      );
+      if (nextIntervalSelection) {
+        setChartIntervalDraftSelection(null);
+        setChartIntervalSelection(nextIntervalSelection);
+        setActiveIntervalContext({
+          startTradeDate: nextIntervalSelection.startTradeDate,
+          endTradeDate: nextIntervalSelection.endTradeDate,
+        });
+        setChartIntervalMode(true);
+        setChartIntervalPanelOpen(true);
+        setChartIntervalNotice("");
+      }
+      return;
+    }
+
+    if (dragState.mode === "interval-move") {
+      const moveSelectionStartAbsoluteIndex =
+        dragState.moveSelectionStartAbsoluteIndex;
+      const moveSelectionEndAbsoluteIndex =
+        dragState.moveSelectionEndAbsoluteIndex;
+      if (
+        moveSelectionStartAbsoluteIndex === undefined ||
+        moveSelectionEndAbsoluteIndex === undefined
+      ) {
+        return;
+      }
+
+      const nextIntervalSelection = buildMovedChartIntervalSelection(
+        event.currentTarget,
+        event.clientX,
+        event.clientY,
+        dragState.anchorAbsoluteIndex ?? effectiveVisibleStart,
+        moveSelectionStartAbsoluteIndex,
+        moveSelectionEndAbsoluteIndex,
+      );
+      if (nextIntervalSelection) {
+        setChartIntervalDraftSelection(null);
+        setChartIntervalSelection(nextIntervalSelection);
+        setActiveIntervalContext({
+          startTradeDate: nextIntervalSelection.startTradeDate,
+          endTradeDate: nextIntervalSelection.endTradeDate,
+        });
+        setChartIntervalMode(true);
+        setChartIntervalPanelOpen(true);
+        setChartIntervalNotice("");
+      }
+      return;
+    }
+
+    if (dragState.moved) {
+      return;
+    }
+
+    const nextFocus = buildChartFocus(
+      panelKey,
+      event.currentTarget,
+      event.clientX,
+      event.clientY,
+      true,
+    );
+    if (!nextFocus) {
+      if (chartFocus?.pinned) {
+        setChartFocus(null);
+      }
+      return;
+    }
+
+    if (
+      chartFocus?.pinned &&
+      chartFocus.panelKey === nextFocus.panelKey &&
+      chartFocus.absoluteIndex === nextFocus.absoluteIndex
+    ) {
+      setChartFocus(null);
+      return;
+    }
+
+    setChartFocus(nextFocus);
+  }
+
+  function onChartPointerLeave(
+    panelKey: string,
+    event: ReactPointerEvent<HTMLDivElement>,
+  ) {
+    const dragState = chartDragRef.current;
+    if (
+      dragState?.pointerId === event.pointerId &&
+      dragState.panelKey === panelKey
+    ) {
+      return;
+    }
+
+    if (!chartFocusRef.current?.pinned) {
+      setChartFocus(null);
+    }
+  }
+
+  function onChartPointerCancel(
+    _panelKey: string,
+    event: ReactPointerEvent<HTMLDivElement>,
+  ) {
+    if (chartPinchRef.current?.pointerIds.includes(event.pointerId)) {
+      chartPinchRef.current = null;
+    }
+    if (
+      chartDragRef.current?.mode === "interval-select" ||
+      chartDragRef.current?.mode === "interval-adjust-start" ||
+      chartDragRef.current?.mode === "interval-adjust-end"
+    ) {
+      setChartIntervalDraftSelection(null);
+    }
+    clearChartPointerState(event);
+  }
+
+  function onChartDoubleClick(
+    _panelKey: string,
+    event: ReactMouseEvent<HTMLDivElement>,
+  ) {
+    const targetElement = event.target instanceof Element ? event.target : null;
+    if (
+      targetElement?.closest("button,input,select,textarea,a,[role='button']")
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+    openChartIntervalMode();
+  }
+
+  const onToggleCyqPanel = useCallback(() => {
+    detailCyqFailedRequestKeyRef.current = "";
+    setDetailCyqVisible((visible) => !visible);
+  }, []);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      resetInterval(selecting) {
+        cancelChartPointerMove();
+        chartDragRef.current = null;
+        chartPinchRef.current = null;
+        chartTouchPointersRef.current.clear();
+        setChartFocus(null);
+        setChartIntervalMode(selecting);
+        setChartIntervalSelection(null);
+        setChartIntervalDraftSelection(null);
+        setChartIntervalPanelOpen(false);
+        setChartIntervalNotice("");
+      },
+    }),
+    [cancelChartPointerMove, setChartFocus],
+  );
+
+  return (
+    <section className="details-card details-chart-card" ref={chartCardRef}>
+      <h3 className="details-subtitle">
+        K线图
+        {detailIndicatorsLoading ? " · 指标异步加载中" : ""}
+        {!detailIndicatorsLoading && detailIndicatorsNotice
+          ? ` · ${detailIndicatorsNotice}`
+          : ""}
+      </h3>
+
+      <div className="details-chart-toolbar">
+        <label className="details-chart-slider-field">
+          <span>缩放</span>
+          <input
+            type="range"
+            min={minVisibleBars || 1}
+            max={Math.max(totalChartItems, 1)}
+            step={1}
+            value={Math.max(effectiveVisibleBarCount, 1)}
+            onChange={(event) => setChartZoom(Number(event.target.value))}
+            disabled={totalChartItems === 0}
+          />
+          <strong>{effectiveVisibleBarCount || 0} 根</strong>
+        </label>
+
+        <label className="details-chart-slider-field details-chart-slider-field-wide">
+          <span>平移</span>
+          <input
+            type="range"
+            min={0}
+            max={Math.max(maxVisibleStart, 1)}
+            step={1}
+            value={effectiveVisibleStart}
+            onChange={(event) =>
+              setVisibleStartIndex(Number(event.target.value))
+            }
+            disabled={totalChartItems === 0 || maxVisibleStart === 0}
+          />
+          <strong>{chartRangeText}</strong>
+        </label>
+      </div>
+
+      <div
+        className="details-chart-shell"
+        style={{
+          height: `${chartShellHeight}px`,
+          minHeight:
+            chartMainHeightMode === "percent"
+              ? `${chartShellHeight}px`
+              : undefined,
+          gridTemplateRows: chartTemplateRows,
+        }}
+      >
+        {panels.map((panel, index) => (
+          <DetailChartPanel
+            key={panel.key}
+            panel={panel}
+            items={chartItems}
+            index={index}
+            panelCount={panels.length}
+            watermarkName={watermarkName}
+            watermarkCode={watermarkCode}
+            watermarkConcept={watermarkConcept}
+            chartFocus={chartFocus}
+            effectiveVisibleStart={effectiveVisibleStart}
+            allItems={allChartItems}
+            referenceTradeDate={
+              resolvedTradeDate !== "--" ? resolvedTradeDate : null
+            }
+            annotationLayers={annotationLayers}
+            onChartPointerDown={onChartPointerDown}
+            onChartPointerMove={onChartPointerMove}
+            onChartPointerUp={onChartPointerUp}
+            onChartPointerLeave={onChartPointerLeave}
+            onChartPointerCancel={onChartPointerCancel}
+            onChartDoubleClick={onChartDoubleClick}
+            isCyqPanelVisible={detailCyqVisible}
+            selectedCyqSnapshot={selectedCyqSnapshot}
+            cyqScaleMaxChip={cyqScaleMaxChip}
+            reserveCyqPanelWidthForAllPanels={shouldReserveCyqPanelWidth}
+            cyqHolderView={detailCyqHolderView}
+            cyqStatusText={
+              detailCyqError
+                ? "筹码读取失败"
+                : detailCyqLoading
+                  ? "筹码加载中…"
+                  : "该日暂无筹码"
+            }
+            chipToggleButton={
+              detailCyqModel === "chen" &&
+              detailCyqVisible &&
+              shouldReserveCyqPanelWidth ? (
+                <div
+                  className="details-chart-cyq-holder-switch"
+                  onPointerDown={(event) => {
+                    event.stopPropagation();
+                  }}
+                >
+                  {DETAIL_CYQ_HOLDER_OPTIONS.map((option) => (
+                    <button
+                      className={
+                        detailCyqHolderView === option.value ? "is-active" : ""
+                      }
+                      key={option.value}
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setDetailCyqHolderView(option.value);
+                      }}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              ) : null
+            }
+            watchObserveButton={
+              <div className="details-chart-watch-action">
+                <div className="details-chart-watch-row">
+                  <button
+                    className={[
+                      "details-chart-watch-btn",
+                      "details-chart-watch-btn-interval",
+                      chartIntervalSelecting ? "is-selecting" : "",
+                      chartIntervalMode || chartIntervalSelection
+                        ? "is-active"
+                        : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
+                    type="button"
+                    data-testid="details-interval-toggle"
+                    onPointerDown={(event) => {
+                      event.stopPropagation();
+                    }}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      toggleChartIntervalMode();
+                    }}
+                    aria-busy={chartIntervalSelecting}
+                  >
+                    {chartIntervalButtonLabel}
+                  </button>
+                  <button
+                    className={[
+                      "details-chart-cyq-toggle",
+                      "details-chart-cyq-toggle-inline",
+                      detailCyqVisible ? "is-active" : "",
+                      detailCyqLoading ? "is-loading" : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
+                    type="button"
+                    onPointerDown={(event) => {
+                      event.stopPropagation();
+                    }}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void onToggleCyqPanel();
+                    }}
+                    title={cyqToggleTitle}
+                  >
+                    筹
+                  </button>
+                  {watchActions}
+                </div>
+                {watchNotes}
+                {chartIntervalNotice ? (
+                  <span className="details-chart-watch-note">
+                    {chartIntervalNotice}
+                  </span>
+                ) : null}
+              </div>
+            }
+            chartIntervalSelection={chartIntervalSelection}
+            chartIntervalDraftSelection={chartIntervalDraftSelection}
+            chartIntervalPanelOpen={chartIntervalPanelOpen}
+            intervalStatsSections={intervalStatsSections}
+            onCloseChartIntervalPanel={closeChartIntervalPanel}
+          />
+        ))}
+        {shouldShowCyqSummary ? (
+          <div
+            className={[
+              "details-chart-cyq-summary-overlay",
+              shouldUseCyqSummaryIndicatorSlot ? "is-indicator-slot" : "",
+            ]
+              .filter(Boolean)
+              .join(" ")}
+            style={cyqSummaryOverlayStyle}
+            onPointerDown={stopEventPropagation}
+            onPointerMove={stopEventPropagation}
+            onPointerUp={stopEventPropagation}
+            onPointerCancel={stopEventPropagation}
+            onClick={stopEventPropagation}
+          >
+            <DetailCyqSummaryPanel
+              snapshot={selectedCyqSnapshot}
+              holderView={detailCyqHolderView}
+              isIndicatorSlot={shouldUseCyqSummaryIndicatorSlot}
+            />
+          </div>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
 export default function DetailsPage({
   variant = "default",
   navigationItems,
@@ -4563,7 +6670,6 @@ export default function DetailsPage({
   const [tradeDateInput, setTradeDateInput] = useState("");
   const [lookupInput, setLookupInput] = useState("");
   const [topLimitInput, setTopLimitInput] = useState(DEFAULT_TOP_LIMIT);
-  const [defaultVisibleBars] = useState(() => readStoredChartDefaultVisibleBars());
 
   const [topRows, setTopRows] = useState<OverviewRow[]>([]);
   const [stockLookupRows, setStockLookupRows] = useState<StockLookupRow[]>([]);
@@ -4587,37 +6693,6 @@ export default function DetailsPage({
   const [dateOptionsLoading, setDateOptionsLoading] = useState(false);
   const [topError, setTopError] = useState("");
   const [detailError, setDetailError] = useState("");
-  const [visibleBarCount, setVisibleBarCount] = useState(defaultVisibleBars);
-  const [visibleStartIndex, setVisibleStartIndex] = useState(0);
-  const [chartFocus, setChartFocusImmediate] = useState<ChartFocus | null>(
-    null,
-  );
-  const pendingChartFocusRef = useRef<ChartFocus | null>(null);
-  const chartFocusFrameRef = useRef<number | null>(null);
-  const setChartFocus = useCallback((focus: ChartFocus | null) => {
-    pendingChartFocusRef.current = focus;
-    if (chartFocusFrameRef.current !== null) return;
-    chartFocusFrameRef.current = window.requestAnimationFrame(() => {
-      chartFocusFrameRef.current = null;
-      const next = pendingChartFocusRef.current;
-      setChartFocusImmediate((current) => {
-        if (!current || !next) return current === next ? current : next;
-        return current.absoluteIndex === next.absoluteIndex &&
-          current.panelKey === next.panelKey &&
-          current.cursorYPercent === next.cursorYPercent &&
-          current.pinned === next.pinned
-          ? current
-          : next;
-      });
-    });
-  }, []);
-  useEffect(
-    () => () => {
-      if (chartFocusFrameRef.current !== null)
-        window.cancelAnimationFrame(chartFocusFrameRef.current);
-    },
-    [],
-  );
   const [strategySplitRatio, setStrategySplitRatio] = useState(
     STRATEGY_SPLIT_DEFAULT,
   );
@@ -4643,17 +6718,6 @@ export default function DetailsPage({
       searchParams.get("autoIntraday") === "1" ||
       searchParams.get("autoRealtime") === "1",
   );
-  const [detailCyqWindows, setDetailCyqWindows] = useState<
-    StockDetailCyqData[]
-  >([]);
-  const [detailCyqModel, setDetailCyqModel] = useState<DetailCyqModel>(() =>
-    readStoredDetailCyqModel(),
-  );
-  const [detailCyqHolderView, setDetailCyqHolderView] =
-    useState<DetailCyqHolderView>("mixed");
-  const [detailCyqVisible, setDetailCyqVisible] = useState(false);
-  const [detailCyqLoading, setDetailCyqLoading] = useState(false);
-  const [detailCyqError, setDetailCyqError] = useState("");
   const [detailRealtimeLoading, setDetailRealtimeLoading] = useState(false);
   const [detailRealtimeNotice, setDetailRealtimeNotice] = useState("");
   const [stockSimilarityLoading, setStockSimilarityLoading] = useState(false);
@@ -4670,27 +6734,9 @@ export default function DetailsPage({
     setDetailsNavLongPressIntervalSeconds,
   ] = useState(() => readStoredDetailsNavLongPressIntervalSeconds());
   const [detailsSimilarityNavMode, setDetailsSimilarityNavMode] =
-    useState<DetailsSimilarityNavMode>(() => readStoredDetailsSimilarityNavMode());
-  const [chartLayoutWidth, setChartLayoutWidth] = useState(() =>
-    typeof window === "undefined" ? CHART_VIEWBOX_WIDTH : window.innerWidth,
-  );
-  const [chartMainWidthRatio, setChartMainWidthRatio] = useState(() =>
-    readStoredChartMainWidthRatio(),
-  );
-  const [chartMainHeightMode, setChartMainHeightMode] =
-    useState<ChartMainHeightMode>(() => readStoredChartMainHeightMode());
-  const [chartMainPercentPixels, setChartMainPercentPixels] = useState(() =>
-    readStoredChartMainPercentPixels(),
-  );
-  const [chartMainPercentMinHeight, setChartMainPercentMinHeight] = useState(
-    () => readStoredChartMainPercentMinHeight(),
-  );
-  const [chartMainPercentMaxHeight, setChartMainPercentMaxHeight] = useState(
-    () => readStoredChartMainPercentMaxHeight(),
-  );
-  const [chartIndicatorWidthRatio, setChartIndicatorWidthRatio] = useState(() =>
-    readStoredChartIndicatorWidthRatio(),
-  );
+    useState<DetailsSimilarityNavMode>(() =>
+      readStoredDetailsSimilarityNavMode(),
+    );
   const [strategyCompareSnapshot, setStrategyCompareSnapshot] =
     useState<StrategyCompareSnapshot | null>(
       externalStrategyCompareSnapshot ?? null,
@@ -4702,18 +6748,7 @@ export default function DetailsPage({
     useState<IntervalRestoreRequest | null>(null);
   const [pendingIntervalRestore, setPendingIntervalRestore] =
     useState<IntervalRestoreRequest | null>(null);
-  const [chartIntervalNotice, setChartIntervalNotice] = useState("");
-  const [chartIntervalMode, setChartIntervalMode] = useState(false);
-  const [chartIntervalSelection, setChartIntervalSelection] =
-    useState<ResolvedIntervalRestore | null>(null);
-  const [chartIntervalDraftSelection, setChartIntervalDraftSelection] =
-    useState<ResolvedIntervalRestore | null>(null);
-  const [chartIntervalPanelOpen, setChartIntervalPanelOpen] = useState(false);
-  const chartDragRef = useRef<ChartDragState | null>(null);
-  const chartTouchPointersRef = useRef<Map<number, ChartTouchPointer>>(
-    new Map(),
-  );
-  const chartPinchRef = useRef<ChartPinchState | null>(null);
+  const detailChartRef = useRef<DetailChartHandle | null>(null);
   const chartCardRef = useRef<HTMLElement | null>(null);
   const overviewCardRef = useRef<HTMLElement | null>(null);
   const strategyGridRef = useRef<HTMLDivElement | null>(null);
@@ -4731,16 +6766,14 @@ export default function DetailsPage({
   const detailIntradayRequestIdRef = useRef(0);
   const detailIntradayRequestKeyRef = useRef("");
   const detailIntradayLoadedKeyRef = useRef("");
-  const detailIntradayPendingRef = useRef<Promise<TencentIntradayData> | null>(null);
-  const detailCyqRequestKeyRef = useRef("");
-  const detailCyqRequestIdRef = useRef(0);
-  const detailCyqFailedRequestKeyRef = useRef("");
+  const detailIntradayPendingRef = useRef<Promise<TencentIntradayData> | null>(
+    null,
+  );
   const stockSimilarityRequestKeyRef = useRef("");
   const detailStrategyRequestKeyRef = useRef("");
   const prevRanksRequestKeyRef = useRef("");
   const detailsNavLongPressTimerRef = useRef<number | null>(null);
   const detailsNavLongPressHandledRef = useRef(false);
-  const strategyCompareRequestKeyRef = useRef("");
 
   const sourcePathTrimmed = sourcePath.trim();
   const isLinkedOverlay = variant === "linked-overlay";
@@ -4762,8 +6795,7 @@ export default function DetailsPage({
       ),
     [routeIntervalEndTradeDate, routeIntervalStartTradeDate],
   );
-  const routeEffectiveTradeDate =
-    routeIntervalEndTradeDate || routeTradeDate;
+  const routeEffectiveTradeDate = routeIntervalEndTradeDate || routeTradeDate;
   const inputCodeDigits = sanitizeCodeInput(lookupInput);
   const normalizedCode =
     inputCodeDigits.length === 6 ? stdTsCode(inputCodeDigits) : "";
@@ -4820,25 +6852,6 @@ export default function DetailsPage({
       cancelled = true;
     };
   }, []);
-
-  useEffect(() => {
-    function refreshDetailCyqModel() {
-      setDetailCyqModel(readStoredDetailCyqModel());
-    }
-
-    window.addEventListener("focus", refreshDetailCyqModel);
-    window.addEventListener("storage", refreshDetailCyqModel);
-    return () => {
-      window.removeEventListener("focus", refreshDetailCyqModel);
-      window.removeEventListener("storage", refreshDetailCyqModel);
-    };
-  }, []);
-
-  useEffect(() => {
-    if (detailCyqModel === "legacy") {
-      setDetailCyqHolderView("mixed");
-    }
-  }, [detailCyqModel]);
 
   const loadDetailIntraday = useCallback(
     async (
@@ -5086,64 +7099,6 @@ export default function DetailsPage({
     [routeAutoIntraday, loadDetailIntraday],
   );
 
-  const loadDetailCyq = useCallback(
-    async (
-      nextSourcePath: string,
-      nextTsCode: string,
-      nextModel: DetailCyqModel,
-      nextTradeDate: string,
-    ) => {
-      const normalizedSourcePath = nextSourcePath.trim();
-      const normalizedTsCode = nextTsCode.trim();
-      if (normalizedSourcePath === "" || normalizedTsCode === "") {
-        setDetailCyqWindows([]);
-        setDetailCyqError("");
-        return null;
-      }
-
-      const requestKey = `${normalizedSourcePath}|${normalizedTsCode}|${nextModel}|${nextTradeDate}`;
-      if (
-        detailCyqRequestKeyRef.current !== "" ||
-        detailCyqFailedRequestKeyRef.current === requestKey
-      ) {
-        return null;
-      }
-
-      const requestId = ++detailCyqRequestIdRef.current;
-      detailCyqRequestKeyRef.current = requestKey;
-      setDetailCyqLoading(true);
-      setDetailCyqError("");
-      detailCyqFailedRequestKeyRef.current = "";
-
-      try {
-        const cyq = await getStockDetailCyq({
-          sourcePath: normalizedSourcePath,
-          tsCode: normalizedTsCode,
-          chipModel: nextModel,
-          tradeDate: nextTradeDate,
-        });
-        if (detailCyqRequestIdRef.current !== requestId) {
-          return null;
-        }
-        // Keep at most three batch windows; cursor movement does not cancel a running query.
-        setDetailCyqWindows((current) => [cyq, ...current].slice(0, 3));
-        return cyq;
-      } catch (error) {
-        if (detailCyqRequestIdRef.current === requestId) {
-          detailCyqFailedRequestKeyRef.current = requestKey;
-          setDetailCyqError(`读取筹码分布失败: ${String(error)}`);
-        }
-        return null;
-      } finally {
-        if (detailCyqRequestIdRef.current === requestId) {
-          detailCyqRequestKeyRef.current = "";
-          setDetailCyqLoading(false);
-        }
-      }
-    },
-    [],
-  );
-
   useEffect(() => {
     if (!sourcePathTrimmed) {
       setDateOptions([]);
@@ -5305,11 +7260,7 @@ export default function DetailsPage({
     setDetailError("");
     setActiveIntervalContext(null);
     setPendingIntervalRestore(null);
-    setChartIntervalNotice("");
-    setChartIntervalMode(false);
-    setChartIntervalSelection(null);
-    setChartIntervalDraftSelection(null);
-    setChartIntervalPanelOpen(false);
+    detailChartRef.current?.resetInterval(false);
     setStrategyCompareSnapshot(null);
     void readDetail(sourcePathTrimmed, nextTradeDate, stdTsCode(nextCode));
   }, [lookupInput, readDetail, sourcePathTrimmed, topRows, tradeDateInput]);
@@ -5328,11 +7279,7 @@ export default function DetailsPage({
     setInlineNavigationItems(null);
     setActiveIntervalContext(null);
     setPendingIntervalRestore(null);
-    setChartIntervalNotice("");
-    setChartIntervalMode(false);
-    setChartIntervalSelection(null);
-    setChartIntervalDraftSelection(null);
-    setChartIntervalPanelOpen(false);
+    detailChartRef.current?.resetInterval(false);
     if (normalizedCode === "" && exactStockLookupMatch) {
       setLookupInput(exactStockLookupMatch.name);
     }
@@ -5357,11 +7304,7 @@ export default function DetailsPage({
     }
     setActiveIntervalContext(intervalRestore ?? null);
     setPendingIntervalRestore(intervalRestore ?? null);
-    setChartIntervalNotice("");
-    setChartIntervalMode(Boolean(intervalRestore));
-    setChartIntervalSelection(null);
-    setChartIntervalDraftSelection(null);
-    setChartIntervalPanelOpen(false);
+    detailChartRef.current?.resetInterval(Boolean(intervalRestore));
     setDetailError("");
     setStrategyCompareSnapshot(null);
     void readDetail(
@@ -5380,11 +7323,7 @@ export default function DetailsPage({
 
     setLookupFocused(false);
     setInlineNavigationItems(null);
-    onAutoReadDetail(
-      tradeDateInput,
-      stdTsCode(nextCode),
-      row.name || nextCode,
-    );
+    onAutoReadDetail(tradeDateInput, stdTsCode(nextCode), row.name || nextCode);
   }
 
   function onSelectTopRow(value: string) {
@@ -5478,7 +7417,8 @@ export default function DetailsPage({
       stockSimilarity?.items.map((item) => ({
         tsCode: item.tsCode,
         tradeDate: similarityTradeDate,
-        intervalStartTradeDate: similarityIntervalRestore?.startTradeDate ?? null,
+        intervalStartTradeDate:
+          similarityIntervalRestore?.startTradeDate ?? null,
         intervalEndTradeDate: similarityIntervalRestore?.endTradeDate ?? null,
         sourcePath: sourcePathTrimmed || null,
         name: item.name?.trim() || splitTsCode(item.tsCode),
@@ -5706,15 +7646,6 @@ export default function DetailsPage({
     sourcePathTrimmed,
   ]);
 
-  useEffect(() => {
-    detailCyqRequestIdRef.current += 1;
-    detailCyqRequestKeyRef.current = "";
-    detailCyqFailedRequestKeyRef.current = "";
-    setDetailCyqWindows([]);
-    setDetailCyqError("");
-    setDetailCyqLoading(false);
-  }, [detailCyqModel, resolvedTsCode, sourcePathTrimmed]);
-
   const overviewGridStyle = useMemo(() => {
     if (overviewCardHeight === null) {
       return undefined;
@@ -5835,38 +7766,18 @@ export default function DetailsPage({
   useEffect(() => {
     if (
       sourcePathTrimmed === "" ||
-      !detailData ||
+      !detailData?.resolved_ts_code ||
       resolvedTsCode === "--" ||
       resolvedTradeDate === "--" ||
       !previousStrategyTradeDate ||
-      externalStrategyCompareSnapshot
+      externalStrategyCompareSnapshot ||
+      (strategyCompareSnapshot?.tsCode === resolvedTsCode &&
+        strategyCompareSnapshot.relativeTradeDate.trim() !== "")
     ) {
-      strategyCompareRequestKeyRef.current = "";
       return;
     }
 
-    if (
-      strategyCompareSnapshot &&
-      strategyCompareSnapshot.tsCode === resolvedTsCode &&
-      strategyCompareSnapshot.relativeTradeDate.trim() !== ""
-    ) {
-      strategyCompareRequestKeyRef.current = "";
-      return;
-    }
-
-    const requestKey = [
-      sourcePathTrimmed,
-      resolvedTsCode,
-      resolvedTradeDate,
-      previousStrategyTradeDate,
-    ].join("|");
-    if (strategyCompareRequestKeyRef.current === requestKey) {
-      return;
-    }
-
-    strategyCompareRequestKeyRef.current = requestKey;
     let cancelled = false;
-
     const loadStrategyCompareSnapshot = async () => {
       try {
         const compareDetail = await getStockDetailStrategySnapshot({
@@ -5874,9 +7785,7 @@ export default function DetailsPage({
           tradeDate: previousStrategyTradeDate,
           tsCode: resolvedTsCode,
         });
-        if (cancelled || strategyCompareRequestKeyRef.current !== requestKey) {
-          return;
-        }
+        if (cancelled) return;
 
         setStrategyCompareSnapshot({
           tsCode: resolvedTsCode,
@@ -5889,14 +7798,7 @@ export default function DetailsPage({
           ],
         });
       } catch {
-        if (cancelled || strategyCompareRequestKeyRef.current !== requestKey) {
-          return;
-        }
-        setStrategyCompareSnapshot(null);
-      } finally {
-        if (strategyCompareRequestKeyRef.current === requestKey) {
-          strategyCompareRequestKeyRef.current = "";
-        }
+        if (!cancelled) setStrategyCompareSnapshot(null);
       }
     };
 
@@ -5905,7 +7807,7 @@ export default function DetailsPage({
       cancelled = true;
     };
   }, [
-    detailData,
+    detailData?.resolved_ts_code,
     previousStrategyTradeDate,
     resolvedTradeDate,
     resolvedTsCode,
@@ -5914,13 +7816,19 @@ export default function DetailsPage({
     strategyCompareSnapshot,
   ]);
 
-  const sceneRows = useMemo(() => buildSceneStatusRows(detailData), [detailData]);
+  const sceneRows = useMemo(
+    () => buildSceneStatusRows(detailData),
+    [detailData],
+  );
   const sceneStatusStats = useMemo(
     () => buildSceneStatusStats(sceneRows),
     [sceneRows],
   );
   const sceneTotalCount = sceneRows.length;
-  const sceneRuleScoreBundle = useMemo(() => buildSceneRuleScoreMap(detailData), [detailData]);
+  const sceneRuleScoreBundle = useMemo(
+    () => buildSceneRuleScoreMap(detailData),
+    [detailData],
+  );
   const compareSceneRuleScoreBundle = useMemo(() => {
     if (
       !strategyCompareSnapshot ||
@@ -5964,255 +7872,15 @@ export default function DetailsPage({
     prevRanks,
     prevRankSortDefinitions,
   );
-  const kline = detailRealtimeData?.kline ?? detailData?.kline;
-  const allChartItems = kline?.items ?? EMPTY_KLINE_ROWS;
-  const selectedCyqTradeDate =
-    chartFocus &&
-    chartFocus.absoluteIndex >= 0 &&
-    chartFocus.absoluteIndex < allChartItems.length
-      ? (allChartItems[chartFocus.absoluteIndex]?.trade_date ?? null)
-      : (allChartItems[allChartItems.length - 1]?.trade_date ??
-        (resolvedTradeDate !== "--" ? resolvedTradeDate : null));
-  const detailCyqData = useMemo(() => {
-    const windows = detailCyqWindows.filter(
-      (data) =>
-        data.resolved_ts_code === resolvedTsCode &&
-        data.model === detailCyqModel,
-    );
-    return (
-      windows.find(
-        (data) =>
-          selectedCyqTradeDate &&
-          isCyqWindowCovered(data, selectedCyqTradeDate),
-      ) ??
-      windows[0] ??
-      null
-    );
-  }, [detailCyqWindows, resolvedTsCode, detailCyqModel, selectedCyqTradeDate]);
-  const detailCyqSnapshots =
-    detailCyqData?.resolved_ts_code === resolvedTsCode &&
-    detailCyqData.model === detailCyqModel
-      ? detailCyqData.snapshots
-      : EMPTY_CYQ_SNAPSHOTS;
-  const totalChartItems = allChartItems.length;
-  const minVisibleBars =
-    totalChartItems === 0 ? 0 : Math.min(MIN_VISIBLE_BARS, totalChartItems);
-  const effectiveVisibleBarCount =
-    totalChartItems === 0
-      ? 0
-      : clampNumber(visibleBarCount, minVisibleBars, totalChartItems);
-  const maxVisibleStart = Math.max(
-    totalChartItems - effectiveVisibleBarCount,
-    0,
-  );
-  const effectiveVisibleStart = clampNumber(
-    visibleStartIndex,
-    0,
-    maxVisibleStart,
-  );
-  const chartItems = useMemo(
-    () =>
-      allChartItems.slice(
-        effectiveVisibleStart,
-        effectiveVisibleStart + effectiveVisibleBarCount,
-      ),
-    [allChartItems, effectiveVisibleStart, effectiveVisibleBarCount],
-  );
-  useEffect(() => {
-    if (
-      !detailCyqVisible ||
-      !selectedCyqTradeDate ||
-      resolvedTsCode === "--" ||
-      !sourcePathTrimmed
-    ) {
-      return;
-    }
-    if (
-      detailCyqData?.resolved_ts_code === resolvedTsCode &&
-      detailCyqData.model === detailCyqModel &&
-      isCyqWindowCovered(detailCyqData, selectedCyqTradeDate)
-    ) {
-      return;
-    }
-    if (detailCyqLoading) return;
-    // Debounce before starting, then let the single in-flight batch finish and cache it.
-    const timer = window.setTimeout(() => {
-      void loadDetailCyq(
-        sourcePathTrimmed,
-        resolvedTsCode,
-        detailCyqModel,
-        selectedCyqTradeDate,
-      );
-    }, 120);
-    return () => {
-      window.clearTimeout(timer);
-    };
-  }, [
-    detailCyqData,
-    detailCyqLoading,
-    detailCyqSnapshots,
-    detailCyqVisible,
-    detailCyqModel,
-    loadDetailCyq,
-    resolvedTsCode,
-    selectedCyqTradeDate,
-    sourcePathTrimmed,
-  ]);
-  const selectedCyqSnapshot = useMemo(() => {
-    const index = findCyqSnapshotIndexForTradeDate(
-      detailCyqSnapshots,
-      selectedCyqTradeDate,
-    );
-    if (
-      (detailCyqData?.has_earlier_snapshots &&
-        index < DETAIL_CYQ_SCALE_WINDOW_DAYS - 1) ||
-      (detailCyqData?.has_later_snapshots &&
-        selectedCyqTradeDate &&
-        selectedCyqTradeDate >
-          detailCyqSnapshots[detailCyqSnapshots.length - 1]?.trade_date)
-    ) {
-      return null;
-    }
-    return findCyqSnapshotForTradeDate(
-      detailCyqSnapshots,
-      selectedCyqTradeDate,
-    );
-  }, [
-    detailCyqData?.has_earlier_snapshots,
-    detailCyqData?.has_later_snapshots,
-    detailCyqSnapshots,
-    selectedCyqTradeDate,
-  ]);
-  const cyqScaleMaxChips = useMemo(() => {
-    const mixedMaxima = detailCyqSnapshots.map((snapshot) =>
-      getCyqSnapshotMaxChip(snapshot, "mixed"),
-    );
-    const holderMaxima =
-      detailCyqHolderView === "mixed"
-        ? mixedMaxima
-        : detailCyqSnapshots.map((snapshot) =>
-            getCyqSnapshotMaxChip(snapshot, detailCyqHolderView),
-          );
-    return mixedMaxima.map((_, index) => {
-      const start = Math.max(0, index - DETAIL_CYQ_SCALE_WINDOW_DAYS + 1);
-      const mixedMax = Math.max(...mixedMaxima.slice(start, index + 1));
-      return mixedMax > 0
-        ? mixedMax
-        : Math.max(...holderMaxima.slice(start, index + 1));
-    });
-  }, [detailCyqHolderView, detailCyqSnapshots]);
-  const cyqScaleMaxChip =
-    cyqScaleMaxChips[
-      findCyqSnapshotIndexForTradeDate(detailCyqSnapshots, selectedCyqTradeDate)
-    ] ?? 0;
-  const chartLayoutSlotCount = getChartLayoutSlotCount(
-    chartItems.length,
-    totalChartItems,
-  );
-  const panels = useMemo(
-    () => (kline?.panels?.length ? kline.panels : buildDefaultPanels()),
-    [kline?.panels],
-  );
-  const annotationProviderContext = useMemo(
-    () => ({
-      sourcePath: sourcePathTrimmed,
-      tsCode: resolvedTsCode !== "--" ? resolvedTsCode : undefined,
-      startTradeDate: allChartItems[0]?.trade_date,
-      endTradeDate: allChartItems[allChartItems.length - 1]?.trade_date,
-      indicator: {
-        panels,
-        rows: allChartItems,
-      },
-    }),
-    [allChartItems, panels, resolvedTsCode, sourcePathTrimmed],
-  );
-  const { layers: annotationLayers } = useDetailAnnotationProviders(
-    DETAIL_ANNOTATION_PROVIDERS,
-    annotationProviderContext,
-  );
-  const indicatorPanelCount = panels.filter((panel) => !isMainChartPanel(panel)).length;
-  const shouldReserveCyqPanelWidth =
-    detailCyqVisible && panels.some((panel) => isInteractivePricePanel(panel));
-  const shouldShowCyqSummary =
-    detailCyqVisible &&
-    shouldReserveCyqPanelWidth &&
-    selectedCyqSnapshot !== null;
-  const shouldUseCyqSummaryIndicatorSlot =
-    shouldReserveCyqPanelWidth && indicatorPanelCount === 0;
-  const fixedChartMainPanelHeight = chartLayoutWidth * chartMainWidthRatio;
-  const mainChartPanel =
-    panels.find((panel) => isMainChartPanel(panel)) ?? panels[0] ?? null;
-  const chartMainPanelHeight =
-    chartMainHeightMode === "percent"
-      ? buildPercentScaledMainPanelHeight(
-          mainChartPanel,
-          chartItems,
-          chartMainPercentPixels,
-          chartMainPercentMinHeight,
-          chartMainPercentMaxHeight,
-          fixedChartMainPanelHeight,
-        )
-      : fixedChartMainPanelHeight;
-  const chartIndicatorPanelBaseHeight =
-    (chartLayoutWidth * chartIndicatorWidthRatio) /
-    DEFAULT_INDICATOR_PANEL_COUNT;
-  const chartPanelHeights = buildChartPanelHeights(
-    kline,
-    panels,
-    chartMainPanelHeight,
-    chartIndicatorPanelBaseHeight,
-  );
-  const cyqSummaryIndicatorSlotHeight = shouldUseCyqSummaryIndicatorSlot
-    ? chartIndicatorPanelBaseHeight
-    : 0;
-  const chartPanelGapTotal =
-    Math.max(
-      0,
-      panels.length - 1 + (shouldUseCyqSummaryIndicatorSlot ? 1 : 0),
-    ) * CHART_PANEL_GAP_PX;
-  const chartShellHeight =
-    chartPanelHeights.reduce((sum, panelHeight) => sum + panelHeight, 0) +
-    cyqSummaryIndicatorSlotHeight +
-    chartPanelGapTotal;
-  const chartTemplateRows = [
-    buildChartTemplateRows(
-      kline,
-      panels,
-      chartMainPanelHeight,
-      chartIndicatorPanelBaseHeight,
-    ),
-    shouldUseCyqSummaryIndicatorSlot
-      ? `${cyqSummaryIndicatorSlotHeight.toFixed(2)}px`
-      : "",
-  ]
-    .filter(Boolean)
-    .join(" ");
-  const cyqSummaryPlotWidth =
-    CHART_VIEWBOX_WIDTH - CHART_MARGIN.left - CHART_MARGIN.right;
-  const cyqSummaryPanelWidth =
-    cyqSummaryPlotWidth * CHART_CYQ_PANEL_WIDTH_RATIO;
-  const cyqSummaryPanelLeft =
-    CHART_VIEWBOX_WIDTH - CHART_MARGIN.right - cyqSummaryPanelWidth;
-  const cyqSummaryOverlayStyle = {
-    "--details-cyq-summary-top": `${chartMainPanelHeight + CHART_PANEL_GAP_PX}px`,
-    "--details-cyq-summary-left": shouldUseCyqSummaryIndicatorSlot
-      ? "0px"
-      : `${(cyqSummaryPanelLeft / CHART_VIEWBOX_WIDTH) * 100}%`,
-    "--details-cyq-summary-right": shouldUseCyqSummaryIndicatorSlot
-      ? "0px"
-      : `${(CHART_MARGIN.right / CHART_VIEWBOX_WIDTH) * 100}%`,
-    "--details-cyq-summary-height": `${cyqSummaryIndicatorSlotHeight.toFixed(2)}px`,
-  } as CSSProperties;
-  const watermarkName =
-    kline?.watermark_name ?? detailData?.overview?.name ?? "个股详情";
-  const watermarkCode = kline?.watermark_code ?? splitTsCode(resolvedTsCode);
   const matchedTopDate = topResolvedDate || "--";
-  const chartAnchorTradeDate =
-    detailRealtimeData?.quoteTradeDate?.trim() || resolvedTradeDate;
   const defaultNavigationItems = useMemo(
     () =>
       topRows.map((row) =>
-        buildNavigationItemFromOverviewRow(row, tradeDateInput, sourcePathTrimmed),
+        buildNavigationItemFromOverviewRow(
+          row,
+          tradeDateInput,
+          sourcePathTrimmed,
+        ),
       ),
     [sourcePathTrimmed, topRows, tradeDateInput],
   );
@@ -6282,87 +7950,15 @@ export default function DetailsPage({
   const currentNavigationRoleLabel = navigationRoleLabel(currentNavigationRole);
   const isPrevAutoLocked = detailsNavAutoDirection === "prev";
   const isNextAutoLocked = detailsNavAutoDirection === "next";
-  const chartRangeText =
-    chartItems.length > 0
-      ? `${chartItems[0].trade_date} -> ${chartItems[chartItems.length - 1].trade_date}`
-      : "--";
-  const cyqToggleTitle = detailCyqLoading
-    ? "筹码分布加载中..."
-    : detailCyqError
-      ? detailCyqError
-      : detailCyqVisible
-        ? `隐藏${detailCyqModel === "chen" ? "新" : "旧"}筹码分布${selectedCyqTradeDate ? `（${selectedCyqTradeDate}）` : ""}`
-        : `显示${detailCyqModel === "chen" ? "新" : "旧"}筹码分布`;
   const strategyGridStyle = useMemo(
     () =>
       isStrategyStacked
         ? undefined
-          : {
-              gridTemplateColumns: `minmax(0, ${strategySplitRatio}fr) 14px minmax(0, ${1 - strategySplitRatio}fr)`,
-            },
+        : {
+            gridTemplateColumns: `minmax(0, ${strategySplitRatio}fr) 14px minmax(0, ${1 - strategySplitRatio}fr)`,
+          },
     [isStrategyStacked, strategySplitRatio],
   );
-  const intervalStatsSections = useMemo(
-    () => buildIntervalStatsSections(allChartItems, chartIntervalSelection),
-    [allChartItems, chartIntervalSelection],
-  );
-  const chartIntervalSelecting = chartIntervalMode && chartIntervalSelection === null;
-  const chartIntervalButtonLabel = chartIntervalSelection
-    ? "关闭区间"
-    : chartIntervalSelecting
-      ? "选择区间中..."
-      : "区间统计";
-
-  const closeChartIntervalPanel = useCallback(() => {
-    setChartIntervalMode(false);
-    setChartIntervalSelection(null);
-    setChartIntervalDraftSelection(null);
-    setChartIntervalPanelOpen(false);
-    setActiveIntervalContext(null);
-    setPendingIntervalRestore(null);
-    setChartIntervalNotice("");
-  }, []);
-
-  const openChartIntervalMode = useCallback(() => {
-    if (totalChartItems === 0) {
-      return;
-    }
-
-    setChartIntervalMode(true);
-    setChartFocus(null);
-    setChartIntervalDraftSelection(null);
-    setChartIntervalNotice("");
-    if (chartIntervalSelection) {
-      setChartIntervalPanelOpen(true);
-      return;
-    }
-
-    setChartIntervalPanelOpen(false);
-    setChartIntervalNotice("请在主K图上拖拽选择区间");
-  }, [chartIntervalSelection, totalChartItems, setChartFocus]);
-
-  const toggleChartIntervalMode = useCallback(() => {
-    if (
-      chartIntervalMode ||
-      chartIntervalSelection ||
-      chartIntervalDraftSelection
-    ) {
-      closeChartIntervalPanel();
-      return;
-    }
-
-    setChartIntervalMode(true);
-    setChartFocus(null);
-    setChartIntervalPanelOpen(false);
-    setChartIntervalNotice("请在主K图上拖拽选择区间");
-  }, [
-    chartIntervalDraftSelection,
-    chartIntervalMode,
-    chartIntervalSelection,
-    closeChartIntervalPanel,
-    setChartFocus,
-  ]);
-
   useLayoutEffect(() => {
     const element = overviewCardRef.current;
     if (!element) {
@@ -6390,193 +7986,14 @@ export default function DetailsPage({
   }, [conceptText, conceptItems.length, overviewRows.length]);
 
   useEffect(() => {
-    if (pendingIntervalRestore && detailLoading) {
-      return;
-    }
-
-    if (totalChartItems === 0) {
-      chartDragRef.current = null;
-      setVisibleBarCount(defaultVisibleBars);
-      setVisibleStartIndex(0);
-      setChartFocus(null);
-      setChartIntervalSelection(null);
-      setChartIntervalDraftSelection(null);
-      setChartIntervalPanelOpen(false);
-      if (pendingIntervalRestore) {
-        setChartIntervalNotice("区间超出当前图表窗口，已回退为单参考日。");
-        setActiveIntervalContext(null);
-        setChartIntervalMode(false);
-        setPendingIntervalRestore(null);
-      }
-      return;
-    }
-
-    const nextVisibleBarCount = clampNumber(
-      defaultVisibleBars,
-      Math.min(MIN_VISIBLE_BARS, totalChartItems),
-      totalChartItems,
-    );
-    const referenceIndex = allChartItems.findIndex(
-      (item) => item.trade_date === chartAnchorTradeDate,
-    );
-    const nextVisibleStart =
-      referenceIndex >= 0
-        ? clampNumber(
-            referenceIndex - Math.floor(nextVisibleBarCount / 2),
-            0,
-            totalChartItems - nextVisibleBarCount,
-          )
-        : Math.max(totalChartItems - nextVisibleBarCount, 0);
-
-    if (pendingIntervalRestore) {
-      const resolvedIntervalRestore = resolveIntervalRestore(
-        allChartItems,
-        pendingIntervalRestore,
+    const syncNavInterval = () => {
+      setDetailsNavLongPressIntervalSeconds(
+        readStoredDetailsNavLongPressIntervalSeconds(),
       );
-      if (resolvedIntervalRestore) {
-        const intervalBarCount =
-          resolvedIntervalRestore.endAbsoluteIndex -
-          resolvedIntervalRestore.startAbsoluteIndex +
-          1;
-        const restoredVisibleBarCount = clampNumber(
-          Math.max(defaultVisibleBars, intervalBarCount + 20),
-          Math.min(MIN_VISIBLE_BARS, totalChartItems),
-          totalChartItems,
-        );
-        const intervalMidpoint = Math.floor(
-          (resolvedIntervalRestore.startAbsoluteIndex +
-            resolvedIntervalRestore.endAbsoluteIndex) /
-            2,
-        );
-        const restoredVisibleStart = clampNumber(
-          intervalMidpoint - Math.floor(restoredVisibleBarCount / 2),
-          0,
-          totalChartItems - restoredVisibleBarCount,
-        );
-
-        chartDragRef.current = null;
-        setVisibleBarCount(restoredVisibleBarCount);
-        setVisibleStartIndex(restoredVisibleStart);
-        setChartFocus(null);
-        setActiveIntervalContext({
-          startTradeDate: resolvedIntervalRestore.startTradeDate,
-          endTradeDate: resolvedIntervalRestore.endTradeDate,
-        });
-        setChartIntervalMode(true);
-        setChartIntervalSelection(resolvedIntervalRestore);
-        setChartIntervalDraftSelection(null);
-        setChartIntervalPanelOpen(true);
-        setChartIntervalNotice(
-          buildIntervalRestoreNotice(
-            pendingIntervalRestore,
-            resolvedIntervalRestore,
-          ),
-        );
-        setPendingIntervalRestore(null);
-        return;
-      }
-
-      setChartIntervalNotice("区间超出当前图表窗口，已回退为单参考日。");
-      setActiveIntervalContext(null);
-      setChartIntervalMode(false);
-      setChartIntervalSelection(null);
-      setChartIntervalDraftSelection(null);
-      setChartIntervalPanelOpen(false);
-      setPendingIntervalRestore(null);
-    }
-
-    chartDragRef.current = null;
-    setVisibleBarCount(nextVisibleBarCount);
-    setVisibleStartIndex(nextVisibleStart);
-    setChartFocus(null);
-  }, [
-    setChartFocus,
-    allChartItems,
-    detailData?.resolved_trade_date,
-    detailData?.resolved_ts_code,
-    detailLoading,
-    detailRealtimeData?.quoteTradeDate,
-    pendingIntervalRestore,
-    chartAnchorTradeDate,
-    defaultVisibleBars,
-    totalChartItems,
-  ]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    const updateChartLayoutWidth = () => {
-      const cardWidth = chartCardRef.current?.getBoundingClientRect().width;
-      const nextWidth =
-        typeof cardWidth === "number" && cardWidth > 0
-          ? cardWidth
-          : window.innerWidth;
-      setChartLayoutWidth(nextWidth);
     };
-
-    updateChartLayoutWidth();
-    window.addEventListener("resize", updateChartLayoutWidth);
-
-    const card = chartCardRef.current;
-    const observer =
-      typeof ResizeObserver === "undefined" || !card
-        ? null
-        : new ResizeObserver(() => {
-            updateChartLayoutWidth();
-          });
-    if (observer && card) {
-      observer.observe(card);
-    }
-
-    return () => {
-      window.removeEventListener("resize", updateChartLayoutWidth);
-      observer?.disconnect();
-    };
-  }, []);
-
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    const onStorage = (event: StorageEvent) => {
-      if (
-        event.key === null ||
-        event.key === "lh_chart_main_width_ratio_v1" ||
-        event.key === "lh_chart_indicator_width_ratio_v1" ||
-        event.key === "lh_chart_main_height_mode_v1" ||
-        event.key === "lh_chart_main_percent_pixels_v1" ||
-        event.key === "lh_chart_main_percent_min_height_v1" ||
-        event.key === "lh_chart_main_percent_max_height_v1" ||
-        event.key === "lh_details_nav_long_press_interval_seconds_v1"
-      ) {
-        setChartMainWidthRatio(readStoredChartMainWidthRatio());
-        setChartIndicatorWidthRatio(readStoredChartIndicatorWidthRatio());
-        setChartMainHeightMode(readStoredChartMainHeightMode());
-        setChartMainPercentPixels(readStoredChartMainPercentPixels());
-        setChartMainPercentMinHeight(readStoredChartMainPercentMinHeight());
-        setChartMainPercentMaxHeight(readStoredChartMainPercentMaxHeight());
-        setDetailsNavLongPressIntervalSeconds(
-          readStoredDetailsNavLongPressIntervalSeconds(),
-        );
-      }
-    };
-
-    setChartMainWidthRatio(readStoredChartMainWidthRatio());
-    setChartIndicatorWidthRatio(readStoredChartIndicatorWidthRatio());
-    setChartMainHeightMode(readStoredChartMainHeightMode());
-    setChartMainPercentPixels(readStoredChartMainPercentPixels());
-    setChartMainPercentMinHeight(readStoredChartMainPercentMinHeight());
-    setChartMainPercentMaxHeight(readStoredChartMainPercentMaxHeight());
-    setDetailsNavLongPressIntervalSeconds(
-      readStoredDetailsNavLongPressIntervalSeconds(),
-    );
-    window.addEventListener("storage", onStorage);
-    return () => {
-      window.removeEventListener("storage", onStorage);
-    };
+    syncNavInterval();
+    window.addEventListener("storage", syncNavInterval);
+    return () => window.removeEventListener("storage", syncNavInterval);
   }, []);
 
   useEffect(() => {
@@ -6586,7 +8003,8 @@ export default function DetailsPage({
 
     const updateStrategyLayoutMode = () => {
       const grid = strategyGridRef.current;
-      const gridWidth = grid?.getBoundingClientRect().width ?? window.innerWidth;
+      const gridWidth =
+        grid?.getBoundingClientRect().width ?? window.innerWidth;
       const isPortraitViewport = window.innerHeight > window.innerWidth;
       setIsStrategyStacked(
         gridWidth <= STRATEGY_STACK_BREAKPOINT ||
@@ -6720,54 +8138,6 @@ export default function DetailsPage({
     container.scrollTo({ top: nextScrollTop });
   }, [resolvedTradeDate, sortedPrevRanks]);
 
-  useLayoutEffect(() => {
-    if (detailLoading) {
-      return;
-    }
-
-    const pendingScroll = pendingPageScrollRef.current;
-    if (!pendingScroll) {
-      return;
-    }
-
-    const contentElement = getContentScrollElement();
-    const chartRect = chartCardRef.current?.getBoundingClientRect();
-    const currentChartEdgeOffset =
-      pendingScroll.chartEdge === "bottom"
-        ? chartRect?.bottom
-        : pendingScroll.chartEdge === "top"
-          ? chartRect?.top
-          : undefined;
-    const scrollDelta =
-      currentChartEdgeOffset !== undefined &&
-      pendingScroll.chartEdgeViewportOffset !== null
-        ? currentChartEdgeOffset - pendingScroll.chartEdgeViewportOffset
-        : null;
-    if (contentElement) {
-      contentElement.scrollTo({
-        left: pendingScroll.left,
-        top:
-          scrollDelta === null
-            ? pendingScroll.top
-            : contentElement.scrollTop + scrollDelta,
-      });
-    } else {
-      window.scrollTo(
-        pendingScroll.left,
-        scrollDelta === null ? pendingScroll.top : window.scrollY + scrollDelta,
-      );
-    }
-    if (!detailIndicatorsLoading) {
-      pendingPageScrollRef.current = null;
-    }
-  }, [
-    chartShellHeight,
-    detailIndicatorsLoading,
-    detailLoading,
-    detailData?.resolved_trade_date,
-    detailData?.resolved_ts_code,
-  ]);
-
   useEffect(() => {
     let cancelled = false;
 
@@ -6862,11 +8232,7 @@ export default function DetailsPage({
     setTradeDateInput(routeEffectiveTradeDate);
     setActiveIntervalContext(routeIntervalRestore);
     setPendingIntervalRestore(routeIntervalRestore);
-    setChartIntervalNotice("");
-    setChartIntervalMode(Boolean(routeIntervalRestore));
-    setChartIntervalSelection(null);
-    setChartIntervalDraftSelection(null);
-    setChartIntervalPanelOpen(false);
+    detailChartRef.current?.resetInterval(Boolean(routeIntervalRestore));
     setLookupInput(routeTsCode);
     setTopError("");
     setDetailError("");
@@ -6886,902 +8252,6 @@ export default function DetailsPage({
     routeTsCode,
     sourcePathTrimmed,
   ]);
-
-  function setChartZoom(nextCount: number) {
-    if (totalChartItems === 0) {
-      return;
-    }
-
-    const resolvedCount = clampNumber(
-      nextCount,
-      minVisibleBars,
-      totalChartItems,
-    );
-    const currentEnd = effectiveVisibleStart + effectiveVisibleBarCount;
-    setVisibleBarCount(resolvedCount);
-    setVisibleStartIndex(
-      clampNumber(
-        currentEnd - resolvedCount,
-        0,
-        totalChartItems - resolvedCount,
-      ),
-    );
-  }
-
-  function setChartZoomAnchored(
-    nextCount: number,
-    anchorAbsoluteIndex: number,
-    anchorRatio: number,
-  ) {
-    if (totalChartItems === 0) {
-      return;
-    }
-
-    const resolvedCount = clampNumber(
-      Math.round(nextCount),
-      minVisibleBars,
-      totalChartItems,
-    );
-    const nextMaxVisibleStart = Math.max(totalChartItems - resolvedCount, 0);
-    const resolvedAnchorRatio = clampNumber(anchorRatio, 0, 1);
-    const nextVisibleStart = clampNumber(
-      Math.round(
-        anchorAbsoluteIndex -
-          resolvedAnchorRatio * Math.max(resolvedCount - 1, 0),
-      ),
-      0,
-      nextMaxVisibleStart,
-    );
-
-    setVisibleBarCount(resolvedCount);
-    setVisibleStartIndex(nextVisibleStart);
-  }
-
-  function getChartTouchPointers(panelKey: string) {
-    return [...chartTouchPointersRef.current.values()].filter(
-      (pointer) => pointer.panelKey === panelKey,
-    );
-  }
-
-  function getChartPointerDistance(
-    firstPointer: ChartTouchPointer,
-    secondPointer: ChartTouchPointer,
-  ) {
-    return Math.hypot(
-      secondPointer.clientX - firstPointer.clientX,
-      secondPointer.clientY - firstPointer.clientY,
-    );
-  }
-
-  function startChartPinch(
-    panelKey: string,
-    viewport: HTMLDivElement,
-    pointers: ChartTouchPointer[],
-  ) {
-    if (totalChartItems === 0 || pointers.length < 2) {
-      return false;
-    }
-
-    const [firstPointer, secondPointer] = pointers;
-    const midpointX = (firstPointer.clientX + secondPointer.clientX) / 2;
-    const anchor = resolveChartAnchorFromClientX(
-      viewport,
-      midpointX,
-      chartItems.length,
-      chartLayoutSlotCount,
-      shouldReserveCyqPanelWidth,
-    );
-    if (!anchor) {
-      return false;
-    }
-
-    chartPinchRef.current = {
-      panelKey,
-      pointerIds: [firstPointer.pointerId, secondPointer.pointerId],
-      startDistance: Math.max(
-        getChartPointerDistance(firstPointer, secondPointer),
-        CHART_PINCH_MIN_DISTANCE,
-      ),
-      startVisibleBarCount: effectiveVisibleBarCount,
-      startAnchorAbsoluteIndex: effectiveVisibleStart + anchor.visiblePosition,
-      startAnchorRatio: anchor.visibleRatio,
-    };
-    chartDragRef.current = null;
-    setChartFocus(null);
-    setChartIntervalDraftSelection(null);
-    setChartIntervalPanelOpen(false);
-    return true;
-  }
-
-  function updateChartPinchZoom(event: ReactPointerEvent<HTMLDivElement>) {
-    const pinchState = chartPinchRef.current;
-    if (!pinchState || !pinchState.pointerIds.includes(event.pointerId)) {
-      return false;
-    }
-
-    const [firstPointerId, secondPointerId] = pinchState.pointerIds;
-    const firstPointer = chartTouchPointersRef.current.get(firstPointerId);
-    const secondPointer = chartTouchPointersRef.current.get(secondPointerId);
-    if (!firstPointer || !secondPointer) {
-      chartPinchRef.current = null;
-      return true;
-    }
-
-    const distance = Math.max(
-      getChartPointerDistance(firstPointer, secondPointer),
-      CHART_PINCH_MIN_DISTANCE,
-    );
-    const scale = distance / pinchState.startDistance;
-    if (!Number.isFinite(scale) || scale <= 0) {
-      return true;
-    }
-
-    setChartZoomAnchored(
-      pinchState.startVisibleBarCount / scale,
-      pinchState.startAnchorAbsoluteIndex,
-      pinchState.startAnchorRatio,
-    );
-    return true;
-  }
-
-  function zoomChartFromWheel(
-    viewport: HTMLDivElement,
-    clientX: number,
-    deltaY: number,
-  ) {
-    const anchor = resolveChartAnchorFromClientX(
-      viewport,
-      clientX,
-      chartItems.length,
-      chartLayoutSlotCount,
-      shouldReserveCyqPanelWidth,
-    );
-    if (!anchor) {
-      return false;
-    }
-
-    setChartZoomAnchored(
-      effectiveVisibleBarCount * Math.exp(deltaY * CHART_WHEEL_ZOOM_FACTOR),
-      effectiveVisibleStart + anchor.visiblePosition,
-      anchor.visibleRatio,
-    );
-    return true;
-  }
-
-  useEffect(() => {
-    const chartCard = chartCardRef.current;
-    if (!chartCard) {
-      return;
-    }
-    const activeChartCard = chartCard;
-
-    function handleNativeChartWheel(event: WheelEvent) {
-      if (!event.ctrlKey && !event.metaKey) {
-        return;
-      }
-
-      const targetElement =
-        event.target instanceof Element ? event.target : null;
-      const viewport =
-        targetElement?.closest<HTMLDivElement>(".details-chart-viewport") ??
-        null;
-      if (!viewport || !activeChartCard.contains(viewport)) {
-        return;
-      }
-
-      event.preventDefault();
-      if (totalChartItems === 0) {
-        return;
-      }
-
-      zoomChartFromWheel(viewport, event.clientX, event.deltaY);
-    }
-
-    activeChartCard.addEventListener("wheel", handleNativeChartWheel, {
-      passive: false,
-    });
-    return () => {
-      activeChartCard.removeEventListener("wheel", handleNativeChartWheel);
-    };
-  });
-
-  function buildChartFocus(
-    panelKey: string,
-    viewport: HTMLDivElement,
-    clientX: number,
-    clientY: number,
-    pinned: boolean,
-  ) {
-    const pointer = buildChartPointerSnapshot(
-      viewport,
-      clientX,
-      clientY,
-      chartItems.length,
-      chartLayoutSlotCount,
-      shouldReserveCyqPanelWidth,
-    );
-    if (!pointer) {
-      return null;
-    }
-
-    return {
-      absoluteIndex: effectiveVisibleStart + pointer.visibleIndex,
-      panelKey,
-      cursorXPercent: pointer.cursorXPercent,
-      cursorYPercent: pointer.cursorYPercent,
-      pinned,
-    };
-  }
-
-  function buildChartIntervalSelection(
-    viewport: HTMLDivElement,
-    clientX: number,
-    clientY: number,
-    anchorAbsoluteIndex: number,
-  ) {
-    const pointer = buildChartPointerSnapshot(
-      viewport,
-      clientX,
-      clientY,
-      chartItems.length,
-      chartLayoutSlotCount,
-      shouldReserveCyqPanelWidth,
-    );
-    if (!pointer) {
-      return null;
-    }
-
-    return buildIntervalSelectionFromAbsoluteIndices(
-      allChartItems,
-      anchorAbsoluteIndex,
-      effectiveVisibleStart + pointer.visibleIndex,
-    );
-  }
-
-  function buildAdjustedChartIntervalSelection(
-    viewport: HTMLDivElement,
-    clientX: number,
-    clientY: number,
-    fixedAbsoluteIndex: number,
-    side: ChartIntervalAdjustSide,
-  ) {
-    const pointer = buildChartPointerSnapshot(
-      viewport,
-      clientX,
-      clientY,
-      chartItems.length,
-      chartLayoutSlotCount,
-      shouldReserveCyqPanelWidth,
-    );
-    if (!pointer) {
-      return null;
-    }
-
-    const pointerAbsoluteIndex = effectiveVisibleStart + pointer.visibleIndex;
-    const nextStartAbsoluteIndex =
-      side === "start"
-        ? Math.min(pointerAbsoluteIndex, fixedAbsoluteIndex)
-        : fixedAbsoluteIndex;
-    const nextEndAbsoluteIndex =
-      side === "end"
-        ? Math.max(pointerAbsoluteIndex, fixedAbsoluteIndex)
-        : fixedAbsoluteIndex;
-
-    return buildIntervalSelectionFromAbsoluteIndices(
-      allChartItems,
-      nextStartAbsoluteIndex,
-      nextEndAbsoluteIndex,
-    );
-  }
-
-  function buildMovedChartIntervalSelection(
-    viewport: HTMLDivElement,
-    clientX: number,
-    clientY: number,
-    anchorAbsoluteIndex: number,
-    moveSelectionStartAbsoluteIndex: number,
-    moveSelectionEndAbsoluteIndex: number,
-  ) {
-    const pointer = buildChartPointerSnapshot(
-      viewport,
-      clientX,
-      clientY,
-      chartItems.length,
-      chartLayoutSlotCount,
-      shouldReserveCyqPanelWidth,
-    );
-    if (!pointer || allChartItems.length === 0) {
-      return null;
-    }
-
-    const pointerAbsoluteIndex = effectiveVisibleStart + pointer.visibleIndex;
-    const delta = pointerAbsoluteIndex - anchorAbsoluteIndex;
-    const span = Math.max(
-      0,
-      moveSelectionEndAbsoluteIndex - moveSelectionStartAbsoluteIndex,
-    );
-    const maxStartAbsoluteIndex = Math.max(0, allChartItems.length - 1 - span);
-    const nextStartAbsoluteIndex = clampNumber(
-      moveSelectionStartAbsoluteIndex + delta,
-      0,
-      maxStartAbsoluteIndex,
-    );
-    const nextEndAbsoluteIndex = nextStartAbsoluteIndex + span;
-
-    return buildIntervalSelectionFromAbsoluteIndices(
-      allChartItems,
-      nextStartAbsoluteIndex,
-      nextEndAbsoluteIndex,
-    );
-  }
-
-  function onChartPointerDown(
-    panelKey: string,
-    event: ReactPointerEvent<HTMLDivElement>,
-  ) {
-    if (event.pointerType === "mouse" && event.button !== 0) {
-      return;
-    }
-
-    const rect = event.currentTarget.getBoundingClientRect();
-    if (rect.width <= 0) {
-      return;
-    }
-
-    if (event.pointerType === "touch") {
-      chartTouchPointersRef.current.set(event.pointerId, {
-        pointerId: event.pointerId,
-        panelKey,
-        clientX: event.clientX,
-        clientY: event.clientY,
-      });
-      try {
-        event.currentTarget.setPointerCapture(event.pointerId);
-      } catch {
-        // Ignore browsers that do not support pointer capture for this target.
-      }
-
-      const touchPointers = getChartTouchPointers(panelKey);
-      if (touchPointers.length >= 2) {
-        event.preventDefault();
-        startChartPinch(
-          panelKey,
-          event.currentTarget,
-          touchPointers.slice(0, 2),
-        );
-        return;
-      }
-    }
-
-    const isTouchPointer = event.pointerType !== "mouse";
-    let anchorAbsoluteIndex: number | undefined;
-    let moveSelectionStartAbsoluteIndex: number | undefined;
-    let moveSelectionEndAbsoluteIndex: number | undefined;
-    let intervalStartedOutsideSelection = false;
-    const mode =
-      panelKey === "price" && chartIntervalMode
-        ? (() => {
-            const dragTarget = detectChartIntervalDragTarget(
-              event.currentTarget,
-              event.clientX,
-              chartIntervalSelection,
-              effectiveVisibleStart,
-              chartItems.length,
-              chartLayoutSlotCount,
-              shouldReserveCyqPanelWidth,
-            );
-            if (dragTarget && chartIntervalSelection && dragTarget !== "move") {
-              anchorAbsoluteIndex =
-                dragTarget === "start"
-                  ? chartIntervalSelection.endAbsoluteIndex
-                  : chartIntervalSelection.startAbsoluteIndex;
-              setChartIntervalDraftSelection(chartIntervalSelection);
-              setChartIntervalPanelOpen(false);
-              setChartFocus(null);
-              return dragTarget === "start"
-                ? "interval-adjust-start"
-                : "interval-adjust-end";
-            }
-
-            if (dragTarget === "move" && chartIntervalSelection) {
-              const pointer = buildChartPointerSnapshot(
-                event.currentTarget,
-                event.clientX,
-                event.clientY,
-                chartItems.length,
-                chartLayoutSlotCount,
-                shouldReserveCyqPanelWidth,
-              );
-              if (!pointer) {
-                return "interval-select" as const;
-              }
-
-              anchorAbsoluteIndex =
-                effectiveVisibleStart + pointer.visibleIndex;
-              moveSelectionStartAbsoluteIndex =
-                chartIntervalSelection.startAbsoluteIndex;
-              moveSelectionEndAbsoluteIndex =
-                chartIntervalSelection.endAbsoluteIndex;
-              setChartIntervalDraftSelection(chartIntervalSelection);
-              setChartIntervalPanelOpen(false);
-              setChartFocus(null);
-              return "interval-move" as const;
-            }
-
-            const pointer = buildChartPointerSnapshot(
-              event.currentTarget,
-              event.clientX,
-              event.clientY,
-              chartItems.length,
-              chartLayoutSlotCount,
-              shouldReserveCyqPanelWidth,
-            );
-            if (!pointer) {
-              return "interval-select" as const;
-            }
-
-            anchorAbsoluteIndex = effectiveVisibleStart + pointer.visibleIndex;
-            const intervalSelection = buildIntervalSelectionFromAbsoluteIndices(
-              allChartItems,
-              anchorAbsoluteIndex,
-              anchorAbsoluteIndex,
-            );
-            intervalStartedOutsideSelection = chartIntervalSelection !== null;
-            if (intervalSelection && !intervalStartedOutsideSelection) {
-              setChartIntervalDraftSelection(intervalSelection);
-              setChartIntervalPanelOpen(false);
-              setChartFocus(null);
-            }
-            return "interval-select" as const;
-          })()
-        : chartFocus?.pinned
-          ? isTouchPointer &&
-            !isPointerNearChartFocus(
-              panelKey,
-              event.currentTarget,
-              event.clientX,
-              event.clientY,
-              chartFocus,
-            )
-            ? "dismiss"
-            : "focus"
-          : maxVisibleStart > 0
-            ? "pan"
-            : "tap";
-
-    if (mode === "interval-select" && anchorAbsoluteIndex === undefined) {
-      setChartIntervalDraftSelection(null);
-      return;
-    }
-    if (
-      (mode === "interval-adjust-start" || mode === "interval-adjust-end") &&
-      anchorAbsoluteIndex === undefined
-    ) {
-      setChartIntervalDraftSelection(null);
-      return;
-    }
-    if (
-      mode === "interval-move" &&
-      (anchorAbsoluteIndex === undefined ||
-        moveSelectionStartAbsoluteIndex === undefined ||
-        moveSelectionEndAbsoluteIndex === undefined)
-    ) {
-      setChartIntervalDraftSelection(null);
-      return;
-    }
-
-    try {
-      event.currentTarget.setPointerCapture(event.pointerId);
-    } catch {
-      // Ignore browsers that do not support pointer capture for this target.
-    }
-
-    chartDragRef.current = {
-      pointerId: event.pointerId,
-      panelKey,
-      mode,
-      startClientX: event.clientX,
-      startClientY: event.clientY,
-      startVisibleStart: effectiveVisibleStart,
-      barsPerPixel: effectiveVisibleBarCount / rect.width,
-      maxVisibleStart,
-      moved: false,
-      anchorAbsoluteIndex,
-      moveSelectionStartAbsoluteIndex,
-      moveSelectionEndAbsoluteIndex,
-      intervalStartedOutsideSelection,
-    };
-  }
-
-  function onChartPointerMove(
-    panelKey: string,
-    event: ReactPointerEvent<HTMLDivElement>,
-  ) {
-    if (event.pointerType === "touch") {
-      const trackedPointer = chartTouchPointersRef.current.get(event.pointerId);
-      if (trackedPointer) {
-        chartTouchPointersRef.current.set(event.pointerId, {
-          ...trackedPointer,
-          clientX: event.clientX,
-          clientY: event.clientY,
-        });
-      }
-
-      if (updateChartPinchZoom(event)) {
-        event.preventDefault();
-        return;
-      }
-    }
-
-    const dragState = chartDragRef.current;
-    if (!dragState) {
-      if (event.pointerType !== "mouse" || !chartFocus?.pinned) {
-        return;
-      }
-
-      const nextFocus = buildChartFocus(
-        panelKey,
-        event.currentTarget,
-        event.clientX,
-        event.clientY,
-        true,
-      );
-      if (!nextFocus) {
-        return;
-      }
-
-      setChartFocus(nextFocus);
-      return;
-    }
-
-    if (
-      dragState.pointerId !== event.pointerId ||
-      dragState.panelKey !== panelKey
-    ) {
-      return;
-    }
-
-    const moveX = event.clientX - dragState.startClientX;
-    const moveY = event.clientY - dragState.startClientY;
-    const absMoveX = Math.abs(moveX);
-    const absMoveY = Math.abs(moveY);
-    if (
-      event.pointerType === "touch" &&
-      !dragState.moved &&
-      absMoveY >= CHART_POINTER_DRAG_THRESHOLD &&
-      absMoveY > absMoveX * CHART_TOUCH_VERTICAL_SCROLL_RATIO
-    ) {
-      if (
-        dragState.mode === "interval-select" ||
-        dragState.mode === "interval-adjust-start" ||
-        dragState.mode === "interval-adjust-end"
-      ) {
-        setChartIntervalDraftSelection(null);
-      }
-      clearChartPointerState(event);
-      return;
-    }
-
-    const moveDistance = Math.hypot(moveX, moveY);
-    if (!dragState.moved && moveDistance >= CHART_POINTER_DRAG_THRESHOLD) {
-      dragState.moved = true;
-    }
-
-    if (dragState.mode === "pan") {
-      if (!dragState.moved) {
-        return;
-      }
-
-      const deltaBars = Math.round(
-        moveX * dragState.barsPerPixel,
-      );
-      const nextVisibleStart = clampNumber(
-        dragState.startVisibleStart - deltaBars,
-        0,
-        dragState.maxVisibleStart,
-      );
-
-      setVisibleStartIndex(nextVisibleStart);
-      return;
-    }
-
-    if (dragState.mode === "interval-select") {
-      if (dragState.intervalStartedOutsideSelection && !dragState.moved) {
-        return;
-      }
-
-      const nextIntervalSelection = buildChartIntervalSelection(
-        event.currentTarget,
-        event.clientX,
-        event.clientY,
-        dragState.anchorAbsoluteIndex ?? effectiveVisibleStart,
-      );
-      if (!nextIntervalSelection) {
-        return;
-      }
-
-      if (dragState.intervalStartedOutsideSelection) {
-        setChartIntervalPanelOpen(false);
-        setChartFocus(null);
-      }
-      setChartIntervalDraftSelection(nextIntervalSelection);
-      return;
-    }
-
-    if (
-      dragState.mode === "interval-adjust-start" ||
-      dragState.mode === "interval-adjust-end"
-    ) {
-      const nextIntervalSelection = buildAdjustedChartIntervalSelection(
-        event.currentTarget,
-        event.clientX,
-        event.clientY,
-        dragState.anchorAbsoluteIndex ?? effectiveVisibleStart,
-        dragState.mode === "interval-adjust-start" ? "start" : "end",
-      );
-      if (!nextIntervalSelection) {
-        return;
-      }
-
-      setChartIntervalDraftSelection(nextIntervalSelection);
-      return;
-    }
-
-    if (dragState.mode === "interval-move") {
-      const moveSelectionStartAbsoluteIndex =
-        dragState.moveSelectionStartAbsoluteIndex;
-      const moveSelectionEndAbsoluteIndex = dragState.moveSelectionEndAbsoluteIndex;
-      if (
-        moveSelectionStartAbsoluteIndex === undefined ||
-        moveSelectionEndAbsoluteIndex === undefined
-      ) {
-        return;
-      }
-
-      const nextIntervalSelection = buildMovedChartIntervalSelection(
-        event.currentTarget,
-        event.clientX,
-        event.clientY,
-        dragState.anchorAbsoluteIndex ?? effectiveVisibleStart,
-        moveSelectionStartAbsoluteIndex,
-        moveSelectionEndAbsoluteIndex,
-      );
-      if (!nextIntervalSelection) {
-        return;
-      }
-
-      setChartIntervalDraftSelection(nextIntervalSelection);
-      return;
-    }
-
-    if (dragState.mode === "dismiss") {
-      return;
-    }
-
-    if (dragState.mode !== "focus" || !dragState.moved) {
-      return;
-    }
-
-    const nextFocus = buildChartFocus(
-      panelKey,
-      event.currentTarget,
-      event.clientX,
-      event.clientY,
-      true,
-    );
-    if (!nextFocus) {
-      return;
-    }
-
-    setChartFocus(nextFocus);
-  }
-
-  function clearChartPointerState(event: ReactPointerEvent<HTMLDivElement>) {
-    try {
-      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-        event.currentTarget.releasePointerCapture(event.pointerId);
-      }
-    } catch {
-      // Ignore stale pointer capture state during cleanup.
-    }
-    chartTouchPointersRef.current.delete(event.pointerId);
-    chartDragRef.current = null;
-  }
-
-  function onChartPointerUp(
-    panelKey: string,
-    event: ReactPointerEvent<HTMLDivElement>,
-  ) {
-    const pinchState = chartPinchRef.current;
-    if (pinchState?.pointerIds.includes(event.pointerId)) {
-      event.preventDefault();
-      chartPinchRef.current = null;
-      clearChartPointerState(event);
-      return;
-    }
-
-    const dragState = chartDragRef.current;
-    clearChartPointerState(event);
-
-    if (
-      !dragState ||
-      dragState.pointerId !== event.pointerId ||
-      dragState.panelKey !== panelKey
-    ) {
-      return;
-    }
-
-    if (dragState.mode === "dismiss") {
-      if (!dragState.moved) {
-        setChartFocus(null);
-      }
-      return;
-    }
-
-    if (dragState.mode === "interval-select") {
-      if (dragState.intervalStartedOutsideSelection && !dragState.moved) {
-        closeChartIntervalPanel();
-        return;
-      }
-
-      const nextIntervalSelection = buildChartIntervalSelection(
-        event.currentTarget,
-        event.clientX,
-        event.clientY,
-        dragState.anchorAbsoluteIndex ?? effectiveVisibleStart,
-      );
-      if (nextIntervalSelection) {
-        setChartIntervalDraftSelection(null);
-        setChartIntervalSelection(nextIntervalSelection);
-        setActiveIntervalContext({
-          startTradeDate: nextIntervalSelection.startTradeDate,
-          endTradeDate: nextIntervalSelection.endTradeDate,
-        });
-        setChartIntervalMode(true);
-        setChartIntervalPanelOpen(true);
-        setChartIntervalNotice("");
-      }
-      return;
-    }
-
-    if (
-      dragState.mode === "interval-adjust-start" ||
-      dragState.mode === "interval-adjust-end"
-    ) {
-      const nextIntervalSelection = buildAdjustedChartIntervalSelection(
-        event.currentTarget,
-        event.clientX,
-        event.clientY,
-        dragState.anchorAbsoluteIndex ?? effectiveVisibleStart,
-        dragState.mode === "interval-adjust-start" ? "start" : "end",
-      );
-      if (nextIntervalSelection) {
-        setChartIntervalDraftSelection(null);
-        setChartIntervalSelection(nextIntervalSelection);
-        setActiveIntervalContext({
-          startTradeDate: nextIntervalSelection.startTradeDate,
-          endTradeDate: nextIntervalSelection.endTradeDate,
-        });
-        setChartIntervalMode(true);
-        setChartIntervalPanelOpen(true);
-        setChartIntervalNotice("");
-      }
-      return;
-    }
-
-    if (dragState.mode === "interval-move") {
-      const moveSelectionStartAbsoluteIndex =
-        dragState.moveSelectionStartAbsoluteIndex;
-      const moveSelectionEndAbsoluteIndex = dragState.moveSelectionEndAbsoluteIndex;
-      if (
-        moveSelectionStartAbsoluteIndex === undefined ||
-        moveSelectionEndAbsoluteIndex === undefined
-      ) {
-        return;
-      }
-
-      const nextIntervalSelection = buildMovedChartIntervalSelection(
-        event.currentTarget,
-        event.clientX,
-        event.clientY,
-        dragState.anchorAbsoluteIndex ?? effectiveVisibleStart,
-        moveSelectionStartAbsoluteIndex,
-        moveSelectionEndAbsoluteIndex,
-      );
-      if (nextIntervalSelection) {
-        setChartIntervalDraftSelection(null);
-        setChartIntervalSelection(nextIntervalSelection);
-        setActiveIntervalContext({
-          startTradeDate: nextIntervalSelection.startTradeDate,
-          endTradeDate: nextIntervalSelection.endTradeDate,
-        });
-        setChartIntervalMode(true);
-        setChartIntervalPanelOpen(true);
-        setChartIntervalNotice("");
-      }
-      return;
-    }
-
-    if (dragState.moved) {
-      return;
-    }
-
-    const nextFocus = buildChartFocus(
-      panelKey,
-      event.currentTarget,
-      event.clientX,
-      event.clientY,
-      true,
-    );
-    if (!nextFocus) {
-      if (chartFocus?.pinned) {
-        setChartFocus(null);
-      }
-      return;
-    }
-
-    if (
-      chartFocus?.pinned &&
-      chartFocus.panelKey === nextFocus.panelKey &&
-      chartFocus.absoluteIndex === nextFocus.absoluteIndex
-    ) {
-      setChartFocus(null);
-      return;
-    }
-
-    setChartFocus(nextFocus);
-  }
-
-  function onChartPointerLeave(
-    panelKey: string,
-    event: ReactPointerEvent<HTMLDivElement>,
-  ) {
-    const dragState = chartDragRef.current;
-    if (
-      dragState?.pointerId === event.pointerId &&
-      dragState.panelKey === panelKey
-    ) {
-      return;
-    }
-
-    if (!chartFocus?.pinned) {
-      setChartFocus(null);
-    }
-  }
-
-  function onChartPointerCancel(
-    _panelKey: string,
-    event: ReactPointerEvent<HTMLDivElement>,
-  ) {
-    if (chartPinchRef.current?.pointerIds.includes(event.pointerId)) {
-      chartPinchRef.current = null;
-    }
-    if (
-      chartDragRef.current?.mode === "interval-select" ||
-      chartDragRef.current?.mode === "interval-adjust-start" ||
-      chartDragRef.current?.mode === "interval-adjust-end"
-    ) {
-      setChartIntervalDraftSelection(null);
-    }
-    clearChartPointerState(event);
-  }
-
-  function onChartDoubleClick(
-    _panelKey: string,
-    event: ReactMouseEvent<HTMLDivElement>,
-  ) {
-    const targetElement = event.target instanceof Element ? event.target : null;
-    if (
-      targetElement?.closest(
-        "button,input,select,textarea,a,[role='button']",
-      )
-    ) {
-      return;
-    }
-
-    event.preventDefault();
-    openChartIntervalMode();
-  }
 
   async function onAddWatchObserve() {
     if (
@@ -7845,9 +8315,7 @@ export default function DetailsPage({
       setWatchObserveNotice("");
     } catch {
       setWatchObserveItems(previousItems);
-      setWatchObserveNotice(
-        isRemoving ? "取消自选失败" : "加入自选失败",
-      );
+      setWatchObserveNotice(isRemoving ? "取消自选失败" : "加入自选失败");
     } finally {
       setWatchObserveSavingAction(null);
     }
@@ -7901,11 +8369,6 @@ export default function DetailsPage({
     resolvedTsCode,
     sourcePathTrimmed,
   ]);
-
-  const onToggleCyqPanel = useCallback(() => {
-    detailCyqFailedRequestKeyRef.current = "";
-    setDetailCyqVisible((visible) => !visible);
-  }, []);
 
   const toggleDetailRealtimePinned = useCallback(() => {
     let nextPinned = false;
@@ -8026,14 +8489,12 @@ export default function DetailsPage({
         : null;
     autoFillTopRef.current = false;
     setTradeDateInput(nextTradeDate);
-    setLookupInput(detailData?.overview?.name?.trim() || splitTsCode(resolvedTsCode));
+    setLookupInput(
+      detailData?.overview?.name?.trim() || splitTsCode(resolvedTsCode),
+    );
     setActiveIntervalContext(null);
     setPendingIntervalRestore(null);
-    setChartIntervalMode(false);
-    setChartIntervalSelection(null);
-    setChartIntervalDraftSelection(null);
-    setChartIntervalPanelOpen(false);
-    setChartIntervalNotice("");
+    detailChartRef.current?.resetInterval(false);
     setDetailError("");
     void (async () => {
       const nextDetail = await readDetail(
@@ -8075,11 +8536,7 @@ export default function DetailsPage({
       setLookupInput(target.name?.trim() || nextCode);
       setActiveIntervalContext(nextIntervalRestore);
       setPendingIntervalRestore(nextIntervalRestore);
-      setChartIntervalMode(Boolean(nextIntervalRestore));
-      setChartIntervalSelection(null);
-      setChartIntervalDraftSelection(null);
-      setChartIntervalPanelOpen(false);
-      setChartIntervalNotice("");
+      detailChartRef.current?.resetInterval(Boolean(nextIntervalRestore));
       if (nextTradeDate !== "") {
         setTradeDateInput(nextTradeDate);
       }
@@ -8232,7 +8689,9 @@ export default function DetailsPage({
     prevNavigationItem,
   ]);
 
-  function onStrategyResizePointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+  function onStrategyResizePointerDown(
+    event: ReactPointerEvent<HTMLDivElement>,
+  ) {
     if (event.pointerType === "mouse" && event.button !== 0) {
       return;
     }
@@ -8415,315 +8874,132 @@ export default function DetailsPage({
         }}
       />
 
-      <section className="details-card details-chart-card" ref={chartCardRef}>
-        <h3 className="details-subtitle">
-          K线图
-          {detailIndicatorsLoading ? " · 指标异步加载中" : ""}
-          {!detailIndicatorsLoading && detailIndicatorsNotice
-            ? ` · ${detailIndicatorsNotice}`
-            : ""}
-        </h3>
-
-        <div className="details-chart-toolbar">
-          <label className="details-chart-slider-field">
-            <span>缩放</span>
-            <input
-              type="range"
-              min={minVisibleBars || 1}
-              max={Math.max(totalChartItems, 1)}
-              step={1}
-              value={Math.max(effectiveVisibleBarCount, 1)}
-              onChange={(event) => setChartZoom(Number(event.target.value))}
-              disabled={totalChartItems === 0}
-            />
-            <strong>{effectiveVisibleBarCount || 0} 根</strong>
-          </label>
-
-          <label className="details-chart-slider-field details-chart-slider-field-wide">
-            <span>平移</span>
-            <input
-              type="range"
-              min={0}
-              max={Math.max(maxVisibleStart, 1)}
-              step={1}
-              value={effectiveVisibleStart}
-              onChange={(event) =>
-                setVisibleStartIndex(Number(event.target.value))
-              }
-              disabled={totalChartItems === 0 || maxVisibleStart === 0}
-            />
-            <strong>{chartRangeText}</strong>
-          </label>
-        </div>
-
-        <div
-          className="details-chart-shell"
-          style={{
-            height: `${chartShellHeight}px`,
-            minHeight:
-              chartMainHeightMode === "percent"
-                ? `${chartShellHeight}px`
-                : undefined,
-            gridTemplateRows: chartTemplateRows,
-          }}
-        >
-          {panels.map((panel, index) => (
-            <DetailChartPanel
-              key={panel.key}
-              panel={panel}
-              items={chartItems}
-              index={index}
-              panelCount={panels.length}
-              watermarkName={watermarkName}
-              watermarkCode={watermarkCode}
-              watermarkConcept={watermarkConcept}
-              chartFocus={chartFocus}
-              effectiveVisibleStart={effectiveVisibleStart}
-              allItems={allChartItems}
-              referenceTradeDate={
-                resolvedTradeDate !== "--" ? resolvedTradeDate : null
-              }
-              annotationLayers={annotationLayers}
-              onChartPointerDown={onChartPointerDown}
-              onChartPointerMove={onChartPointerMove}
-              onChartPointerUp={onChartPointerUp}
-              onChartPointerLeave={onChartPointerLeave}
-              onChartPointerCancel={onChartPointerCancel}
-              onChartDoubleClick={onChartDoubleClick}
-              isCyqPanelVisible={detailCyqVisible}
-              selectedCyqSnapshot={selectedCyqSnapshot}
-              selectedCyqTradeDate={selectedCyqTradeDate}
-              cyqScaleMaxChip={cyqScaleMaxChip}
-              reserveCyqPanelWidthForAllPanels={shouldReserveCyqPanelWidth}
-              cyqHolderView={detailCyqHolderView}
-              cyqStatusText={
-                detailCyqError
-                  ? "筹码读取失败"
-                  : detailCyqLoading
-                    ? "筹码加载中…"
-                    : "该日暂无筹码"
-              }
-              chipToggleButton={
-                detailCyqModel === "chen" &&
-                detailCyqVisible &&
-                shouldReserveCyqPanelWidth ? (
-                  <div
-                    className="details-chart-cyq-holder-switch"
-                    onPointerDown={(event) => {
-                      event.stopPropagation();
-                    }}
-                  >
-                    {DETAIL_CYQ_HOLDER_OPTIONS.map((option) => (
-                      <button
-                        className={
-                          detailCyqHolderView === option.value
-                            ? "is-active"
-                            : ""
-                        }
-                        key={option.value}
-                        type="button"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          setDetailCyqHolderView(option.value);
-                        }}
-                      >
-                        {option.label}
-                      </button>
-                    ))}
-                  </div>
-                ) : null
-              }
-              watchObserveButton={
-                <div className="details-chart-watch-action">
-                  <div className="details-chart-watch-row">
-                    <button
-                      className={[
-                        "details-chart-watch-btn",
-                        "details-chart-watch-btn-interval",
-                        chartIntervalSelecting ? "is-selecting" : "",
-                        chartIntervalMode || chartIntervalSelection
-                          ? "is-active"
-                          : "",
-                      ]
-                        .filter(Boolean)
-                        .join(" ")}
-                      type="button"
-                      data-testid="details-interval-toggle"
-                      onPointerDown={(event) => {
-                        event.stopPropagation();
-                      }}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        toggleChartIntervalMode();
-                      }}
-                      aria-busy={chartIntervalSelecting}
-                    >
-                      {chartIntervalButtonLabel}
-                    </button>
-                    <button
-                      className={[
-                        "details-chart-cyq-toggle",
-                        "details-chart-cyq-toggle-inline",
-                        detailCyqVisible ? "is-active" : "",
-                        detailCyqLoading ? "is-loading" : "",
-                      ]
-                        .filter(Boolean)
-                        .join(" ")}
-                      type="button"
-                      onPointerDown={(event) => {
-                        event.stopPropagation();
-                      }}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        void onToggleCyqPanel();
-                      }}
-                      title={cyqToggleTitle}
-                    >
-                      筹
-                    </button>
-                    <span className="details-chart-watch-time">
-                      {detailRealtimeData?.refreshedAt ?? "未刷新"}
-                    </span>
-                    <button
-                      className={[
-                        "details-chart-watch-btn",
-                        "details-chart-watch-btn-refresh",
-                        detailRealtimePinned ? "is-fixed" : "",
-                      ]
-                        .filter(Boolean)
-                        .join(" ")}
-                      type="button"
-                      disabled={
-                        resolvedTsCode === "--" || detailRealtimeLoading
-                      }
-                      title={
-                        detailRealtimePinned
-                          ? `固定自动刷新中（${formatAutoRefreshSeconds(DETAIL_REALTIME_AUTO_REFRESH_INTERVAL_MS)} / 次），长按取消`
-                          : `点击立即刷新，长按固定自动刷新（${formatAutoRefreshSeconds(DETAIL_REALTIME_AUTO_REFRESH_INTERVAL_MS)} / 次）`
-                      }
-                      onPointerDown={handleDetailRealtimeRefreshPointerDown}
-                      onPointerUp={handleDetailRealtimeRefreshPointerRelease}
-                      onPointerLeave={handleDetailRealtimeRefreshPointerRelease}
-                      onPointerCancel={
-                        handleDetailRealtimeRefreshPointerRelease
-                      }
-                      onMouseDown={(event) => {
-                        event.stopPropagation();
-                      }}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        if (detailRealtimeLongPressHandledRef.current) {
-                          detailRealtimeLongPressHandledRef.current = false;
-                          return;
-                        }
-                        void onRefreshRealtimeDetail();
-                      }}
-                    >
-                      {detailRealtimeLoading
-                        ? "刷新中..."
-                        : detailRealtimePinned
-                          ? "固定刷新中"
-                          : "刷新实时"}
-                    </button>
-                    <button
-                      className={[
-                        "details-chart-watch-btn",
-                        watchObserveSaving ? "is-pending" : "",
-                        isCurrentWatched ? "is-added" : "",
-                      ]
-                        .filter(Boolean)
-                        .join(" ")}
-                      type="button"
-                      disabled={
-                        watchObserveSaving ||
-                        resolvedTsCode === "--" ||
-                        (!isCurrentWatched && resolvedTradeDate === "--")
-                      }
-                      title={
-                        isCurrentWatched
-                          ? `自选日期 ${currentWatchObserveItem?.watchDate ?? "--"}，标记日期 ${currentWatchObserveItem?.markedDate ?? "--"}`
-                          : `加入自选`
-                      }
-                      onPointerDown={(event) => {
-                        event.stopPropagation();
-                      }}
-                      onPointerUp={(event) => {
-                        event.stopPropagation();
-                      }}
-                      onMouseDown={(event) => {
-                        event.stopPropagation();
-                      }}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        void onAddWatchObserve();
-                      }}
-                    >
-                      {watchObserveSavingAction
-                        ? watchObserveSavingAction === "remove"
-                          ? "取消中..."
-                          : "加入中..."
-                        : isCurrentWatched
-                          ? "取消自选"
-                          : "加自选"}
-                    </button>
-                  </div>
-                  {detailRealtimeNotice ? (
-                    <span className="details-chart-watch-note">
-                      {detailRealtimeNotice}
-                    </span>
-                  ) : null}
-                  {detailRealtimePinned ? (
-                    <span className="details-chart-watch-note">
-                      固定自动刷新中{" "}
-                      {formatAutoRefreshSeconds(
-                        DETAIL_REALTIME_AUTO_REFRESH_INTERVAL_MS,
-                      )}{" "}
-                      / 次，长按按钮取消
-                    </span>
-                  ) : null}
-                  {watchObserveNotice ? (
-                    <span className="details-chart-watch-note">
-                      {watchObserveNotice}
-                    </span>
-                  ) : null}
-                  {chartIntervalNotice ? (
-                    <span className="details-chart-watch-note">
-                      {chartIntervalNotice}
-                    </span>
-                  ) : null}
-                </div>
-              }
-              chartIntervalSelection={chartIntervalSelection}
-              chartIntervalDraftSelection={chartIntervalDraftSelection}
-              chartIntervalPanelOpen={chartIntervalPanelOpen}
-              intervalStatsSections={intervalStatsSections}
-              onCloseChartIntervalPanel={closeChartIntervalPanel}
-            />
-          ))}
-          {shouldShowCyqSummary ? (
-            <div
+      <DetailChart
+        ref={detailChartRef}
+        kline={detailRealtimeData?.kline ?? detailData?.kline}
+        sourcePathTrimmed={sourcePathTrimmed}
+        resolvedTsCode={resolvedTsCode}
+        resolvedTradeDate={resolvedTradeDate}
+        quoteTradeDate={detailRealtimeData?.quoteTradeDate}
+        overviewName={detailData?.overview?.name}
+        watermarkConcept={watermarkConcept}
+        detailLoading={detailLoading}
+        detailIndicatorsLoading={detailIndicatorsLoading}
+        detailIndicatorsNotice={detailIndicatorsNotice}
+        pendingIntervalRestore={pendingIntervalRestore}
+        setPendingIntervalRestore={setPendingIntervalRestore}
+        setActiveIntervalContext={setActiveIntervalContext}
+        chartCardRef={chartCardRef}
+        pendingPageScrollRef={pendingPageScrollRef}
+        watchActions={
+          <>
+            <span className="details-chart-watch-time">
+              {detailRealtimeData?.refreshedAt ?? "未刷新"}
+            </span>
+            <button
               className={[
-                "details-chart-cyq-summary-overlay",
-                shouldUseCyqSummaryIndicatorSlot ? "is-indicator-slot" : "",
+                "details-chart-watch-btn",
+                "details-chart-watch-btn-refresh",
+                detailRealtimePinned ? "is-fixed" : "",
               ]
                 .filter(Boolean)
                 .join(" ")}
-              style={cyqSummaryOverlayStyle}
-              onPointerDown={stopEventPropagation}
-              onPointerMove={stopEventPropagation}
-              onPointerUp={stopEventPropagation}
-              onPointerCancel={stopEventPropagation}
-              onClick={stopEventPropagation}
+              type="button"
+              disabled={resolvedTsCode === "--" || detailRealtimeLoading}
+              title={
+                detailRealtimePinned
+                  ? `固定自动刷新中（${formatAutoRefreshSeconds(DETAIL_REALTIME_AUTO_REFRESH_INTERVAL_MS)} / 次），长按取消`
+                  : `点击立即刷新，长按固定自动刷新（${formatAutoRefreshSeconds(DETAIL_REALTIME_AUTO_REFRESH_INTERVAL_MS)} / 次）`
+              }
+              onPointerDown={handleDetailRealtimeRefreshPointerDown}
+              onPointerUp={handleDetailRealtimeRefreshPointerRelease}
+              onPointerLeave={handleDetailRealtimeRefreshPointerRelease}
+              onPointerCancel={handleDetailRealtimeRefreshPointerRelease}
+              onMouseDown={(event) => {
+                event.stopPropagation();
+              }}
+              onClick={(event) => {
+                event.stopPropagation();
+                if (detailRealtimeLongPressHandledRef.current) {
+                  detailRealtimeLongPressHandledRef.current = false;
+                  return;
+                }
+                void onRefreshRealtimeDetail();
+              }}
             >
-              {renderCyqSummaryPanel(
-                selectedCyqSnapshot,
-                detailCyqHolderView,
-                shouldUseCyqSummaryIndicatorSlot,
-              )}
-            </div>
-          ) : null}
-        </div>
-      </section>
+              {detailRealtimeLoading
+                ? "刷新中..."
+                : detailRealtimePinned
+                  ? "固定刷新中"
+                  : "刷新实时"}
+            </button>
+            <button
+              className={[
+                "details-chart-watch-btn",
+                watchObserveSaving ? "is-pending" : "",
+                isCurrentWatched ? "is-added" : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
+              type="button"
+              disabled={
+                watchObserveSaving ||
+                resolvedTsCode === "--" ||
+                (!isCurrentWatched && resolvedTradeDate === "--")
+              }
+              title={
+                isCurrentWatched
+                  ? `自选日期 ${currentWatchObserveItem?.watchDate ?? "--"}，标记日期 ${currentWatchObserveItem?.markedDate ?? "--"}`
+                  : `加入自选`
+              }
+              onPointerDown={(event) => {
+                event.stopPropagation();
+              }}
+              onPointerUp={(event) => {
+                event.stopPropagation();
+              }}
+              onMouseDown={(event) => {
+                event.stopPropagation();
+              }}
+              onClick={(event) => {
+                event.stopPropagation();
+                void onAddWatchObserve();
+              }}
+            >
+              {watchObserveSavingAction
+                ? watchObserveSavingAction === "remove"
+                  ? "取消中..."
+                  : "加入中..."
+                : isCurrentWatched
+                  ? "取消自选"
+                  : "加自选"}
+            </button>
+          </>
+        }
+        watchNotes={
+          <>
+            {detailRealtimeNotice ? (
+              <span className="details-chart-watch-note">
+                {detailRealtimeNotice}
+              </span>
+            ) : null}
+            {detailRealtimePinned ? (
+              <span className="details-chart-watch-note">
+                固定自动刷新中{" "}
+                {formatAutoRefreshSeconds(
+                  DETAIL_REALTIME_AUTO_REFRESH_INTERVAL_MS,
+                )}{" "}
+                / 次，长按按钮取消
+              </span>
+            ) : null}
+            {watchObserveNotice ? (
+              <span className="details-chart-watch-note">
+                {watchObserveNotice}
+              </span>
+            ) : null}
+          </>
+        }
+      />
 
       <div className="details-overview-grid" style={overviewGridStyle}>
         <OverviewSummarySection

@@ -1,6 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import {
+  createChannel,
+  Importance,
   isPermissionGranted,
+  removeActive,
   requestPermission,
 } from "@tauri-apps/plugin-notification";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -1406,9 +1409,25 @@ export default function AllMarketMonitorPage() {
         try {
           if (await isPermissionGranted()) {
             if (volumeRatioNotificationsRef.current && enabledRef.current) {
+              const androidNotifications = /Android/i.test(navigator.userAgent);
+              if (androidNotifications) {
+                await createChannel({
+                  id: "volume-ratio-alerts",
+                  name: "量比异动",
+                  description: "实时监控量比新高提醒",
+                  importance: Importance.High,
+                });
+                // 插件对同 ID 更新设置 onlyAlertOnce，先移除才能再次提醒。
+                await removeActive([{ id: 3101 }]);
+              }
+              if (!volumeRatioNotificationsRef.current || !enabledRef.current)
+                return;
               await invoke("plugin:notification|notify", {
                 options: {
                   id: 3101,
+                  channelId: androidNotifications
+                    ? "volume-ratio-alerts"
+                    : undefined,
                   title:
                     hits.length === 1
                       ? hits[0].name || hits[0].ts_code
@@ -1418,7 +1437,7 @@ export default function AllMarketMonitorPage() {
                       .slice(0, 5)
                       .map(
                         (row) =>
-                          `${row.name} ${row.ts_code} 量比 ${formatNumber(row.realtime_vol_ratio)}`,
+                          `${row.name} ${row.ts_code} 量比 ${formatNumber(row.realtime_vol_ratio)} 五日优 ${formatNumber([row.best_rank_5d, row.similarity_rank].filter(isFiniteNumber).sort((a, b) => a - b)[0] ?? null, 0)}`,
                       )
                       .join("；") +
                     (hits.length > 5
@@ -3632,6 +3651,10 @@ export default function AllMarketMonitorPage() {
                     />
                     <span>系统通知</span>
                   </label>
+                  <p className="settings-section-note">
+                    Android
+                    使用“量比异动”高重要性通知渠道；如未悬浮，请在系统通知设置中开启该渠道的悬浮通知，并检查勿扰模式。
+                  </p>
                   {notificationError ? (
                     <p role="alert">{notificationError}</p>
                   ) : null}
