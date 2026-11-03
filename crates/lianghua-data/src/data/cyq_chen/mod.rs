@@ -567,7 +567,9 @@ pub(super) fn replay_chen_chip_snapshots(
                 result.anchor_mass = Some(
                     selected
                         .iter()
-                        .map(|bucket| bucket.initial + bucket.ages.iter().sum::<f64>())
+                        .map(|bucket| {
+                            bucket.initial + bucket.age_mass(feature_state.observed_days, 0..121)
+                        })
                         .sum(),
                 );
                 frozen_bounds.extend(
@@ -601,12 +603,17 @@ pub(super) fn replay_chen_chip_snapshots(
                             let old = selected
                                 .iter()
                                 .map(|bucket| {
-                                    bucket.initial + bucket.ages[distance..].iter().sum::<f64>()
+                                    bucket.initial
+                                        + bucket
+                                            .age_mass(feature_state.observed_days, distance..121)
                                 })
                                 .sum::<f64>();
                             let total = selected
                                 .iter()
-                                .map(|bucket| bucket.initial + bucket.ages.iter().sum::<f64>())
+                                .map(|bucket| {
+                                    bucket.initial
+                                        + bucket.age_mass(feature_state.observed_days, 0..121)
+                                })
                                 .sum::<f64>();
                             result.old_remaining = Some(old);
                             result.current_mass = Some(total);

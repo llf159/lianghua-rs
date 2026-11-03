@@ -1,6 +1,6 @@
-use super::compute::append_prepared_cyq_chen_batch_rows;
 #[cfg(test)]
 use super::compute::prepare_cyq_chen_batch_rows;
+use super::compute::{append_cyq_chen_checkpoints, append_prepared_cyq_chen_batch_rows};
 use super::store::{init_cyq_chen_db, remove_cyq_chen_db_artifacts, write_cyq_chen_meta};
 use super::{CYQ_CHEN_BIN_TABLE, CYQ_CHEN_SNAPSHOT_TABLE, CyqChenWriteMessage, DEFAULT_ADJ_TYPE};
 use crate::data::cyq_chen::ChenChipConfig;
@@ -126,6 +126,9 @@ pub(super) fn write_cyq_chen_maintenance_batches_from_channel(
 ) -> Result<(usize, usize), String> {
     let result = (|| -> Result<(usize, usize), String> {
         let mut stage = Connection::open(stage_path).map_err(|e| e.to_string())?;
+        stage
+            .execute_batch("SET checkpoint_threshold = '256MB'")
+            .map_err(|e| e.to_string())?;
         let mut finished = false;
         let mut interrupted = None;
         while !finished && interrupted.is_none() {
@@ -137,9 +140,17 @@ pub(super) fn write_cyq_chen_maintenance_batches_from_channel(
                     .appender(CYQ_CHEN_SNAPSHOT_TABLE)
                     .map_err(|e| e.to_string())?;
                 let mut bins = tx.appender(CYQ_CHEN_BIN_TABLE).map_err(|e| e.to_string())?;
+                let mut done = tx
+                    .appender("cyq_chen_maintenance_done")
+                    .map_err(|e| e.to_string())?;
+                let mut unverified = tx
+                    .appender("cyq_chen_maintenance_unverified")
+                    .map_err(|e| e.to_string())?;
                 let mut stocks = 0;
                 let mut bin_rows = 0;
-                for _ in 0..128 {
+                let mut checkpoint_bytes = 0;
+                let mut checkpoints = Vec::new();
+                for _ in 0..512 {
                     let batch = match rx.recv() {
                         #[cfg(test)]
                         Ok(CyqChenWriteMessage::Batch(batch)) => {
@@ -165,25 +176,37 @@ pub(super) fn write_cyq_chen_maintenance_batches_from_channel(
                     group_codes.extend(batch.completed_ts_codes.iter().cloned());
                     group_codes.extend(batch.checkpoints.iter().map(|row| row.0.clone()));
                     for code in &batch.completed_ts_codes {
-                        tx.execute(
-                            "INSERT INTO cyq_chen_maintenance_unverified VALUES (?)",
-                            [code],
-                        )
-                        .map_err(|e| format!("保存维护待校验股票失败:{e}"))?;
-                        tx.execute(
-                            "INSERT INTO cyq_chen_maintenance_done VALUES (?, ?)",
-                            params![code, batch.replace_ts_codes.contains(code)],
-                        )
-                        .map_err(|e| format!("保存维护股票进度失败:{e}"))?;
+                        unverified
+                            .append_row([code])
+                            .map_err(|e| format!("保存维护待校验股票失败:{e}"))?;
+                        done.append_row(params![code, batch.replace_ts_codes.contains(code)])
+                            .map_err(|e| format!("保存维护股票进度失败:{e}"))?;
                     }
                     stocks += batch.completed_ts_codes.len();
                     bin_rows += batch.bin_rows;
+                    checkpoint_bytes += batch
+                        .checkpoints
+                        .iter()
+                        .map(|row| row.2.len() + row.3.as_ref().map_or(0, String::len))
+                        .sum::<usize>();
                     retry_batches.push(batch.clone());
-                    append_prepared_cyq_chen_batch_rows(&tx, &mut snapshots, &mut bins, batch)?;
-                    if stocks >= 64 || bin_rows >= 1_000_000 {
+                    append_prepared_cyq_chen_batch_rows(
+                        &tx,
+                        &mut snapshots,
+                        &mut bins,
+                        batch,
+                        &mut checkpoints,
+                    )?;
+                    if stocks >= 512
+                        || bin_rows >= 1_000_000
+                        || checkpoint_bytes >= 32 * 1024 * 1024
+                    {
                         break;
                     }
                 }
+                append_cyq_chen_checkpoints(&tx, checkpoints)?;
+                done.flush().map_err(|e| e.to_string())?;
+                unverified.flush().map_err(|e| e.to_string())?;
                 snapshots.flush().map_err(|e| e.to_string())?;
                 bins.flush().map_err(|e| e.to_string())?;
             }
@@ -204,6 +227,9 @@ pub(super) fn write_cyq_chen_maintenance_batches_from_channel(
                     match verified {
                         Ok(()) => {
                             stage = Connection::open(stage_path).map_err(|e| e.to_string())?;
+                            stage
+                                .execute_batch("SET checkpoint_threshold = '256MB'")
+                                .map_err(|e| e.to_string())?;
                             break;
                         }
                         Err(error)
@@ -216,6 +242,9 @@ pub(super) fn write_cyq_chen_maintenance_batches_from_channel(
                                 attempt + 1
                             );
                             stage = Connection::open(stage_path).map_err(|e| e.to_string())?;
+                            stage
+                                .execute_batch("SET checkpoint_threshold = '256MB'")
+                                .map_err(|e| e.to_string())?;
                             super::compute::rewrite_unverified_cyq_batch(
                                 &mut stage,
                                 &retry_batches,
@@ -227,13 +256,14 @@ pub(super) fn write_cyq_chen_maintenance_batches_from_channel(
                     }
                 }
                 let tx = stage.transaction().map_err(|e| e.to_string())?;
-                for code in &group_codes {
-                    tx.execute(
-                        "DELETE FROM cyq_chen_maintenance_unverified WHERE ts_code = ?",
-                        [code],
-                    )
-                    .map_err(|e| format!("确认维护批次校验完成失败:{e}"))?;
-                }
+                tx.execute(
+                    &format!(
+                        "DELETE FROM cyq_chen_maintenance_unverified WHERE ts_code IN ({})",
+                        vec!["?"; group_codes.len()].join(",")
+                    ),
+                    duckdb::params_from_iter(group_codes.iter()),
+                )
+                .map_err(|e| format!("确认维护批次校验完成失败:{e}"))?;
                 tx.commit().map_err(|e| e.to_string())?;
             }
         }
