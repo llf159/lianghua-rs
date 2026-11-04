@@ -30,6 +30,11 @@ use lianghua_app_data::download::{
     StockDataIndicatorColumnsRebuildRunInput as CoreStockDataIndicatorColumnsRebuildRunInput,
     ThsConceptDownloadRunInput as CoreThsConceptDownloadRunInput,
 };
+use lianghua_app_data::download::{
+    prepare_company_download_run as core_prepare_company_download_run,
+    run_prepared_company_download as core_run_prepared_company_download,
+    CompanyDownloadRunInput as CoreCompanyDownloadRunInput,
+};
 use lianghua_download::download::runner::DownloadProgress as CoreDownloadProgress;
 use serde::{Deserialize, Serialize};
 use tauri::Emitter;
@@ -80,6 +85,23 @@ pub struct DragonTigerDownloadRequest {
     end_date: String,
     retry_times: usize,
     limit_calls_per_min: usize,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompanyDownloadRequest {
+    download_id: String,
+    #[serde(default)]
+    task_group: Option<String>,
+    source_path: String,
+    token: String,
+    start_date: String,
+    end_date: String,
+    threads: usize,
+    retry_times: usize,
+    limit_calls_per_min: usize,
+    #[serde(default)]
+    refresh_history: bool,
 }
 
 #[derive(Clone, Deserialize)]
@@ -629,6 +651,118 @@ pub async fn run_dragon_tiger_download(
                         current_label: None,
                         message: format!(
                             "{} 已完成，同步 {} 个交易日，写入 {} 行{}。",
+                            action_label,
+                            run_result.summary.success_count,
+                            run_result.summary.saved_rows,
+                            format_completion_detail_tail(&run_result.completion_details)
+                        ),
+                    },
+                ),
+                Err(error) => emit_data_download_event(
+                    &app,
+                    DataDownloadEventPayload {
+                        download_id: download_id.clone(),
+                        phase: "failed".to_string(),
+                        action: action.clone(),
+                        action_label: action_label.clone(),
+                        elapsed_ms: started_at.elapsed().as_millis() as u64,
+                        finished: 0,
+                        total: 0,
+                        current_label: None,
+                        message: format!("{} 失败: {}", action_label, error),
+                    },
+                ),
+            }
+
+            result
+        },
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn run_company_download(
+    app: tauri::AppHandle,
+    request: CompanyDownloadRequest,
+) -> Result<DataDownloadRunResult, String> {
+    crate::task_control::run(
+        app.clone(),
+        request.download_id.clone(),
+        request.source_path.clone(),
+        request.task_group.clone(),
+        move || {
+            let download_id = request.download_id.trim().to_string();
+            if download_id.is_empty() {
+                return Err("download_id 不能为空".to_string());
+            }
+
+            let prepared = {
+                core_prepare_company_download_run(CoreCompanyDownloadRunInput {
+                    source_path: request.source_path,
+                    token: request.token,
+                    start_date: request.start_date,
+                    end_date: request.end_date,
+                    threads: request.threads,
+                    retry_times: request.retry_times,
+                    limit_calls_per_min: request.limit_calls_per_min,
+                    refresh_history: request.refresh_history,
+                })?
+            };
+            let action = prepared.action.clone();
+            let action_label = prepared.action_label.clone();
+            emit_data_download_event(
+                &app,
+                DataDownloadEventPayload {
+                    download_id: download_id.clone(),
+                    phase: "started".to_string(),
+                    action: action.clone(),
+                    action_label: action_label.clone(),
+                    elapsed_ms: 0,
+                    finished: 0,
+                    total: 0,
+                    current_label: None,
+                    message: format!("{action_label} 已启动，正在准备执行下载。"),
+                },
+            );
+
+            let started_at = Instant::now();
+            let result = (|| -> Result<DataDownloadRunResult, String> {
+                let progress_app = app.clone();
+                let progress_download_id = download_id.clone();
+                let progress_action = action.clone();
+                let progress_action_label = action_label.clone();
+                let progress_started_at = started_at;
+                let progress_cb = move |progress: CoreDownloadProgress| {
+                    emit_core_download_progress(
+                        &progress_app,
+                        progress_download_id.as_str(),
+                        progress_action.as_str(),
+                        progress_action_label.as_str(),
+                        progress_started_at.elapsed().as_millis() as u64,
+                        progress,
+                    );
+                };
+
+                let mut run_result =
+                    core_run_prepared_company_download(&prepared, Some(&progress_cb))?;
+                run_result.elapsed_ms = started_at.elapsed().as_millis() as u64;
+                Ok(run_result)
+            })();
+
+            match &result {
+                Ok(run_result) => emit_data_download_event(
+                    &app,
+                    DataDownloadEventPayload {
+                        download_id: download_id.clone(),
+                        phase: "completed".to_string(),
+                        action: action.clone(),
+                        action_label: action_label.clone(),
+                        elapsed_ms: run_result.elapsed_ms,
+                        finished: run_result.summary.success_count,
+                        total: run_result.summary.success_count,
+                        current_label: None,
+                        message: format!(
+                            "{} 已完成，同步 {} 个数据段，写入 {} 行{}。",
                             action_label,
                             run_result.summary.success_count,
                             run_result.summary.saved_rows,

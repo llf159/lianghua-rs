@@ -92,11 +92,20 @@ pub struct DragonTigerDbStatus {
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CompanyDbStatus {
+    pub exists: bool,
+    pub completed_windows: u64,
+    pub last_synced_at: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DataDownloadStatus {
     pub source_path: String,
     pub source_db: DataDownloadDbRange,
     pub concept_performance_db: DataDownloadDbRange,
     pub dragon_tiger_db: DragonTigerDbStatus,
+    pub company_db: CompanyDbStatus,
     pub stock_list: DataDownloadFileStatus,
     pub trade_calendar: DataDownloadFileStatus,
     pub ths_concepts: DataDownloadFileStatus,
@@ -164,6 +173,26 @@ pub struct DragonTigerDownloadRunInput {
     pub end_date: String,
     pub retry_times: usize,
     pub limit_calls_per_min: usize,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompanyDownloadRunInput {
+    pub source_path: String,
+    pub token: String,
+    pub start_date: String,
+    pub end_date: String,
+    pub threads: usize,
+    pub retry_times: usize,
+    pub limit_calls_per_min: usize,
+    #[serde(default)]
+    pub refresh_history: bool,
+}
+
+pub struct PreparedCompanyDownloadRun {
+    pub config: lianghua_download::download::company::CompanyDownloadConfig,
+    pub action: String,
+    pub action_label: String,
 }
 
 #[derive(Clone, Deserialize)]
@@ -1112,11 +1141,35 @@ pub fn get_data_download_status(source_path: &str) -> Result<DataDownloadStatus,
             trimmed,
             "similarity",
         )?;
+    let company_path = Path::new(trimmed).join("company_fundamentals.db");
+    let company_db = if company_path.exists() {
+        let conn = crate::data::open_db_readonly(&company_path)
+            .map_err(|e| format!("读取公司库状态失败: {e}"))?;
+        conn.query_row(
+            "SELECT count(*), CAST(max(synced_at) AS VARCHAR) FROM company_sync_log",
+            [],
+            |row| {
+                Ok(CompanyDbStatus {
+                    exists: true,
+                    completed_windows: row.get(0)?,
+                    last_synced_at: row.get(1)?,
+                })
+            },
+        )
+        .map_err(|e| format!("读取公司下载记录失败: {e}"))?
+    } else {
+        CompanyDbStatus {
+            exists: false,
+            completed_windows: 0,
+            last_synced_at: None,
+        }
+    };
     Ok(DataDownloadStatus {
         source_path: trimmed.to_string(),
         source_db,
         concept_performance_db,
         dragon_tiger_db,
+        company_db,
         stock_list,
         trade_calendar,
         ths_concepts,
@@ -1257,6 +1310,66 @@ pub fn prepare_dragon_tiger_download_run(
         limit_calls_per_min: input.limit_calls_per_min.max(1),
         action: "download-dragon-tiger".to_string(),
         action_label: "龙虎榜下载".to_string(),
+    })
+}
+
+pub fn prepare_company_download_run(
+    input: CompanyDownloadRunInput,
+) -> Result<PreparedCompanyDownloadRun, String> {
+    let source_path = input.source_path.trim().to_string();
+    if source_path.is_empty() {
+        return Err("数据目录不能为空".into());
+    }
+    let token = input.token.trim().to_string();
+    if token.is_empty() {
+        return Err("Token 不能为空".into());
+    }
+    let start_date = normalize_download_date(&input.start_date, "开始日期")?;
+    let end_date = normalize_download_end_date(&input.end_date)?;
+    if end_date != "today" && start_date > end_date {
+        return Err("开始日期不能晚于结束日期".into());
+    }
+    if input.limit_calls_per_min == 0 {
+        return Err("每分钟调用次数必须大于 0".into());
+    }
+    Ok(PreparedCompanyDownloadRun {
+        config: lianghua_download::download::company::CompanyDownloadConfig {
+            source_dir: source_path,
+            token,
+            start_date,
+            end_date,
+            threads: input.threads.max(1),
+            retry_times: input.retry_times,
+            limit_calls_per_min: input.limit_calls_per_min,
+            refresh_history: input.refresh_history,
+        },
+        action: "download-company".into(),
+        action_label: "公司经营与股东下载".into(),
+    })
+}
+
+pub fn run_prepared_company_download(
+    prepared: &PreparedCompanyDownloadRun,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
+) -> Result<DataDownloadRunResult, String> {
+    let summary =
+        lianghua_download::download::company::download_company(&prepared.config, progress_cb)?;
+    Ok(DataDownloadRunResult {
+        action: prepared.action.clone(),
+        action_label: prepared.action_label.clone(),
+        elapsed_ms: 0,
+        summary: DataDownloadSummary {
+            success_count: summary.success_count as u64,
+            failed_count: summary.failed_items.len() as u64,
+            saved_rows: summary.saved_rows as u64,
+            concept_performance_rows: 0,
+            failed_items: summary.failed_items,
+        },
+        completion_details: vec![format!(
+            "跳过 {} 段已完成历史；本年和上一年重新拉取",
+            summary.skipped_count
+        )],
+        status: get_data_download_status(&prepared.config.source_dir)?,
     })
 }
 

@@ -81,6 +81,7 @@ export type DataDownloadStatus = {
   sourceDb: RankComputeDbRange
   conceptPerformanceDb: RankComputeDbRange
   dragonTigerDb: DragonTigerDbStatus
+  companyDb: { exists: boolean; completedWindows: number; lastSyncedAt: string | null }
   stockList: DataDownloadFileStatus
   tradeCalendar: DataDownloadFileStatus
   thsConcepts: DataDownloadFileStatus
@@ -147,6 +148,23 @@ export type DragonTigerDownloadRequest = {
   endDate: string
   retryTimes: number
   limitCallsPerMin: number
+}
+
+export type CompanyDownloadRequest = {
+  downloadId: string
+  taskGroup?: string
+  sourcePath: string
+  token: string
+  startDate: string
+  endDate: string
+  threads: number
+  retryTimes: number
+  limitCallsPerMin: number
+  refreshHistory: boolean
+}
+
+export async function runCompanyDownload(request: CompanyDownloadRequest) {
+  return invoke<DataDownloadRunResult>('run_company_download', { request })
 }
 
 export type ThsConceptDownloadRequest = {
