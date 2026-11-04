@@ -354,7 +354,7 @@ fn cloud_items(manifest: &Manifest, state: &SyncState) -> Vec<CloudItem> {
                 path: path.clone(),
                 version: version.clone(),
                 is_head: heads.iter().any(|v| v.id == version.id),
-                conflict: heads.len() > 1,
+                conflict: heads.len() > 1 || state.receiving.contains(path),
                 is_local_base: state
                     .base
                     .get(path)
@@ -948,6 +948,85 @@ pub fn restore(
     result.transferred_bytes = dav.uploaded_bytes + dav.downloaded_bytes;
     result.items = cloud_items(&dav.manifest, &state);
     Ok(result)
+}
+
+// 明确选择本机榜单后才能解除接收中断保护；云端分支保留为新版本的祖先。
+pub fn resolve_local_snapshot(
+    app_data: &Path,
+    source: &Path,
+    path: &str,
+    progress: impl Fn(&str),
+) -> Result<SyncResult, String> {
+    if !database::is_snapshot(path) {
+        return Err("仅支持选择本机总榜或相似榜快照".into());
+    }
+    let config = get_config(app_data)?;
+    let local = local_root(app_data, source, &config)?;
+    let state_path = local.join("state.json");
+    let mut state: SyncState = if state_path.exists() {
+        read_json(&state_path)?
+    } else {
+        SyncState::default()
+    };
+    let _guard = SOURCE_ACCESS
+        .try_write()
+        .map_err(|_| "下载、计算或数据操作正在进行，请完成后再处理冲突")?;
+    progress("正在读取选定的本机榜单");
+    let bytes = database::export_day(source, path)?
+        .ok_or("本机没有可用榜单，请先重新计算，或恢复一个云端版本")?;
+    let hash = digest(&bytes);
+    let compressed = encode(&bytes)?;
+    let mut dav = dav::Dav::new(&config)?;
+    dav.acquire()?;
+    progress("正在保存本机榜单并合并云端分支");
+    if !dav.manifest.hashes().contains(&hash) && !dav.manifest.packs.contains_key(&hash) {
+        dav.upload(&hash, &compressed)?;
+    }
+    let mut parents: Vec<_> = dav.manifest.heads(path).into_iter().map(|v| v.id).collect();
+    if parents.is_empty() {
+        // 删掉末端版本不会使祖先重新成为当前版本；接在旧图之后才能生成新的有效末端。
+        parents.extend(
+            dav.manifest
+                .entries
+                .get(path)
+                .into_iter()
+                .flatten()
+                .map(|v| v.id.clone()),
+        );
+    }
+    let version = dav.manifest.add(
+        path,
+        &hash,
+        parents,
+        bytes.len() as u64,
+        compressed.len() as u64,
+    );
+    dav.manifest.format = 3;
+    dav.persist()?;
+    state.base.insert(
+        path.into(),
+        Base {
+            id: version.id,
+            hash,
+            local_hash: None,
+            pending_hash: None,
+        },
+    );
+    state.receiving.remove(path);
+    atomic_write(
+        &state_path,
+        &serde_json::to_vec(&state).map_err(|e| e.to_string())?,
+    )?;
+    dav.release()?;
+    Ok(SyncResult {
+        uploaded: 1,
+        uploaded_paths: vec![path.into()],
+        uploaded_bytes: dav.uploaded_bytes,
+        downloaded_bytes: dav.downloaded_bytes,
+        transferred_bytes: dav.uploaded_bytes + dav.downloaded_bytes,
+        items: cloud_items(&dav.manifest, &state),
+        ..Default::default()
+    })
 }
 
 pub fn delete_cloud(app_data: &Path, path: &str, id: &str) -> Result<(), String> {

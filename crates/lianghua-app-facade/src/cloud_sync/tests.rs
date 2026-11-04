@@ -797,6 +797,79 @@ fn two_devices_keep_conflicts_deduplicate_and_recover() {
     .unwrap();
     assert_eq!(confirmed.uploaded, 0);
     assert_eq!(confirmed.downloaded, 0);
+    // 接收中断只有一个云端版本时也必须给出恢复入口；删空云端后可明确用本机重建。
+    let app_rank = temp.path().join("app-rank");
+    let source_rank = temp.path().join("source-rank");
+    save_config(&app_rank, config.clone()).unwrap();
+    lianghua_data::data::scoring_store::init_result_db(&source_rank.join("scoring_result.db"))
+        .unwrap();
+    {
+        let conn = Connection::open(source_rank.join("scoring_result.db")).unwrap();
+        conn.execute(
+            "INSERT INTO score_summary VALUES ('000001.SZ', '20261007', 1, 1)",
+            [],
+        )
+        .unwrap();
+    }
+    let rank_path = "ranking/scoring_result.zip";
+    let uploaded = resolve_local_snapshot(&app_rank, &source_rank, rank_path, |_| {}).unwrap();
+    let head = uploaded
+        .items
+        .iter()
+        .find(|item| item.path == rank_path && item.is_head)
+        .unwrap();
+    let state_path = local_root(&app_rank, &source_rank, &config)
+        .unwrap()
+        .join("state.json");
+    let mut state: SyncState = read_json(&state_path).unwrap();
+    state.receiving.insert(rank_path.into());
+    atomic_write(&state_path, &serde_json::to_vec(&state).unwrap()).unwrap();
+    assert!(
+        list_cloud(&app_rank, &source_rank)
+            .unwrap()
+            .iter()
+            .any(|item| item.path == rank_path && item.is_head && item.conflict)
+    );
+    restore(
+        &app_rank,
+        &source_rank,
+        rank_path,
+        &head.version.id,
+        BTreeMap::new(),
+        |_| {},
+    )
+    .unwrap();
+    let state: SyncState = read_json(&state_path).unwrap();
+    assert!(!state.receiving.contains(rank_path));
+    let head = list_cloud(&app_rank, &source_rank)
+        .unwrap()
+        .into_iter()
+        .find(|item| item.path == rank_path && item.is_head)
+        .unwrap();
+    delete_cloud(&app_rank, rank_path, &head.version.id).unwrap();
+    let mut state: SyncState = read_json(&state_path).unwrap();
+    state.receiving.insert(rank_path.into());
+    atomic_write(&state_path, &serde_json::to_vec(&state).unwrap()).unwrap();
+    let blocked = sync(&app_rank, &source_rank, BTreeMap::new(), false, |_| {}).unwrap();
+    assert!(blocked.conflicts.contains(&rank_path.to_string()));
+    assert!(
+        !blocked
+            .items
+            .iter()
+            .any(|item| item.path == rank_path && item.is_head)
+    );
+    let repaired = resolve_local_snapshot(&app_rank, &source_rank, rank_path, |_| {}).unwrap();
+    assert_eq!(
+        repaired
+            .items
+            .iter()
+            .filter(|item| item.path == rank_path && item.is_head)
+            .count(),
+        1
+    );
+    let retried = sync(&app_rank, &source_rank, BTreeMap::new(), false, |_| {}).unwrap();
+    assert!(!retried.conflicts.contains(&rank_path.to_string()));
+    assert!(!retried.uploaded_paths.contains(&rank_path.to_string()));
     stopped.store(true, Ordering::Relaxed);
     let _ = TcpStream::connect(address);
     worker.join().unwrap();

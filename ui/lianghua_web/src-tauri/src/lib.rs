@@ -3488,6 +3488,7 @@ pub fn run() {
             cloud_sync_bridge::preview_cloud_sync_data,
             cloud_sync_bridge::resolve_cloud_strategy_conflicts,
             cloud_sync_bridge::restore_cloud_sync_version,
+            cloud_sync_bridge::resolve_local_cloud_snapshot,
             cloud_sync_bridge::delete_cloud_sync_version,
             warehouse::get_warehouse_root,
             warehouse::set_warehouse_root,

@@ -107,6 +107,27 @@ pub async fn restore_cloud_sync_version(
 }
 
 #[tauri::command]
+pub async fn resolve_local_cloud_snapshot(
+    app: tauri::AppHandle,
+    path: String,
+) -> Result<SyncResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = CLOUD_TASK.try_lock().map_err(|_| "云端操作正在进行")?;
+        let source = crate::warehouse::warehouse_root(&app)?.join("source");
+        cloud_sync::resolve_local_snapshot(
+            &app.path().app_data_dir().map_err(|e| e.to_string())?,
+            &source,
+            &path,
+            |message| {
+                let _ = app.emit("cloud-sync-progress", message);
+            },
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 pub async fn delete_cloud_sync_version(
     app: tauri::AppHandle,
     path: String,

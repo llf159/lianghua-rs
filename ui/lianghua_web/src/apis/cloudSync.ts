@@ -67,6 +67,9 @@ export function deleteCloudVersion(item: CloudItem) {
     versionId: item.version.id,
   });
 }
+export function resolveLocalCloudSnapshot(path: string) {
+  return invoke<CloudSyncResult>("resolve_local_cloud_snapshot", { path });
+}
 export async function syncCloud(
   item?: CloudItem,
   downloadOnly = false,
