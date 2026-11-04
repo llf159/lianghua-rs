@@ -198,6 +198,8 @@ pub struct DownloadTask {
     pub ts_code: String,
     pub start_date: String,
     pub end_date: String,
+    pub list_date: Option<String>,
+    pub fetch_start_date: Option<String>,
     pub freq: BarFreq,
     pub adj_type: AdjType,
     pub with_factors: bool,
@@ -665,12 +667,19 @@ impl TushareClient {
                 self.prepare_one_stock_download(
                     source_dir.to_string(),
                     task.ts_code.to_string(),
-                    task.start_date.to_string(),
+                    task.fetch_start_date
+                        .as_ref()
+                        .unwrap_or(&task.start_date)
+                        .to_string(),
                     task.end_date.to_string(),
                     task.freq,
                     task.adj_type,
                     task.with_factors,
                 )
+                .map(|mut prepared| {
+                    prepared.start_date = task.start_date.clone();
+                    prepared
+                })
                 .map_err(|err| (task.ts_code.to_string(), err))
             })
             .collect::<Vec<_>>();
@@ -865,14 +874,29 @@ pub fn parse_bar_rows(table: &TushareTable) -> Result<Vec<BarRow>, String> {
     let mut rows = Vec::with_capacity(table.items.len());
 
     for item in &table.items {
+        let ts_code = TushareTable::value_as_string(&item[ts_code_idx], "ts_code")?;
+        let trade_date = TushareTable::value_as_string(&item[trade_date_idx], "trade_date")?;
+        let close = TushareTable::value_as_f64(&item[close_idx], "close")?;
+        let pre_close = if item[pre_close_idx].is_null() {
+            item[change_idx].as_f64().map(|change| close - change)
+                .filter(|value| value.is_finite() && *value > 0.0)
+                .ok_or_else(|| format!("{ts_code} {trade_date}: pre_close 为 null，无法从 close={} 和 change={} 推算，pct_chg={}", item[close_idx], item[change_idx], item[pct_chg_idx]))?
+        } else {
+            TushareTable::value_as_f64(&item[pre_close_idx], "pre_close").map_err(|err| {
+                format!(
+                    "{ts_code} {trade_date}: {err}，上游返回 {}，close={}，change={}，pct_chg={}",
+                    item[pre_close_idx], item[close_idx], item[change_idx], item[pct_chg_idx]
+                )
+            })?
+        };
         rows.push(BarRow {
-            ts_code: TushareTable::value_as_string(&item[ts_code_idx], "ts_code")?,
-            trade_date: TushareTable::value_as_string(&item[trade_date_idx], "trade_date")?,
+            ts_code,
+            trade_date,
             open: TushareTable::value_as_f64(&item[open_idx], "open")?,
             high: TushareTable::value_as_f64(&item[high_idx], "high")?,
             low: TushareTable::value_as_f64(&item[low_idx], "low")?,
-            close: TushareTable::value_as_f64(&item[close_idx], "close")?,
-            pre_close: TushareTable::value_as_f64(&item[pre_close_idx], "pre_close")?,
+            close,
+            pre_close,
             change: TushareTable::value_as_f64(&item[change_idx], "change")?,
             pct_chg: TushareTable::value_as_f64(&item[pct_chg_idx], "pct_chg")?,
             vol: TushareTable::value_as_f64(&item[vol_idx], "vol")?,
@@ -1632,6 +1656,37 @@ pub fn build_market_basic_with_basiccol(
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn missing_pre_close_requires_numeric_change() {
+        let mut table = TushareTable {
+            fields: "ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount"
+                .split(',')
+                .map(str::to_owned)
+                .collect(),
+            items: vec![
+                serde_json::json!([
+                    "920726.BJ",
+                    "20160930",
+                    10,
+                    11,
+                    9,
+                    10.5,
+                    null,
+                    0.5,
+                    5,
+                    100,
+                    1000
+                ])
+                .as_array()
+                .unwrap()
+                .clone(),
+            ],
+        };
+        assert_eq!(parse_bar_rows(&table).unwrap()[0].pre_close, 10.0);
+        table.items[0][7] = serde_json::Value::Null;
+        assert!(parse_bar_rows(&table).unwrap_err().contains("change=null"));
+    }
 
     fn probar_row(ts_code: &str, trade_date: &str, close: f64, pre_close: f64) -> ProBarRow {
         ProBarRow {

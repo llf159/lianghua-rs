@@ -1021,6 +1021,8 @@ pub fn build_download_task<'a>(
             ts_code: ts_code.as_str().to_string(),
             start_date: start_date.to_string(),
             end_date: end_date.to_string(),
+            list_date: None,
+            fetch_start_date: None,
             freq: BarFreq::Daily,
             adj_type,
             with_factors,
@@ -1053,6 +1055,8 @@ fn build_download_task_with_list_dates(
             ts_code: ts_code.clone(),
             start_date: adjusted_start,
             end_date: end_date.to_string(),
+            list_date: list_dates.get(ts_code).cloned(),
+            fetch_start_date: None,
             freq: BarFreq::Daily,
             adj_type,
             with_factors,
@@ -1105,6 +1109,37 @@ fn build_download_task_from_stock_list_dates(
         with_factors,
         &list_dates,
     ))
+}
+
+fn apply_pending_stock_repairs(
+    conn: &Connection,
+    tasks: &mut [DownloadTask],
+) -> Result<(), String> {
+    let pending_repairs = load_pending_stock_repairs(conn)?;
+    for task in tasks {
+        if let Some(pending) = pending_repairs
+            .iter()
+            .find(|item| item.ts_code == task.ts_code)
+        {
+            task.start_date = pending.start_date.clone();
+            task.end_date = pending.end_date.clone();
+            if let Some(list_date) = task
+                .list_date
+                .as_ref()
+                .filter(|date| **date > task.start_date && **date <= task.end_date)
+            {
+                let has_older_rows: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM stock_data WHERE ts_code=? AND adj_type=? AND trade_date >= ? AND trade_date < ?)",
+                    duckdb::params![task.ts_code, match task.adj_type { AdjType::Qfq => "qfq", AdjType::Hfq => "hfq", AdjType::Raw => "raw", AdjType::Ind => "ind" }, task.start_date, list_date],
+                    |row| row.get(0),
+                ).map_err(|e| format!("检查待补救历史行情失败: {e}"))?;
+                if !has_older_rows {
+                    task.fetch_start_date = Some(list_date.clone());
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn merge_summary(total: &mut DownloadSummary, batch: DownloadSummary) {
@@ -1619,16 +1654,7 @@ fn download_selected_stocks_with_context(
             adj_type,
             with_factors,
         )?;
-        let pending_repairs = load_pending_stock_repairs(conn)?;
-        for task in &mut tasks {
-            if let Some(pending) = pending_repairs
-                .iter()
-                .find(|item| item.ts_code == task.ts_code)
-            {
-                task.start_date = pending.start_date.clone();
-                task.end_date = pending.end_date.clone();
-            }
-        }
+        apply_pending_stock_repairs(conn, &mut tasks)?;
         let total_tasks = tasks.len();
         if tasks.is_empty() {
             emit_progress(
@@ -2781,16 +2807,7 @@ fn download_pending_all_market_after_basic_data(
                     adj_type,
                     with_factors,
                 )?;
-                let pending_repairs = load_pending_stock_repairs(conn)?;
-                for task in &mut tasks {
-                    if let Some(pending) = pending_repairs
-                        .iter()
-                        .find(|pending| pending.ts_code == task.ts_code)
-                    {
-                        task.start_date = pending.start_date.clone();
-                        task.end_date = pending.end_date.clone();
-                    }
-                }
+                apply_pending_stock_repairs(conn, &mut tasks)?;
                 let total_tasks = tasks.len();
                 let mut total = DownloadSummary::default();
 
@@ -3345,6 +3362,37 @@ prec=6
         assert_eq!(tasks[0].start_date, "20240101");
         assert_eq!(tasks[1].ts_code, "301999.SZ");
         assert_eq!(tasks[1].start_date, "20250115");
+    }
+
+    #[test]
+    fn pending_repair_keeps_coverage_and_respects_listing_without_discarding_history() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE stock_data(ts_code VARCHAR, adj_type VARCHAR, trade_date VARCHAR); CREATE TABLE pending_stock_repair(ts_code VARCHAR, start_date VARCHAR, end_date VARCHAR); INSERT INTO pending_stock_repair VALUES ('920726.BJ','20100101','20261030')").unwrap();
+        let codes = vec!["920726.BJ".to_string()];
+        let dates = HashMap::from([("920726.BJ".to_string(), "20210527".to_string())]);
+        let mut tasks = build_download_task_with_list_dates(
+            &codes,
+            "20100101",
+            "20261030",
+            AdjType::Qfq,
+            true,
+            &dates,
+        );
+        apply_pending_stock_repairs(&conn, &mut tasks).unwrap();
+        assert_eq!(tasks[0].start_date, "20100101");
+        assert_eq!(tasks[0].fetch_start_date.as_deref(), Some("20210527"));
+        conn.execute_batch("INSERT INTO stock_data VALUES ('920726.BJ','qfq','20160930')")
+            .unwrap();
+        let mut tasks = build_download_task_with_list_dates(
+            &codes,
+            "20100101",
+            "20261030",
+            AdjType::Qfq,
+            true,
+            &dates,
+        );
+        apply_pending_stock_repairs(&conn, &mut tasks).unwrap();
+        assert_eq!(tasks[0].fetch_start_date, None);
     }
 
     #[test]
