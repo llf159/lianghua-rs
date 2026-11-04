@@ -961,7 +961,7 @@ pub fn snapshot(
         })
         .count();
     let status = Some(format!(
-        "{}已补齐 {} · 待补齐 {pending} · 待重试 {failed} · 本地不足已跳过 {skipped} · 近似 {approximate}",
+        "{}补齐 {} · 待补 {pending} · 重试 {failed} · 本地不足跳过 {skipped} · 近似 {approximate}",
         if state.paused { "已暂停 · " } else { "" },
         values
             .values()
@@ -1276,8 +1276,8 @@ mod tests {
             assert!(result.values["000001.SZ"].opening_high.is_some());
             assert!(!result.values.contains_key("001999.SZ"));
             let status = result.status.unwrap();
-            assert!(status.contains("已补齐 1 · 待补齐 0 · 待重试 0"));
-            assert!(status.contains("本地不足已跳过 1"));
+            assert!(status.contains("补齐 1 · 待补 0 · 重试 0"));
+            assert!(status.contains("本地不足跳过 1"));
             let state = cache.lock().unwrap();
             assert!(!state.entries.contains_key("001999.SZ"));
             assert!(!state.paused);

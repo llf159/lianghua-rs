@@ -2138,7 +2138,6 @@
 .all-market-event-row .all-market-event-time { grid-column: 2; grid-row: 1 / 3; }
 .all-market-hit-list { overflow-anchor: none; overscroll-behavior-y: contain; }
 .all-market-hit-card .all-market-volume-ratio-controls { flex-wrap: wrap; }
-.all-market-hit-card .all-market-volume-ratio-row { flex-wrap: wrap; }
 
 
 .all-market-table-wrap { overflow-anchor: none; }
@@ -2157,19 +2156,18 @@
   }
 }
 
-/* 固定短状态与两列来源格，避免网络错误撑宽行情榜或挤空流水。 */
+/* 状态随流水栏宽度换行，避免文字超出卡片。 */
 .all-market-volume-ratio-status {
+  width: 100%;
   min-width: 0;
 }
 .all-market-volume-ratio-progress {
   display: block;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal;
 }
 .all-market-volume-ratio-sources {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 110px), 1fr));
   gap: 4px 8px;
 }
 .all-market-volume-source {
@@ -2183,9 +2181,10 @@
   background: #f1f5f9;
   color: #64748b;
   font-size: 12px;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 .all-market-volume-source strong {
+  min-width: 0;
   font-weight: 500;
 }
 .all-market-volume-source.is-available {
