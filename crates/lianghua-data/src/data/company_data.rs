@@ -2,10 +2,25 @@ use std::{collections::HashMap, fs, path::Path};
 
 use duckdb::{Connection, appender_params_from_iter, params, types::Value};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CompanyDbKind {
+    Fundamentals,
+    ShareholderCounts,
+}
+
+impl CompanyDbKind {
+    pub fn file_name(self) -> &'static str {
+        match self {
+            Self::Fundamentals => "company_fundamentals.db",
+            Self::ShareholderCounts => "shareholder_counts.db",
+        }
+    }
+}
+
 /// A successful query window is replaced and recorded in the same transaction.
-pub fn open_company_db(source_dir: &str) -> Result<Connection, String> {
+pub fn open_company_db(source_dir: &str, kind: CompanyDbKind) -> Result<Connection, String> {
     fs::create_dir_all(source_dir).map_err(|e| format!("创建公司数据目录失败: {e}"))?;
-    let conn = Connection::open(Path::new(source_dir).join("company_fundamentals.db"))
+    let conn = Connection::open(Path::new(source_dir).join(kind.file_name()))
         .map_err(|e| format!("打开公司数据库失败: {e}"))?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS company_sync_log (
@@ -28,13 +43,17 @@ pub struct CompanyDownloadWindow {
     pub items: Vec<Vec<serde_json::Value>>,
 }
 
-/// Commit the successful windows in one download batch, including their completion records.
-pub fn replace_company_batch(
+/// Commit one stock's downloaded windows and completion records atomically.
+pub fn replace_company_stock(
     conn: &mut Connection,
     windows: &[CompanyDownloadWindow],
 ) -> Result<(), String> {
     if windows.is_empty() {
         return Ok(());
+    }
+    let code = windows[0].code.as_str();
+    if windows.iter().any(|window| window.code != code) {
+        return Err("单股事务只能包含同一只股票的下载窗口".into());
     }
     lianghua_model::task::checkpoint()?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
@@ -200,7 +219,7 @@ pub fn replace_company_batch(
     }
     lianghua_model::task::checkpoint()?;
     tx.commit()
-        .map_err(|e| format!("提交公司数据批次失败: {e}"))
+        .map_err(|e| format!("提交股票数据事务失败: {e}"))
 }
 
 #[cfg(test)]
@@ -209,7 +228,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn company_batches_replace_atomically_preserve_variants_and_nulls() {
+    fn company_stock_transaction_replaces_atomically_and_preserves_variants_and_nulls() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE company_sync_log (api_name VARCHAR, ts_code VARCHAR, start_date VARCHAR, end_date VARCHAR, row_count BIGINT, synced_at TIMESTAMP, PRIMARY KEY(api_name,ts_code,start_date,end_date))").unwrap();
         let window = CompanyDownloadWindow {
@@ -231,7 +250,7 @@ mod tests {
             items: Vec::new(),
         };
         for amount in [100.0, 200.0] {
-            replace_company_batch(
+            replace_company_stock(
                 &mut conn,
                 &[CompanyDownloadWindow {
                     items: vec![
@@ -272,7 +291,7 @@ mod tests {
         );
         // A failure in the second window rolls back the earlier window in the same batch.
         assert!(
-            replace_company_batch(
+            replace_company_stock(
                 &mut conn,
                 &[
                     window.clone(),
@@ -302,7 +321,7 @@ mod tests {
                 .unwrap(),
             2
         );
-        replace_company_batch(&mut conn, &[window]).unwrap();
+        replace_company_stock(&mut conn, &[window]).unwrap();
         assert_eq!(
             conn.query_row("SELECT count(*) FROM income", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
@@ -317,16 +336,14 @@ mod tests {
             fields: ["ts_code", "ann_date", "type"].map(str::to_owned).to_vec(),
             items: Vec::new(),
         };
-        replace_company_batch(
+        replace_company_stock(&mut conn, &[empty.clone()]).unwrap();
+        replace_company_stock(
             &mut conn,
-            &[
-                empty.clone(),
-                CompanyDownloadWindow {
-                    code: "600519.SH".into(),
-                    items: vec![vec![json!("600519.SH"), json!("20240101"), json!("预增")]],
-                    ..empty
-                },
-            ],
+            &[CompanyDownloadWindow {
+                code: "600519.SH".into(),
+                items: vec![vec![json!("600519.SH"), json!("20240101"), json!("预增")]],
+                ..empty
+            }],
         )
         .unwrap();
         assert_eq!(

@@ -31,9 +31,11 @@ use lianghua_app_data::download::{
     ThsConceptDownloadRunInput as CoreThsConceptDownloadRunInput,
 };
 use lianghua_app_data::download::{
-    prepare_company_download_run as core_prepare_company_download_run,
+    prepare_company_fundamentals_download_run as core_prepare_company_fundamentals_download_run,
+    prepare_shareholder_count_download_run as core_prepare_shareholder_count_download_run,
     run_prepared_company_download as core_run_prepared_company_download,
     CompanyDownloadRunInput as CoreCompanyDownloadRunInput,
+    PreparedCompanyDownloadRun as CorePreparedCompanyDownloadRun,
 };
 use lianghua_download::download::runner::DownloadProgress as CoreDownloadProgress;
 use serde::{Deserialize, Serialize};
@@ -101,7 +103,7 @@ pub struct CompanyDownloadRequest {
     retry_times: usize,
     limit_calls_per_min: usize,
     #[serde(default)]
-    refresh_history: bool,
+    refresh_quarters: Option<usize>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -680,10 +682,10 @@ pub async fn run_dragon_tiger_download(
     .await
 }
 
-#[tauri::command]
-pub async fn run_company_download(
+async fn run_company_download_task(
     app: tauri::AppHandle,
     request: CompanyDownloadRequest,
+    prepare: fn(CoreCompanyDownloadRunInput) -> Result<CorePreparedCompanyDownloadRun, String>,
 ) -> Result<DataDownloadRunResult, String> {
     crate::task_control::run(
         app.clone(),
@@ -697,7 +699,7 @@ pub async fn run_company_download(
             }
 
             let prepared = {
-                core_prepare_company_download_run(CoreCompanyDownloadRunInput {
+                prepare(CoreCompanyDownloadRunInput {
                     source_path: request.source_path,
                     token: request.token,
                     start_date: request.start_date,
@@ -705,7 +707,7 @@ pub async fn run_company_download(
                     threads: request.threads,
                     retry_times: request.retry_times,
                     limit_calls_per_min: request.limit_calls_per_min,
-                    refresh_history: request.refresh_history,
+                    refresh_quarters: request.refresh_quarters,
                 })?
             };
             let action = prepared.action.clone();
@@ -758,11 +760,12 @@ pub async fn run_company_download(
                         action: action.clone(),
                         action_label: action_label.clone(),
                         elapsed_ms: run_result.elapsed_ms,
-                        finished: run_result.summary.success_count,
-                        total: run_result.summary.success_count,
+                        finished: run_result.summary.success_count
+                            + run_result.summary.failed_count,
+                        total: run_result.summary.success_count + run_result.summary.failed_count,
                         current_label: None,
                         message: format!(
-                            "{} 已完成，同步 {} 个数据段，写入 {} 行{}。",
+                            "{} 已完成，同步 {} 只股票，写入 {} 行{}。",
                             action_label,
                             run_result.summary.success_count,
                             run_result.summary.saved_rows,
@@ -790,6 +793,22 @@ pub async fn run_company_download(
         },
     )
     .await
+}
+
+#[tauri::command]
+pub async fn run_company_fundamentals_download(
+    app: tauri::AppHandle,
+    request: CompanyDownloadRequest,
+) -> Result<DataDownloadRunResult, String> {
+    run_company_download_task(app, request, core_prepare_company_fundamentals_download_run).await
+}
+
+#[tauri::command]
+pub async fn run_shareholder_count_download(
+    app: tauri::AppHandle,
+    request: CompanyDownloadRequest,
+) -> Result<DataDownloadRunResult, String> {
+    run_company_download_task(app, request, core_prepare_shareholder_count_download_run).await
 }
 
 #[tauri::command]

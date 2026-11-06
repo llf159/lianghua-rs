@@ -81,7 +81,8 @@ export type DataDownloadStatus = {
   sourceDb: RankComputeDbRange
   conceptPerformanceDb: RankComputeDbRange
   dragonTigerDb: DragonTigerDbStatus
-  companyDb: { exists: boolean; completedWindows: number; lastSyncedAt: string | null }
+  fundamentalsDb: CompanyDbStatus
+  shareholderCountsDb: CompanyDbStatus
   stockList: DataDownloadFileStatus
   tradeCalendar: DataDownloadFileStatus
   thsConcepts: DataDownloadFileStatus
@@ -94,6 +95,16 @@ export type DataDownloadStatus = {
   plannedAction: string
   plannedActionLabel: string
   plannedActionDetail: string
+}
+
+export type CompanyDbStatus = {
+  fileName: string
+  exists: boolean
+  completedWindows: number
+  syncedStocks: number
+  syncStartDate: string | null
+  syncEndDate: string | null
+  lastSyncedAt: string | null
 }
 
 export type DataDownloadMissingStockRepairStatus = {
@@ -150,7 +161,7 @@ export type DragonTigerDownloadRequest = {
   limitCallsPerMin: number
 }
 
-export type CompanyDownloadRequest = {
+type CompanyDownloadBaseRequest = {
   downloadId: string
   taskGroup?: string
   sourcePath: string
@@ -160,11 +171,20 @@ export type CompanyDownloadRequest = {
   threads: number
   retryTimes: number
   limitCallsPerMin: number
-  refreshHistory: boolean
 }
 
-export async function runCompanyDownload(request: CompanyDownloadRequest) {
-  return invoke<DataDownloadRunResult>('run_company_download', { request })
+export type CompanyFundamentalsDownloadRequest = CompanyDownloadBaseRequest & {
+  refreshQuarters: number
+}
+
+export type CompanyShareholderDownloadRequest = CompanyDownloadBaseRequest
+
+export async function runCompanyFundamentalsDownload(request: CompanyFundamentalsDownloadRequest) {
+  return invoke<DataDownloadRunResult>('run_company_fundamentals_download', { request })
+}
+
+export async function runShareholderCountDownload(request: CompanyShareholderDownloadRequest) {
+  return invoke<DataDownloadRunResult>('run_shareholder_count_download', { request })
 }
 
 export type ThsConceptDownloadRequest = {

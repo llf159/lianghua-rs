@@ -216,7 +216,11 @@ export function getProgressCounterText(
 
   const phaseLabel = formatPhaseLabel(progress.phase)
   if (progress.total > 0) {
-    return `${phaseLabel} · ${progress.finished} / ${progress.total}`
+    const stockUnit = progress.action === 'download-company-fundamentals' ||
+      progress.action === 'download-shareholder-counts'
+      ? ' 只'
+      : ''
+    return `${phaseLabel} · ${progress.finished} / ${progress.total}${stockUnit}`
   }
 
   return phaseLabel

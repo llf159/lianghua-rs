@@ -12,8 +12,9 @@ import {
   runConceptMostRelatedRepair,
   runDataDownload,
   runDragonTigerDownload,
-  runCompanyDownload,
+  runCompanyFundamentalsDownload,
   runMissingStockRepair,
+  runShareholderCountDownload,
   runThsConceptDownload,
   type DataDownloadProgress,
   type DataDownloadRunResult,
@@ -41,7 +42,7 @@ import { readJsonStorage, writeJsonStorage } from '../../shared/storage'
 import './css/DataDownloadPage.css'
 
 type BusyAction = 'idle' | 'loading' | 'running' | 'checking'
-type TaskSection = 'main' | 'dragonTiger' | 'concept' | 'company'
+type TaskSection = 'main' | 'dragonTiger' | 'concept' | 'fundamentals' | 'shareholders'
 
 type DataDownloadDraft = {
   token: string
@@ -52,10 +53,10 @@ type DataDownloadDraft = {
   retryTimes: number
   limitCallsPerMin: number
   includeTurnover: boolean
-  companyStartDate: string
-  companyEndDate: string
-  companyUseTodayEnd: boolean
-  companyRefreshHistory: boolean
+  fundamentalsRefreshQuarters: number
+  shareholderStartDate: string
+  shareholderEndDate: string
+  shareholderUseTodayEnd: boolean
   dragonTigerStartDate: string
   dragonTigerEndDate: string
   dragonTigerUseTodayEnd: boolean
@@ -143,12 +144,24 @@ function formatPhaseLabel(phase: string | null | undefined) {
       return '概念重试'
     case 'write_ths_concepts':
       return '写入概念文件'
-    case 'download_company':
-      return '下载公司经营与股东'
-    case 'write_company':
-      return '批量写入公司数据'
-    case 'company_done':
-      return '公司数据下载结束'
+    case 'company_income': return '利润表'
+    case 'company_balancesheet': return '资产负债表'
+    case 'company_cashflow': return '现金流量表'
+    case 'company_fina_indicator': return '财务指标'
+    case 'company_fina_mainbz': return '主营业务构成'
+    case 'company_forecast': return '业绩预告'
+    case 'company_express': return '业绩快报'
+    case 'company_dividend': return '分红送股'
+    case 'company_top10_holders': return '十大股东'
+    case 'company_top10_floatholders': return '十大流通股东'
+    case 'company_stk_holdernumber': return '股东人数'
+    case 'company_stk_holdertrade': return '股东增减持'
+    case 'company_share_float': return '限售股解禁'
+    case 'company_daily_basic': return '每日股本'
+    case 'company_fundamentals_done':
+      return '基本面数据下载结束'
+    case 'shareholder_counts_done':
+      return '股东人数下载结束'
     case 'download_dragon_tiger':
       return '拉取龙虎榜'
     case 'write_dragon_tiger':
@@ -298,8 +311,17 @@ function getProgressWorkflow(action: string | null | undefined) {
           phases: [['prepare_ths_concepts', 'fetch_ths_concept', 'retry_ths_concepts', 'write_ths_concepts']],
         },
       ] as ProgressWorkflowStep[]
-    case 'download-company':
-      return [{ key: 'company_download', label: '公司数据同步', phases: [['download_company', 'write_company']] }] as ProgressWorkflowStep[]
+    case 'download-company-fundamentals':
+      return [
+        'company_income', 'company_balancesheet', 'company_cashflow', 'company_fina_indicator',
+        'company_fina_mainbz', 'company_forecast', 'company_express', 'company_dividend',
+        'company_top10_holders', 'company_top10_floatholders', 'company_stk_holdertrade',
+        'company_share_float', 'company_daily_basic',
+      ] as ProgressWorkflowStep[]
+    case 'download-shareholder-counts':
+      return [
+        'company_stk_holdernumber',
+      ] as ProgressWorkflowStep[]
     case 'download-dragon-tiger':
       return [
         {
@@ -423,10 +445,10 @@ function readDraft(): DataDownloadDraft {
     retryTimes: 3,
     limitCallsPerMin: 190,
     includeTurnover: true,
-    companyStartDate: '2000-01-01',
-    companyEndDate: '',
-    companyUseTodayEnd: true,
-    companyRefreshHistory: false,
+    fundamentalsRefreshQuarters: 8,
+    shareholderStartDate: '2000-01-01',
+    shareholderEndDate: '',
+    shareholderUseTodayEnd: true,
     dragonTigerStartDate: '2005-01-01',
     dragonTigerEndDate: '',
     dragonTigerUseTodayEnd: true,
@@ -460,10 +482,24 @@ function readDraft(): DataDownloadDraft {
       typeof parsed.includeTurnover === 'boolean'
         ? parsed.includeTurnover
         : fallback.includeTurnover,
-    companyStartDate: typeof parsed.companyStartDate === 'string' ? parsed.companyStartDate : fallback.companyStartDate,
-    companyEndDate: typeof parsed.companyEndDate === 'string' ? parsed.companyEndDate : fallback.companyEndDate,
-    companyUseTodayEnd: typeof parsed.companyUseTodayEnd === 'boolean' ? parsed.companyUseTodayEnd : fallback.companyUseTodayEnd,
-    companyRefreshHistory: typeof parsed.companyRefreshHistory === 'boolean' ? parsed.companyRefreshHistory : fallback.companyRefreshHistory,
+    fundamentalsRefreshQuarters:
+      typeof parsed.fundamentalsRefreshQuarters === 'number' &&
+      Number.isInteger(parsed.fundamentalsRefreshQuarters) &&
+      parsed.fundamentalsRefreshQuarters > 0
+        ? parsed.fundamentalsRefreshQuarters
+        : fallback.fundamentalsRefreshQuarters,
+    shareholderStartDate:
+      typeof parsed.shareholderStartDate === 'string'
+        ? parsed.shareholderStartDate
+        : fallback.shareholderStartDate,
+    shareholderEndDate:
+      typeof parsed.shareholderEndDate === 'string'
+        ? parsed.shareholderEndDate
+        : fallback.shareholderEndDate,
+    shareholderUseTodayEnd:
+      typeof parsed.shareholderUseTodayEnd === 'boolean'
+        ? parsed.shareholderUseTodayEnd
+        : fallback.shareholderUseTodayEnd,
     dragonTigerStartDate:
       typeof parsed.dragonTigerStartDate === 'string'
         ? parsed.dragonTigerStartDate
@@ -541,10 +577,12 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
   const [retryTimes, setRetryTimes] = useState(String(draft.retryTimes))
   const [limitCallsPerMin, setLimitCallsPerMin] = useState(String(draft.limitCallsPerMin))
   const [includeTurnover, setIncludeTurnover] = useState(draft.includeTurnover)
-  const [companyStartDate, setCompanyStartDate] = useState(draft.companyStartDate)
-  const [companyEndDate, setCompanyEndDate] = useState(draft.companyEndDate)
-  const [companyUseTodayEnd, setCompanyUseTodayEnd] = useState(draft.companyUseTodayEnd)
-  const [companyRefreshHistory, setCompanyRefreshHistory] = useState(draft.companyRefreshHistory)
+  const [fundamentalsRefreshQuarters, setFundamentalsRefreshQuarters] = useState(
+    String(draft.fundamentalsRefreshQuarters),
+  )
+  const [shareholderStartDate, setShareholderStartDate] = useState(draft.shareholderStartDate)
+  const [shareholderEndDate, setShareholderEndDate] = useState(draft.shareholderEndDate)
+  const [shareholderUseTodayEnd, setShareholderUseTodayEnd] = useState(draft.shareholderUseTodayEnd)
   const [dragonTigerStartDate, setDragonTigerStartDate] = useState(draft.dragonTigerStartDate)
   const [dragonTigerEndDate, setDragonTigerEndDate] = useState(draft.dragonTigerEndDate)
   const [dragonTigerUseTodayEnd, setDragonTigerUseTodayEnd] = useState(draft.dragonTigerUseTodayEnd)
@@ -598,10 +636,14 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
     progress?.action,
     progress?.phase,
     getProgressWorkflow,
-    ['done', 'done_ths_concepts', 'dragon_tiger_done', 'company_done'],
+    ['done', 'done_ths_concepts', 'dragon_tiger_done', 'company_fundamentals_done', 'shareholder_counts_done'],
     formatPhaseLabel,
   )
   const missingStockRepair = status?.missingStockRepair ?? null
+  const isFirstFundamentalsDownload = !status?.fundamentalsDb?.completedWindows
+  const isFirstShareholderDownload = !status?.shareholderCountsDb?.completedWindows
+  const showFundamentalsProgress = busyAction === 'running' && activeTaskSection === 'fundamentals'
+  const showShareholderProgress = busyAction === 'running' && activeTaskSection === 'shareholders'
   const showMainProgress = busyAction === 'running' && activeTaskSection === 'main'
   const showDragonTigerProgress = busyAction === 'running' && activeTaskSection === 'dragonTiger'
   const showConceptProgress = busyAction === 'running' && activeTaskSection === 'concept'
@@ -628,10 +670,10 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
       retryTimes: Number(retryTimes),
       limitCallsPerMin: Number(limitCallsPerMin),
       includeTurnover,
-      companyStartDate,
-      companyEndDate,
-      companyUseTodayEnd,
-      companyRefreshHistory,
+      fundamentalsRefreshQuarters: Number(fundamentalsRefreshQuarters),
+      shareholderStartDate,
+      shareholderEndDate,
+      shareholderUseTodayEnd,
       dragonTigerStartDate,
       dragonTigerEndDate,
       dragonTigerUseTodayEnd,
@@ -643,10 +685,10 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
     })
   }, [
     endDateInput,
-    companyStartDate,
-    companyEndDate,
-    companyUseTodayEnd,
-    companyRefreshHistory,
+    fundamentalsRefreshQuarters,
+    shareholderStartDate,
+    shareholderEndDate,
+    shareholderUseTodayEnd,
     dragonTigerEndDate,
     dragonTigerStartDate,
     dragonTigerUseTodayEnd,
@@ -719,7 +761,8 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
         'done',
         'done_ths_concepts',
         'dragon_tiger_done',
-        'company_done',
+        'company_fundamentals_done',
+        'shareholder_counts_done',
       ])
       // 重试准备、并行回调和未知总量不能把已确认的总进度倒退。
       setProgressPercent((previous) =>
@@ -773,8 +816,11 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
         setNotice(
           `${result.actionLabel}完成，用时 ${formatElapsedMs(result.elapsedMs)}；补算 ${result.summary.successCount} 组，回写 ${result.summary.savedRows} 行${formatCompletionDetailTail(result.completionDetails)}。`,
         )
-      } else if (result.action === 'download-company') {
-        setNotice(`${result.actionLabel}结束，用时 ${formatElapsedMs(result.elapsedMs)}；成功 ${result.summary.successCount} 段，写入 ${result.summary.savedRows} 行，失败 ${result.summary.failedCount} 项${formatCompletionDetailTail(result.completionDetails)}。`)
+      } else if (
+        result.action === 'download-company-fundamentals' ||
+        result.action === 'download-shareholder-counts'
+      ) {
+        setNotice(`${result.actionLabel}结束，用时 ${formatElapsedMs(result.elapsedMs)}；成功 ${result.summary.successCount} 只，写入 ${result.summary.savedRows} 行，失败 ${result.summary.failedCount} 只${formatCompletionDetailTail(result.completionDetails)}。`)
         if (result.summary.failedCount > 0) setError(result.summary.failedItems.slice(0, 5).join('；'))
       } else if (result.action === 'download-dragon-tiger') {
         setNotice(
@@ -1041,24 +1087,45 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
     )
   }
 
-  async function onRunCompanyDownload() {
-    setFeedbackSection('company')
+  async function onRunFundamentalsDownload() {
+    setFeedbackSection('fundamentals')
     if (!sourcePath || !token.trim()) {
       setError('请确认数据目录，并在通用参数中填写 Tushare Token。')
       return
     }
-    if (!companyStartDate || (!companyUseTodayEnd && !companyEndDate)) {
-      setError('请填写公司数据的开始和结束日期。')
+    const refreshQuarters = Number(fundamentalsRefreshQuarters)
+    if (!Number.isInteger(refreshQuarters) || refreshQuarters < 1) {
+      setError('基本面数据刷新季度数必须是正整数。')
       return
     }
-    await runDataTask('company', (downloadId, taskGroup) => runCompanyDownload({
+    await runDataTask('fundamentals', (downloadId, taskGroup) => runCompanyFundamentalsDownload({
       downloadId, taskGroup, sourcePath, token: token.trim(),
-      startDate: inputDateToCompact(companyStartDate),
-      endDate: companyUseTodayEnd ? 'today' : inputDateToCompact(companyEndDate),
+      startDate: '20000101',
+      endDate: 'today',
       threads: Math.max(1, Number(threads) || 1),
       retryTimes: Math.max(0, Number(retryTimes) || 0),
       limitCallsPerMin: Math.max(1, Number(limitCallsPerMin) || 1),
-      refreshHistory: companyRefreshHistory,
+      refreshQuarters,
+    }))
+  }
+
+  async function onRunShareholderDownload() {
+    setFeedbackSection('shareholders')
+    if (!sourcePath || !token.trim()) {
+      setError('请确认数据目录，并在通用参数中填写 Tushare Token。')
+      return
+    }
+    if (!shareholderStartDate || (!shareholderUseTodayEnd && !shareholderEndDate)) {
+      setError('请填写股东人数数据的开始和结束日期。')
+      return
+    }
+    await runDataTask('shareholders', (downloadId, taskGroup) => runShareholderCountDownload({
+      downloadId, taskGroup, sourcePath, token: token.trim(),
+      startDate: inputDateToCompact(shareholderStartDate),
+      endDate: shareholderUseTodayEnd ? 'today' : inputDateToCompact(shareholderEndDate),
+      threads: Math.max(1, Number(threads) || 1),
+      retryTimes: Math.max(0, Number(retryTimes) || 0),
+      limitCallsPerMin: Math.max(1, Number(limitCallsPerMin) || 1),
     }))
   }
 
@@ -1286,7 +1353,7 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
         <div className="data-download-panel-grid">
           <section className="data-download-panel">
             <div className="data-download-panel-head">
-              <h3>行情下载参数</h3>
+              <h3>下载参数</h3>
             </div>
 
             <div className="data-download-form-grid">
@@ -1453,51 +1520,154 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
       <section className="data-download-card">
         <section className="data-download-panel">
           <div className="data-download-panel-head">
-            <h3>公司经营与股东数据下载</h3>
-            <p>一次下载三大财报、财务指标、主营构成、业绩预告与快报、分红、十大股东、流通股东、股东人数、增减持、解禁和每日股本。</p>
-            <p>沿用通用线程数、限频与重试参数，并发抓取后分批提交，支持停止后续传。本年和上一年会重新下载，较早的已完成区间自动跳过。</p>
+            <h3>基本面数据下载</h3>
+            <p>
+              同步财报、财务指标、主营构成、预告快报、分红、十大股东、增减持、解禁和每日股本，写入独立的
+              company_fundamentals.db。默认从 2000 年开始补全，之后按最近 N 个自然季度刷新，4 个季度为一年。
+            </p>
           </div>
+
           <div className="data-download-dragon-status">
-            <strong>{status?.companyDb?.exists ? `已保存 ${status.companyDb.completedWindows} 个下载段` : '尚未下载公司数据'}</strong>
-            {status?.companyDb?.lastSyncedAt ? <span>最近下载：{status.companyDb.lastSyncedAt}</span> : null}
+            <strong>
+              {status?.fundamentalsDb
+                ? status.fundamentalsDb.exists
+                  ? `已同步 ${status.fundamentalsDb.syncedStocks} 只股票`
+                  : '尚未下载基本面数据'
+                : '正在读取基本面库状态'}
+            </strong>
+            {status?.fundamentalsDb?.syncStartDate && status.fundamentalsDb.syncEndDate ? (
+              <span>同步周期：{status.fundamentalsDb.syncStartDate} ～ {status.fundamentalsDb.syncEndDate}</span>
+            ) : null}
+            {status?.fundamentalsDb?.lastSyncedAt ? (
+              <span>最近下载：{status.fundamentalsDb.lastSyncedAt}</span>
+            ) : null}
           </div>
-          <div className="data-download-dragon-row">
+
+          <div className="data-download-dragon-row data-download-fundamentals-row">
             <label className="data-download-field data-download-field-compact">
-              <span>开始日期</span>
-              <input type="date" value={companyStartDate} onChange={(event) => setCompanyStartDate(event.target.value)} />
+              <span>刷新季度数</span>
+              <input
+                type="number"
+                min="1"
+                step="1"
+                inputMode="numeric"
+                value={fundamentalsRefreshQuarters}
+                onChange={(event) => setFundamentalsRefreshQuarters(event.target.value)}
+              />
             </label>
-            <label className="data-download-field data-download-field-compact">
-              <span>结束日期</span>
-              <input type="date" value={companyEndDate} disabled={companyUseTodayEnd} onChange={(event) => setCompanyEndDate(event.target.value)} />
-            </label>
-            <label className="data-download-check data-download-check-compact">
-              <input type="checkbox" checked={companyUseTodayEnd} onChange={(event) => setCompanyUseTodayEnd(event.target.checked)} />
-              <span>自动到今天</span>
-            </label>
-            <label className="data-download-check data-download-check-compact">
-              <input type="checkbox" checked={companyRefreshHistory} onChange={(event) => setCompanyRefreshHistory(event.target.checked)} />
-              <span>重新下载已完成历史</span>
-            </label>
-            <button className="data-download-secondary-btn" type="button" disabled={isBusy || !sourcePath} onClick={() => void onRunCompanyDownload()}>
-              {activeTaskSection === 'company' && isBusy ? '公司数据下载中...' : '开始公司数据下载'}
+            <button
+              className="data-download-secondary-btn"
+              type="button"
+              onClick={() => void onRunFundamentalsDownload()}
+              disabled={isBusy || !sourcePath}
+            >
+              {showFundamentalsProgress ? '基本面下载中...' : isBusy ? '任务执行中...' : isFirstFundamentalsDownload ? '首次下载' : '增量更新'}
             </button>
           </div>
-          <p>财务指标、主营构成、十大股东及分红按报告期筛选；财报、预告、快报及股东变动按公告日筛选；解禁和每日股本按各自日期筛选。</p>
-          {busyAction === 'running' && activeTaskSection === 'company' ? (
+
+          {showFundamentalsProgress ? (
             <DataTaskProgress
-              onCancel={() => void taskControl.stop()} cancelDisabled={taskControl.disabled}
+              onCancel={() => void taskControl.stop()}
+              cancelDisabled={taskControl.disabled}
               phaseLabel={phaseLabel}
               phaseStepPillText={phaseStep ? ` · ${phaseStep.current}/${phaseStep.total}` : ''}
               phaseStepStatText={phaseStep ? ` ${phaseStep.current}/${phaseStep.total}` : ''}
-              actionLabel={progress?.actionLabel ?? '公司经营与股东下载'}
-              progressPercent={progressPercent} progressSegments={progressSegments}
-              elapsedText={formatElapsedMs(progressTiming.elapsedMs)} shownProgressPercent={shownProgressPercent}
-              progressCounterText={progressCounterText} currentObjectText={getCurrentObjectText(progress)}
-              message={taskControl.message || progress?.message} fallbackMessage="正在准备公司数据下载。"
+              actionLabel={progress?.actionLabel ?? '基本面数据下载'}
+              progressPercent={progressPercent}
+              progressSegments={progressSegments}
+              elapsedText={formatElapsedMs(progressTiming.elapsedMs)}
+              shownProgressPercent={shownProgressPercent}
+              progressCounterText={progressCounterText}
+              estimatedRemainingText={formatProgressDuration(progressTiming.estimatedRemainingMs)}
+              estimatedTotalText={formatProgressDuration(progressTiming.estimatedTotalMs)}
+              message={taskControl.message || progress?.message}
+              fallbackMessage="正在准备基本面数据下载。"
             />
           ) : null}
-          {notice && feedbackSection === 'company' ? <div className="data-download-notice">{notice}</div> : null}
-          {error && feedbackSection === 'company' ? <div className="data-download-error">{error}</div> : null}
+          {notice && feedbackSection === 'fundamentals' ? <div className="data-download-notice">{notice}</div> : null}
+          {error && feedbackSection === 'fundamentals' ? <div className="data-download-error">{error}</div> : null}
+        </section>
+      </section>
+
+      <section className="data-download-card">
+        <section className="data-download-panel">
+          <div className="data-download-panel-head">
+            <h3>股东人数下载</h3>
+            <p>
+              股东人数可能不定期披露，单独写入 shareholder_counts.db，并按完整日期范围重新同步，不套用基本面的季度刷新窗口。
+            </p>
+          </div>
+
+          <div className="data-download-dragon-status">
+            <strong>
+              {status?.shareholderCountsDb
+                ? status.shareholderCountsDb.exists
+                  ? `已保存 ${status.shareholderCountsDb.completedWindows} 个下载段`
+                  : '尚未下载股东人数'
+                : '正在读取股东人数库状态'}
+            </strong>
+            {status?.shareholderCountsDb?.lastSyncedAt ? (
+              <span>最近下载：{status.shareholderCountsDb.lastSyncedAt}</span>
+            ) : null}
+          </div>
+
+          <div className="data-download-dragon-row">
+            <label className="data-download-field data-download-field-compact">
+              <span>开始日期</span>
+              <input
+                type="date"
+                value={shareholderStartDate}
+                onChange={(event) => setShareholderStartDate(event.target.value)}
+              />
+            </label>
+            <label className="data-download-field data-download-field-compact">
+              <span>结束日期</span>
+              <input
+                type="date"
+                value={shareholderEndDate}
+                onChange={(event) => setShareholderEndDate(event.target.value)}
+                disabled={shareholderUseTodayEnd}
+              />
+            </label>
+            <label className="data-download-check data-download-check-compact">
+              <input
+                type="checkbox"
+                checked={shareholderUseTodayEnd}
+                onChange={(event) => setShareholderUseTodayEnd(event.target.checked)}
+              />
+              <span>自动到今天</span>
+            </label>
+            <button
+              className="data-download-secondary-btn"
+              type="button"
+              onClick={() => void onRunShareholderDownload()}
+              disabled={isBusy || !sourcePath}
+            >
+              {showShareholderProgress ? '股东人数下载中...' : isBusy ? '任务执行中...' : isFirstShareholderDownload ? '开始下载' : '重新同步'}
+            </button>
+          </div>
+
+          {showShareholderProgress ? (
+            <DataTaskProgress
+              onCancel={() => void taskControl.stop()}
+              cancelDisabled={taskControl.disabled}
+              phaseLabel={phaseLabel}
+              phaseStepPillText={phaseStep ? ` · ${phaseStep.current}/${phaseStep.total}` : ''}
+              phaseStepStatText={phaseStep ? ` ${phaseStep.current}/${phaseStep.total}` : ''}
+              actionLabel={progress?.actionLabel ?? '股东人数下载'}
+              progressPercent={progressPercent}
+              progressSegments={progressSegments}
+              elapsedText={formatElapsedMs(progressTiming.elapsedMs)}
+              shownProgressPercent={shownProgressPercent}
+              progressCounterText={progressCounterText}
+              estimatedRemainingText={formatProgressDuration(progressTiming.estimatedRemainingMs)}
+              estimatedTotalText={formatProgressDuration(progressTiming.estimatedTotalMs)}
+              message={taskControl.message || progress?.message}
+              fallbackMessage="正在准备股东人数下载。"
+            />
+          ) : null}
+          {notice && feedbackSection === 'shareholders' ? <div className="data-download-notice">{notice}</div> : null}
+          {error && feedbackSection === 'shareholders' ? <div className="data-download-error">{error}</div> : null}
         </section>
       </section>
 

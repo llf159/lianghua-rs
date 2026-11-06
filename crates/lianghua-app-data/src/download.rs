@@ -93,8 +93,12 @@ pub struct DragonTigerDbStatus {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompanyDbStatus {
+    pub file_name: String,
     pub exists: bool,
     pub completed_windows: u64,
+    pub synced_stocks: u64,
+    pub sync_start_date: Option<String>,
+    pub sync_end_date: Option<String>,
     pub last_synced_at: Option<String>,
 }
 
@@ -105,7 +109,8 @@ pub struct DataDownloadStatus {
     pub source_db: DataDownloadDbRange,
     pub concept_performance_db: DataDownloadDbRange,
     pub dragon_tiger_db: DragonTigerDbStatus,
-    pub company_db: CompanyDbStatus,
+    pub fundamentals_db: CompanyDbStatus,
+    pub shareholder_counts_db: CompanyDbStatus,
     pub stock_list: DataDownloadFileStatus,
     pub trade_calendar: DataDownloadFileStatus,
     pub ths_concepts: DataDownloadFileStatus,
@@ -185,8 +190,7 @@ pub struct CompanyDownloadRunInput {
     pub threads: usize,
     pub retry_times: usize,
     pub limit_calls_per_min: usize,
-    #[serde(default)]
-    pub refresh_history: bool,
+    pub refresh_quarters: Option<usize>,
 }
 
 pub struct PreparedCompanyDownloadRun {
@@ -1141,35 +1145,21 @@ pub fn get_data_download_status(source_path: &str) -> Result<DataDownloadStatus,
             trimmed,
             "similarity",
         )?;
-    let company_path = Path::new(trimmed).join("company_fundamentals.db");
-    let company_db = if company_path.exists() {
-        let conn = crate::data::open_db_readonly(&company_path)
-            .map_err(|e| format!("读取公司库状态失败: {e}"))?;
-        conn.query_row(
-            "SELECT count(*), CAST(max(synced_at) AS VARCHAR) FROM company_sync_log",
-            [],
-            |row| {
-                Ok(CompanyDbStatus {
-                    exists: true,
-                    completed_windows: row.get(0)?,
-                    last_synced_at: row.get(1)?,
-                })
-            },
-        )
-        .map_err(|e| format!("读取公司下载记录失败: {e}"))?
-    } else {
-        CompanyDbStatus {
-            exists: false,
-            completed_windows: 0,
-            last_synced_at: None,
-        }
-    };
+    let fundamentals_db = read_company_db_status(
+        trimmed,
+        lianghua_data::data::company_data::CompanyDbKind::Fundamentals,
+    )?;
+    let shareholder_counts_db = read_company_db_status(
+        trimmed,
+        lianghua_data::data::company_data::CompanyDbKind::ShareholderCounts,
+    )?;
     Ok(DataDownloadStatus {
         source_path: trimmed.to_string(),
         source_db,
         concept_performance_db,
         dragon_tiger_db,
-        company_db,
+        fundamentals_db,
+        shareholder_counts_db,
         stock_list,
         trade_calendar,
         ths_concepts,
@@ -1183,6 +1173,47 @@ pub fn get_data_download_status(source_path: &str) -> Result<DataDownloadStatus,
         planned_action_label,
         planned_action_detail,
     })
+}
+
+fn read_company_db_status(
+    source_dir: &str,
+    kind: lianghua_data::data::company_data::CompanyDbKind,
+) -> Result<CompanyDbStatus, String> {
+    let path = Path::new(source_dir).join(kind.file_name());
+    if path.exists() {
+        let conn =
+            crate::data::open_db_readonly(&path).map_err(|e| format!("读取公司库状态失败: {e}"))?;
+        Ok(conn
+            .query_row(
+                "SELECT count(*), CAST(max(synced_at) AS VARCHAR), count(DISTINCT ts_code),
+                    strftime(try_strptime(min(start_date), '%Y%m%d'), '%Y-%m-%d'),
+                    strftime(try_strptime(max(end_date), '%Y%m%d'), '%Y-%m-%d')
+                 FROM company_sync_log",
+                [],
+                |row| {
+                    Ok(CompanyDbStatus {
+                        file_name: kind.file_name().to_string(),
+                        exists: true,
+                        completed_windows: row.get(0)?,
+                        last_synced_at: row.get(1)?,
+                        synced_stocks: row.get(2)?,
+                        sync_start_date: row.get(3)?,
+                        sync_end_date: row.get(4)?,
+                    })
+                },
+            )
+            .map_err(|e| format!("读取公司下载记录失败: {e}"))?)
+    } else {
+        Ok(CompanyDbStatus {
+            file_name: kind.file_name().to_string(),
+            exists: false,
+            completed_windows: 0,
+            synced_stocks: 0,
+            sync_start_date: None,
+            sync_end_date: None,
+            last_synced_at: None,
+        })
+    }
 }
 
 pub fn prepare_missing_stock_repair_run(
@@ -1313,8 +1344,27 @@ pub fn prepare_dragon_tiger_download_run(
     })
 }
 
-pub fn prepare_company_download_run(
+pub fn prepare_company_fundamentals_download_run(
     input: CompanyDownloadRunInput,
+) -> Result<PreparedCompanyDownloadRun, String> {
+    prepare_company_download_run(
+        input,
+        lianghua_data::data::company_data::CompanyDbKind::Fundamentals,
+    )
+}
+
+pub fn prepare_shareholder_count_download_run(
+    input: CompanyDownloadRunInput,
+) -> Result<PreparedCompanyDownloadRun, String> {
+    prepare_company_download_run(
+        input,
+        lianghua_data::data::company_data::CompanyDbKind::ShareholderCounts,
+    )
+}
+
+fn prepare_company_download_run(
+    input: CompanyDownloadRunInput,
+    database: lianghua_data::data::company_data::CompanyDbKind,
 ) -> Result<PreparedCompanyDownloadRun, String> {
     let source_path = input.source_path.trim().to_string();
     if source_path.is_empty() {
@@ -1332,6 +1382,12 @@ pub fn prepare_company_download_run(
     if input.limit_calls_per_min == 0 {
         return Err("每分钟调用次数必须大于 0".into());
     }
+    let refresh_quarters = input
+        .refresh_quarters
+        .unwrap_or(lianghua_download::download::company::DEFAULT_COMPANY_REFRESH_QUARTERS);
+    if refresh_quarters == 0 {
+        return Err("公司数据刷新季度数必须大于 0".into());
+    }
     Ok(PreparedCompanyDownloadRun {
         config: lianghua_download::download::company::CompanyDownloadConfig {
             source_dir: source_path,
@@ -1341,10 +1397,20 @@ pub fn prepare_company_download_run(
             threads: input.threads.max(1),
             retry_times: input.retry_times,
             limit_calls_per_min: input.limit_calls_per_min,
-            refresh_history: input.refresh_history,
+            refresh_quarters,
+            database,
         },
-        action: "download-company".into(),
-        action_label: "公司经营与股东下载".into(),
+        action: if database == lianghua_data::data::company_data::CompanyDbKind::Fundamentals {
+            "download-company-fundamentals".into()
+        } else {
+            "download-shareholder-counts".into()
+        },
+        action_label: if database == lianghua_data::data::company_data::CompanyDbKind::Fundamentals
+        {
+            "基本面数据下载".into()
+        } else {
+            "股东人数下载".into()
+        },
     })
 }
 
@@ -1360,15 +1426,21 @@ pub fn run_prepared_company_download(
         elapsed_ms: 0,
         summary: DataDownloadSummary {
             success_count: summary.success_count as u64,
-            failed_count: summary.failed_items.len() as u64,
+            failed_count: summary.failed_count as u64,
             saved_rows: summary.saved_rows as u64,
             concept_performance_rows: 0,
             failed_items: summary.failed_items,
         },
-        completion_details: vec![format!(
-            "跳过 {} 段已完成历史；本年和上一年重新拉取",
-            summary.skipped_count
-        )],
+        completion_details: vec![if prepared.config.database
+            == lianghua_data::data::company_data::CompanyDbKind::Fundamentals
+        {
+            format!(
+                "基本面等最近 {} 个季度刷新；分红整段重新同步",
+                prepared.config.refresh_quarters
+            )
+        } else {
+            "股东人数按完整日期范围重新同步".into()
+        }],
         status: get_data_download_status(&prepared.config.source_dir)?,
     })
 }

@@ -304,8 +304,9 @@ impl Drop for SimilarityDisplaySleepInhibitor {
 
 use data_download_bridge::{
     check_databases, get_data_download_status, get_indicator_manage_page, repair_database_issues,
-    run_company_download, run_concept_most_related_repair, run_concept_performance_repair,
-    run_data_download, run_dragon_tiger_download, run_missing_stock_repair,
+    run_company_fundamentals_download, run_concept_most_related_repair,
+    run_concept_performance_repair, run_data_download, run_dragon_tiger_download,
+    run_missing_stock_repair, run_shareholder_count_download,
     run_stock_data_indicator_columns_delete, run_stock_data_indicator_columns_rebuild,
     run_ths_concept_download, save_indicator_manage_page,
 };
@@ -3529,7 +3530,8 @@ pub fn run() {
             run_stock_data_indicator_columns_rebuild,
             run_data_download,
             run_dragon_tiger_download,
-            run_company_download,
+            run_company_fundamentals_download,
+            run_shareholder_count_download,
             run_missing_stock_repair,
             run_ths_concept_download,
             run_concept_performance_repair,

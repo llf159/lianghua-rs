@@ -337,6 +337,11 @@
   align-items: end;
 }
 
+.data-download-fundamentals-row {
+  grid-template-columns: minmax(96px, 120px) auto;
+  justify-content: start;
+}
+
 .data-download-dragon-today {
   min-width: 132px;
 }
@@ -351,7 +356,8 @@
 }
 
 @media (max-width: 760px) {
-  .data-download-dragon-row {
+  .data-download-dragon-row,
+  .data-download-fundamentals-row {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
