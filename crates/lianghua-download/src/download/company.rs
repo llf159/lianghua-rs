@@ -11,7 +11,7 @@ use super::{
 };
 use crate::data::{
     bulk_write::BulkWriteSettings,
-    company_data::{CompanyDbKind, CompanyDownloadWindow, open_company_db, replace_company_stock},
+    company_data::{CompanyDataWriter, CompanyDbKind, CompanyDownloadWindow, open_company_db},
     load_stock_list,
 };
 
@@ -188,8 +188,6 @@ impl TushareClient {
             let mut response = None;
             for attempt in 0..=retry_times {
                 lianghua_model::task::checkpoint()?;
-                // One budget for the entire company task, in addition to upstream per-API limits.
-                self.limiter.wait("company-global")?;
                 match self.post_table(
                     api,
                     &request,
@@ -370,6 +368,7 @@ pub fn download_company(
     }
     let settings = BulkWriteSettings::apply(&conn)?;
     let result = (|| {
+        let mut writer = CompanyDataWriter::new(&mut conn);
         let mut summary = CompanyDownloadSummary::default();
         let total = stocks.len();
         let mut failed_stocks = HashSet::new();
@@ -506,7 +505,7 @@ pub fn download_company(
                 for ((code, _), result) in batch.iter().zip(fetched) {
                     match result {
                         Ok(windows) => {
-                            if let Err(error) = replace_company_stock(&mut conn, &windows) {
+                            if let Err(error) = writer.replace_stock(&windows) {
                                 failed_stocks.insert(code.clone());
                                 summary
                                     .failed_items
@@ -645,6 +644,9 @@ mod tests {
             .fetch_company_window("fina_mainbz", "600519.SH", "20240101", "20241231", 0)
             .unwrap();
         assert_eq!(table.items.len(), 2);
+        let budgets = client.limiter.next_allowed_at.lock().unwrap();
+        assert_eq!(budgets.len(), 1);
+        assert!(budgets.contains_key("fina_mainbz"));
         assert!(started.elapsed() >= Duration::from_millis(75));
         server.join().unwrap();
     }

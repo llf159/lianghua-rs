@@ -37,6 +37,8 @@ pub fn managed_source_file_name(file_id: &str) -> Option<&'static str> {
     match file_id {
         "source-db" => Some("stock_data.db"),
         "dragon-tiger-db" => Some("dragon_tiger.db"),
+        "company-fundamentals-db" => Some("company_fundamentals.db"),
+        "shareholder-counts-db" => Some("shareholder_counts.db"),
         "stock-list" => Some("stock_list.csv"),
         "trade-calendar" => Some("trade_calendar.csv"),
         "result-db" => Some("scoring_result.db"),

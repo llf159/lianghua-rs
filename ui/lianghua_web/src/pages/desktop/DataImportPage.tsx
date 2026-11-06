@@ -49,7 +49,7 @@ const MANAGED_SOURCE_FILE_GROUPS = [
     id: 'derived',
     label: '下载与计算产物',
     description: '龙虎榜、评分、走势相似度、概念表现及筹码计算结果。',
-    fileIds: ['dragon-tiger-db', 'result-db', 'similarity-db', 'concept-performance-db', 'cyq-db', 'cyq-chen-db'],
+    fileIds: ['dragon-tiger-db', 'company-fundamentals-db', 'shareholder-counts-db', 'result-db', 'similarity-db', 'concept-performance-db', 'cyq-db', 'cyq-chen-db'],
   },
   {
     id: 'config',
