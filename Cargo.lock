@@ -99,6 +99,7 @@ dependencies = [
  "lianghua-provider",
  "libc",
  "log",
+ "reqwest",
  "rustls-platform-verifier",
  "serde",
  "serde_json",
@@ -2585,6 +2586,7 @@ dependencies = [
  "reqwest",
  "rusqlite",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

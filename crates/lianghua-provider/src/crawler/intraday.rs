@@ -510,6 +510,42 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "单股检查东财直连及解析，需要网络"]
+    fn live_eastmoney_intraday_fetch_returns_points() {
+        let http = reqwest::blocking::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(6))
+            .timeout(std::time::Duration::from_secs(12))
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                eprintln!(
+                    "东财跳转至 {}",
+                    attempt.url().host_str().unwrap_or("unknown")
+                );
+                if attempt.previous().len() >= 5 {
+                    attempt.stop()
+                } else {
+                    attempt.follow()
+                }
+            }))
+            .build()
+            .unwrap();
+        for code in ["000001.SZ", "600000.SH"] {
+            let started = std::time::Instant::now();
+            let raw = fetch_eastmoney_intraday_text(&http, code).unwrap();
+            let data =
+                super::super::volume_ratio::parse_eastmoney_volume_ratio(&raw, code, 100000.0)
+                    .unwrap();
+            eprintln!(
+                "东财 {code} {}: {} points, opening complete={}, elapsed={:?}",
+                data.trade_date,
+                data.points.len(),
+                data.opening_window_complete(),
+                started.elapsed()
+            );
+            assert!(data.opening_window_complete());
+        }
+    }
+
+    #[test]
     #[ignore = "requires network access"]
     fn live_tencent_intraday_fetch_returns_points() {
         let http = reqwest::blocking::Client::builder()
@@ -654,26 +690,45 @@ pub fn normalize_eastmoney_intraday_text(raw: &str, ts_code: &str) -> Result<Str
     Ok(normalized.to_string())
 }
 
-pub fn fetch_eastmoney_intraday_text(
-    http: &reqwest::blocking::Client,
+/// 东财直连与登录 WebView 共用参数，stream=true 仅用于网页首快照。
+pub fn eastmoney_intraday_request(
     ts_code: &str,
-) -> Result<String, String> {
+    stream: bool,
+) -> Result<super::volume_ratio::IntradayRequest, String> {
     let symbol = ts_code_to_tencent_code(ts_code)?;
     let secid = format!(
         "{}.{}",
         if symbol.starts_with("sh") { 1 } else { 0 },
         &symbol[2..]
     );
-    let raw = http
-        .get("https://push2.eastmoney.com/api/qt/stock/trends2/get")
-        .query(&[
-            ("secid", secid.as_str()),
-            ("fields1", "f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11"),
-            ("fields2", "f51,f52,f53,f54,f55,f56,f57,f58"),
-            ("ndays", "1"),
-            ("iscr", "1"),
-        ])
-        .header("Referer", "https://quote.eastmoney.com/")
+    let endpoint = if stream { "sse" } else { "get" };
+    let fields = if stream {
+        "f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13,f17"
+    } else {
+        "f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11"
+    };
+    let mut url = format!(
+        "https://push2.eastmoney.com/api/qt/stock/trends2/{endpoint}?secid={secid}&fields1={fields}&fields2=f51,f52,f53,f54,f55,f56,f57,f58&ndays=1&iscr=1"
+    );
+    if stream {
+        url.push_str("&iscca=0&mpi=1000&ut=fa5fd1943c7b386f172d6893dbfba10b");
+    }
+    Ok(super::volume_ratio::IntradayRequest {
+        url,
+        method: "GET".into(),
+        body: None,
+        headers: [("Referer".into(), "https://quote.eastmoney.com/".into())]
+            .into_iter()
+            .collect(),
+    })
+}
+
+pub fn fetch_eastmoney_intraday_text(
+    http: &reqwest::blocking::Client,
+    ts_code: &str,
+) -> Result<String, String> {
+    let raw = eastmoney_intraday_request(ts_code, false)?
+        .http(http)?
         .header("User-Agent", "Mozilla/5.0")
         .send()
         .map_err(|e| format_intraday_request_error("东财", ts_code, e))?

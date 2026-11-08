@@ -1244,8 +1244,9 @@ pub fn get_all_market_monitor_snapshot(
                 Err(_) => {
                     // 量比本地检查失败只停止补齐，行情和原榜单继续刷新。
                     let _ = super::volume_ratio::set_fetch_paused(true);
-                    volume_ratio_source_statuses = ["tencent", "eastmoney", "microsoft", "local"]
+                    volume_ratio_source_statuses = super::volume_ratio::VOLUME_RATIO_SOURCES
                         .into_iter()
+                        .chain(std::iter::once("local"))
                         .map(|source| super::volume_ratio::VolumeRatioSourceStatus {
                             source,
                             state: if source == "local" {

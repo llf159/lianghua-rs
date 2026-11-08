@@ -8,17 +8,21 @@ import android.widget.Button
 import android.widget.FrameLayout
 import androidx.activity.OnBackPressedCallback
 
-class EastmoneyVerificationActivity : TauriActivity() {
+class EastmoneyVerificationActivity : DataSourceVerificationActivity()
+class XueqiuVerificationActivity : DataSourceVerificationActivity()
+class TonghuashunVerificationActivity : DataSourceVerificationActivity()
+
+open class DataSourceVerificationActivity : TauriActivity() {
   fun showVerificationWindow() {
     runOnUiThread {
-      startActivity(Intent(this, EastmoneyVerificationActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+      startActivity(Intent(this, javaClass).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
   }
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     val button = Button(this).apply {
-      text = "返回监控，保留验证窗口"
+      text = "返回监控，保留登录窗口"
       setOnClickListener { returnToMonitor() }
     }
     val layout = FrameLayout.LayoutParams(

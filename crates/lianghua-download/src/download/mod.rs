@@ -228,7 +228,14 @@ impl TushareClient {
         fields: &str,
     ) -> Result<TushareTable, String> {
         lianghua_model::task::checkpoint()?;
-        self.limiter.wait(api_name)?;
+        if api_name == "stk_holdertrade" {
+            self.limiter.wait_with_interval(
+                api_name,
+                self.limiter.min_interval.max(Duration::from_millis(625)),
+            )?;
+        } else {
+            self.limiter.wait(api_name)?;
+        }
         lianghua_model::task::checkpoint()?;
 
         let json_body = TushareRequest {

@@ -11,9 +11,6 @@ import { ensureManagedSourcePath } from "../../apis/managedSource";
 import {
   getAllMarketMonitorSnapshot,
   setAllMarketVolumeRatioPaused,
-  openEastmoneyVerification,
-  useEastmoneyVerifiedSession as connectEastmoneySession,
-  stopEastmoneyVerifiedSession,
   type StockLookupRow,
   type VolumeRatioSourceStatus,
   type AllMarketIndexRow,
@@ -22,6 +19,7 @@ import {
   type IntradayMonitorTemplate,
 } from "../../apis/reader";
 import IntradayTemplateManagerModal from "./components/IntradayTemplateManagerModal";
+import DataSourceSessionMenu from "./components/DataSourceSessionMenu";
 import WatchlistModal from "./components/WatchlistModal";
 import IntradayMarketGroupTable from "./components/IntradayMarketGroupTable";
 import {
@@ -690,10 +688,6 @@ export default function AllMarketMonitorPage() {
     VolumeRatioSourceStatus[]
   >([]);
   const [volumeRatioEnabled, setVolumeRatioEnabled] = useState(false);
-  const [eastmoneySessionOpen, setEastmoneySessionOpen] = useState(false);
-  const eastmoneySessionMenuRef = useRef<HTMLDivElement>(null);
-  const [eastmoneySessionBusy, setEastmoneySessionBusy] = useState(false);
-  const [eastmoneySessionMessage, setEastmoneySessionMessage] = useState("");
   const [marketStatus, setMarketStatus] = useState("");
   const refreshTimingRef = useRef<{
     backend: AllMarketMonitorTimings;
@@ -1091,30 +1085,6 @@ export default function AllMarketMonitorPage() {
     document.addEventListener("mousedown", handleMouseDown);
     return () => document.removeEventListener("mousedown", handleMouseDown);
   }, [openTemplateTsCode, openHitTsCode]);
-
-  useEffect(() => {
-    if (!eastmoneySessionOpen) return;
-
-    function onPointerDown(event: PointerEvent) {
-      if (!eastmoneySessionMenuRef.current?.contains(event.target as Node)) {
-        setEastmoneySessionOpen(false);
-      }
-    }
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        setEastmoneySessionOpen(false);
-        eastmoneySessionMenuRef.current
-          ?.querySelector<HTMLButtonElement>(".eastmoney-session-trigger")
-          ?.focus();
-      }
-    }
-    document.addEventListener("pointerdown", onPointerDown);
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("pointerdown", onPointerDown);
-      document.removeEventListener("keydown", onKeyDown);
-    };
-  }, [eastmoneySessionOpen]);
 
   useEffect(() => {
     lastProcessedDataVersionRef.current = null;
@@ -2976,111 +2946,7 @@ export default function AllMarketMonitorPage() {
                     aria-hidden="true"
                   />
                 </button>
-                <div
-                  className="eastmoney-session-menu"
-                  ref={eastmoneySessionMenuRef}
-                >
-                  <button
-                    type="button"
-                    className="eastmoney-session-trigger"
-                    title="东方财富访问验证"
-                    aria-expanded={eastmoneySessionOpen}
-                    aria-controls="eastmoney-session-popover"
-                    onClick={() => setEastmoneySessionOpen((value) => !value)}
-                  >
-                    东财验证
-                  </button>
-                  {eastmoneySessionOpen ? (
-                    <div
-                      className="eastmoney-session-popover"
-                      id="eastmoney-session-popover"
-                    >
-                      <div className="eastmoney-session-popover-head">
-                        <strong>东财验证</strong>
-                        <button
-                          type="button"
-                          aria-label="关闭东财验证弹窗"
-                          onClick={() => setEastmoneySessionOpen(false)}
-                        >
-                          关闭
-                        </button>
-                      </div>
-                      <div
-                        className="eastmoney-session-actions"
-                        role="group"
-                        aria-label="东财验证操作"
-                        aria-busy={eastmoneySessionBusy}
-                      >
-                        <button
-                          className="all-market-toggle"
-                          type="button"
-                          disabled={eastmoneySessionBusy}
-                          onClick={async () => {
-                            setEastmoneySessionBusy(true);
-                            try {
-                              await openEastmoneyVerification();
-                              setEastmoneySessionMessage(
-                                "验证后点击“检查连接”。",
-                              );
-                            } catch {
-                              setEastmoneySessionMessage(
-                                "验证会话异常，请重试",
-                              );
-                            } finally {
-                              setEastmoneySessionBusy(false);
-                            }
-                          }}
-                        >
-                          打开验证页
-                        </button>
-                        <button
-                          className="all-market-toggle"
-                          type="button"
-                          disabled={eastmoneySessionBusy}
-                          onClick={async () => {
-                            setEastmoneySessionBusy(true);
-                            setEastmoneySessionMessage("检查中…");
-                            try {
-                              await connectEastmoneySession();
-                              setEastmoneySessionMessage("已连接");
-                            } catch {
-                              setEastmoneySessionMessage(
-                                "连接失败，请重新验证",
-                              );
-                            } finally {
-                              setEastmoneySessionBusy(false);
-                            }
-                          }}
-                        >
-                          检查连接
-                        </button>
-                        <button
-                          className="all-market-toggle"
-                          type="button"
-                          disabled={eastmoneySessionBusy}
-                          onClick={async () => {
-                            setEastmoneySessionBusy(true);
-                            try {
-                              await stopEastmoneyVerifiedSession();
-                              setEastmoneySessionMessage("已停用");
-                            } catch {
-                              setEastmoneySessionMessage(
-                                "验证会话异常，请重试",
-                              );
-                            } finally {
-                              setEastmoneySessionBusy(false);
-                            }
-                          }}
-                        >
-                          停用会话
-                        </button>
-                      </div>
-                      {eastmoneySessionMessage ? (
-                        <p role="status">{eastmoneySessionMessage}</p>
-                      ) : null}
-                    </div>
-                  ) : null}
-                </div>
+                <DataSourceSessionMenu />
               </div>
               <div
                 className="all-market-volume-ratio-status"
@@ -3097,6 +2963,10 @@ export default function AllMarketMonitorPage() {
                       ["tencent", "腾讯"],
                       ["eastmoney", "东财"],
                       ["microsoft", "微软"],
+                      ["tonghuashun", "同花顺"],
+                      ["xueqiu", "雪球"],
+                      ["sse", "上交所"],
+                      ["szse", "深交所"],
                       ["local", "本地"],
                     ] as const
                   ).map(([source, label]) => {
@@ -3132,7 +3002,11 @@ export default function AllMarketMonitorPage() {
                             ? "请更新日线、股票列表和交易日历后重新开启；缓存基准不一致时请清空量比缓存"
                             : source === "microsoft"
                               ? "当日沪深行情 09:50 后参与补齐，使用近似基准"
-                              : undefined
+                              : source === "sse"
+                                ? "仅参与沪市股票分时补齐"
+                                : source === "szse"
+                                  ? "仅参与深市股票分时补齐"
+                                  : undefined
                         }
                       >
                         <span>{label}</span>

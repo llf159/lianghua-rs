@@ -1,3 +1,9 @@
+mod sources;
+pub use sources::{
+    IntradayRequest, IntradayVolumeSource, fetch_volume_ratio_from_source,
+    parse_volume_ratio_from_source, volume_ratio_request,
+};
+
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -50,11 +56,19 @@ pub struct TencentVolumeRatioData {
 
 impl TencentVolumeRatioData {
     pub fn opening_window_complete(&self) -> bool {
-        self.points.len() >= 6
-            && self.points[..6]
+        // 累计量不下降且两点分母同为 1 分钟，09:31 的量比必不低于 09:30。
+        // 雪球没有独立竞价点，只需真实覆盖 09:31–09:35，不能伪造 09:30。
+        let start = usize::from(
+            self.points
+                .first()
+                .is_some_and(|point| point.time == "0930"),
+        );
+        self.points.get(start..start + 5).is_some_and(|points| {
+            points
                 .iter()
-                .zip(["0930", "0931", "0932", "0933", "0934", "0935"])
+                .zip(["0931", "0932", "0933", "0934", "0935"])
                 .all(|(point, time)| point.time == time)
+        })
     }
 }
 
@@ -162,7 +176,7 @@ pub fn fetch_eastmoney_volume_ratio(
 }
 
 /// MSN 分钟量按股累加；显式盘前量保留，分钟桶转换为闭合时间。
-/// 数据口径尚未与腾讯完全一致，调用方须标识为近似基准。
+/// 分钟量口径与腾讯可能存在差异，按产品要求不单独显示近似标记。
 pub fn parse_msn_volume_ratio(
     raw: &str,
     ts_code: &str,

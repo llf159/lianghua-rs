@@ -32,6 +32,20 @@
             android:taskAffinity="${applicationId}.eastmoney"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode" />
 
+        <activity
+            android:name=".XueqiuVerificationActivity"
+            android:exported="false"
+            android:launchMode="singleInstance"
+            android:taskAffinity="${applicationId}.xueqiu"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode" />
+
+        <activity
+            android:name=".TonghuashunVerificationActivity"
+            android:exported="false"
+            android:launchMode="singleInstance"
+            android:taskAffinity="${applicationId}.tonghuashun"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode" />
+
         <provider
           android:name="androidx.core.content.FileProvider"
           android:authorities="${applicationId}.fileprovider"

@@ -12,10 +12,21 @@ use lianghua_data::data::{load_stock_list, load_trade_date_list, source_db_path}
 use lianghua_provider::crawler::{
     SinaQuote,
     volume_ratio::{
-        TencentVolumeRatioData, fetch_msn_volume_ratio, fetch_tencent_volume_ratio,
-        intraday_trading_minutes,
+        IntradayVolumeSource, TencentVolumeRatioData, fetch_msn_volume_ratio,
+        fetch_tencent_volume_ratio, fetch_volume_ratio_from_source, intraday_trading_minutes,
+        parse_volume_ratio_from_source,
     },
 };
+
+pub const VOLUME_RATIO_SOURCES: [&str; 7] = [
+    "tencent",
+    "eastmoney",
+    "microsoft",
+    "tonghuashun",
+    "xueqiu",
+    "sse",
+    "szse",
+];
 
 pub fn load_volume_ratio_averages(
     source_path: &str,
@@ -186,13 +197,13 @@ struct Cache {
     preflight_checked: bool,
     preflight_blocked: bool,
     msn_enabled: bool,
-    source_results: [Option<bool>; 3],
-    next_request_at: [Option<Instant>; 3],
-    cooldown_until: [Option<Instant>; 3],
-    request_interval_ms: [u64; 3],
+    source_results: [Option<bool>; VOLUME_RATIO_SOURCES.len()],
+    next_request_at: [Option<Instant>; VOLUME_RATIO_SOURCES.len()],
+    cooldown_until: [Option<Instant>; VOLUME_RATIO_SOURCES.len()],
+    request_interval_ms: [u64; VOLUME_RATIO_SOURCES.len()],
     source_cursor: usize,
-    recovery_at: [Option<Instant>; 3],
-    source_successes: [u8; 3],
+    recovery_at: [Option<Instant>; VOLUME_RATIO_SOURCES.len()],
+    source_successes: [u8; VOLUME_RATIO_SOURCES.len()],
 }
 
 impl Cache {
@@ -365,29 +376,30 @@ impl Cache {
     fn reserve_source(
         &mut self,
         now: Instant,
-        allow_msn: bool,
+        eligible: u8,
         attempted: u8,
     ) -> Option<(usize, Duration)> {
-        let deadlines: [Instant; 3] = std::array::from_fn(|index| {
+        let deadlines: [Instant; VOLUME_RATIO_SOURCES.len()] = std::array::from_fn(|index| {
             self.next_request_at[index]
                 .into_iter()
                 .chain(self.cooldown_until[index])
                 .max()
                 .unwrap_or(now)
         });
-        let source = (0..if allow_msn { 3 } else { 2 })
-            .filter(|&index| attempted & (1 << index) == 0)
+        let source = (0..VOLUME_RATIO_SOURCES.len())
+            .filter(|&index| eligible & (1 << index) != 0 && attempted & (1 << index) == 0)
             .min_by_key(|&index| {
                 (
                     deadlines[index].max(now),
-                    (index + 3 - self.source_cursor) % 3,
+                    (index + VOLUME_RATIO_SOURCES.len() - self.source_cursor)
+                        % VOLUME_RATIO_SOURCES.len(),
                 )
             })?;
         let wait = deadlines[source].saturating_duration_since(now);
         if wait.is_zero() {
-            let interval = self.request_interval_ms[source].max(if source == 2 { 40 } else { 60 });
+            let interval = self.request_interval_ms[source].max(60);
             self.next_request_at[source] = Some(now + Duration::from_millis(interval));
-            self.source_cursor = (source + 1) % 3;
+            self.source_cursor = (source + 1) % VOLUME_RATIO_SOURCES.len();
         }
         Some((source, wait))
     }
@@ -397,7 +409,7 @@ impl Cache {
         self.recovery_at[source] = Some(now + Duration::from_secs(40));
         self.source_successes[source] = 0;
         self.request_interval_ms[source] = self.request_interval_ms[source]
-            .max(if source == 2 { 40 } else { 60 })
+            .max(60)
             .saturating_mul(2)
             .min(2000);
     }
@@ -411,7 +423,9 @@ impl Cache {
             .nth(1)
             .and_then(|value| value.get(..3))
             .and_then(|value| value.parse::<u16>().ok());
-        if status.is_some_and(|status| status == 429 || (500..=599).contains(&status)) {
+        if status.is_some_and(|status| {
+            matches!(status, 401 | 403 | 429) || (500..=599).contains(&status)
+        }) {
             self.throttle_source(source, now);
         }
         // 超时、断连与读取失败只重试该股；没有 HTTP 状态不能推断全源限流。
@@ -422,15 +436,14 @@ impl Cache {
         if self.cooldown_until[source].is_some_and(|until| started < until) {
             return;
         }
-        let base = if source == 2 { 40 } else { 60 };
-        if self.request_interval_ms[source] <= base {
+        if self.request_interval_ms[source] <= 60 {
             return;
         }
         self.source_successes[source] = self.source_successes[source].saturating_add(1);
         if self.source_successes[source] >= 8
             && self.recovery_at[source].is_some_and(|at| now >= at)
         {
-            self.request_interval_ms[source] = (self.request_interval_ms[source] / 2).max(base);
+            self.request_interval_ms[source] = (self.request_interval_ms[source] / 2).max(60);
             self.source_successes[source] = 0;
             self.recovery_at[source] = Some(now + Duration::from_secs(20));
         }
@@ -482,31 +495,63 @@ pub struct VolumeRatioSnapshot {
 }
 
 static CACHE: OnceLock<Arc<Mutex<Cache>>> = OnceLock::new();
-type EastmoneyBrowserFetch = Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>;
-static EASTMONEY_BROWSER_FETCH: Mutex<Option<EastmoneyBrowserFetch>> = Mutex::new(None);
+pub type VolumeRatioSessionFetch = Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>;
+static SESSION_FETCHES: OnceLock<Mutex<HashMap<usize, VolumeRatioSessionFetch>>> = OnceLock::new();
+
+pub fn volume_ratio_session_fetch(source: &str) -> Result<Option<VolumeRatioSessionFetch>, String> {
+    let index = VOLUME_RATIO_SOURCES
+        .iter()
+        .position(|name| *name == source)
+        .ok_or("未知量比来源")?;
+    Ok(SESSION_FETCHES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .map_err(|_| "来源会话锁已损坏")?
+        .get(&index)
+        .cloned())
+}
 
 pub fn fetch_eastmoney_intraday_text(
     http: &reqwest::blocking::Client,
     ts_code: &str,
 ) -> Result<String, String> {
-    let fetch = EASTMONEY_BROWSER_FETCH
-        .lock()
-        .map_err(|_| "东财浏览器会话锁已损坏")?
-        .clone();
-    match fetch {
+    match volume_ratio_session_fetch("eastmoney")? {
         Some(fetch) => fetch(ts_code),
         None => lianghua_provider::crawler::intraday::fetch_eastmoney_intraday_text(http, ts_code),
     }
 }
 
-pub fn set_eastmoney_browser_fetch(fetch: Option<EastmoneyBrowserFetch>) -> Result<(), String> {
-    *EASTMONEY_BROWSER_FETCH
-        .lock()
-        .map_err(|_| "东财浏览器会话锁已损坏")? = fetch;
+pub fn set_eastmoney_browser_fetch(fetch: Option<VolumeRatioSessionFetch>) -> Result<(), String> {
+    set_volume_ratio_session_fetch("eastmoney", fetch)
+}
+
+pub fn set_volume_ratio_session_fetch(
+    source: &str,
+    fetch: Option<VolumeRatioSessionFetch>,
+) -> Result<(), String> {
+    let index = VOLUME_RATIO_SOURCES
+        .iter()
+        .position(|name| *name == source)
+        .ok_or("未知量比来源")?;
+    {
+        let mut sessions = SESSION_FETCHES
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .map_err(|_| "来源会话锁已损坏")?;
+        if let Some(fetch) = fetch {
+            sessions.insert(index, fetch);
+        } else {
+            sessions.remove(&index);
+        }
+    }
     if let Some(cache) = CACHE.get() {
         let mut state = cache.lock().map_err(|_| "量比缓存锁已损坏")?;
-        state.cooldown_until[1] = None;
-        state.next_request_at[1] = None;
+        state.cooldown_until[index] = None;
+        state.next_request_at[index] = None;
+        state.source_results[index] = None;
+        state.request_interval_ms[index] = 0;
+        state.recovery_at[index] = None;
+        state.source_successes[index] = 0;
         // 会话切换后允许失败股票立即重试，已补齐的基准继续使用。
         for entry in state.entries.values_mut() {
             if let Entry::Failed { at, .. } = entry {
@@ -625,12 +670,12 @@ pub fn clear_cache(source_path: &str) -> Result<(), String> {
         state.preflight_checked = false;
         state.preflight_blocked = false;
         state.entries.clear();
-        state.source_results = [None; 3];
-        state.next_request_at = [None; 3];
-        state.cooldown_until = [None; 3];
-        state.request_interval_ms = [0; 3];
-        state.recovery_at = [None; 3];
-        state.source_successes = [0; 3];
+        state.source_results = [None; VOLUME_RATIO_SOURCES.len()];
+        state.next_request_at = [None; VOLUME_RATIO_SOURCES.len()];
+        state.cooldown_until = [None; VOLUME_RATIO_SOURCES.len()];
+        state.request_interval_ms = [0; VOLUME_RATIO_SOURCES.len()];
+        state.recovery_at = [None; VOLUME_RATIO_SOURCES.len()];
+        state.source_successes = [0; VOLUME_RATIO_SOURCES.len()];
         state.dirty.clear();
         state.local_averages.clear();
         state.local_loaded_at = None;
@@ -683,12 +728,12 @@ pub fn snapshot(
         state.date = trade_date.to_string();
         state.source_path = source_path.to_string();
         state.entries.clear();
-        state.source_results = [None; 3];
-        state.next_request_at = [None; 3];
-        state.cooldown_until = [None; 3];
-        state.request_interval_ms = [0; 3];
-        state.recovery_at = [None; 3];
-        state.source_successes = [0; 3];
+        state.source_results = [None; VOLUME_RATIO_SOURCES.len()];
+        state.next_request_at = [None; VOLUME_RATIO_SOURCES.len()];
+        state.cooldown_until = [None; VOLUME_RATIO_SOURCES.len()];
+        state.request_interval_ms = [0; VOLUME_RATIO_SOURCES.len()];
+        state.recovery_at = [None; VOLUME_RATIO_SOURCES.len()];
+        state.source_successes = [0; VOLUME_RATIO_SOURCES.len()];
         state.revision += 1;
         state.generation += 1;
         state.local_loaded_at = None;
@@ -801,8 +846,19 @@ pub fn snapshot(
                                 state.revision += 1;
                                 return;
                             }
-                            let allow_msn = state.msn_enabled && msn_supported;
-                            match state.reserve_source(Instant::now(), allow_msn, attempted) {
+                            // 腾讯、东财、同花顺覆盖沪深北；其余来源按交易所开放。
+                            let eligible = (1 << 0)
+                                | (1 << 1)
+                                | (1 << 3)
+                                | if msn_supported { 1 << 4 } else { 0 }
+                                | if state.msn_enabled && msn_supported {
+                                    1 << 2
+                                } else {
+                                    0
+                                }
+                                | if ts_code.ends_with(".SH") { 1 << 5 } else { 0 }
+                                | if ts_code.ends_with(".SZ") { 1 << 6 } else { 0 };
+                            match state.reserve_source(Instant::now(), eligible, attempted) {
                                 Some(reservation) => reservation,
                                 None => break 'fetch (0, Err("各来源暂不可用".to_string())),
                             }
@@ -820,6 +876,35 @@ pub fn snapshot(
                             fetch_tencent_volume_ratio(&http, &ts_code, local_average)
                         } else if source == 2 {
                             fetch_msn_volume_ratio(&http, &ts_code, local_average)
+                        } else if source >= 3 {
+                            let provider = match source {
+                                3 => IntradayVolumeSource::Tonghuashun,
+                                4 => IntradayVolumeSource::Xueqiu,
+                                5 => IntradayVolumeSource::Sse,
+                                6 => IntradayVolumeSource::Szse,
+                                _ => unreachable!(),
+                            };
+                            volume_ratio_session_fetch(VOLUME_RATIO_SOURCES[source]).and_then(
+                                |fetch| match fetch {
+                                    Some(fetch) => {
+                                        let raw = fetch(&ts_code)?;
+                                        let data = serde_json::from_str(&raw)
+                                            .map_err(|e| format!("浏览器分时 JSON 无效: {e}"))?;
+                                        parse_volume_ratio_from_source(
+                                            &data,
+                                            provider,
+                                            &ts_code,
+                                            local_average,
+                                        )
+                                    }
+                                    None => fetch_volume_ratio_from_source(
+                                        &http,
+                                        provider,
+                                        &ts_code,
+                                        local_average,
+                                    ),
+                                },
+                            )
                         } else {
                             fetch_eastmoney_intraday_text(&http, &ts_code).and_then(|raw| {
                             lianghua_provider::crawler::volume_ratio::parse_eastmoney_volume_ratio(
@@ -835,9 +920,9 @@ pub fn snapshot(
                                 ));
                             }
                             if opening_window_ended && !data.opening_window_complete() {
-                                return Err("分时未完整覆盖 09:30–09:35 开盘窗口".to_string());
+                                return Err("分时未完整覆盖 09:31–09:35 开盘窗口".to_string());
                             }
-                            // 三个源的曲线都已换算为量比；实时量单位独立于曲线源。
+                            // 各源曲线都已换算为量比；实时量单位独立于曲线源。
                             data.volume_to_hands = live_volume_to_hands;
                             Ok(data)
                         });
@@ -947,21 +1032,8 @@ pub fn snapshot(
     if let Err(error) = state.persist(false) {
         state.persistence_error = Some(error);
     }
-    let approximate = state
-        .entries
-        .values()
-        .filter(|entry| match entry {
-            Entry::Ready(baseline)
-            | Entry::Pending(Some(baseline))
-            | Entry::Failed {
-                baseline: Some(baseline),
-                ..
-            } => baseline.source == 2,
-            _ => false,
-        })
-        .count();
     let status = Some(format!(
-        "{}补齐 {} · 待补 {pending} · 重试 {failed} · 本地不足跳过 {skipped} · 近似 {approximate}",
+        "{}补齐 {} · 待补 {pending} · 重试 {failed} · 本地不足跳过 {skipped}",
         if state.paused { "已暂停 · " } else { "" },
         values
             .values()
@@ -969,7 +1041,7 @@ pub fn snapshot(
             .count(),
     ));
     let now = Instant::now();
-    let mut source_statuses: Vec<_> = ["tencent", "eastmoney", "microsoft"]
+    let mut source_statuses: Vec<_> = VOLUME_RATIO_SOURCES
         .into_iter()
         .enumerate()
         .map(|(index, source)| VolumeRatioSourceStatus {
@@ -1398,39 +1470,99 @@ mod tests {
     }
 
     #[test]
+    fn browser_sessions_are_independent_and_eastmoney_remains_compatible() {
+        set_volume_ratio_session_fetch("xueqiu", Some(Arc::new(|code| Ok(format!("xq:{code}")))))
+            .unwrap();
+        set_volume_ratio_session_fetch(
+            "tonghuashun",
+            Some(Arc::new(|code| Ok(format!("ths:{code}")))),
+        )
+        .unwrap();
+        set_eastmoney_browser_fetch(Some(Arc::new(|code| Ok(format!("em:{code}"))))).unwrap();
+        let http = reqwest::blocking::Client::new();
+        assert_eq!(
+            fetch_eastmoney_intraday_text(&http, "000001.SZ").unwrap(),
+            "em:000001.SZ"
+        );
+        assert_eq!(
+            volume_ratio_session_fetch("xueqiu").unwrap().unwrap()("600000.SH").unwrap(),
+            "xq:600000.SH"
+        );
+        set_volume_ratio_session_fetch("xueqiu", None).unwrap();
+        assert!(volume_ratio_session_fetch("xueqiu").unwrap().is_none());
+        assert_eq!(
+            volume_ratio_session_fetch("tonghuashun").unwrap().unwrap()("600000.SH").unwrap(),
+            "ths:600000.SH"
+        );
+        set_volume_ratio_session_fetch("tonghuashun", None).unwrap();
+        set_eastmoney_browser_fetch(None).unwrap();
+        assert!(volume_ratio_session_fetch("unknown").is_err());
+    }
+
+    #[test]
+    fn new_sources_rotate_with_independent_cooldown_and_retry_exclusion() {
+        let now = Instant::now();
+        let mut cache = Cache::default();
+        // 沪市可选腾讯、东财、同花顺、雪球、上交所，不开放深交所及未到时刻的 MSN。
+        let eligible = 0b0111011;
+        for source in [0, 1, 3, 4, 5] {
+            assert_eq!(
+                cache.reserve_source(now, eligible, 0),
+                Some((source, Duration::ZERO))
+            );
+        }
+        assert_eq!(cache.next_request_at[2], None);
+        assert_eq!(cache.next_request_at[6], None);
+        cache.handle_fetch_error(3, "同花顺 HTTP状态=403;", now);
+        cache.handle_fetch_error(5, "上交所 HTTP状态=429;", now);
+        assert_eq!(cache.cooldown_until[3], Some(now + Duration::from_secs(20)));
+        assert_eq!(cache.cooldown_until[5], Some(now + Duration::from_secs(20)));
+        assert_eq!(cache.cooldown_until[4], None);
+        assert_eq!(
+            cache.reserve_source(now + Duration::from_millis(60), eligible, 0b0001011),
+            Some((4, Duration::ZERO))
+        );
+        assert_eq!(cache.reserve_source(now, eligible, eligible), None);
+        assert_eq!(
+            cache.reserve_source(now, 1 << 6, 0),
+            Some((6, Duration::ZERO))
+        );
+    }
+
+    #[test]
     fn ready_sources_rotate_and_backoff_recovers_only_after_stable_successes() {
         let now = Instant::now();
         let mut cache = Cache::default();
         // 旧截止时间均已到期：按轮转公平选择，不能永远偏向最旧时间戳。
-        cache.next_request_at = [Some(now - Duration::from_secs(1)); 3];
+        cache.next_request_at = [Some(now - Duration::from_secs(1)); VOLUME_RATIO_SOURCES.len()];
         cache.source_cursor = 2;
         assert_eq!(
-            cache.reserve_source(now, true, 0),
+            cache.reserve_source(now, 0b111, 0),
             Some((2, Duration::ZERO))
         );
         assert_eq!(
-            cache.reserve_source(now, true, 0),
+            cache.reserve_source(now, 0b111, 0),
             Some((0, Duration::ZERO))
         );
         assert_eq!(
-            cache.reserve_source(now, true, 0),
+            cache.reserve_source(now, 0b111, 0),
             Some((1, Duration::ZERO))
         );
         assert_eq!(
-            cache.reserve_source(now, true, 0),
-            Some((2, Duration::from_millis(40)))
+            cache.reserve_source(now, 0b111, 0),
+            Some((2, Duration::from_millis(60)))
         );
         // 等待不会预占请求额度；再次调用仍是同一截止时间。
         assert_eq!(
             cache.next_request_at[2],
-            Some(now + Duration::from_millis(40))
+            Some(now + Duration::from_millis(60))
         );
         cache.throttle_source(2, now);
         for _ in 0..8 {
             cache.handle_fetch_success(2, now, now + Duration::from_secs(41));
         }
         assert_eq!(cache.source_successes[2], 0);
-        assert_eq!(cache.request_interval_ms[2], 80);
+        assert_eq!(cache.request_interval_ms[2], 120);
         for _ in 0..8 {
             cache.handle_fetch_success(
                 2,
@@ -1438,7 +1570,7 @@ mod tests {
                 now + Duration::from_secs(22),
             );
         }
-        assert_eq!(cache.request_interval_ms[2], 80);
+        assert_eq!(cache.request_interval_ms[2], 120);
         cache.handle_fetch_error(2, "响应缺竞价", now + Duration::from_secs(30));
         for _ in 0..8 {
             cache.handle_fetch_success(
@@ -1447,13 +1579,13 @@ mod tests {
                 now + Duration::from_secs(41),
             );
         }
-        assert_eq!(cache.request_interval_ms[2], 80);
+        assert_eq!(cache.request_interval_ms[2], 120);
         cache.handle_fetch_success(
             2,
             now + Duration::from_secs(50),
             now + Duration::from_secs(50),
         );
-        assert_eq!(cache.request_interval_ms[2], 40);
+        assert_eq!(cache.request_interval_ms[2], 60);
         assert_eq!(cache.request_interval_ms[0], 0);
         assert_eq!(cache.request_interval_ms[1], 0);
     }
@@ -1519,21 +1651,21 @@ mod tests {
         let mut cache = Cache::default();
         let now = Instant::now();
         assert_eq!(
-            cache.reserve_source(now, false, 0).unwrap(),
+            cache.reserve_source(now, 0b011, 0).unwrap(),
             (0, Duration::ZERO)
         );
         assert_eq!(
-            cache.reserve_source(now, false, 0).unwrap(),
+            cache.reserve_source(now, 0b011, 0).unwrap(),
             (1, Duration::ZERO)
         );
         assert_eq!(
-            cache.reserve_source(now, false, 0).unwrap(),
+            cache.reserve_source(now, 0b011, 0).unwrap(),
             (0, Duration::from_millis(60))
         );
         cache.throttle_source(0, now);
         assert_eq!(
             cache
-                .reserve_source(now + Duration::from_millis(60), false, 0)
+                .reserve_source(now + Duration::from_millis(60), 0b011, 0)
                 .unwrap(),
             (1, Duration::ZERO)
         );
@@ -1541,14 +1673,14 @@ mod tests {
         assert_eq!(cache.request_interval_ms[1], 0);
         cache.throttle_source(1, now);
         assert_eq!(cache.request_interval_ms[1], 120);
-        assert!(cache.reserve_source(now, false, 0).unwrap().1 >= Duration::from_secs(20));
+        assert!(cache.reserve_source(now, 0b011, 0).unwrap().1 >= Duration::from_secs(20));
         for status in [429, 500, 501, 502, 503, 504] {
             let mut cache = Cache::default();
             cache.handle_fetch_error(0, &format!("腾讯分时 HTTP 错误; HTTP状态={status};"), now);
             assert_eq!(cache.cooldown_until[0], Some(now + Duration::from_secs(20)));
             assert_eq!(cache.request_interval_ms[0], 120);
             assert_eq!(
-                cache.reserve_source(now, false, 0).unwrap(),
+                cache.reserve_source(now, 0b011, 0).unwrap(),
                 (1, Duration::ZERO)
             );
             cache.handle_fetch_error(0, "请求腾讯分时失败（连接失败）", now);
@@ -1561,7 +1693,7 @@ mod tests {
         assert_eq!(cache.cooldown_until[1], None);
         assert_eq!(cache.request_interval_ms[1], 0);
         assert_eq!(
-            cache.reserve_source(now, false, 0).unwrap(),
+            cache.reserve_source(now, 0b011, 0).unwrap(),
             (0, Duration::ZERO)
         );
     }
@@ -1570,26 +1702,26 @@ mod tests {
     fn msn_participates_only_when_enabled_and_has_its_own_cooldown() {
         let now = Instant::now();
         let mut cache = Cache::default();
-        cache.reserve_source(now, false, 0).unwrap();
-        cache.reserve_source(now, false, 0).unwrap();
+        cache.reserve_source(now, 0b011, 0).unwrap();
+        cache.reserve_source(now, 0b011, 0).unwrap();
         assert_eq!(
-            cache.reserve_source(now, false, 0).unwrap(),
+            cache.reserve_source(now, 0b011, 0).unwrap(),
             (0, Duration::from_millis(60))
         );
         assert_eq!(cache.next_request_at[2], None);
         assert_eq!(
-            cache.reserve_source(now, true, 0).unwrap(),
+            cache.reserve_source(now, 0b111, 0).unwrap(),
             (2, Duration::ZERO)
         );
         assert_eq!(
             cache.next_request_at[2],
-            Some(now + Duration::from_millis(40))
+            Some(now + Duration::from_millis(60))
         );
         cache.handle_fetch_error(2, "MSN HTTP状态=429;", now);
-        assert_eq!(cache.request_interval_ms[2], 80);
+        assert_eq!(cache.request_interval_ms[2], 120);
         assert_eq!(cache.cooldown_until[2], Some(now + Duration::from_secs(20)));
         assert_eq!(
-            cache.reserve_source(now, true, 0).unwrap(),
+            cache.reserve_source(now, 0b111, 0).unwrap(),
             (0, Duration::from_millis(60))
         );
     }
@@ -1602,15 +1734,15 @@ mod tests {
         cache.next_request_at[0] = Some(now + Duration::from_millis(100));
         cache.next_request_at[1] = Some(now + Duration::from_millis(200));
         assert_eq!(
-            cache.reserve_source(now, true, 0b100),
+            cache.reserve_source(now, 0b111, 0b100),
             Some((0, Duration::from_millis(100)))
         );
         assert_eq!(
-            cache.reserve_source(now, true, 0b101),
+            cache.reserve_source(now, 0b111, 0b101),
             Some((1, Duration::from_millis(200)))
         );
-        assert_eq!(cache.reserve_source(now, true, 0b111), None);
-        assert_eq!(cache.reserve_source(now, false, 0b011), None);
+        assert_eq!(cache.reserve_source(now, 0b111, 0b111), None);
+        assert_eq!(cache.reserve_source(now, 0b011, 0b011), None);
     }
 
     #[test]

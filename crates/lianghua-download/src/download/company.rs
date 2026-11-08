@@ -186,7 +186,9 @@ impl TushareClient {
                     }
                     Err(error) => {
                         lianghua_model::task::checkpoint()?;
-                        if error.contains("code=40203")
+                        if (error.contains("code=40203")
+                            && !error.contains("频率")
+                            && !error.contains("每分钟"))
                             || error.contains("没有权限")
                             || error.contains("访问权限")
                             || error.contains("token")
@@ -434,7 +436,9 @@ pub fn download_company(
                         if error.contains("token") || error.contains("Token") {
                             return Err(error);
                         }
-                        if error.contains("code=40203")
+                        if (error.contains("code=40203")
+                            && !error.contains("频率")
+                            && !error.contains("每分钟"))
                             || error.contains("没有权限")
                             || error.contains("访问权限")
                         {

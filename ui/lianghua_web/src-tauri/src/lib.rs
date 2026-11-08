@@ -1,5 +1,6 @@
 mod cloud_sync_bridge;
 mod data_download_bridge;
+mod data_source_session;
 mod eastmoney_session;
 mod managed_source_bridge;
 mod rank_comparison_bridge;
@@ -3552,6 +3553,10 @@ pub fn run() {
             get_all_market_monitor_snapshot,
             set_all_market_volume_ratio_paused,
             manage_volume_ratio_cache,
+            data_source_session::open_data_source_login,
+            data_source_session::use_data_source_session,
+            data_source_session::stop_data_source_session,
+            data_source_session::data_source_sessions,
             eastmoney_session::open_eastmoney_verification,
             eastmoney_session::use_eastmoney_verified_session,
             eastmoney_session::stop_eastmoney_verified_session,

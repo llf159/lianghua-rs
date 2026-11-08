@@ -783,12 +783,12 @@
   border-radius: 4px;
 }
 
-.eastmoney-session-menu {
+.data-source-session-menu {
   color: #64748b;
   font-size: 12px;
 }
 
-.eastmoney-session-menu > .eastmoney-session-trigger {
+.data-source-session-menu > .data-source-session-trigger {
   display: inline-flex;
   align-items: center;
   min-height: 44px;
@@ -801,22 +801,22 @@
   white-space: nowrap;
 }
 
-.eastmoney-session-menu > .eastmoney-session-trigger:hover {
+.data-source-session-menu > .data-source-session-trigger:hover {
   color: #334155;
 }
 
-.eastmoney-session-menu > .eastmoney-session-trigger:focus-visible {
+.data-source-session-menu > .data-source-session-trigger:focus-visible {
   outline: 2px solid var(--theme-orange-300);
   outline-offset: 2px;
   border-radius: 4px;
 }
 
-.eastmoney-session-popover {
+.data-source-session-popover {
   position: absolute;
   top: calc(100% + 6px);
-  left: 0;
+  right: 0;
   z-index: 30;
-  width: min(300px, calc(100vw - 40px));
+  width: min(360px, 100%);
   box-sizing: border-box;
   padding: 12px;
   border: 1px solid #d9e0e8;
@@ -825,24 +825,24 @@
   box-shadow: 0 4px 16px rgb(15 23 42 / 10%);
 }
 
-.eastmoney-session-popover p {
+.data-source-session-popover p {
   margin: 0 0 8px;
   line-height: 1.6;
   overflow-wrap: anywhere;
 }
 
-.eastmoney-session-popover p[role="status"] {
+.data-source-session-popover p[role="status"] {
   margin: 8px 0 0;
 }
 
-.eastmoney-session-actions {
+.data-source-session-actions {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 6px;
 }
 
-.eastmoney-session-actions .all-market-toggle {
+.data-source-session-actions .all-market-toggle {
   appearance: none;
   justify-content: center;
   min-height: 44px;
@@ -857,12 +857,12 @@
   touch-action: manipulation;
 }
 
-.eastmoney-session-actions .all-market-toggle:hover:not(:disabled) {
+.data-source-session-actions .all-market-toggle:hover:not(:disabled) {
   border-color: #9fb1c5;
   background: #f7f9fc;
 }
 
-.eastmoney-session-actions .all-market-toggle:disabled {
+.data-source-session-actions .all-market-toggle:disabled {
   opacity: 0.5;
   cursor: wait;
 }
@@ -2108,7 +2108,7 @@
   }
 }
 
-.eastmoney-session-popover-head {
+.data-source-session-popover-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -2116,7 +2116,7 @@
   margin-bottom: 8px;
 }
 
-.eastmoney-session-popover-head button {
+.data-source-session-popover-head button {
   border: 1px solid #c6d0da;
   border-radius: 6px;
   background: #fff;
@@ -2233,3 +2233,24 @@
   color: #475569;
   box-shadow: 0 4px 16px #0002;
 }
+
+.data-source-session-popover {
+  max-height: min(620px, 70dvh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.data-source-session-source {
+  border-top: 1px solid #e8edf3;
+  padding-top: 10px;
+  margin-top: 10px;
+}
+.data-source-session-source-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.data-source-session-source-head strong { color: #334155; }
+.data-source-session-source-head .is-connected { color: #15803d; }
+.data-source-session-actions .all-market-toggle:disabled { cursor: default; }

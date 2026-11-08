@@ -234,7 +234,7 @@ export type AllMarketIndexRow = {
 };
 
 export type VolumeRatioSourceStatus = {
-  source: "tencent" | "eastmoney" | "microsoft" | "local";
+  source: "tencent" | "eastmoney" | "microsoft" | "tonghuashun" | "xueqiu" | "sse" | "szse" | "local";
   state:
     | "paused"
     | "not_ready"
