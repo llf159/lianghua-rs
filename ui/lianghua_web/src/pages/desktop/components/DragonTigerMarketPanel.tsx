@@ -118,7 +118,7 @@ export default function DragonTigerMarketPanel({
     setNotice("");
     try {
       const startDate =
-        data?.latest_sync_trade_date || compactDate(settings.startDate) || "20050101";
+        data?.latest_sync_trade_date || "20240101";
       const result = await runDragonTigerDownload({
         downloadId: `dragon-tiger-quick-${Date.now()}`,
         sourcePath: sourcePath.trim(),

@@ -350,6 +350,7 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
   )
   const [cyqFactorInput, setCyqFactorInput] = useState('50')
   const [cyqStartDateInput, setCyqStartDateInput] = useState('')
+  const cyqInputsSourceRef = useRef('')
   const [cyqEndDateInput, setCyqEndDateInput] = useState('')
   const [cyqChenWarmupDaysInput, setCyqChenWarmupDaysInput] = useState('120')
   const [cyqChenBucketPctInput, setCyqChenBucketPctInput] = useState('1')
@@ -886,6 +887,10 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
       setCyqFactorInput((current) =>
         current.trim() !== '' ? current : String(nextStatus.cyqFactor ?? 50),
       )
+      if (nextStatus.sourceDb.minTradeDate && (syncSuggestedInputs || cyqInputsSourceRef.current !== nextStatus.sourcePath)) {
+        setCyqStartDateInput(`${Number(nextStatus.sourceDb.minTradeDate.slice(0, 4)) + 1}-01-01`)
+        cyqInputsSourceRef.current = nextStatus.sourcePath
+      }
       setCyqEndDateInput((current) =>
         syncSuggestedInputs
           ? compactDateToInput(nextStatus.sourceDb.maxTradeDate)
@@ -895,9 +900,15 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
         const rebuild = nextStatus.cyqChenRebuild
         setCyqChenWarmupDaysInput(String(rebuild?.warmupDays ?? nextStatus.cyqChenWarmupDays ?? 120))
         setCyqChenBucketPctInput(String(rebuild?.bucketPct ?? nextStatus.cyqChenBucketPct ?? 1))
-        setCyqChenStartDateInput(compactDateToInput(rebuild?.startDate ?? nextStatus.cyqChenDb.minTradeDate))
+        setCyqChenStartDateInput(rebuild?.startDate
+          ? compactDateToInput(rebuild.startDate)
+          : nextStatus.sourceDb.minTradeDate
+            ? `${Number(nextStatus.sourceDb.minTradeDate.slice(0, 4)) + 1}-01-01`
+            : '')
         setCyqChenEndDateInput(compactDateToInput(rebuild?.endDate ?? nextStatus.sourceDb.maxTradeDate))
-        cyqChenInputsSourceRef.current = nextStatus.sourcePath
+        if (rebuild?.startDate || nextStatus.sourceDb.minTradeDate) {
+          cyqChenInputsSourceRef.current = nextStatus.sourcePath
+        }
       }
     } catch (loadError) {
       setFeedbackError('status', `读取数据计算状态失败: ${String(loadError)}`)
@@ -1058,9 +1069,9 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
     }
 
     const startDate = status?.resultDb.minTradeDate ?? ''
-    const endDate = status?.resultDb.maxTradeDate ?? ''
+    const endDate = status?.sourceDb.maxTradeDate ?? ''
     if (!startDate || !endDate) {
-      setFeedbackError('rank', '当前结果库没有可用日期范围，无法一键重算。')
+      setFeedbackError('rank', '缺少结果库开始日期或原始库最新日期，无法一键重算。')
       return
     }
 
@@ -1730,12 +1741,12 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
                 isBusy ||
                 sourcePath === '' ||
                 !status?.resultDb.minTradeDate ||
-                !status.resultDb.maxTradeDate
+                !status.sourceDb.maxTradeDate
               }
               title={
-                status?.resultDb.minTradeDate && status.resultDb.maxTradeDate
-                  ? `按原结果库区间 ${formatTradeDate(status.resultDb.minTradeDate)} 至 ${formatTradeDate(status.resultDb.maxTradeDate)} 重算`
-                  : '当前结果库没有可用日期范围'
+                status?.resultDb.minTradeDate && status.sourceDb.maxTradeDate
+                  ? `从原结果库起点 ${formatTradeDate(status.resultDb.minTradeDate)} 重算至原始库最新日期 ${formatTradeDate(status.sourceDb.maxTradeDate)}`
+                  : '缺少结果库开始日期或原始库最新日期'
               }
             >
               {busyAction === 'recomputing-result-db' ? '重算中...' : '一键重算'}
@@ -1929,7 +1940,7 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
           </label>
 
           <small className="ranking-compute-cyq-range">
-            起始日留空走默认：
+            默认从原始库开始年的下一年 1 月 1 日计算；留空使用后端默认日期。
             {status?.sourceDb?.minTradeDate || status?.sourceDb?.maxTradeDate
               ? `原始库 ${formatTradeDate(status?.sourceDb?.minTradeDate)} 至 ${formatTradeDate(status?.sourceDb?.maxTradeDate)}`
               : '暂无'}
@@ -2330,7 +2341,7 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
                   ? `确认丢弃当前未完成的新筹码计算进度（已完成 ${status?.cyqChenRebuild?.completedStocks ?? 0} / ${status?.cyqChenRebuild?.totalStocks ?? 0} 只）吗？\n\n正式筹码库保持不变，下次计算会从零开始。`
                 : pendingConfirm?.kind === 'run-ranking-with-strategy-change'
                   ? `检测到当前排名策略相对最近计算快照有 ${pendingConfirm.changedLineCount} 行变化。是否仍使用当前策略计算 ${formatTradeDate(pendingConfirm.startDate)} 至 ${formatTradeDate(pendingConfirm.endDate)}？`
-                : `确认先删除当前结果库 scoring_result.db，再按原结果库日期范围 ${formatTradeDate(status?.resultDb.minTradeDate)} 至 ${formatTradeDate(status?.resultDb.maxTradeDate)} 重算排名吗？`
+                : `确认先删除当前结果库 scoring_result.db，再从原结果库起点 ${formatTradeDate(status?.resultDb.minTradeDate)} 重算至原始库最新日期 ${formatTradeDate(status?.sourceDb.maxTradeDate)} 吗？`
         }
         confirmText={
           pendingConfirm?.kind === 'run-ranking-with-strategy-change' ? '仍然继续计算' : '确认'

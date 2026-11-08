@@ -685,13 +685,15 @@ pub async fn run_dragon_tiger_download(
 async fn run_company_download_task(
     app: tauri::AppHandle,
     request: CompanyDownloadRequest,
+    lane: &'static str,
     prepare: fn(CoreCompanyDownloadRunInput) -> Result<CorePreparedCompanyDownloadRun, String>,
 ) -> Result<DataDownloadRunResult, String> {
-    crate::task_control::run(
+    crate::task_control::run_in_lane(
         app.clone(),
         request.download_id.clone(),
         request.source_path.clone(),
         request.task_group.clone(),
+        lane,
         move || {
             let download_id = request.download_id.trim().to_string();
             if download_id.is_empty() {
@@ -800,7 +802,13 @@ pub async fn run_company_fundamentals_download(
     app: tauri::AppHandle,
     request: CompanyDownloadRequest,
 ) -> Result<DataDownloadRunResult, String> {
-    run_company_download_task(app, request, core_prepare_company_fundamentals_download_run).await
+    run_company_download_task(
+        app,
+        request,
+        "fundamentals",
+        core_prepare_company_fundamentals_download_run,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -808,7 +816,13 @@ pub async fn run_shareholder_count_download(
     app: tauri::AppHandle,
     request: CompanyDownloadRequest,
 ) -> Result<DataDownloadRunResult, String> {
-    run_company_download_task(app, request, core_prepare_shareholder_count_download_run).await
+    run_company_download_task(
+        app,
+        request,
+        "shareholders",
+        core_prepare_shareholder_count_download_run,
+    )
+    .await
 }
 
 #[tauri::command]

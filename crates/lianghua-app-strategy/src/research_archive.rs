@@ -6,10 +6,23 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-static RESEARCH_EXECUTION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static RESEARCH_EXECUTION: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
-pub fn try_research_execution() -> Result<std::sync::MutexGuard<'static, ()>, String> {
-    match RESEARCH_EXECUTION.try_lock() {
+pub fn try_research_execution() -> Result<std::sync::RwLockWriteGuard<'static, ()>, String> {
+    match RESEARCH_EXECUTION.try_write() {
+        Ok(guard) => Ok(guard),
+        Err(std::sync::TryLockError::Poisoned(error)) => {
+            RESEARCH_EXECUTION.clear_poison();
+            Ok(error.into_inner())
+        }
+        Err(std::sync::TryLockError::WouldBlock) => {
+            Err("已有研究或模拟任务正在运行，请等待完成或取消".into())
+        }
+    }
+}
+
+pub fn try_data_execution() -> Result<std::sync::RwLockReadGuard<'static, ()>, String> {
+    match RESEARCH_EXECUTION.try_read() {
         Ok(guard) => Ok(guard),
         Err(std::sync::TryLockError::Poisoned(error)) => {
             RESEARCH_EXECUTION.clear_poison();

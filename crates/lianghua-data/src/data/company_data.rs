@@ -64,15 +64,11 @@ impl<'a> CompanyDataWriter<'a> {
         }
     }
 
-    /// Commit one stock's downloaded windows and completion records atomically.
-    pub fn replace_stock(&mut self, windows: &[CompanyDownloadWindow]) -> Result<(), String> {
+    /// Commit a batch of stock/API windows and completion records atomically.
+    pub fn replace_batch(&mut self, windows: &[CompanyDownloadWindow]) -> Result<(), String> {
         let result = (|| {
             if windows.is_empty() {
                 return Ok(());
-            }
-            let code = windows[0].code.as_str();
-            if windows.iter().any(|window| window.code != code) {
-                return Err("单股事务只能包含同一只股票的下载窗口".into());
             }
             lianghua_model::task::checkpoint()?;
             let tx = self.conn.transaction().map_err(|e| e.to_string())?;
@@ -273,9 +269,9 @@ impl<'a> CompanyDataWriter<'a> {
             }
             lianghua_model::task::checkpoint()?;
             tx.commit()
-                .map_err(|e| format!("提交股票数据事务失败: {e}"))
+                .map_err(|e| format!("提交公司数据批次失败: {e}"))
         })();
-        // DDL may have rolled back; reload schemas on the next stock after any failure.
+        // DDL may have rolled back; reload schemas on the next batch after any failure.
         if result.is_err() {
             self.schemas.clear();
         }
@@ -287,6 +283,61 @@ impl<'a> CompanyDataWriter<'a> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn company_batch_commits_multiple_stocks_and_apis_and_rolls_back_together() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE company_sync_log (api_name VARCHAR, ts_code VARCHAR, start_date VARCHAR, end_date VARCHAR, row_count BIGINT, synced_at TIMESTAMP, PRIMARY KEY(api_name,ts_code,start_date,end_date))").unwrap();
+        let mut writer = CompanyDataWriter::new(&mut conn);
+        let mut windows = Vec::new();
+        for (api, code) in [("income", "600519.SH"), ("forecast", "000001.SZ")] {
+            windows.push(CompanyDownloadWindow {
+                api: api.into(),
+                code: code.into(),
+                date_field: "ann_date".into(),
+                start: "20240101".into(),
+                end: "20241231".into(),
+                fields: ["ts_code", "ann_date", "value"].map(str::to_owned).to_vec(),
+                items: vec![vec![json!(code), json!("20240401"), json!(7.0)]],
+            });
+        }
+        writer.replace_batch(&windows).unwrap();
+        assert_eq!(
+            writer
+                .conn
+                .query_row("SELECT count(*) FROM company_sync_log", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        // A later stock/API failure must also roll back an earlier replacement.
+        windows[0].items[0][2] = json!(9.0);
+        windows[1].items[0][0] = json!("wrong_stock");
+        assert!(writer.replace_batch(&windows).is_err());
+        assert_eq!(
+            writer
+                .conn
+                .query_row("SELECT value FROM income", [], |r| r.get::<_, f64>(0))
+                .unwrap(),
+            7.0
+        );
+        assert_eq!(
+            writer
+                .conn
+                .query_row("SELECT value FROM forecast", [], |r| r.get::<_, f64>(0))
+                .unwrap(),
+            7.0
+        );
+        windows[1].items[0][0] = json!("000001.SZ");
+        writer.replace_batch(&windows).unwrap();
+        assert_eq!(
+            writer
+                .conn
+                .query_row("SELECT value FROM income", [], |r| r.get::<_, f64>(0))
+                .unwrap(),
+            9.0
+        );
+    }
 
     #[test]
     fn company_stock_transaction_replaces_atomically_and_preserves_variants_and_nulls() {
@@ -313,7 +364,7 @@ mod tests {
         };
         for amount in [100.0, 200.0] {
             writer
-                .replace_stock(&[CompanyDownloadWindow {
+                .replace_batch(&[CompanyDownloadWindow {
                     items: vec![
                         vec![
                             json!("600519.SH"),
@@ -354,7 +405,7 @@ mod tests {
         // A failure in the second window rolls back the earlier window in the same batch.
         assert!(
             writer
-                .replace_stock(&[
+                .replace_batch(&[
                     window.clone(),
                     CompanyDownloadWindow {
                         items: vec![vec![
@@ -385,7 +436,7 @@ mod tests {
                 .unwrap(),
             2
         );
-        writer.replace_stock(&[window]).unwrap();
+        writer.replace_batch(&[window]).unwrap();
         assert_eq!(
             writer
                 .conn
@@ -402,9 +453,9 @@ mod tests {
             fields: ["ts_code", "ann_date", "type"].map(str::to_owned).to_vec(),
             items: Vec::new(),
         };
-        writer.replace_stock(&[empty.clone()]).unwrap();
+        writer.replace_batch(&[empty.clone()]).unwrap();
         writer
-            .replace_stock(&[CompanyDownloadWindow {
+            .replace_batch(&[CompanyDownloadWindow {
                 code: "600519.SH".into(),
                 items: vec![vec![json!("600519.SH"), json!("20240101"), json!("预增")]],
                 ..empty
@@ -448,7 +499,7 @@ mod tests {
                 })
                 .collect(),
         };
-        writer.replace_stock(&[window.clone()]).unwrap();
+        writer.replace_batch(&[window.clone()]).unwrap();
         assert_eq!(
             writer
                 .conn
@@ -486,7 +537,7 @@ mod tests {
                 .collect(),
             ..window.clone()
         };
-        assert!(writer.replace_stock(&[changed.clone()]).is_err());
+        assert!(writer.replace_batch(&[changed.clone()]).is_err());
         assert!(writer.schemas.is_empty());
         assert_eq!(
             writer
@@ -503,7 +554,7 @@ mod tests {
             json!("20240101"),
             json!("600519.SH"),
         ]];
-        writer.replace_stock(&[changed]).unwrap();
+        writer.replace_batch(&[changed]).unwrap();
         assert_eq!(
             writer
                 .conn
@@ -517,7 +568,7 @@ mod tests {
         );
         // Reuse the committed cache for a subsequent numeric response; VARCHAR persists.
         writer
-            .replace_stock(&[CompanyDownloadWindow {
+            .replace_batch(&[CompanyDownloadWindow {
                 items: vec![vec![json!("600519.SH"), json!("20240101"), json!(200.0)]],
                 ..window
             }])

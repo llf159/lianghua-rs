@@ -212,7 +212,7 @@ export default function DownloadComputePage() {
         <div>
           <span>公共参数</span>
           <h1 id="shared-token-title">Tushare Token</h1>
-          <p>行情下载、缺失股票补全和龙虎榜下载共用，并自动保存在当前浏览器。</p>
+          <p>行情、基本面、股东人数和龙虎榜下载共用，并自动保存在当前浏览器。</p>
         </div>
         <label>
           <span>Token</span>
@@ -295,7 +295,7 @@ export default function DownloadComputePage() {
           <span className="download-compute-section-index">01 · 数据获取</span>
           <div>
             <h1 id="download-task-title">下载任务</h1>
-            <p>从外部数据源拉取行情、龙虎榜和概念数据。需要鉴权的任务统一使用下方公共 Token。</p>
+            <p>按需启动行情、基本面、股东人数、龙虎榜和概念下载。行情、基本面和股东人数可同时运行，分别显示进度。</p>
           </div>
         </header>
 

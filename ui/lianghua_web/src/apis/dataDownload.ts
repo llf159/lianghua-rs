@@ -6,7 +6,6 @@ export const DATA_DOWNLOAD_DRAFT_STORAGE_KEY = 'lh_data_download_draft_v1'
 
 export type StoredDragonTigerDownloadSettings = {
   token: string
-  startDate: string
   retryTimes: number
   limitCallsPerMin: number
 }
@@ -14,7 +13,6 @@ export type StoredDragonTigerDownloadSettings = {
 export function readStoredDragonTigerDownloadSettings(): StoredDragonTigerDownloadSettings {
   const fallback: StoredDragonTigerDownloadSettings = {
     token: '',
-    startDate: '2005-01-01',
     retryTimes: 3,
     limitCallsPerMin: 190,
   }
@@ -30,10 +28,6 @@ export function readStoredDragonTigerDownloadSettings(): StoredDragonTigerDownlo
     const parsed = JSON.parse(raw) as Record<string, unknown>
     return {
       token: typeof parsed.token === 'string' ? parsed.token.trim() : fallback.token,
-      startDate:
-        typeof parsed.dragonTigerStartDate === 'string'
-          ? parsed.dragonTigerStartDate
-          : fallback.startDate,
       retryTimes:
         typeof parsed.retryTimes === 'number' && Number.isFinite(parsed.retryTimes)
           ? Math.max(0, parsed.retryTimes)

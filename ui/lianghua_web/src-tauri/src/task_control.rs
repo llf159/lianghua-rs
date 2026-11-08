@@ -12,6 +12,7 @@ use tauri::Emitter;
 
 struct Session {
     id: String,
+    lane: &'static str,
     source: PathBuf,
     control: Arc<TaskControl>,
     sender: mpsc::Sender<Command>,
@@ -27,7 +28,7 @@ struct Entry {
     control: Arc<TaskControl>,
 }
 static ENTRIES: OnceLock<Mutex<HashMap<String, Entry>>> = OnceLock::new();
-static SESSION: Mutex<Option<Arc<Session>>> = Mutex::new(None);
+static SESSIONS: OnceLock<Mutex<HashMap<&'static str, Arc<Session>>>> = OnceLock::new();
 
 fn report(app: &tauri::AppHandle, id: &str, message: &str) {
     let _ = app.emit(
@@ -36,7 +37,12 @@ fn report(app: &tauri::AppHandle, id: &str, message: &str) {
     );
 }
 
-async fn begin(app: tauri::AppHandle, id: String, source: String) -> Result<Arc<Session>, String> {
+async fn begin(
+    app: tauri::AppHandle,
+    id: String,
+    source: String,
+    lane: &'static str,
+) -> Result<Arc<Session>, String> {
     if id.is_empty()
         || id.len() > 128
         || !id
@@ -49,6 +55,7 @@ async fn begin(app: tauri::AppHandle, id: String, source: String) -> Result<Arc<
     let (sender, receiver) = mpsc::channel();
     let session = Arc::new(Session {
         id: id.clone(),
+        lane,
         source,
         control: Arc::new(TaskControl::default()),
         sender,
@@ -56,30 +63,33 @@ async fn begin(app: tauri::AppHandle, id: String, source: String) -> Result<Arc<
         done: (Mutex::new(None), Condvar::new()),
     });
     {
-        let mut active = SESSION.lock().unwrap_or_else(|e| e.into_inner());
-        if active.is_some() {
-            return Err("已有可写任务正在运行，请先停止".into());
+        let mut active = SESSIONS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if active.contains_key(lane) {
+            return Err("同类任务正在运行，请先停止".into());
         }
-        *active = Some(session.clone());
-    }
-    ENTRIES
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap()
-        .insert(
+        let mut entries = ENTRIES.get_or_init(Default::default).lock().unwrap();
+        if entries.contains_key(&id) {
+            return Err("任务编号重复".into());
+        }
+        active.insert(lane, session.clone());
+        entries.insert(
             id.clone(),
             Entry {
                 session: session.clone(),
                 control: session.control.clone(),
             },
         );
+    }
     let worker = session.clone();
     let (ready, waiting) = mpsc::sync_channel(1);
     std::thread::spawn(move || {
         let mut initialized = false;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
             || -> Result<TaskState, String> {
-                let _execution = lianghua_app_strategy::research_archive::try_research_execution()
+                let _execution = lianghua_app_strategy::research_archive::try_data_execution()
                     .map_err(|error| {
                         let _ = ready.send(Err(error.clone()));
                         error
@@ -114,7 +124,11 @@ async fn begin(app: tauri::AppHandle, id: String, source: String) -> Result<Arc<
         worker.busy.store(false, Ordering::SeqCst);
         // 线程异常时可能仍有计算子线程退出中，保留占用直到应用重启。
         if !panicked {
-            *SESSION.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            SESSIONS
+                .get_or_init(Default::default)
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(worker.lane);
         }
         *worker.done.0.lock().unwrap() = Some(result.clone());
         worker.done.1.notify_all();
@@ -147,7 +161,7 @@ pub async fn begin_task_group(
     task_id: String,
     source_path: String,
 ) -> Result<(), String> {
-    begin(app, task_id, source_path).await.map(|_| ())
+    begin(app, task_id, source_path, "main").await.map(|_| ())
 }
 
 #[tauri::command]
@@ -214,11 +228,26 @@ pub async fn run<T: Send + 'static>(
     group: Option<String>,
     action: impl FnOnce() -> Result<T, String> + Send + 'static,
 ) -> Result<T, String> {
+    run_in_lane(app, id, source, group, "main", action).await
+}
+
+pub async fn run_in_lane<T: Send + 'static>(
+    app: tauri::AppHandle,
+    id: String,
+    source: String,
+    group: Option<String>,
+    lane: &'static str,
+    action: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    if lane != "main" && group.is_some() {
+        return Err("独立下载不能加入串行工作流".into());
+    }
     let grouped = group.is_some();
     let session = if let Some(group) = group {
         let entries = ENTRIES.get_or_init(Default::default).lock().unwrap();
         let entry = entries.get(&group).ok_or("工作流已停止或不存在")?;
         if entry.session.id != group
+            || entry.session.lane != lane
             || fs::canonicalize(&source).map_err(|e| e.to_string())? != entry.session.source
         {
             return Err("工作流与任务数据目录不匹配".into());
@@ -226,7 +255,7 @@ pub async fn run<T: Send + 'static>(
         entry.control.check()?;
         entry.session.clone()
     } else {
-        begin(app.clone(), id.clone(), source).await?
+        begin(app.clone(), id.clone(), source, lane).await?
     };
     if session.busy.swap(true, Ordering::SeqCst) {
         return Err("工作流中已有阶段正在执行".into());
@@ -266,7 +295,11 @@ pub async fn run<T: Send + 'static>(
         let outcome = (|| {
             worker.control.check()?;
             report(&app, &id, "正在执行任务");
-            let active = ActiveTask::enter(vec![worker.control.clone(), control.clone()]);
+            let active = if worker.lane == "main" {
+                ActiveTask::enter(vec![worker.control.clone(), control.clone()])
+            } else {
+                ActiveTask::enter_isolated(vec![worker.control.clone(), control.clone()])
+            };
             let output = action();
             drop(active);
             let mode = if grouped {

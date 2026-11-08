@@ -1386,8 +1386,23 @@ fn prepare_company_download_run(
         .refresh_quarters
         .unwrap_or(lianghua_download::download::company::DEFAULT_COMPANY_REFRESH_QUARTERS);
     if refresh_quarters == 0 {
-        return Err("公司数据刷新季度数必须大于 0".into());
+        return Err("公司数据下载季度数必须大于 0".into());
     }
+    let start_date = if database == lianghua_data::data::company_data::CompanyDbKind::Fundamentals {
+        lianghua_download::download::company::company_report_start(
+            if end_date == "today" {
+                Local::now().date_naive()
+            } else {
+                chrono::NaiveDate::parse_from_str(&end_date, "%Y%m%d")
+                    .map_err(|e| format!("结束日期无效: {e}"))?
+            },
+            refresh_quarters,
+        )?
+        .format("%Y%m%d")
+        .to_string()
+    } else {
+        start_date
+    };
     Ok(PreparedCompanyDownloadRun {
         config: lianghua_download::download::company::CompanyDownloadConfig {
             source_dir: source_path,
@@ -1435,7 +1450,7 @@ pub fn run_prepared_company_download(
             == lianghua_data::data::company_data::CompanyDbKind::Fundamentals
         {
             format!(
-                "基本面等最近 {} 个季度刷新；分红整段重新同步",
+                "基本面按最近已结束的 {} 个季度下载，财报按报告期筛选，不补更早历史",
                 prepared.config.refresh_quarters
             )
         } else {
