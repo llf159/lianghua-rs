@@ -197,7 +197,12 @@ function formatPhaseLabel(phase: string | null | undefined) {
     case 'audit_recheck': return '重新检查修复计划'
     case 'score_prepare': return '准备评分'
     case 'score_compute': return '计算评分'
-    case 'score_write': return '提交评分及排名'
+    case 'score_write': return '完成批次写入'
+    case 'score_scene_rank': return '计算场景排名'
+    case 'score_summary_rank': return '计算总榜排名'
+    case 'score_keys': return '构建结果主键'
+    case 'score_publish': return '发布评分及排名'
+    case 'score_checkpoint': return '结果库落盘'
     case 'prepare': return '准备相似度数据'
     case 'select-templates': return '筛选历史模板'
     case 'candidate-fingerprints': return '构建历史模板指纹'
@@ -221,7 +226,7 @@ function getProgressWorkflow(action: string | null | undefined) {
     case 'repair-database':
       return [{ key: 'database_repair', label: '针对性修复', phases: [['audit_recheck', 'repair_stock_history', 'repair_index_history', 'rebuild_concept_performance']] }] as ProgressWorkflowStep[]
     case 'score':
-      return ['score_prepare', 'score_compute', 'score_write'] as ProgressWorkflowStep[]
+      return ['score_prepare', 'score_compute', 'score_write', 'score_scene_rank', 'score_summary_rank', 'score_keys', 'score_publish', 'score_checkpoint'] as ProgressWorkflowStep[]
     case 'first-download':
       return [
         {
@@ -1602,10 +1607,7 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
           <div className="data-download-panel-head">
             <h3>基本面数据下载</h3>
             <p>
-              同步财报、财务指标、主营构成、预告快报、分红、十大股东、增减持、解禁和每日股本，写入独立的
-              company_fundamentals.db。下载最近已结束的 N 个季度，4 个季度为一年，16 个季度为四年。
-              首次下载和再次同步均由季度数向前推算范围，财报按报告期筛选，不再向更早年份补历史；已有历史数据保留。
-              进度按已处理股票统计，失败详情在结束后显示。
+              同步财报、财务指标、分红、股东及股本等数据。按最近已结束的季度下载（4 个季度为一年），已有历史数据保留。
             </p>
           </div>
 
@@ -1623,11 +1625,11 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
             {status?.fundamentalsDb?.lastSyncedAt ? (
               <span>最近下载：{status.fundamentalsDb.lastSyncedAt}</span>
             ) : null}
+            {fundamentalsReportRange ? (
+              <span>本次报告期：{fundamentalsReportRange.startDate} ～ {fundamentalsReportRange.endDate}</span>
+            ) : null}
           </div>
 
-          {fundamentalsReportRange ? (
-            <p>本次报告期范围：{fundamentalsReportRange.startDate} ～ {fundamentalsReportRange.endDate}；公告及每日数据同步至今天。</p>
-          ) : null}
           <div className="data-download-dragon-row data-download-fundamentals-row">
             <label className="data-download-field data-download-field-compact">
               <span>下载季度数</span>

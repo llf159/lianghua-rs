@@ -216,6 +216,9 @@ export function getProgressCounterText(
 
   const phaseLabel = formatPhaseLabel(progress.phase)
   if (progress.total > 0) {
+    if (progress.phase === 'score_scene_rank' || progress.phase === 'score_summary_rank') {
+      return `${phaseLabel} · ${progress.finished === progress.total ? '已完成' : `数据库估算 ${(progress.finished / progress.total * 100).toFixed(1)}%`}`
+    }
     const stockUnit = progress.action === 'download-company-fundamentals' ||
       progress.action === 'download-shareholder-counts'
       ? ' 只'

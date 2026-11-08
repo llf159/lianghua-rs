@@ -6,7 +6,7 @@ use lianghua_model::{DownloadProgress, DownloadProgressCallback};
 use rayon::prelude::*;
 use std::{
     collections::{HashMap, HashSet},
-    sync::mpsc::sync_channel,
+    sync::mpsc::{channel, sync_channel},
     sync::{Arc, Mutex},
     thread, time,
 };
@@ -815,7 +815,11 @@ pub fn scoring_all_to_db(
     let adj_type_owned = adj_type.to_string();
     let start_date_owned = start_date.to_string();
     let end_date_owned = end_date.to_string();
+    let (progress_tx, progress_rx) = channel();
     let writer_handle = thread::spawn(move || {
+        let writer_progress = move |progress| {
+            let _ = progress_tx.send(progress);
+        };
         write_score_batches_from_channel(
             &db_path,
             Some(&source_db_path),
@@ -824,6 +828,7 @@ pub fn scoring_all_to_db(
             &start_date_owned,
             &end_date_owned,
             rx,
+            Some(&writer_progress),
         )
     });
 
@@ -901,7 +906,7 @@ pub fn scoring_all_to_db(
         "score_write",
         0,
         0,
-        "评分计算完成，正在写入结果库。",
+        "评分计算完成，正在等待剩余批次写入，随后计算排名。",
     );
 
     if let Err(err) = &compute_result {
@@ -910,6 +915,11 @@ pub fn scoring_all_to_db(
     drop(abort_tx);
     drop(tx);
 
+    for progress in progress_rx {
+        if let Some(cb) = progress_cb {
+            cb(progress);
+        }
+    }
     let writer_result = match writer_handle.join() {
         Ok(result) => result,
         Err(_) => Err("结果库写线程异常退出".to_string()),
@@ -942,7 +952,7 @@ pub fn scoring_all_to_db(
             format_elapsed_ms(profile.writer.total_ms),
         );
         println!(
-            "写库明细: 删索引={}；附加原始库={}；删旧数据={}；接收+写入批次(含等待)={}；总榜排名写入={}；提交={}；卸载原始库={}；建索引={}；批次={}",
+            "写库明细: 删索引={}；附加原始库={}；删旧数据={}；接收+写入批次(含等待)={}；场景排名={}；总榜排名写入={}；最终落盘={}；提交={}；卸载原始库={}；建索引={}；批次={}",
             format_elapsed_ms(profile.writer.drop_indexes_ms),
             profile
                 .writer
@@ -951,7 +961,9 @@ pub fn scoring_all_to_db(
                 .unwrap_or_else(|| "-".to_string()),
             format_elapsed_ms(profile.writer.delete_range_ms),
             format_elapsed_ms(profile.writer.receive_and_append_batches_ms),
+            format_elapsed_ms(profile.writer.scene_rank_ms),
             format_elapsed_ms(profile.writer.summary_rank_ms),
+            format_elapsed_ms(profile.writer.checkpoint_ms),
             format_elapsed_ms(profile.writer.commit_ms),
             profile
                 .writer

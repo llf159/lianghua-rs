@@ -260,6 +260,15 @@ function formatPhaseLabel(phase: string | null | undefined) {
       return '补算指标列'
     case 'panel_indicators':
       return '市场/横截面指标'
+    case 'score_prepare': return '准备评分'
+    case 'score_compute': return '计算评分并分批写入'
+    case 'score_write': return '完成批次写入'
+    case 'score_scene_rank': return '计算场景排名'
+    case 'score_summary_rank': return '计算总榜排名'
+    case 'score_keys': return '构建结果主键'
+    case 'score_publish': return '发布评分及排名'
+    case 'score_indexes': return '构建查询索引'
+    case 'score_checkpoint': return '结果库落盘'
     case 'compute_cyq':
       return '筹码计算'
     case 'compute_cyq_chen':
@@ -297,7 +306,7 @@ function getProgressWorkflow(action: string | null | undefined) {
     case 'cyq-chen':
       return ['compute_cyq_chen'] as string[]
     case 'score':
-      return ['score_prepare', 'score_compute', 'score_write'] as string[]
+      return ['score_prepare', 'score_compute', 'score_write', 'score_scene_rank', 'score_summary_rank', 'score_keys', 'score_publish', 'score_indexes', 'score_checkpoint'] as string[]
     default:
       return null
   }

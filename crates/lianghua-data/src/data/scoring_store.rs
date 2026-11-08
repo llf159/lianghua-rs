@@ -18,6 +18,7 @@ use lianghua_model::scoring::{
     RankTiebreakProfile, SceneDetails, ScoreDetails, ScoreSummary, ScoreWriteMessage,
     ScoreWriteProfile, TieBreakWay,
 };
+use lianghua_model::{DownloadProgress, DownloadProgressCallback};
 
 const SCORE_SUMMARY_TABLE: &str = "score_summary";
 const RULE_DETAILS_TABLE: &str = "rule_details";
@@ -54,7 +55,12 @@ pub fn init_result_db(db_path: &Path) -> Result<(), String> {
             .map_err(|e| format!("删除scene_details索引失败:{e}"))?;
         Ok(())
     })(&conn)?;
-    ensure_result_db_indexes(&conn)?;
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_score_summary_trade_date_rank_ts;
+         DROP INDEX IF EXISTS idx_rule_details_rule_date_ts;
+         DROP INDEX IF EXISTS idx_scene_details_trade_date_scene_rank_ts;",
+    )
+    .map_err(|e| format!("删除结果库查询索引失败:{e}"))?;
 
     Ok(())
 }
@@ -199,25 +205,6 @@ fn ensure_result_table_schema(conn: &Connection, table_name: &str) -> Result<(),
     conn.execute(&format!("DROP TABLE {table_name}"), [])
         .map_err(|e| format!("删除旧{table_name}失败:{e}"))?;
     create_result_table(conn, table_name)
-}
-
-fn ensure_result_db_indexes(conn: &Connection) -> Result<(), String> {
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_score_summary_trade_date_rank_ts ON score_summary(trade_date, rank, ts_code)",
-        [],
-    )
-    .map_err(|e| format!("创建score_summary索引失败:{e}"))?;
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_rule_details_rule_date_ts ON rule_details(rule_name, trade_date, ts_code)",
-        [],
-    )
-    .map_err(|e| format!("创建rule_details索引失败:{e}"))?;
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_scene_details_trade_date_scene_rank_ts ON scene_details(trade_date, scene_name, scene_rank, ts_code)",
-        [],
-    )
-    .map_err(|e| format!("创建scene_details索引失败:{e}"))?;
-    Ok(())
 }
 
 fn delete_convolution_rank_range(
@@ -516,6 +503,7 @@ mod tests {
             "20240102",
             "20240102",
             rx,
+            None,
         )
         .unwrap();
 
@@ -587,6 +575,9 @@ mod tests {
         let conn = Connection::open(&db_path).expect("open result db");
         conn.execute_batch(
             r#"
+            CREATE INDEX idx_score_summary_trade_date_rank_ts ON score_summary(trade_date, rank, ts_code);
+            CREATE INDEX idx_rule_details_rule_date_ts ON rule_details(rule_name, trade_date, ts_code);
+            CREATE INDEX idx_scene_details_trade_date_scene_rank_ts ON scene_details(trade_date, scene_name, scene_rank, ts_code);
             CREATE INDEX idx_score_summary_ts_date
                 ON score_summary(ts_code, trade_date);
             CREATE INDEX idx_rule_details_ts_date_rule
@@ -602,11 +593,7 @@ mod tests {
         let conn = Connection::open(&db_path).expect("reopen result db");
         assert_eq!(
             explicit_result_index_names(&conn),
-            vec![
-                "idx_rule_details_rule_date_ts".to_string(),
-                "idx_scene_details_trade_date_scene_rank_ts".to_string(),
-                "idx_score_summary_trade_date_rank_ts".to_string(),
-            ]
+            Vec::<String>::new()
         );
 
         drop(conn);
@@ -646,6 +633,7 @@ mod tests {
                 trade_date,
                 trade_date,
                 rx,
+                None,
             )
             .expect("write score batch");
         }
@@ -660,11 +648,7 @@ mod tests {
         );
         assert_eq!(
             explicit_result_index_names(&conn),
-            vec![
-                "idx_rule_details_rule_date_ts".to_string(),
-                "idx_scene_details_trade_date_scene_rank_ts".to_string(),
-                "idx_score_summary_trade_date_rank_ts".to_string(),
-            ]
+            Vec::<String>::new()
         );
         for table_name in ["score_summary", "rule_details", "scene_details"] {
             assert!(
@@ -721,6 +705,7 @@ mod tests {
             "20240101",
             "20240611",
             rx,
+            None,
         )
         .expect("write score batches");
 
@@ -792,6 +777,7 @@ mod tests {
             "20240102",
             "20240102",
             rx,
+            None,
         );
         assert!(result.is_err());
 
@@ -852,7 +838,10 @@ mod tests {
                     ('000002.SZ', '20240102', 'qfq', 9.0),
                     ('000003.SZ', '20240102', 'qfq', 1.0),
                     ('000001.SZ', '20240103', 'qfq', 5.0),
-                    ('000002.SZ', '20240103', 'qfq', 7.0)
+                    ('000002.SZ', '20240103', 'qfq', 7.0),
+                    ('000001.SZ', '20230102', 'qfq', -100.0),
+                    ('000001.SZ', '20250102', 'qfq', -100.0),
+                    ('000001.SZ', '20240102', 'hfq', -100.0)
                 "#,
                 [],
             )
@@ -936,6 +925,10 @@ mod tests {
 
         let db_path_str = db_path.to_str().expect("db path utf8");
         let source_db_path_str = source_db_path.to_str().expect("source db path utf8");
+        let progress = std::sync::Mutex::new(Vec::new());
+        let on_progress = |event: lianghua_model::DownloadProgress| {
+            progress.lock().unwrap().push(event);
+        };
         write_score_batches_from_channel(
             db_path_str,
             Some(source_db_path_str),
@@ -944,8 +937,25 @@ mod tests {
             "20240102",
             "20240103",
             rx,
+            Some(&on_progress),
         )
         .expect("write score batches");
+        let events = progress.into_inner().unwrap();
+        let completed: Vec<_> = events
+            .iter()
+            .filter(|event| event.total > 0 && event.finished == event.total)
+            .map(|event| event.phase.as_str())
+            .collect();
+        assert_eq!(
+            completed,
+            [
+                "score_scene_rank",
+                "score_summary_rank",
+                "score_keys",
+                "score_publish",
+                "score_checkpoint"
+            ]
+        );
 
         let conn = Connection::open(&db_path).expect("open result db");
         let mut stmt = conn
@@ -1024,6 +1034,61 @@ fn drop_result_staging_tables(conn: &Connection) -> Result<(), String> {
     .map_err(|e| format!("清理结果库暂存表失败:{e}"))
 }
 
+// Poll the executing connection without issuing another SQL query or splitting the sort.
+fn score_write_stage<T>(
+    conn: &mut Connection,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
+    phase: &str,
+    message: &str,
+    action: impl FnOnce(&mut Connection) -> Result<T, String>,
+) -> Result<T, String> {
+    let Some(cb) = progress_cb else {
+        return action(conn);
+    };
+    let emit = |finished, total, message: String| {
+        cb(DownloadProgress {
+            phase: phase.to_string(),
+            finished,
+            total,
+            current_label: None,
+            message,
+        })
+    };
+    emit(0, 0, message.to_string());
+    let progress = conn.progress_handle();
+    let result = std::thread::scope(|scope| {
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+        scope.spawn(move || {
+            let started = time::Instant::now();
+            let mut finished = 0;
+            while matches!(
+                stop_rx.recv_timeout(time::Duration::from_millis(500)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ) {
+                // Only the two sorts have a single dominant query. Index/publish phases
+                // contain multiple statements, so their percentages cannot be combined.
+                if phase == "score_scene_rank" || phase == "score_summary_rank" {
+                    if let Some(percent) = progress.query_progress().percentage() {
+                        finished = finished.max((percent * 100.0).min(9_900.0) as usize);
+                    }
+                }
+                emit(
+                    finished,
+                    if finished > 0 { 10_000 } else { 0 },
+                    format!("{message} 已耗时 {} 秒。", started.elapsed().as_secs()),
+                );
+            }
+        });
+        let result = action(conn);
+        let _ = stop_tx.send(());
+        result
+    });
+    if result.is_ok() {
+        emit(1, 1, format!("{message} 完成。"));
+    }
+    result
+}
+
 pub fn write_score_batches_from_channel(
     db_path: &str,
     source_db_path: Option<&str>,
@@ -1032,10 +1097,15 @@ pub fn write_score_batches_from_channel(
     start_date: &str,
     end_date: &str,
     rx: Receiver<ScoreWriteMessage>,
+    progress_cb: Option<&DownloadProgressCallback<'_>>,
 ) -> Result<ScoreWriteProfile, String> {
     let total_started_at = time::Instant::now();
     let mut profile = ScoreWriteProfile::default();
     let mut conn = Connection::open(db_path).map_err(|e| format!("结果库连接失败:{e}"))?;
+    if progress_cb.is_some() {
+        conn.set_query_progress_tracking(true)
+            .map_err(|e| format!("启用排名查询进度失败:{e}"))?;
+    }
     let full_replace = (|conn: &Connection,
                          start_date: &str,
                          end_date: &str|
@@ -1335,13 +1405,21 @@ pub fn write_score_batches_from_channel(
             tx.commit().map_err(|e| format!("提交评分批次失败:{e}"))?;
         }
 
-        (|conn: &mut Connection| -> Result<(), String> {
-            let tx = conn
-                .transaction()
-                .map_err(|e| format!("创建数据库事务失败:{e}"))?;
-            tx.execute(
-                &format!(
-                    r#"
+        profile.receive_and_append_batches_ms =
+            receive_and_append_started_at.elapsed().as_millis() as u64;
+        let scene_rank_started_at = time::Instant::now();
+        score_write_stage(
+            &mut conn,
+            progress_cb,
+            "score_scene_rank",
+            "正在计算场景排名。",
+            |conn| {
+                let tx = conn
+                    .transaction()
+                    .map_err(|e| format!("创建数据库事务失败:{e}"))?;
+                tx.execute(
+                    &format!(
+                        r#"
                 INSERT INTO {SCENE_DETAILS_SHADOW_TABLE}
                 SELECT ts_code, trade_date, scene_name, direction, stage,
                     stage_score, risk_score, confirm_strength, risk_intensity,
@@ -1357,30 +1435,35 @@ pub fn write_score_batches_from_channel(
                     ) AS INTEGER)
                 FROM {SCENE_DETAILS_STAGE_TABLE}
             "#
-                ),
-                [],
-            )
-            .map_err(|e| format!("写入场景排名失败:{e}"))?;
-            tx.execute(&format!("DROP TABLE {SCENE_DETAILS_STAGE_TABLE}"), [])
-                .map_err(|e| format!("清理场景暂存表失败:{e}"))?;
-            tx.commit().map_err(|e| format!("提交场景排名失败:{e}"))
-        })(&mut conn)?;
-        profile.receive_and_append_batches_ms =
-            receive_and_append_started_at.elapsed().as_millis() as u64;
+                    ),
+                    [],
+                )
+                .map_err(|e| format!("写入场景排名失败:{e}"))?;
+                tx.execute(&format!("DROP TABLE {SCENE_DETAILS_STAGE_TABLE}"), [])
+                    .map_err(|e| format!("清理场景暂存表失败:{e}"))?;
+                tx.commit().map_err(|e| format!("提交场景排名失败:{e}"))
+            },
+        )?;
+        profile.scene_rank_ms = scene_rank_started_at.elapsed().as_millis() as u64;
 
         let summary_rank_started_at = time::Instant::now();
-        (|conn: &mut Connection| -> Result<(), String> {
-            let tx = conn
-                .transaction()
-                .map_err(|e| format!("创建数据库事务失败:{e}"))?;
-            (|tx: &Transaction<'_>,
-              tie_break: TieBreakWay,
-              adj_type: &str|
-             -> Result<(), String> {
-                match tie_break {
-                    TieBreakWay::TsCode => {
-                        let sql = format!(
-                            r#"
+        score_write_stage(
+            &mut conn,
+            progress_cb,
+            "score_summary_rank",
+            "正在计算总榜排名（含 J 值同分排序）。",
+            |conn| {
+                let tx = conn
+                    .transaction()
+                    .map_err(|e| format!("创建数据库事务失败:{e}"))?;
+                (|tx: &Transaction<'_>,
+                  tie_break: TieBreakWay,
+                  adj_type: &str|
+                 -> Result<(), String> {
+                    match tie_break {
+                        TieBreakWay::TsCode => {
+                            let sql = format!(
+                                r#"
                 INSERT INTO {SCORE_SUMMARY_SHADOW_TABLE} (ts_code, trade_date, total_score, rank)
                 SELECT
                     ts_code,
@@ -1394,13 +1477,13 @@ pub fn write_score_batches_from_channel(
                     ) AS rank
                 FROM {SCORE_SUMMARY_STAGE_TABLE}
                 "#
-                        );
-                        tx.execute(&sql, [])
-                            .map_err(|e| format!("写入总榜排名失败:{e}"))?;
-                    }
-                    TieBreakWay::KdjJ => {
-                        let sql = format!(
-                            r#"
+                            );
+                            tx.execute(&sql, [])
+                                .map_err(|e| format!("写入总榜排名失败:{e}"))?;
+                        }
+                        TieBreakWay::KdjJ => {
+                            let sql = format!(
+                                r#"
                 INSERT INTO {SCORE_SUMMARY_SHADOW_TABLE} (ts_code, trade_date, total_score, rank)
                 SELECT
                     st.ts_code,
@@ -1417,42 +1500,58 @@ pub fn write_score_batches_from_channel(
                   ON st.ts_code = src.ts_code
                  AND st.trade_date = src.trade_date
                  AND src.adj_type = ?
+                 AND src.trade_date >= ? AND src.trade_date <= ?
                 "#
-                        );
-                        tx.execute(&sql, params![adj_type])
-                            .map_err(|e| format!("写入J值同分总榜排名失败:{e}"))?;
+                            );
+                            tx.execute(&sql, params![adj_type, start_date, end_date])
+                                .map_err(|e| format!("写入J值同分总榜排名失败:{e}"))?;
+                        }
                     }
-                }
-                Ok(())
-            })(&tx, tie_break, adj_type)?;
-            tx.execute(&format!("DROP TABLE {SCORE_SUMMARY_STAGE_TABLE}"), [])
-                .map_err(|e| format!("清理score_summary暂存表失败:{e}"))?;
-            tx.commit().map_err(|e| format!("提交总榜排名失败:{e}"))
-        })(&mut conn)?;
+                    Ok(())
+                })(&tx, tie_break, adj_type)?;
+                tx.execute(&format!("DROP TABLE {SCORE_SUMMARY_STAGE_TABLE}"), [])
+                    .map_err(|e| format!("清理score_summary暂存表失败:{e}"))?;
+                tx.commit().map_err(|e| format!("提交总榜排名失败:{e}"))
+            },
+        )?;
         profile.summary_rank_ms = summary_rank_started_at.elapsed().as_millis() as u64;
 
         if full_replace {
             let shadow_key_started_at = time::Instant::now();
-            conn.execute_batch(&format!(
-                r#"
+            score_write_stage(
+                &mut conn,
+                progress_cb,
+                "score_keys",
+                "正在构建结果主键。",
+                |conn| {
+                    conn.execute_batch(&format!(
+                        r#"
         ALTER TABLE {SCORE_SUMMARY_SHADOW_TABLE} ADD PRIMARY KEY (ts_code, trade_date);
         ALTER TABLE {RULE_DETAILS_SHADOW_TABLE} ADD PRIMARY KEY (ts_code, trade_date, rule_name);
         ALTER TABLE {SCENE_DETAILS_SHADOW_TABLE} ADD PRIMARY KEY (ts_code, trade_date, scene_name);
         "#
-            ))
-            .map_err(|e| format!("创建结果库影子表主键失败:{e}"))?;
+                    ))
+                    .map_err(|e| format!("创建结果库影子表主键失败:{e}"))
+                },
+            )?;
             profile.recreate_indexes_ms = shadow_key_started_at.elapsed().as_millis() as u64;
         }
 
-        let tx = conn
-            .transaction()
-            .map_err(|e| format!("创建数据库事务失败:{e}"))?;
-        lianghua_model::task::checkpoint()?;
-        let replace_started_at = time::Instant::now();
-        if full_replace {
-            (|tx: &Transaction<'_>| -> Result<(), String> {
-                tx.execute_batch(&format!(
-                    r#"
+        score_write_stage(
+            &mut conn,
+            progress_cb,
+            "score_publish",
+            "正在发布评分、排名和跟踪结果。",
+            |conn| {
+                let tx = conn
+                    .transaction()
+                    .map_err(|e| format!("创建数据库事务失败:{e}"))?;
+                lianghua_model::task::checkpoint()?;
+                let replace_started_at = time::Instant::now();
+                if full_replace {
+                    (|tx: &Transaction<'_>| -> Result<(), String> {
+                        tx.execute_batch(&format!(
+                            r#"
         DROP TABLE {SCORE_SUMMARY_TABLE};
         DROP TABLE {RULE_DETAILS_TABLE};
         DROP TABLE {SCENE_DETAILS_TABLE};
@@ -1461,37 +1560,40 @@ pub fn write_score_batches_from_channel(
         ALTER TABLE {RULE_DETAILS_SHADOW_TABLE} RENAME TO {RULE_DETAILS_TABLE};
         ALTER TABLE {SCENE_DETAILS_SHADOW_TABLE} RENAME TO {SCENE_DETAILS_TABLE};
         "#
-                ))
-                .map_err(|e| format!("切换结果库影子表失败:{e}"))?;
-                Ok(())
-            })(&tx)?;
-        } else {
-            (|tx: &Transaction<'_>, start_date: &str, end_date: &str| -> Result<(), String> {
-                tx.execute(
-                    "DELETE FROM score_summary WHERE trade_date >= ? AND trade_date <= ?",
-                    params![start_date, end_date],
-                )
-                .map_err(|e| format!("删除score_summary旧数据失败:{e}"))?;
-                tx.execute(
-                    "DELETE FROM rule_details WHERE trade_date >= ? AND trade_date <= ?",
-                    params![start_date, end_date],
-                )
-                .map_err(|e| format!("删除rule_details旧数据失败:{e}"))?;
-                tx.execute(
-                    "DELETE FROM scene_details WHERE trade_date >= ? AND trade_date <= ?",
-                    params![start_date, end_date],
-                )
-                .map_err(|e| format!("删除scene_details旧数据失败:{e}"))?;
-                Ok(())
-            })(&tx, start_date, end_date)?;
-        }
-        delete_convolution_rank_range(&tx, start_date, end_date)?;
-        profile.delete_range_ms = replace_started_at.elapsed().as_millis() as u64;
+                        ))
+                        .map_err(|e| format!("切换结果库影子表失败:{e}"))?;
+                        Ok(())
+                    })(&tx)?;
+                } else {
+                    (|tx: &Transaction<'_>,
+                      start_date: &str,
+                      end_date: &str|
+                     -> Result<(), String> {
+                        tx.execute(
+                            "DELETE FROM score_summary WHERE trade_date >= ? AND trade_date <= ?",
+                            params![start_date, end_date],
+                        )
+                        .map_err(|e| format!("删除score_summary旧数据失败:{e}"))?;
+                        tx.execute(
+                            "DELETE FROM rule_details WHERE trade_date >= ? AND trade_date <= ?",
+                            params![start_date, end_date],
+                        )
+                        .map_err(|e| format!("删除rule_details旧数据失败:{e}"))?;
+                        tx.execute(
+                            "DELETE FROM scene_details WHERE trade_date >= ? AND trade_date <= ?",
+                            params![start_date, end_date],
+                        )
+                        .map_err(|e| format!("删除scene_details旧数据失败:{e}"))?;
+                        Ok(())
+                    })(&tx, start_date, end_date)?;
+                }
+                delete_convolution_rank_range(&tx, start_date, end_date)?;
+                profile.delete_range_ms = replace_started_at.elapsed().as_millis() as u64;
 
-        if !full_replace {
-            let merge_started_at = time::Instant::now();
-            (|tx: &Transaction<'_>| -> Result<(), String> {
-                tx.execute(
+                if !full_replace {
+                    let merge_started_at = time::Instant::now();
+                    (|tx: &Transaction<'_>| -> Result<(), String> {
+                        tx.execute(
                     &format!(
                         "INSERT INTO {SCORE_SUMMARY_TABLE} (ts_code, trade_date, total_score, rank) \
                          SELECT ts_code, trade_date, total_score, rank FROM {SCORE_SUMMARY_SHADOW_TABLE}"
@@ -1499,7 +1601,7 @@ pub fn write_score_batches_from_channel(
                     [],
                 )
                 .map_err(|e| format!("写入score_summary失败:{e}"))?;
-                tx.execute(
+                        tx.execute(
                     &format!(
                         "INSERT INTO {RULE_DETAILS_TABLE} (ts_code, trade_date, rule_name, rule_score) \
                          SELECT ts_code, trade_date, rule_name, rule_score FROM {RULE_DETAILS_SHADOW_TABLE}"
@@ -1507,7 +1609,7 @@ pub fn write_score_batches_from_channel(
                     [],
                 )
                 .map_err(|e| format!("写入rule_details失败:{e}"))?;
-                tx.execute(
+                        tx.execute(
                     &format!(
                         "INSERT INTO {SCENE_DETAILS_TABLE} (ts_code, trade_date, scene_name, direction, \
                          stage, stage_score, risk_score, confirm_strength, risk_intensity, scene_rank) \
@@ -1517,37 +1619,36 @@ pub fn write_score_batches_from_channel(
                     [],
                 )
                 .map_err(|e| format!("写入scene_details失败:{e}"))?;
-                tx.execute_batch(&format!(
-                    r#"
+                        tx.execute_batch(&format!(
+                            r#"
         DROP TABLE {SCORE_SUMMARY_SHADOW_TABLE};
         DROP TABLE {RULE_DETAILS_SHADOW_TABLE};
         DROP TABLE {SCENE_DETAILS_SHADOW_TABLE};
         "#
-                ))
-                .map_err(|e| format!("清理结果库暂存表失败:{e}"))?;
-                Ok(())
-            })(&tx)?;
-            profile.receive_and_append_batches_ms += merge_started_at.elapsed().as_millis() as u64;
-        }
+                        ))
+                        .map_err(|e| format!("清理结果库暂存表失败:{e}"))?;
+                        Ok(())
+                    })(&tx)?;
+                    profile.receive_and_append_batches_ms +=
+                        merge_started_at.elapsed().as_millis() as u64;
+                }
 
-        // Publish the final event states in the same transaction as scores and ranks.
-        tx.execute_batch(
-            "DROP TABLE IF EXISTS strategy_tracking_state;
+                // Publish the final event states in the same transaction as scores and ranks.
+                tx.execute_batch(
+                    "DROP TABLE IF EXISTS strategy_tracking_state;
             DROP TABLE IF EXISTS strategy_tracking_meta;
             ALTER TABLE strategy_tracking_state_stage RENAME TO strategy_tracking_state;
             ALTER TABLE strategy_tracking_meta_stage RENAME TO strategy_tracking_meta;",
-        )
-        .map_err(|e| format!("提交跟踪状态失败:{e}"))?;
-        lianghua_model::task::checkpoint()?;
-        let commit_started_at = time::Instant::now();
-        tx.commit().map_err(|e| format!("事务提交错误:{e}"))?;
-        profile.commit_ms = commit_started_at.elapsed().as_millis() as u64;
+                )
+                .map_err(|e| format!("提交跟踪状态失败:{e}"))?;
+                lianghua_model::task::checkpoint()?;
+                let commit_started_at = time::Instant::now();
+                tx.commit().map_err(|e| format!("事务提交错误:{e}"))?;
+                profile.commit_ms = commit_started_at.elapsed().as_millis() as u64;
+                Ok(())
+            },
+        )?;
 
-        if full_replace {
-            let index_started_at = time::Instant::now();
-            ensure_result_db_indexes(&conn)?;
-            profile.recreate_indexes_ms += index_started_at.elapsed().as_millis() as u64;
-        }
 
         Ok::<(), String>(())
     })();
@@ -1567,7 +1668,15 @@ pub fn write_score_batches_from_channel(
     } else {
         Ok(())
     };
-    bulk.checkpoint_and_finish(&conn, write_result)?;
+    let checkpoint_started_at = time::Instant::now();
+    score_write_stage(
+        &mut conn,
+        progress_cb,
+        "score_checkpoint",
+        "正在完成结果库落盘。",
+        |conn| bulk.checkpoint_and_finish(conn, write_result),
+    )?;
+    profile.checkpoint_ms = checkpoint_started_at.elapsed().as_millis() as u64;
     detach_source_result?;
     profile.total_ms = total_started_at.elapsed().as_millis() as u64;
 
