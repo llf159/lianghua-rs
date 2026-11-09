@@ -3001,7 +3001,7 @@ export default function AllMarketMonitorPage() {
                           ].includes(state)
                             ? "请更新日线、股票列表和交易日历后重新开启；缓存基准不一致时请清空量比缓存"
                             : source === "microsoft"
-                              ? "当日沪深行情 09:50 后参与补齐，使用近似基准"
+                              ? "沪深行情当日 09:50 后及后续休市日参与补齐"
                               : source === "sse"
                                 ? "仅参与沪市股票分时补齐"
                                 : source === "szse"

@@ -14,5 +14,6 @@ lianghua-download = { path = "../lianghua-download" }
 chrono = "0.4.45"
 duckdb = { version = "~1.20000.0", features = ["appender-arrow"] }
 rayon = "1.12.0"
+rusqlite = { version = "0.37.0", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 toml = "1.1.8"

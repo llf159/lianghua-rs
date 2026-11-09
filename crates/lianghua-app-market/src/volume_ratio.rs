@@ -753,8 +753,9 @@ pub fn snapshot(
     }
     let now = chrono::Utc::now().with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap());
     // 开关随轮询更新，09:50 前排队的任务也能在门槛到达后使用 MSN。
-    state.msn_enabled = now.format("%Y%m%d").to_string() == trade_date
-        && now.format("%H%M").to_string().as_str() >= "0950";
+    state.msn_enabled = now.format("%Y%m%d").to_string().as_str() > trade_date
+        || (now.format("%Y%m%d").to_string() == trade_date
+            && now.format("%H%M").to_string().as_str() >= "0950");
     if state
         .local_loaded_at
         .is_none_or(|at| at.elapsed() >= Duration::from_secs(60))

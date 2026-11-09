@@ -140,6 +140,14 @@ const DATASET_OPTIONS: DatasetOption[] = [
     supportsTsCode: true,
   },
   {
+    id: 'manipulation-stages',
+    label: '操盘行为库',
+    description: '查看 real_trading_behavior.db 的 stages，一条记录对应一个行为区间。',
+    requiredFileId: 'manipulation-behavior-db',
+    supportsTradeDate: false,
+    supportsTsCode: true,
+  },
+  {
     id: 'stock-list-csv',
     label: '股票列表 CSV',
     description: '查看 stock_list.csv，包含名称、市值、拼音首字母等基础信息。',

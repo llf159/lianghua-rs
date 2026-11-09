@@ -135,6 +135,16 @@ export const MANAGED_SOURCE_FILES = [
     scanPathHints: ['cyq', 'chen', 'chip'],
   },
   {
+    id: 'manipulation-behavior-db',
+    label: '操盘行为库',
+    description: '处罚文书整理后的单行为行情区间。',
+    fileName: 'real_trading_behavior.db',
+    expectedSourcePath: 'source/real_trading_behavior.db',
+    targetRelativePathSuffix: 'real_trading_behavior.db',
+    extensions: ['db'],
+    scanPathHints: ['behavior', 'manipulation'],
+  },
+  {
     id: 'chip-change-rule',
     label: '筹码策略文件',
     description: '新筹码计算与测试使用的策略配置，内容在筹码策略页维护。',
@@ -298,6 +308,7 @@ export type ManagedSourceDatasetId =
   | 'cyq-bins'
   | 'cyq-chen-snapshot'
   | 'cyq-chen-bins'
+  | 'manipulation-stages'
   | 'stock-list-csv'
   | 'trade-calendar-csv'
   | 'stock-concepts-csv'

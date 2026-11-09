@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::time::Duration;
 
 use duckdb::Connection;
+use rusqlite::{Connection as SqliteConnection, OpenFlags};
 use serde::Serialize;
 
 use crate::data::{
@@ -511,6 +513,112 @@ pub fn preview_managed_source_dataset(
             selected_columns = columns.clone();
             all_columns = columns;
             order_by_sql = "trade_date DESC, ts_code ASC, bin_index ASC";
+        }
+        "manipulation-stages" => {
+            let db_path = source_path.join("real_trading_behavior.db");
+            if !db_path.exists() {
+                return Err(format!("操盘行为库不存在: {}", db_path.display()));
+            }
+            let sqlite = SqliteConnection::open_with_flags(
+                &db_path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .map_err(|error| format!("打开 real_trading_behavior.db 失败: {error}"))?;
+            sqlite
+                .busy_timeout(Duration::from_secs(5))
+                .map_err(|error| format!("设置操盘行为库读取超时失败: {error}"))?;
+            let columns = {
+                let mut stmt = sqlite
+                    .prepare("PRAGMA table_info(\"stages\")")
+                    .map_err(|error| format!("读取操盘行为库列结构失败: {error}"))?;
+                let rows = stmt
+                    .query_map([], |row| row.get::<_, String>(1))
+                    .map_err(|error| format!("查询操盘行为库列结构失败: {error}"))?;
+                rows.collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| format!("读取操盘行为库列名失败: {error}"))?
+            };
+            if columns.is_empty() {
+                return Err("操盘行为库缺少 stages 表".to_string());
+            }
+            let where_sql = normalized_ts_code
+                .as_deref()
+                .map(|value| format!(" WHERE \"ts_code\" = {}", quote_sql_string(value)))
+                .unwrap_or_default();
+            let page_columns = columns
+                .iter()
+                .map(|column| {
+                    format!(
+                        "COALESCE(CAST({} AS TEXT), '') AS {}",
+                        quote_ident(column),
+                        quote_ident(column)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let output_columns = columns
+                .iter()
+                .map(|column| format!("page.{} AS {}", quote_ident(column), quote_ident(column)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let output_order = "page.\"stage_start\" DESC, page.\"ts_code\" ASC, \
+                                page.\"document_id\" ASC, page.\"behavior\" ASC";
+            let sql = format!(
+                "WITH filtered AS (SELECT * FROM \"stages\"{where_sql}), \
+                 counts AS (SELECT (SELECT COUNT(*) FROM \"stages\") AS total_count, \
+                 COUNT(*) AS matched_count FROM filtered), \
+                 page AS (SELECT {page_columns} FROM filtered ORDER BY \"stage_start\" DESC, \"ts_code\" ASC, \
+                 \"document_id\" ASC, \"behavior\" ASC LIMIT {limit}) \
+                 SELECT counts.total_count, counts.matched_count, {output_columns} \
+                 FROM counts LEFT JOIN page ON TRUE ORDER BY {output_order}"
+            );
+            let mut stmt = sqlite
+                .prepare(&sql)
+                .map_err(|error| format!("准备操盘行为预览查询失败: {error}"))?;
+            let mut rows = stmt
+                .query([])
+                .map_err(|error| format!("执行操盘行为预览查询失败: {error}"))?;
+            let mut row_count = 0i64;
+            let mut matched_rows = 0i64;
+            let mut saw_count_row = false;
+            let mut preview_rows = Vec::with_capacity(limit);
+            while let Some(row) = rows
+                .next()
+                .map_err(|error| format!("读取操盘行为预览结果失败: {error}"))?
+            {
+                if !saw_count_row {
+                    row_count = row
+                        .get::<_, i64>(0)
+                        .map_err(|error| format!("读取操盘行为总行数失败: {error}"))?;
+                    matched_rows = row
+                        .get::<_, i64>(1)
+                        .map_err(|error| format!("读取操盘行为筛选行数失败: {error}"))?;
+                    saw_count_row = true;
+                }
+                if matched_rows > 0 {
+                    let mut values = Vec::with_capacity(columns.len());
+                    for index in 2..columns.len() + 2 {
+                        values.push(
+                            row.get::<_, Option<String>>(index)
+                                .map_err(|error| format!("读取操盘行为预览字段失败: {error}"))?
+                                .unwrap_or_default(),
+                        );
+                    }
+                    preview_rows.push(values);
+                }
+            }
+            if !saw_count_row {
+                return Err("操盘行为预览查询没有返回计数".to_string());
+            }
+            return Ok(ManagedSourceDatasetPreviewResult {
+                source_path: source_path.display().to_string(),
+                target_path: db_path.display().to_string(),
+                dataset_id: normalized_dataset_id.to_string(),
+                dataset_label: "操盘行为区间".to_string(),
+                row_count: row_count.max(0) as u64,
+                matched_rows: matched_rows.max(0) as u64,
+                columns,
+                rows: preview_rows,
+            });
         }
         "stock-list-csv" => {
             let csv_path = stock_list_path(source_path_str);
