@@ -37,9 +37,8 @@ type ProgressTimingSample = {
   sampledAtMs: number
   finished: number
   total: number
-  rateElapsedMs: number
-  rateFinished: number
-  rate: number | null
+  samples: Array<{ elapsedMs: number; finished: number }>
+  estimatedFinishElapsedMs: number | null
 }
 
 export type ProgressTiming = {
@@ -280,33 +279,42 @@ export function useProgressTiming(
           ? `${progress.action}::${workflowMatch.step.key}::${workflowMatch.phaseIndex}`
           : `${progress.action}::${progress.phase}`
         const phaseChanged = !current || current.taskPhase !== taskPhase
-          || (current.total > 0 && progress.total > 0 && current.total !== progress.total)
+          || current.total !== progress.total
           || progress.finished < current.finished || progress.elapsedMs < current.sampledElapsedMs
-        const valuesChanged =
-          phaseChanged || current.finished !== progress.finished || current.total !== progress.total
-        if (!valuesChanged) {
-          return current
+        if (phaseChanged) {
+          return {
+            taskPhase,
+            phaseStartElapsedMs: progress.elapsedMs,
+            sampledElapsedMs: progress.elapsedMs,
+            sampledAtMs,
+            finished: progress.finished,
+            total: progress.total,
+            samples: [{ elapsedMs: progress.elapsedMs, finished: progress.finished }],
+            estimatedFinishElapsedMs: null,
+          }
         }
+        if (current.finished === progress.finished) return current
 
-        const rateElapsed = phaseChanged ? 0 : progress.elapsedMs - current.rateElapsedMs
-        const rateFinished = phaseChanged ? 0 : progress.finished - current.rateFinished
-        const hasRateSample = rateElapsed > 0 && rateFinished > 0
-        const intervalRate = hasRateSample ? rateFinished / rateElapsed : null
-        const weight = 1 - Math.exp(-Math.LN2 * rateElapsed / 30000)
-
+        // 一批并行回调可能集中在几毫秒内；累计至少 5 秒再校正，保留最近约一分钟的吞吐。
+        let samples = current.samples
+        let estimatedFinishElapsedMs = current.estimatedFinishElapsedMs
+        if (progress.elapsedMs - samples[samples.length - 1].elapsedMs >= 5000) {
+          samples = [...samples, { elapsedMs: progress.elapsedMs, finished: progress.finished }]
+          while (samples.length > 2 && samples[1].elapsedMs <= progress.elapsedMs - 60000) {
+            samples.shift()
+          }
+          estimatedFinishElapsedMs = progress.elapsedMs
+            + (progress.total - progress.finished)
+              * (progress.elapsedMs - samples[0].elapsedMs)
+              / (progress.finished - samples[0].finished)
+        }
         return {
-          taskPhase,
-          phaseStartElapsedMs: phaseChanged
-            ? progress.elapsedMs
-            : (current as ProgressTimingSample).phaseStartElapsedMs,
+          ...current,
           sampledElapsedMs: progress.elapsedMs,
           sampledAtMs,
           finished: progress.finished,
-          total: progress.total,
-          rateElapsedMs: phaseChanged || hasRateSample ? progress.elapsedMs : current.rateElapsedMs,
-          rateFinished: phaseChanged || hasRateSample ? progress.finished : current.rateFinished,
-          rate: phaseChanged ? null : intervalRate === null ? current.rate
-            : current.rate === null ? intervalRate : current.rate * (1 - weight) + intervalRate * weight,
+          samples,
+          estimatedFinishElapsedMs,
         }
       })
     })
@@ -325,12 +333,14 @@ export function useProgressTiming(
   const elapsedMs =
     sample.sampledElapsedMs + Math.max(0, Math.max(clockMs, sample.sampledAtMs) - sample.sampledAtMs)
   const phaseElapsedMs = Math.max(0, elapsedMs - sample.phaseStartElapsedMs)
-  const estimatedTotalMs = sample.rate !== null && sample.rate > 0 && sample.total > 0
-    ? Math.max(0, sample.sampledElapsedMs - sample.phaseStartElapsedMs)
-      + Math.max(0, sample.total - sample.finished) / sample.rate
+  // 完成计数仅代表计算完成，后端可能还在写入、校验和发布；没有收尾耗时依据时继续估算。
+  const estimatedRemainingMs = sample.finished < sample.total
+    && sample.estimatedFinishElapsedMs !== null && sample.estimatedFinishElapsedMs > elapsedMs
+    ? sample.estimatedFinishElapsedMs - elapsedMs
     : null
-  const estimatedRemainingMs =
-    estimatedTotalMs === null ? null : Math.max(0, estimatedTotalMs - phaseElapsedMs)
+  const estimatedTotalMs = estimatedRemainingMs === null
+    ? null
+    : sample.estimatedFinishElapsedMs! - sample.phaseStartElapsedMs
 
   return { elapsedMs, phaseElapsedMs, estimatedTotalMs, estimatedRemainingMs }
 }
