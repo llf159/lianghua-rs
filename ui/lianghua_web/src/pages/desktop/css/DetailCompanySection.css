@@ -111,10 +111,6 @@
 .details-company-table tbody tr:hover {
   background: var(--bg-secondary, #f8fafc);
 }
-.details-company-footnote {
-  margin: 14px 0 0;
-  line-height: 1.7;
-}
 @media (max-width: 900px) {
   .details-company-section {
     padding: 16px;
@@ -224,12 +220,6 @@
 .details-company-chart-crosshair text {
   fill: #fff;
   font-size: 10px;
-}
-.details-company-chart-hint {
-  color: #748195;
-  font-size: 12px;
-  line-height: 1.7;
-  margin: 6px 0 0;
 }
 .details-company-table-details > summary {
   cursor: pointer;

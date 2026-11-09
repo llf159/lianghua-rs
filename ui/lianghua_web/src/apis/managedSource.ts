@@ -136,21 +136,11 @@ export const MANAGED_SOURCE_FILES = [
   },
   {
     id: 'manipulation-behavior-db',
-    label: '操盘行为库',
-    description: '处罚文书整理后的单行为行情区间。',
+    label: '操盘行为与持仓库',
+    description: '处罚文书整理的行为事件与持仓检查。',
     fileName: 'real_trading_behavior.db',
     expectedSourcePath: 'source/real_trading_behavior.db',
     targetRelativePathSuffix: 'real_trading_behavior.db',
-    extensions: ['db'],
-    scanPathHints: ['behavior', 'manipulation'],
-  },
-  {
-    id: 'manipulation-behavior-v2-db',
-    label: '操盘行为与持仓双表库',
-    description: '处罚文书整理的行为事件与持仓检查。',
-    fileName: 'real_trading_behavior_v2.db',
-    expectedSourcePath: 'source/real_trading_behavior_v2.db',
-    targetRelativePathSuffix: 'real_trading_behavior_v2.db',
     extensions: ['db'],
     scanPathHints: ['behavior', 'manipulation'],
   },
@@ -318,7 +308,6 @@ export type ManagedSourceDatasetId =
   | 'cyq-bins'
   | 'cyq-chen-snapshot'
   | 'cyq-chen-bins'
-  | 'manipulation-stages'
   | 'manipulation-events'
   | 'manipulation-holdings'
   | 'stock-list-csv'

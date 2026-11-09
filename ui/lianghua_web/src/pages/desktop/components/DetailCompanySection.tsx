@@ -734,20 +734,6 @@ const CompanyDataChart = memo(function CompanyDataChart({
               </g>
             )}
           </svg>
-          <p className="details-company-chart-hint">
-            {horizontal
-              ? "每位股东只画一根持股数量柱，右侧同时标出持股数量和比例。点按查看完整名称与持仓。"
-              : `蓝柱：${primary.label}（左轴） · 橙线：${changeLabel}（右轴） · 点按 / 横向拖动查看详情`}
-          </p>
-          {!horizontal && (
-            <p className="details-company-chart-hint">
-              {comparePrevious ? "基期为上一披露期" : "基期为上年同报告期"}
-              ；变化率 =（本期 − 基期）/ |基期|。变化率右轴至少覆盖
-              −100%～100%，超出时按 100 个百分点整档扩展；百分比指标左轴固定
-              0～100%，越界以箭头标记。准星显示真实值。基期缺失或为 0
-              时断线显示。
-            </p>
-          )}
         </>
       )}
     </div>
@@ -933,14 +919,6 @@ export default memo(function DetailCompanySection({
                     </table>
                   </div>
                 </details>
-                <p className="details-note details-company-footnote">
-                  {selected.key.startsWith("top10_")
-                    ? "展示最新一期披露，按持股数量排列；持股比例沿用数据源口径。"
-                    : selected.key === "stk_holdernumber"
-                      ? "展示最近 8 个报告期；股东人数为披露日对应的报告期户数。"
-                      : "展示最近 8 个报告期；财务报表采用合并报表，利润及现金流为年初至报告期末累计值。"}{" "}
-                  缺失字段以“—”表示。
-                </p>
               </>
             )}
           </div>

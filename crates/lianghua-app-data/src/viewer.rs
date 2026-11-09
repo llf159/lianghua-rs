@@ -514,27 +514,13 @@ pub fn preview_managed_source_dataset(
             all_columns = columns;
             order_by_sql = "trade_date DESC, ts_code ASC, bin_index ASC";
         }
-        "manipulation-stages" | "manipulation-events" | "manipulation-holdings" => {
-            let (file_name, table, date_column, label) = match normalized_dataset_id {
-                "manipulation-events" => (
-                    "real_trading_behavior_v2.db",
-                    "behavior_events",
-                    "start_date",
-                    "操盘行为",
-                ),
-                "manipulation-holdings" => (
-                    "real_trading_behavior_v2.db",
-                    "holding_checks",
-                    "start_date",
-                    "操盘持仓检查",
-                ),
-                _ => (
-                    "real_trading_behavior.db",
-                    "stages",
-                    "stage_start",
-                    "操盘行为区间",
-                ),
+        "manipulation-events" | "manipulation-holdings" => {
+            let (table, label) = match normalized_dataset_id {
+                "manipulation-events" => ("behavior_events", "操盘行为"),
+                _ => ("holding_checks", "操盘持仓检查"),
             };
+            let file_name = "real_trading_behavior.db";
+            let date_column = "start_date";
             let db_path = source_path.join(file_name);
             if !db_path.exists() {
                 return Err(format!("操盘行为库不存在: {}", db_path.display()));
