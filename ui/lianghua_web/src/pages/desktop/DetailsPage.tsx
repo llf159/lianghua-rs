@@ -48,6 +48,7 @@ import {
   type StockDetailRealtimeData,
   type StockDetailPageData,
 } from "../../apis/details";
+import DetailCompanySection from "./components/DetailCompanySection";
 import IntradayChart from "./components/IntradayChart";
 import { ensureManagedSourcePath } from "../../apis/managedSource";
 import { readStoredRealtimeQuoteProvider } from "../../shared/realtimeSettings";
@@ -9386,6 +9387,10 @@ export default function DetailsPage({
           </div>
         </section>
       </div>
+
+      {sourcePathTrimmed && detailData?.resolved_ts_code ? (
+        <DetailCompanySection key={`${sourcePathTrimmed}:${detailData.resolved_ts_code}`} sourcePath={sourcePathTrimmed} tsCode={detailData.resolved_ts_code} />
+      ) : null}
 
       {sceneDetailModalOpen ? (
         <div

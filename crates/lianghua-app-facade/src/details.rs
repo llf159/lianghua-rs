@@ -1,3 +1,6 @@
+mod company;
+pub use company::{DetailCompanyDataset, get_stock_detail_company};
+
 use std::{
     collections::{HashMap, HashSet},
     fs,

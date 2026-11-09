@@ -421,3 +421,13 @@ export async function getStockDetailCyq(query: {
 }) {
   return invoke<StockDetailCyqData>('get_stock_detail_cyq', query)
 }
+
+export type DetailCompanyDataset = {
+  key: string
+  rows: Record<string, string | number | null>[]
+  error: string | null
+}
+
+export async function getStockDetailCompany(query: { sourcePath: string; tsCode: string }) {
+  return invoke<DetailCompanyDataset[]>('get_stock_detail_company', query)
+}

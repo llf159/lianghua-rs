@@ -272,6 +272,7 @@ export type AllMarketMonitorSnapshotData = {
   fetched_count: number;
   template_warning_message?: string | null;
   volume_ratio_status_message?: string | null;
+  volume_ratio_has_tasks?: boolean;
   volume_ratio_source_statuses?: VolumeRatioSourceStatus[];
   timings?: AllMarketMonitorTimings;
 };

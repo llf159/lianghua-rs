@@ -1155,6 +1155,7 @@ export default function AllMarketMonitorPage() {
           ? undefined
           : (lastProcessedDataVersionRef.current ?? undefined);
       const requestStarted = performance.now();
+      const volumeRatioFetchEnabled = volumeRatioEnabledRef.current;
       const result = await getAllMarketMonitorSnapshot(
         sourcePathTrimmed,
         realtimeProvider,
@@ -1167,7 +1168,7 @@ export default function AllMarketMonitorPage() {
         config.otherSortExpression.trim() || undefined,
         true,
         lastDataVersion,
-        volumeRatioEnabledRef.current,
+        volumeRatioFetchEnabled,
       );
       if (!enabledRef.current && !volumeRatioEnabledRef.current) return;
       const receivedAt = performance.now();
@@ -1185,10 +1186,13 @@ export default function AllMarketMonitorPage() {
       // 暂停补齐的本地故障不停止行情轮询，也不清空原榜单。
       setVolumeRatioSources(sourceStatuses);
       if (
-        sourceStatuses.some(
-          (item) => item.source === "local" && item.state === "blocked",
-        )
+        volumeRatioFetchEnabled &&
+        (result.volume_ratio_has_tasks === false ||
+          sourceStatuses.some(
+            (item) => item.source === "local" && item.state === "blocked",
+          ))
       ) {
+        volumeRatioEnabledRef.current = false;
         setVolumeRatioEnabled(false);
       }
       setVolumeRatioStatus(
@@ -2957,64 +2961,67 @@ export default function AllMarketMonitorPage() {
                   {volumeRatioStatus ||
                     (volumeRatioEnabled ? "准备拉取…" : "已暂停")}
                 </span>
-                <div className="all-market-volume-ratio-sources">
-                  {(
-                    [
-                      ["tencent", "腾讯"],
-                      ["eastmoney", "东财"],
-                      ["microsoft", "微软"],
-                      ["tonghuashun", "同花顺"],
-                      ["xueqiu", "雪球"],
-                      ["sse", "上交所"],
-                      ["szse", "深交所"],
-                      ["local", "本地"],
-                    ] as const
-                  ).map(([source, label]) => {
-                    const state =
-                      volumeRatioSources.find((item) => item.source === source)
-                        ?.state ?? (volumeRatioEnabled ? "waiting" : "paused");
-                    const text: Record<
-                      VolumeRatioSourceStatus["state"],
-                      string
-                    > = {
-                      paused: "已暂停",
-                      not_ready: "待开放",
-                      cooling_down: "冷却中",
-                      available: "正常",
-                      retrying: "待重试",
-                      waiting: "等待中",
-                      data_unavailable: "数据不可用",
-                      cache_error: "缓存异常",
-                      incomplete: "数据不全",
-                      blocked: "检查未通过",
-                    };
-                    return (
-                      <span
-                        key={source}
-                        className={`all-market-volume-source is-${state}`}
-                        title={
-                          source === "local" &&
-                          [
-                            "blocked",
-                            "data_unavailable",
-                            "incomplete",
-                          ].includes(state)
-                            ? "请更新日线、股票列表和交易日历后重新开启；缓存基准不一致时请清空量比缓存"
-                            : source === "microsoft"
-                              ? "沪深行情当日 09:50 后及后续休市日参与补齐"
-                              : source === "sse"
-                                ? "仅参与沪市股票分时补齐"
-                                : source === "szse"
-                                  ? "仅参与深市股票分时补齐"
-                                  : undefined
-                        }
-                      >
-                        <span>{label}</span>
-                        <strong>{text[state]}</strong>
-                      </span>
-                    );
-                  })}
-                </div>
+                {volumeRatioEnabled ? (
+                  <div className="all-market-volume-ratio-sources">
+                    {(
+                      [
+                        ["tencent", "腾讯"],
+                        ["eastmoney", "东财"],
+                        ["microsoft", "微软"],
+                        ["tonghuashun", "同花顺"],
+                        ["xueqiu", "雪球"],
+                        ["sse", "上交所"],
+                        ["szse", "深交所"],
+                        ["local", "本地"],
+                      ] as const
+                    ).map(([source, label]) => {
+                      const state =
+                        volumeRatioSources.find(
+                          (item) => item.source === source,
+                        )?.state ?? (volumeRatioEnabled ? "waiting" : "paused");
+                      const text: Record<
+                        VolumeRatioSourceStatus["state"],
+                        string
+                      > = {
+                        paused: "已暂停",
+                        not_ready: "待开放",
+                        cooling_down: "冷却中",
+                        available: "正常",
+                        retrying: "待重试",
+                        waiting: "等待中",
+                        data_unavailable: "数据不可用",
+                        cache_error: "缓存异常",
+                        incomplete: "数据不全",
+                        blocked: "检查未通过",
+                      };
+                      return (
+                        <span
+                          key={source}
+                          className={`all-market-volume-source is-${state}`}
+                          title={
+                            source === "local" &&
+                            [
+                              "blocked",
+                              "data_unavailable",
+                              "incomplete",
+                            ].includes(state)
+                              ? "请更新日线、股票列表和交易日历后重新开启；缓存基准不一致时请清空量比缓存"
+                              : source === "microsoft"
+                                ? "沪深行情当日 09:50 后及后续休市日参与补齐"
+                                : source === "sse"
+                                  ? "仅参与沪市股票分时补齐"
+                                  : source === "szse"
+                                    ? "仅参与深市股票分时补齐"
+                                    : undefined
+                          }
+                        >
+                          <span>{label}</span>
+                          <strong>{text[state]}</strong>
+                        </span>
+                      );
+                    })}
+                  </div>
+                ) : null}
               </div>
             </div>
             <div

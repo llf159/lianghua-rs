@@ -1060,6 +1060,21 @@ async fn get_stock_detail_kline_indicators(
 }
 
 #[tauri::command]
+async fn get_stock_detail_company(
+    source_path: String,
+    ts_code: String,
+) -> Result<Vec<lianghua_app_facade::details::DetailCompanyDataset>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        lianghua_app_facade::details::get_stock_detail_company(source_path, ts_code)
+    })
+    .await
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn get_stock_detail_overview(
     source_path: String,
     trade_date: String,
@@ -3563,6 +3578,7 @@ pub fn run() {
             get_stock_detail_page,
             get_stock_detail_kline_indicators,
             get_stock_detail_overview,
+            get_stock_detail_company,
             get_stock_detail_strategy_snapshot,
             get_stock_detail_prev_ranks,
             get_stock_detail_cyq,

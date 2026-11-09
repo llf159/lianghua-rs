@@ -167,6 +167,7 @@ pub struct AllMarketMonitorSnapshotData {
     pub fetched_count: usize,
     pub template_warning_message: Option<String>,
     pub volume_ratio_status_message: Option<String>,
+    pub volume_ratio_has_tasks: bool,
     pub volume_ratio_source_statuses: Vec<super::volume_ratio::VolumeRatioSourceStatus>,
     pub timings: AllMarketMonitorTimings,
 }
@@ -1312,6 +1313,9 @@ pub fn get_all_market_monitor_snapshot(
             fetched_count: fetch_meta.fetched_count,
             template_warning_message: None,
             volume_ratio_status_message,
+            volume_ratio_has_tasks: volume_ratios
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.has_tasks),
             volume_ratio_source_statuses,
             timings,
         });
@@ -1722,6 +1726,9 @@ pub fn get_all_market_monitor_snapshot(
         fetched_count: fetch_meta.fetched_count,
         template_warning_message,
         volume_ratio_status_message,
+        volume_ratio_has_tasks: volume_ratios
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.has_tasks),
         volume_ratio_source_statuses,
         timings,
     })
