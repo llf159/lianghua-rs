@@ -18,7 +18,7 @@
 .details-company-tabs {
   display: flex;
   gap: 8px;
-  overflow-x: auto;
+  flex-wrap: wrap;
   padding: 16px 0 12px;
   border-bottom: 1px solid var(--border-color, #e2e8f0);
   overscroll-behavior-x: contain;
@@ -125,5 +125,120 @@
   .details-company-table th,
   .details-company-table td {
     padding: 11px 12px;
+  }
+}
+.details-company-chart {
+  min-width: 0;
+  margin: 8px 0 18px;
+}
+.details-company-chart-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.details-company-chart-controls button {
+  border: 1px solid #d8dee6;
+  border-radius: 7px;
+  background: #fff;
+  color: #64748b;
+  min-height: 38px;
+  padding: 8px 12px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.details-company-chart-controls button.is-active {
+  background: #eaf2ff;
+  border-color: #a9c9fb;
+  color: #2563eb;
+  font-weight: 600;
+}
+.details-company-chart-readout {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 20px;
+  min-height: 54px;
+  padding: 12px 14px;
+  background: #f8fafc;
+  border: 1px solid #edf0f4;
+  border-radius: 8px;
+  font-size: 12px;
+  color: #64748b;
+}
+.details-company-chart-readout > div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.details-company-chart-readout > div:first-child {
+  flex-basis: 100%;
+}
+.details-company-chart-readout strong {
+  color: #26354a;
+  font-variant-numeric: tabular-nums;
+}
+.details-company-legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.details-company-chart-svg {
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  touch-action: pan-y;
+  cursor: crosshair;
+}
+.details-company-chart-svg:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+.details-company-chart-svg text {
+  font-size: 11px;
+  fill: #748195;
+  font-variant-numeric: tabular-nums;
+}
+.details-company-chart-grid {
+  stroke: #e8edf3;
+  stroke-dasharray: 3 4;
+}
+.details-company-chart-zero {
+  stroke: #cbd5e1;
+}
+.details-company-chart-crosshair line {
+  stroke: #64748b;
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+}
+.details-company-chart-crosshair rect {
+  fill: #334155;
+}
+.details-company-chart-crosshair text {
+  fill: #fff;
+  font-size: 10px;
+}
+.details-company-chart-hint {
+  color: #748195;
+  font-size: 12px;
+  line-height: 1.7;
+  margin: 6px 0 0;
+}
+.details-company-table-details > summary {
+  cursor: pointer;
+  padding: 12px 0;
+  color: #52657d;
+  font-size: 13px;
+}
+@media (max-width: 600px) {
+  .details-company-chart-controls {
+    gap: 10px;
   }
 }
