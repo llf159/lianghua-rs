@@ -514,8 +514,28 @@ pub fn preview_managed_source_dataset(
             all_columns = columns;
             order_by_sql = "trade_date DESC, ts_code ASC, bin_index ASC";
         }
-        "manipulation-stages" => {
-            let db_path = source_path.join("real_trading_behavior.db");
+        "manipulation-stages" | "manipulation-events" | "manipulation-holdings" => {
+            let (file_name, table, date_column, label) = match normalized_dataset_id {
+                "manipulation-events" => (
+                    "real_trading_behavior_v2.db",
+                    "behavior_events",
+                    "start_date",
+                    "操盘行为",
+                ),
+                "manipulation-holdings" => (
+                    "real_trading_behavior_v2.db",
+                    "holding_checks",
+                    "start_date",
+                    "操盘持仓检查",
+                ),
+                _ => (
+                    "real_trading_behavior.db",
+                    "stages",
+                    "stage_start",
+                    "操盘行为区间",
+                ),
+            };
+            let db_path = source_path.join(file_name);
             if !db_path.exists() {
                 return Err(format!("操盘行为库不存在: {}", db_path.display()));
             }
@@ -523,13 +543,13 @@ pub fn preview_managed_source_dataset(
                 &db_path,
                 OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
             )
-            .map_err(|error| format!("打开 real_trading_behavior.db 失败: {error}"))?;
+            .map_err(|error| format!("打开 {file_name} 失败: {error}"))?;
             sqlite
                 .busy_timeout(Duration::from_secs(5))
                 .map_err(|error| format!("设置操盘行为库读取超时失败: {error}"))?;
             let columns = {
                 let mut stmt = sqlite
-                    .prepare("PRAGMA table_info(\"stages\")")
+                    .prepare(&format!("PRAGMA table_info({})", quote_ident(table)))
                     .map_err(|error| format!("读取操盘行为库列结构失败: {error}"))?;
                 let rows = stmt
                     .query_map([], |row| row.get::<_, String>(1))
@@ -538,7 +558,7 @@ pub fn preview_managed_source_dataset(
                     .map_err(|error| format!("读取操盘行为库列名失败: {error}"))?
             };
             if columns.is_empty() {
-                return Err("操盘行为库缺少 stages 表".to_string());
+                return Err(format!("操盘行为库缺少 {table} 表"));
             }
             let where_sql = normalized_ts_code
                 .as_deref()
@@ -560,16 +580,17 @@ pub fn preview_managed_source_dataset(
                 .map(|column| format!("page.{} AS {}", quote_ident(column), quote_ident(column)))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let output_order = "page.\"stage_start\" DESC, page.\"ts_code\" ASC, \
-                                page.\"document_id\" ASC, page.\"behavior\" ASC";
             let sql = format!(
-                "WITH filtered AS (SELECT * FROM \"stages\"{where_sql}), \
-                 counts AS (SELECT (SELECT COUNT(*) FROM \"stages\") AS total_count, \
+                "WITH filtered AS (SELECT * FROM {table}{where_sql}), \
+                 counts AS (SELECT (SELECT COUNT(*) FROM {table}) AS total_count, \
                  COUNT(*) AS matched_count FROM filtered), \
-                 page AS (SELECT {page_columns} FROM filtered ORDER BY \"stage_start\" DESC, \"ts_code\" ASC, \
-                 \"document_id\" ASC, \"behavior\" ASC LIMIT {limit}) \
+                 page AS (SELECT {page_columns} FROM filtered ORDER BY {date} DESC, \
+                 \"ts_code\" ASC, \"document_id\" ASC LIMIT {limit}) \
                  SELECT counts.total_count, counts.matched_count, {output_columns} \
-                 FROM counts LEFT JOIN page ON TRUE ORDER BY {output_order}"
+                 FROM counts LEFT JOIN page ON TRUE ORDER BY page.{date} DESC, \
+                 page.\"ts_code\" ASC, page.\"document_id\" ASC",
+                table = quote_ident(table),
+                date = quote_ident(date_column),
             );
             let mut stmt = sqlite
                 .prepare(&sql)
@@ -613,7 +634,7 @@ pub fn preview_managed_source_dataset(
                 source_path: source_path.display().to_string(),
                 target_path: db_path.display().to_string(),
                 dataset_id: normalized_dataset_id.to_string(),
-                dataset_label: "操盘行为区间".to_string(),
+                dataset_label: label.to_string(),
                 row_count: row_count.max(0) as u64,
                 matched_rows: matched_rows.max(0) as u64,
                 columns,

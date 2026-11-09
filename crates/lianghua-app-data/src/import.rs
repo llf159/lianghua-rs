@@ -47,6 +47,7 @@ pub fn managed_source_file_name(file_id: &str) -> Option<&'static str> {
         "cyq-db" => Some("cyq.db"),
         "cyq-chen-db" => Some("cyq_chen.db"),
         "manipulation-behavior-db" => Some("real_trading_behavior.db"),
+        "manipulation-behavior-v2-db" => Some("real_trading_behavior_v2.db"),
         "chip-change-rule" => Some("chip_change_rule.toml"),
         "score-rule" => Some("score_rule.toml"),
         "indicator-config" => Some("ind.toml"),

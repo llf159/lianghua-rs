@@ -82,6 +82,12 @@ pub fn build_simulated_row_data(
     let previous_volume = latest_value(&["V"]).unwrap_or(0.0);
     let previous_amount = latest_value(&["AMOUNT"]).unwrap_or(0.0);
     let previous_turnover_rate = latest_value(&["TOR"]);
+    let last_turnover_rate = row_data
+        .cols
+        .get("TOR")
+        .and_then(|series| series.last())
+        .copied()
+        .flatten();
 
     let simulated_open = previous_close * (1.0 + simulate.open_gap_pct / 100.0);
     let simulated_close = if simulate.pct_chg_relative_to_open {
@@ -163,6 +169,17 @@ pub fn build_simulated_row_data(
         }
         if let Some(last) = series.last_mut() {
             *last = simulated_turnover_rate;
+        }
+    }
+
+    if let Some(series) = row_data.cols.get_mut("TOR_R") {
+        let previous_adjusted = series.get(total_len - 2).copied().flatten();
+        let adjusted = previous_adjusted
+            .zip(last_turnover_rate)
+            .map(|(value, _)| value * simulate.volume_ratio)
+            .filter(|value| value.is_finite());
+        if let Some(last) = series.last_mut() {
+            *last = adjusted;
         }
     }
 

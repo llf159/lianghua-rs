@@ -443,6 +443,7 @@ impl PanelSource for Source {
             })
             .cloned()
             .collect::<HashSet<_>>();
+        self.reader.inject_tor_r = required.contains("TOR_R");
         self.reader.cols_table = self
             .input_columns
             .iter()
@@ -724,6 +725,7 @@ fn refresh_inner(
         source,
         Some(&raw_inputs),
         Some(conn.try_clone().map_err(|e| e.to_string())?),
+        None,
     )?;
     let warm_index = if full {
         calendar.partition_point(|d| d < &first)
@@ -1144,7 +1146,7 @@ prec=12
         {
             let inputs = HashSet::from(["PCT_CHG".to_string(), "I_PCT_CHG".to_string()]);
             let reader =
-                DataReader::new_inner(source, Some(&inputs), Some(conn.try_clone().unwrap()))
+                DataReader::new_inner(source, Some(&inputs), Some(conn.try_clone().unwrap()), None)
                     .unwrap();
             let mut cached = Source {
                 input_columns: reader.cols_table.clone(),
@@ -1202,9 +1204,13 @@ prec=12
         );
 
         let requested = HashSet::from(["I_CUSTOM".to_string()]);
-        let selected =
-            DataReader::new_inner(source, Some(&requested), Some(conn.try_clone().unwrap()))
-                .unwrap();
+        let selected = DataReader::new_inner(
+            source,
+            Some(&requested),
+            Some(conn.try_clone().unwrap()),
+            None,
+        )
+        .unwrap();
         assert_eq!(
             selected
                 .load_one_tail_rows("A", "qfq", &dates[99], 1)

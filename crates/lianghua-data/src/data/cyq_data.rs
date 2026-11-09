@@ -796,7 +796,7 @@ pub fn maintain_cyq_incremental_if_db_exists(
         }));
     };
 
-    let reader = DataReader::new(source_dir)?;
+    let reader = DataReader::new_with_optional_tor_r(source_dir, None, false)?;
     let ts_codes = reader.list_ts_code(DEFAULT_ADJ_TYPE, &load_start_date, &end_date)?;
     let cyq_db_str = cyq_db
         .to_str()
@@ -892,7 +892,7 @@ pub fn maintain_cyq_incremental_if_db_exists(
         .par_chunks(CYQ_GROUP_SIZE_INCREMENTAL)
         .try_for_each_with(tx, |sender, ts_group| -> Result<(), String> {
             lianghua_model::task::checkpoint()?;
-            let worker_reader = DataReader::new(source_dir)?;
+            let worker_reader = DataReader::new_with_optional_tor_r(source_dir, None, false)?;
             let batch = compute_cyq_stock_group_batch(
                 &worker_reader,
                 &load_start_date,

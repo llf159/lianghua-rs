@@ -156,6 +156,7 @@
 
 .global-stock-search.is-inline {
   position: relative;
+  z-index: 40;
   top: auto;
   right: auto;
   display: inline-flex;

@@ -391,6 +391,8 @@ pub struct DataReader {
     pub runtime_index_cols: Vec<RuntimeIndexCol>,
     pub runtime_panel_fields: Vec<String>,
     pub source_dir: String,
+    shareholder_conn: Option<Connection>,
+    inject_tor_r: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -412,24 +414,33 @@ const RUNTIME_INDEX_COLS: [(&str, &str); 7] = [
 
 impl DataReader {
     pub fn new(source_dir: &str) -> Result<Self, String> {
-        Self::new_inner(source_dir, None, None)
+        Self::new_inner(source_dir, None, None, Some(true))
     }
 
     pub fn new_with_connection(source_dir: &str, conn: Connection) -> Result<Self, String> {
-        Self::new_inner(source_dir, None, Some(conn))
+        Self::new_inner(source_dir, None, Some(conn), Some(true))
     }
 
     pub fn new_with_runtime_keys(
         source_dir: &str,
         required_runtime_keys: &HashSet<String>,
     ) -> Result<Self, String> {
-        Self::new_inner(source_dir, Some(required_runtime_keys), None)
+        Self::new_inner(source_dir, Some(required_runtime_keys), None, None)
+    }
+
+    pub fn new_with_optional_tor_r(
+        source_dir: &str,
+        conn: Option<Connection>,
+        enabled: bool,
+    ) -> Result<Self, String> {
+        Self::new_inner(source_dir, None, conn, Some(enabled))
     }
 
     fn new_inner(
         source_dir: &str,
         required_runtime_keys: Option<&HashSet<String>>,
         conn: Option<Connection>,
+        tor_r_override: Option<bool>,
     ) -> Result<Self, String> {
         let conn = match conn {
             Some(conn) => conn,
@@ -558,6 +569,7 @@ impl DataReader {
             }
             selected_runtime_keys.extend(runtime_panel_fields.iter().cloned());
             selected_runtime_keys.insert("TOTAL_MV_YI".to_string());
+            selected_runtime_keys.insert("TOR_R".to_string());
             let mut missing_runtime_keys = required_runtime_keys
                 .iter()
                 .filter(|runtime_key| !runtime_key_required(&selected_runtime_keys, runtime_key))
@@ -609,8 +621,22 @@ impl DataReader {
             select_cols.join(",\n")
         );
 
+        let inject_tor_r = tor_r_override
+            .unwrap_or_else(|| required_runtime_keys.is_none_or(|keys| keys.contains("TOR_R")));
+        let shareholder_path =
+            Path::new(source_dir).join(company_data::CompanyDbKind::Fundamentals.file_name());
+        let shareholder_conn = if inject_tor_r && shareholder_path.is_file() {
+            duckdb::Config::default()
+                .access_mode(duckdb::AccessMode::ReadOnly)
+                .ok()
+                .and_then(|config| Connection::open_with_flags(shareholder_path, config).ok())
+        } else {
+            None
+        };
         Ok(Self {
             conn,
+            shareholder_conn,
+            inject_tor_r,
             query_sql,
             query_tail_rows_sql,
             cols_table: db_cols_table,
@@ -658,6 +684,7 @@ impl DataReader {
             Ok(RowData { trade_dates, cols })
         })?;
         self.inject_estimated_market_cap(&mut out)?;
+        self.inject_tor_r(ts_code, &mut out);
         self.inject_runtime_index(&mut out)?;
         self.inject_panel(ts_code, &mut out)?;
         out.validate()?;
@@ -711,6 +738,7 @@ impl DataReader {
             Ok(RowData { trade_dates, cols })
         })?;
         self.inject_estimated_market_cap(&mut out)?;
+        self.inject_tor_r(ts_code, &mut out);
         self.inject_runtime_index(&mut out)?;
         self.inject_panel(ts_code, &mut out)?;
         out.validate()?;
@@ -835,8 +863,10 @@ impl DataReader {
         } else {
             start_date.to_string()
         };
-        for row_data in result.values_mut() {
+        let shareholder_reports = self.load_tor_r_reports(ts_codes);
+        for (code, row_data) in &mut result {
             self.inject_estimated_market_cap(row_data)?;
+            self.apply_tor_r(row_data, shareholder_reports.get(code));
         }
         result.retain(|_, row_data| !row_data.trade_dates.is_empty());
         if !result.is_empty() && !self.runtime_index_cols.is_empty() {
@@ -893,6 +923,7 @@ impl DataReader {
                 end_date,
             )?)
         };
+        let shareholder_reports = self.load_tor_r_reports(ts_codes);
         let empty_row = || RowData {
             trade_dates: Vec::new(),
             cols: self
@@ -903,6 +934,7 @@ impl DataReader {
         };
         let finish_row = |ts_code: &str, mut row: RowData| -> Result<RowData, String> {
             self.inject_estimated_market_cap(&mut row)?;
+            self.apply_tor_r(&mut row, shareholder_reports.get(ts_code));
             if let Some(values) = &index_values_by_key {
                 self.inject_runtime_index_series(&mut row, values);
             }
@@ -1060,6 +1092,76 @@ impl DataReader {
             .collect();
         row_data.cols.insert("TOTAL_MV_YI".to_string(), series);
         Ok(())
+    }
+
+    pub fn load_tor_r_reports(
+        &self,
+        codes: &[String],
+    ) -> HashMap<String, Vec<(String, String, Option<f64>)>> {
+        if !self.inject_tor_r || codes.is_empty() {
+            return HashMap::new();
+        }
+        (|| {
+            let conn = self.shareholder_conn.as_ref()?;
+            let placeholders = vec!["?"; codes.len()].join(",");
+            let sql = format!("SELECT ts_code, end_date, ann_date, CASE WHEN count(*) = count(TRY_CAST(hold_float_ratio AS DOUBLE)) AND count(*) = count(DISTINCT holder_name) AND count(*) BETWEEN 1 AND 10 AND min(TRY_CAST(hold_float_ratio AS DOUBLE)) >= 0 THEN sum(TRY_CAST(hold_float_ratio AS DOUBLE)) ELSE NULL END FROM top10_holders WHERE ts_code IN ({placeholders}) AND end_date IS NOT NULL AND ann_date IS NOT NULL GROUP BY ts_code, end_date, ann_date");
+            let mut stmt = conn.prepare(&sql).ok()?;
+            let records = stmt.query_map(duckdb::params_from_iter(codes.iter()), |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, Option<f64>>(3)?))).ok()?;
+            let mut reports = HashMap::<String, Vec<(String, String, Option<f64>)>>::new();
+            for record in records {
+                let (code, end, announced, ratio) = record.ok()?;
+                reports.entry(code).or_default().push((end, announced, ratio));
+            }
+            for entries in reports.values_mut() {
+                entries.sort_by(|a, b| a.0.as_str().max(a.1.as_str()).cmp(b.0.as_str().max(b.1.as_str())));
+            }
+            Some(reports)
+        })().unwrap_or_default()
+    }
+
+    pub fn inject_tor_r(&self, ts_code: &str, row: &mut RowData) {
+        let reports = self.load_tor_r_reports(&[ts_code.to_string()]);
+        self.apply_tor_r(row, reports.get(ts_code));
+    }
+
+    pub fn apply_tor_r(
+        &self,
+        row: &mut RowData,
+        reports: Option<&Vec<(String, String, Option<f64>)>>,
+    ) {
+        if !self.inject_tor_r {
+            return;
+        }
+        let mut next = 0;
+        let mut latest: Option<&(String, String, Option<f64>)> = None;
+        let values = row
+            .trade_dates
+            .iter()
+            .enumerate()
+            .map(|(index, date)| {
+                if let Some(reports) = reports {
+                    while next < reports.len()
+                        && &reports[next].0 <= date
+                        && &reports[next].1 < date
+                    {
+                        let report = &reports[next];
+                        if latest.is_none_or(|old| report.0 >= old.0) {
+                            latest = Some(report);
+                        }
+                        next += 1;
+                    }
+                }
+                let ratio = latest?.2?;
+                let tor = row.cols.get("TOR")?.get(index).copied().flatten()?;
+                (ratio.is_finite()
+                    && (0.0..100.0).contains(&ratio)
+                    && tor.is_finite()
+                    && tor >= 0.0)
+                    .then_some(tor / (1.0 - ratio / 100.0))
+                    .filter(|value| value.is_finite())
+            })
+            .collect();
+        row.cols.insert("TOR_R".into(), values);
     }
 
     pub fn list_ts_code(
@@ -1887,6 +1989,7 @@ impl IndsData {
                         "SESSION"
                             | "LISTED_DAYS"
                             | "TOTAL_MV_YI"
+                            | "TOR_R"
                             | "RANK"
                             | "SCORE"
                             | "S_RANK"
@@ -2167,6 +2270,41 @@ when = "C > O"
 
         let error = ScoreConfig::validate(&cfg).expect_err("zero-hit points must be zero");
         assert!(error.contains("points_by_hits[0] 必须为 0"));
+    }
+
+    #[test]
+    fn tor_r_uses_announced_float_ratios_and_missing_data_is_unknown() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE stock_data (ts_code VARCHAR, trade_date VARCHAR, adj_type VARCHAR, tor DOUBLE)").unwrap();
+        let keys = ["TOR_R".to_string()].into_iter().collect();
+        let mut reader = DataReader::new_inner("", Some(&keys), Some(conn), None).unwrap();
+        let company = Connection::open_in_memory().unwrap();
+        company.execute_batch("CREATE TABLE top10_holders (ts_code VARCHAR, end_date VARCHAR, ann_date VARCHAR, holder_name VARCHAR, hold_float_ratio DOUBLE); INSERT INTO top10_holders VALUES ('A','20240331','20240430','one',20), ('A','20240331','20240430','two',30), ('A','20240630','20240801','one',NULL)").unwrap();
+        reader.shareholder_conn = Some(company);
+        let mut row = super::RowData {
+            trade_dates: ["20240430", "20240506", "20240802"]
+                .map(str::to_string)
+                .to_vec(),
+            cols: [("TOR".into(), vec![Some(5.0); 3])].into_iter().collect(),
+        };
+        reader.inject_tor_r("A", &mut row);
+        assert_eq!(row.cols["TOR_R"], vec![None, Some(10.0), None]);
+        reader.shareholder_conn.as_ref().unwrap().execute_batch("INSERT INTO top10_holders VALUES ('A','20240331','20240510','one',10), ('A','20240331','20240510','two',30)").unwrap();
+        row.trade_dates = ["20240506", "20240510", "20240513"]
+            .map(str::to_string)
+            .to_vec();
+        reader.inject_tor_r("A", &mut row);
+        assert_eq!(
+            row.cols["TOR_R"],
+            vec![Some(10.0), Some(10.0), Some(5.0 / 0.6)]
+        );
+        reader.shareholder_conn = None;
+        reader.inject_tor_r("A", &mut row);
+        assert_eq!(row.cols["TOR_R"], vec![None; 3]);
+        reader.inject_tor_r = false;
+        row.cols.remove("TOR_R");
+        reader.inject_tor_r("A", &mut row);
+        assert!(!row.cols.contains_key("TOR_R"));
     }
 
     #[test]

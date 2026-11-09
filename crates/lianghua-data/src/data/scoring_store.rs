@@ -591,10 +591,7 @@ mod tests {
 
         init_result_db(&db_path).expect("migrate indexes");
         let conn = Connection::open(&db_path).expect("reopen result db");
-        assert_eq!(
-            explicit_result_index_names(&conn),
-            Vec::<String>::new()
-        );
+        assert_eq!(explicit_result_index_names(&conn), Vec::<String>::new());
 
         drop(conn);
         fs::remove_dir_all(temp_dir).expect("remove temp dir");
@@ -646,10 +643,7 @@ mod tests {
             .expect("count summary rows"),
             2
         );
-        assert_eq!(
-            explicit_result_index_names(&conn),
-            Vec::<String>::new()
-        );
+        assert_eq!(explicit_result_index_names(&conn), Vec::<String>::new());
         for table_name in ["score_summary", "rule_details", "scene_details"] {
             assert!(
                 result_table_has_primary_key(&conn, table_name).expect("check primary key"),
@@ -1648,7 +1642,6 @@ pub fn write_score_batches_from_channel(
                 Ok(())
             },
         )?;
-
 
         Ok::<(), String>(())
     })();

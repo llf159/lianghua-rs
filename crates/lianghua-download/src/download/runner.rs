@@ -2114,7 +2114,19 @@ pub fn download_selected_indices(
                     .iter()
                     .map(|(ts_code, latest)| (ts_code.clone(), latest.trade_date.clone()))
                     .collect::<HashMap<_, _>>();
-                let dr = DataReader::new(source_dir)?;
+                let dr = DataReader::new_with_optional_tor_r(
+                    source_dir,
+                    None,
+                    inds_cache
+                        .iter()
+                        .any(|ind| ind.input_identifiers.contains("TOR_R")),
+                )?;
+                let reports = dr.load_tor_r_reports(
+                    &prepared_items
+                        .iter()
+                        .map(|item| item.ts_code.clone())
+                        .collect::<Vec<_>>(),
+                );
                 let history_rows_by_stock = load_many_tail_rows_with_warmup_need(
                     &dr,
                     "ind",
@@ -2124,6 +2136,9 @@ pub fn download_selected_indices(
 
                 for item in prepared_items {
                     item.indicators = calc_increment_inds_from_history(
+                        &dr,
+                        &item.ts_code,
+                        &reports,
                         &inds_cache,
                         history_rows_by_stock.get(&item.ts_code).cloned(),
                         &item.rows,
@@ -2529,7 +2544,19 @@ fn download_pending_all_market_after_basic_data(
                 stock_rows
                     .par_chunks(256)
                     .map(|chunk| -> Result<Vec<PreparedStockDownload>, String> {
-                        let dr = DataReader::new(source_dir)?;
+                        let dr = DataReader::new_with_optional_tor_r(
+                            source_dir,
+                            None,
+                            inds_cache
+                                .iter()
+                                .any(|ind| ind.input_identifiers.contains("TOR_R")),
+                        )?;
+                        let reports = dr.load_tor_r_reports(
+                            &chunk
+                                .iter()
+                                .map(|(code, _)| code.clone())
+                                .collect::<Vec<_>>(),
+                        );
                         let chunk_end_dates = chunk
                             .iter()
                             .filter_map(|(ts_code, _)| {
@@ -2556,6 +2583,9 @@ fn download_pending_all_market_after_basic_data(
                         for (ts_code, rows) in chunk {
                             lianghua_model::task::checkpoint()?;
                             let indicators = calc_increment_inds_from_history(
+                                &dr,
+                                ts_code,
+                                &reports,
                                 inds_cache,
                                 history_rows_by_stock.remove(ts_code),
                                 rows.as_slice(),

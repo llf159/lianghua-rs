@@ -591,7 +591,13 @@ fn compute_stock_data_indicator_rebuild_batch(
     inds_cache: &[lianghua_download::download::ind_calc::IndsCache],
     work_group: &[StockDataIndicatorWorkItem],
 ) -> Result<(), String> {
-    let reader = DataReader::new_with_connection(source_path, conn)?;
+    let reader = DataReader::new_with_optional_tor_r(
+        source_path,
+        Some(conn),
+        inds_cache
+            .iter()
+            .any(|ind| ind.input_identifiers.contains("TOR_R")),
+    )?;
 
     for item in work_group {
         lianghua_model::task::checkpoint()?;
@@ -1751,6 +1757,18 @@ pub fn run_prepared_data_download(
                             recovered_stock_codes,
                         )?;
                     }
+                    if !history_rebuild_required && !recovered_stock_codes.is_empty() {
+                        if let Some(cb) = progress_cb {
+                            cb(DownloadProgress {
+                                phase: "maintain_cyq_incremental".to_string(),
+                                finished: 0,
+                                total: 0,
+                                current_label: None,
+                                message: "单股筹码修复结束，开始准备全市场筹码增量维护。"
+                                    .to_string(),
+                            });
+                        }
+                    }
                     let incremental_progress_cb = |progress: DownloadProgress| {
                         emit_chip_maintenance_progress(
                             progress_cb,
@@ -1849,6 +1867,18 @@ pub fn run_prepared_data_download(
                             Some(&repair_progress_cb),
                         )?
                     };
+                    if !recovered_stock_codes.is_empty() {
+                        if let Some(cb) = progress_cb {
+                            cb(DownloadProgress {
+                                phase: "maintain_cyq_incremental".to_string(),
+                                finished: 0,
+                                total: 0,
+                                current_label: None,
+                                message: "单股筹码修复结束，开始准备全市场筹码增量维护。"
+                                    .to_string(),
+                            });
+                        }
+                    }
                     let incremental_summary = maintain_cyq_incremental_if_db_exists(source_path)?;
                     let snapshot_rows = repair_summary
                         .as_ref()

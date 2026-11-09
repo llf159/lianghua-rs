@@ -365,6 +365,9 @@ fn pro_bar_rows_to_row_data(rows: &[ProBarRow]) -> Result<RowData, String> {
 }
 
 pub fn calc_increment_inds_from_history(
+    dr: &DataReader,
+    ts_code: &str,
+    reports: &HashMap<String, Vec<(String, String, Option<f64>)>>,
     inds_cache: &[IndsCache],
     history: Option<RowData>,
     new_rows: &[ProBarRow],
@@ -373,29 +376,31 @@ pub fn calc_increment_inds_from_history(
         return Err("增量指标计算失败: new_rows为空".to_string());
     }
 
-    let combined = (|history: Option<RowData>, rows: &[ProBarRow]| -> Result<RowData, String> {
-        let current = pro_bar_rows_to_row_data(rows)?;
+    let mut combined =
+        (|history: Option<RowData>, rows: &[ProBarRow]| -> Result<RowData, String> {
+            let current = pro_bar_rows_to_row_data(rows)?;
 
-        let Some(mut history) = history else {
-            return Ok(current);
-        };
+            let Some(mut history) = history else {
+                return Ok(current);
+            };
 
-        for field in STOCK_DATA_RUNTIME_FIELDS {
-            let key = field.runtime_key;
-            let src = current
-                .cols
-                .get(key)
-                .ok_or_else(|| format!("缺少指标输入列:{key}"))?;
-            let dst = history
-                .cols
-                .get_mut(key)
-                .ok_or_else(|| format!("历史数据缺少指标输入列:{key}"))?;
-            dst.extend_from_slice(src);
-        }
-        history.trade_dates.extend(current.trade_dates);
-        history.validate()?;
-        Ok(history)
-    })(history, new_rows)?;
+            for field in STOCK_DATA_RUNTIME_FIELDS {
+                let key = field.runtime_key;
+                let src = current
+                    .cols
+                    .get(key)
+                    .ok_or_else(|| format!("缺少指标输入列:{key}"))?;
+                let dst = history
+                    .cols
+                    .get_mut(key)
+                    .ok_or_else(|| format!("历史数据缺少指标输入列:{key}"))?;
+                dst.extend_from_slice(src);
+            }
+            history.trade_dates.extend(current.trade_dates);
+            history.validate()?;
+            Ok(history)
+        })(history, new_rows)?;
+    dr.apply_tor_r(&mut combined, reports.get(ts_code));
     let indicators = calc_inds_with_cache(inds_cache, combined)?;
     let keep_len = new_rows.len();
     let mut out = HashMap::with_capacity(indicators.len());
@@ -520,7 +525,8 @@ pub fn calc_increment_one_stock_inds(
         })(dr, ts_code, adj_type, end_date, warmup_need)?,
         None => None,
     };
-    calc_increment_inds_from_history(inds_cache, history, new_rows)
+    let reports = dr.load_tor_r_reports(&[ts_code.to_string()]);
+    calc_increment_inds_from_history(dr, ts_code, &reports, inds_cache, history, new_rows)
 }
 
 pub fn calc_inds_for_rows_with_cache(
@@ -546,7 +552,18 @@ pub fn calc_one_stock_inds(
     if inds_cache.is_empty() {
         return Ok(HashMap::new());
     }
-    calc_inds_with_cache(&inds_cache, pro_bar_rows_to_row_data(rows)?)
+    let mut data = pro_bar_rows_to_row_data(rows)?;
+    if inds_cache
+        .iter()
+        .any(|ind| ind.input_identifiers.contains("TOR_R"))
+    {
+        if let Ok(reader) = DataReader::new_with_optional_tor_r(source_dir, None, true) {
+            reader.inject_tor_r(&rows[0].ts_code, &mut data);
+        } else {
+            data.cols.insert("TOR_R".into(), vec![None; rows.len()]);
+        }
+    }
+    calc_inds_with_cache(&inds_cache, data)
 }
 
 #[cfg(test)]
@@ -641,5 +658,41 @@ mod tests {
         let result = calc_inds_for_rows_with_cache(&cache, &rows).expect("calculate indicators");
 
         assert_eq!(result.get("FLOW_SUM"), Some(&vec![Some(18.0)]));
+
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE stock_data (ts_code VARCHAR, trade_date VARCHAR, adj_type VARCHAR, open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE, pre_close DOUBLE, change DOUBLE, pct_chg DOUBLE, vol DOUBLE, amount DOUBLE, tor DOUBLE)").unwrap();
+        let reader =
+            crate::data::DataReader::new_with_optional_tor_r("", Some(conn), true).unwrap();
+        let reports = [(
+            "000001.SZ".into(),
+            vec![("20231231".into(), "20240101".into(), Some(40.0))],
+        )]
+        .into_iter()
+        .collect();
+        let defs = IndsData::parse_from_text(
+            "version = 1\n[[ind]]\nname = \"ADJ\"\nexpr = \"TOR_R\"\nprec = 2",
+        )
+        .unwrap();
+        let cache = compile_indicator_defs(defs).unwrap();
+        let result = super::calc_increment_inds_from_history(
+            &reader,
+            "000001.SZ",
+            &reports,
+            &cache,
+            None,
+            &rows,
+        )
+        .unwrap();
+        assert_eq!(result["ADJ"], vec![Some(2.0)]);
+        let result = super::calc_increment_inds_from_history(
+            &reader,
+            "000001.SZ",
+            &HashMap::new(),
+            &cache,
+            None,
+            &rows,
+        )
+        .unwrap();
+        assert_eq!(result["ADJ"], vec![None]);
     }
 }

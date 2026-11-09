@@ -11,7 +11,8 @@ use crate::expr::eval::Value;
 use crate::expr::{
     parser::Stmts,
     validation::{
-        estimate_expression_warmup, parse_expression_program, validate_expression_functions,
+        estimate_expression_warmup, expression_input_identifiers, parse_expression_program,
+        validate_expression_functions,
     },
 };
 use crate::{
@@ -561,6 +562,13 @@ fn validate_rule_definition(
             latest_trade_date,
             need_rows,
         )?;
+        if expression_programs
+            .iter()
+            .any(|(_, program)| expression_input_identifiers(program).contains("TOR_R"))
+        {
+            DataReader::new_with_optional_tor_r(source_path, None, true)?
+                .inject_tor_r(sample_ts_code, &mut row_data);
+        }
         inject_stock_extra_fields(
             &mut row_data,
             sample_ts_code,
@@ -614,7 +622,7 @@ fn load_validation_context(
     ),
     String,
 > {
-    let reader = DataReader::new(source_path)?;
+    let reader = DataReader::new_with_optional_tor_r(source_path, None, false)?;
     let latest_trade_date = reader
         .conn
         .query_row(

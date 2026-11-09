@@ -763,6 +763,17 @@ fn inject_chart_indicator_extra_runtime_fields(
         row_data,
         input_fields,
     )?;
+    if input_fields.contains("TOR_R") {
+        if let Ok(reader) =
+            crate::data::DataReader::new_with_optional_tor_r(source_path, None, true)
+        {
+            reader.inject_tor_r(ts_code, row_data);
+        } else {
+            row_data
+                .cols
+                .insert("TOR_R".into(), vec![None; row_data.trade_dates.len()]);
+        }
+    }
     if input_fields.contains("ZHANG")
         || input_fields.contains("BOARD_ID")
         || input_fields.contains("TOTAL_MV_YI")

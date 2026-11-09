@@ -1097,6 +1097,7 @@ fn is_base_runtime_key(key: &str) -> bool {
             | "CHANGE"
             | "PCT_CHG"
             | "TOR"
+            | "TOR_R"
     )
 }
 

@@ -228,6 +228,7 @@ mod tests {
             "",
             Some(&HashSet::from(["C".to_string()])),
             Some(conn),
+            None,
         )
         .unwrap();
         let expected = vec![Some(500.0), Some(200.0), None, None, None, None];

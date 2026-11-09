@@ -148,6 +148,22 @@ const DATASET_OPTIONS: DatasetOption[] = [
     supportsTsCode: true,
   },
   {
+    id: 'manipulation-events',
+    label: '操盘行为双表：行为',
+    description: '查看独立双表库中的操盘行为，阶段与日记录可能重叠。',
+    requiredFileId: 'manipulation-behavior-v2-db',
+    supportsTradeDate: false,
+    supportsTsCode: true,
+  },
+  {
+    id: 'manipulation-holdings',
+    label: '操盘行为双表：持仓',
+    description: '查看独立双表库中的持仓观察、变化及峰值。',
+    requiredFileId: 'manipulation-behavior-v2-db',
+    supportsTradeDate: false,
+    supportsTsCode: true,
+  },
+  {
     id: 'stock-list-csv',
     label: '股票列表 CSV',
     description: '查看 stock_list.csv，包含名称、市值、拼音首字母等基础信息。',
