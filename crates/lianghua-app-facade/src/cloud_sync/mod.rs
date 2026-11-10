@@ -3,7 +3,7 @@ mod database;
 mod dav;
 mod review;
 mod strategies;
-pub use review::{CloudPreview, StrategyResolution, preview, resolve_strategies};
+pub use review::{CloudPreview, SnapshotDecision, StrategyResolution, preview, resolve_strategies};
 mod watchlists;
 pub use strategies::transfer as transfer_strategies;
 
@@ -151,7 +151,7 @@ impl Default for Manifest {
 }
 impl Manifest {
     fn validate(&self) -> Result<(), String> {
-        if !matches!(self.format, 1 | 2 | 3) {
+        if !matches!(self.format, 1 | 2 | 3 | 4 | 5) {
             return Err("云端同步格式不兼容，请更新应用".into());
         }
         if (self.format == 1 && !self.packs.is_empty())
@@ -339,8 +339,8 @@ pub fn list_cloud(app_data: &Path, source: &Path) -> Result<Vec<CloudItem>, Stri
 fn cloud_items(manifest: &Manifest, state: &SyncState) -> Vec<CloudItem> {
     let mut items = Vec::new();
     for (path, versions) in &manifest.entries {
-        let superseded =
-            replacement_path(path).is_some_and(|group| !manifest.heads(group).is_empty());
+        let superseded = path.starts_with("source/strategy_snapshots/")
+            || replacement_path(path).is_some_and(|group| !manifest.heads(group).is_empty());
         let heads = if superseded {
             Vec::new()
         } else {
@@ -406,7 +406,6 @@ fn local_files(
     for name in [
         "strategy_backups",
         "chip_change_rule_backups",
-        "strategy_snapshots",
         "cloud_sync_backups",
     ] {
         let root = source.join(name);
@@ -613,6 +612,26 @@ pub fn sync_scoped(
         dav.acquire()?;
     }
     let original_manifest = dav.manifest.clone();
+    if !download_only {
+        dav.manifest.format = 5;
+    }
+    // 旧基线包中的计算快照不再算作策略编辑；仅在原始缓存可核实时迁移。
+    if let (Some(base), Some(current)) = (
+        state.base.get_mut("bundles/strategies.zip"),
+        snapshots.get("bundles/strategies.zip"),
+    ) {
+        if let Ok(compressed) = fs::read(local.join("objects").join(format!("{}.gz", base.hash))) {
+            if let Ok(raw) = decode(&compressed, 512 * 1024 * 1024) {
+                if digest(&raw) == base.hash {
+                    let groups =
+                        bundles::snapshots(&bundles::read("bundles/strategies.zip", &raw, false)?)?;
+                    if groups.get("bundles/strategies.zip") == Some(current) {
+                        base.local_hash = Some(digest(current));
+                    }
+                }
+            }
+        }
+    }
     let mut result = SyncResult::default();
     let mut retained_days = BTreeSet::new();
     for (kind, count) in [("ranking/", 5), ("similarity/", 1)] {
@@ -671,6 +690,21 @@ pub fn sync_scoped(
             result.skipped += 1;
             continue;
         }
+        if path == "ranking/scoring_result.zip" && !heads.is_empty() {
+            let compatible = if heads.len() == 1 {
+                let remote = dav.download(&heads[0].hash, &local.join("objects"))?;
+                database::same_rank_strategy(path, bytes, &remote)?
+            } else {
+                false
+            };
+            if !compatible {
+                result.conflicts.push(path.clone());
+                result.warnings.push(
+                    "总榜策略快照不同、来源未知或存在多个分支，请查看日期和快照后选择来源".into(),
+                );
+                continue;
+            }
+        }
         let parents = state
             .base
             .get(path)
@@ -694,7 +728,7 @@ pub fn sync_scoped(
             &compressed,
         )?;
         if path.starts_with("bundles/") || database::is_snapshot(path) {
-            dav.manifest.format = 3;
+            dav.manifest.format = 5;
         }
         let version = dav.manifest.add(
             path,
@@ -735,6 +769,9 @@ pub fn sync_scoped(
         .cloned()
         .collect::<Vec<_>>()
     {
+        if path.starts_with("source/strategy_snapshots/") {
+            continue;
+        }
         if replacement_path(&path).is_some_and(|group| !dav.manifest.heads(group).is_empty()) {
             continue;
         }
@@ -798,6 +835,49 @@ pub fn sync_scoped(
                 .push(format!("同步期间本地已变化，保留当前内容：{path}"));
             continue;
         }
+        if path.starts_with("ranking/") || path.starts_with("similarity/") {
+            let dates = database::rank_sources(&path, &bytes)?
+                .dates
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>();
+            let replaces_all = match database::rank_replaces_all(source, &path, &bytes) {
+                Ok(value) => value,
+                Err(error) => {
+                    result.conflicts.push(path.clone());
+                    result.warnings.push(error);
+                    continue;
+                }
+            };
+            if replaces_all
+                || database::export_dates(source, &path, &dates)?.is_some()
+                || current.is_some()
+            {
+                if !result.conflicts.contains(&path) {
+                    result.conflicts.push(path.clone());
+                }
+                result.warnings.push(format!(
+                    "{path} 将替换本地已有日期、来源或当前参数，请查看覆盖范围后明确选择"
+                ));
+                continue;
+            }
+        }
+        if path == "bundles/strategies.zip" {
+            let groups = bundles::snapshots(&bundles::read(&path, &bytes, true)?)?;
+            if groups.get(&path) == current.as_ref() {
+                state.receiving.remove(&path);
+                state.base.insert(
+                    path.clone(),
+                    Base {
+                        id: version.id.clone(),
+                        hash: version.hash.clone(),
+                        local_hash: current.as_ref().map(|bytes| digest(bytes)),
+                        pending_hash: None,
+                    },
+                );
+                continue;
+            }
+        }
         state.receiving.insert(path.clone());
         atomic_write(
             &state_path,
@@ -858,9 +938,13 @@ pub fn restore(
     path: &str,
     id: &str,
     settings: BTreeMap<String, String>,
+    decision: Option<SnapshotDecision>,
     progress: impl Fn(&str),
 ) -> Result<SyncResult, String> {
     validate_path(path)?;
+    if path.starts_with("source/strategy_snapshots/") {
+        return Err("旧计算快照仅保留为历史，请通过排名包接收对应策略来源".into());
+    }
     let config = get_config(app_data)?;
     let local = local_root(app_data, source, &config)?;
     let mut dav = dav::Dav::new(&config)?;
@@ -881,13 +965,41 @@ pub fn restore(
     let _guard = SOURCE_ACCESS
         .try_write()
         .map_err(|_| "下载、计算或数据操作正在进行，请完成后再恢复")?;
-    // 尚未同步的本地改动也先保留到云端，恢复动作才可以合并所有冲突分支。
+    // 策略及配置保留未同步内容；排名按明确选择替换，不额外备份被舍弃的本机结果。
     let current = if let Some(key) = path.strip_prefix("settings/") {
         settings.get(key).map(|v| v.as_bytes().to_vec())
     } else {
         current_bytes(app_data, source, path, &settings)?
     };
-    if let Some(current) = current {
+    let mut replace_all = false;
+    if path.starts_with("ranking/") || path.starts_with("similarity/") {
+        let decision = decision.ok_or("请先查看榜单日期和覆盖范围，再明确选择云端版本")?;
+        let heads = dav
+            .manifest
+            .heads(path)
+            .iter()
+            .map(|version| version.id.clone())
+            .collect::<BTreeSet<_>>();
+        let dates = database::rank_sources(path, &bytes)?
+            .dates
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let overlap = database::export_dates(source, path, &dates)?;
+        replace_all = database::rank_replaces_all(source, path, &bytes)?;
+        if decision.replace_all != replace_all
+            || decision.local_revision.as_ref() != Some(&database::local_revision(source, path)?)
+            || decision.local_hash != current.as_ref().map(|bytes| digest(bytes))
+            || decision.heads.into_iter().collect::<BTreeSet<_>>() != heads
+            || decision.dates != dates
+            || decision.overlap_hash != overlap.as_ref().map(|bytes| digest(bytes))
+        {
+            return Err("本地榜单、覆盖日期或云端分支在预览后已变化，请刷新后重新选择".into());
+        }
+    }
+    if let Some(current) =
+        current.filter(|_| !path.starts_with("ranking/") && !path.starts_with("similarity/"))
+    {
         let hash = digest(&current);
         if hash != version.hash && !dav.manifest.heads(path).iter().any(|v| v.hash == hash) {
             let compressed = encode(&current)?;
@@ -913,6 +1025,7 @@ pub fn restore(
         version.size,
         version.compressed_size,
     );
+    dav.manifest.format = 5;
     dav.persist()?;
     let state_path = local.join("state.json");
     let mut state: SyncState = if state_path.exists() {
@@ -925,7 +1038,11 @@ pub fn restore(
         &state_path,
         &serde_json::to_vec(&state).map_err(|e| e.to_string())?,
     )?;
-    apply(app_data, source, path, &bytes, &mut result)?;
+    if path.starts_with("ranking/") || path.starts_with("similarity/") {
+        database::import(source, path, &bytes, replace_all)?;
+    } else {
+        apply(app_data, source, path, &bytes, &mut result)?;
+    }
     record_applied(
         &mut state,
         app_data,
@@ -955,6 +1072,7 @@ pub fn resolve_local_snapshot(
     app_data: &Path,
     source: &Path,
     path: &str,
+    decision: Option<SnapshotDecision>,
     progress: impl Fn(&str),
 ) -> Result<SyncResult, String> {
     if !database::is_snapshot(path) {
@@ -978,6 +1096,25 @@ pub fn resolve_local_snapshot(
     let compressed = encode(&bytes)?;
     let mut dav = dav::Dav::new(&config)?;
     dav.acquire()?;
+    let decision = decision.ok_or("请先查看本机榜单日期和云端分支，再明确选择本机版本")?;
+    if decision.local_hash.as_ref() != Some(&hash)
+        || decision.local_revision.as_ref() != Some(&database::local_revision(source, path)?)
+        || decision.heads.into_iter().collect::<BTreeSet<_>>()
+            != dav
+                .manifest
+                .heads(path)
+                .iter()
+                .map(|version| version.id.clone())
+                .collect()
+        || decision.dates
+            != database::rank_sources(path, &bytes)?
+                .dates
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+    {
+        return Err("本机榜单或云端分支在预览后已变化，请刷新后重新选择".into());
+    }
     progress("正在保存本机榜单并合并云端分支");
     if !dav.manifest.hashes().contains(&hash) && !dav.manifest.packs.contains_key(&hash) {
         dav.upload(&hash, &compressed)?;
@@ -1001,7 +1138,7 @@ pub fn resolve_local_snapshot(
         bytes.len() as u64,
         compressed.len() as u64,
     );
-    dav.manifest.format = 3;
+    dav.manifest.format = 5;
     dav.persist()?;
     state.base.insert(
         path.into(),
@@ -1135,7 +1272,7 @@ fn apply(
         return Ok(());
     }
     if path.starts_with("ranking/") || path.starts_with("similarity/") {
-        return database::import(source, path, bytes);
+        return database::import(source, path, bytes, false);
     }
     if matches!(
         path,

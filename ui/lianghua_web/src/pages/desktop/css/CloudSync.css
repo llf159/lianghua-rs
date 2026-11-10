@@ -1288,3 +1288,55 @@
   .cloud-review-files button { flex-direction: column; gap: 4px; }
   .cloud-review-dialog .cloud-watch-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+/* 排名来源选择使用独立表单布局，避免策略选择器的 grid label 拆开勾选框和文字。 */
+.cloud-ranking-review { display: grid; gap: 16px; margin-top: 18px; min-width: 0; color: #334155; font-size: 14px; line-height: 1.6; }
+.cloud-ranking-review :where(h4, p) { margin: 0; }
+.cloud-ranking-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.cloud-ranking-toolbar h4 { color: #0f172a; font-size: 17px; }
+.cloud-ranking-toolbar p, .cloud-ranking-hint { color: #64748b; font-size: 13px; }
+.cloud-ranking-toolbar button { flex: 0 0 auto; min-height: 40px; padding: 8px 16px; border: 1px solid #dbe3ee; border-radius: 8px; background: #fff; color: #475569; font: inherit; }
+.cloud-ranking-local-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; padding: 12px 16px; border-radius: 10px; background: #f1f5f9; color: #64748b; font-size: 13px; }
+.cloud-ranking-local-summary strong { color: #334155; }
+.cloud-ranking-sources { display: grid; gap: 12px; min-width: 0; }
+.cloud-ranking-source { min-width: 0; border: 1px solid #dbe3ee; border-radius: 12px; background: #fff; overflow: hidden; }
+.cloud-ranking-source.is-selected { border-color: #f97316; box-shadow: 0 0 0 2px #ffedd5; }
+.cloud-ranking-source.is-unavailable { background: #f8fafc; }
+.cloud-ranking-source-choice { display: flex; align-items: flex-start; gap: 12px; padding: 16px; cursor: pointer; }
+.cloud-ranking-source-choice > span { flex: 1; min-width: 0; }
+.cloud-ranking-source-choice strong, .cloud-ranking-source-choice small { display: block; overflow-wrap: anywhere; }
+.cloud-ranking-source-choice strong { color: #0f172a; font-size: 15px; }
+.cloud-ranking-source-choice small { margin-top: 3px; color: #64748b; font-size: 12px; font-weight: 400; }
+.cloud-ranking-review input:is([type="radio"], [type="checkbox"]) { appearance: auto; flex: 0 0 18px; width: 18px; height: 18px; min-width: 18px; margin: 3px 0 0; padding: 0; accent-color: #ea580c; }
+.cloud-ranking-source-choice em { flex: 0 0 auto; padding: 3px 8px; border-radius: 5px; background: #f1f5f9; color: #64748b; font-size: 11px; font-style: normal; white-space: nowrap; }
+.cloud-ranking-source-choice em.is-destructive { background: #fef2f2; color: #b91c1c; }
+.cloud-ranking-source-body { display: grid; gap: 10px; padding: 0 16px 16px 46px; min-width: 0; }
+.cloud-ranking-date-label { display: flex; align-items: center; justify-content: space-between; color: #64748b; font-size: 12px; }
+.cloud-ranking-date-label strong { font-weight: 500; }
+.cloud-ranking-dates { display: flex; flex-wrap: wrap; gap: 6px; }
+.cloud-ranking-dates span { padding: 3px 8px; border: 1px solid #e2e8f0; border-radius: 5px; color: #475569; font-size: 12px; font-variant-numeric: tabular-nums; }
+.cloud-ranking-strategy { min-width: 0; color: #64748b; font-size: 12px; }
+.cloud-ranking-strategy summary { cursor: pointer; padding: 5px 0; }
+.cloud-ranking-strategy pre { max-height: 280px; margin: 8px 0 0; padding: 12px; overflow: auto; border-radius: 7px; background: #f8fafc; color: #334155; font: 12px/1.65 monospace; white-space: pre-wrap; overflow-wrap: anywhere; overscroll-behavior: contain; }
+.cloud-ranking-source-error { color: #b91c1c; font-size: 12px; }
+.cloud-ranking-decision { display: grid; gap: 12px; min-width: 0; padding: 18px; border: 1px solid #fed7aa; border-radius: 12px; background: #fffaf5; overflow-wrap: anywhere; }
+.cloud-ranking-decision h4 { color: #0f172a; font-size: 15px; }
+.cloud-ranking-decision.is-destructive { border-color: #fecaca; background: #fffafa; }
+.cloud-ranking-decision.is-destructive h4 { color: #991b1b; }
+.cloud-ranking-replacement { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 16px; padding: 14px; border: 1px solid #fee2e2; border-radius: 8px; background: #fff; }
+.cloud-ranking-replacement > div { display: grid; gap: 4px; min-width: 0; }
+.cloud-ranking-replacement span { color: #64748b; font-size: 12px; }
+.cloud-ranking-replacement strong { color: #991b1b; font-size: 24px; line-height: 1.3; font-variant-numeric: tabular-nums; }
+.cloud-ranking-replacement small { font-size: 12px; font-weight: 400; }
+.cloud-ranking-confirm { display: flex; align-items: flex-start; gap: 10px; min-width: 0; padding: 10px 0; cursor: pointer; font-size: 13px; }
+.cloud-ranking-confirm span { flex: 1; min-width: 0; }
+.cloud-ranking-submit { width: 100%; min-height: 44px; padding: 10px 16px; border: 0; border-radius: 8px; background: #ea580c; color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
+.cloud-ranking-submit.is-destructive { background: #b91c1c; }
+.cloud-ranking-review button:disabled { opacity: .45; cursor: default; }
+@media (min-width: 1000px) { .cloud-ranking-sources { grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; } }
+@media (max-width: 900px) {
+  .settings-modal.cloud-review-dialog { width: min(720px, 100%); padding: 16px; max-height: calc(100dvh - 24px); }
+  .cloud-ranking-source-choice { gap: 10px; padding: 14px; }
+  .cloud-ranking-source-body { padding: 0 14px 14px 42px; }
+  .cloud-ranking-decision { padding: 14px; }
+}

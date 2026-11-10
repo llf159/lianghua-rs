@@ -6,6 +6,9 @@ use std::{
 use zip::{ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 pub(super) fn for_path(path: &str) -> Option<&'static str> {
+    if path.starts_with("source/strategy_snapshots/") {
+        return None;
+    }
     if path == "app/watch_observe.json"
         || matches!(
             path.strip_prefix("settings/"),
@@ -35,6 +38,9 @@ pub(super) fn snapshots(
 ) -> Result<BTreeMap<String, Vec<u8>>, String> {
     let mut groups = BTreeMap::<&str, Vec<(&String, &Vec<u8>)>>::new();
     for (path, bytes) in files {
+        if path.starts_with("source/strategy_snapshots/") {
+            continue;
+        }
         let group = for_path(path).ok_or_else(|| format!("不允许打包此路径：{path}"))?;
         groups.entry(group).or_default().push((path, bytes));
     }
@@ -71,10 +77,15 @@ pub(super) fn read(
     let mut archive = ZipArchive::new(Cursor::new(bytes)).map_err(|e| e.to_string())?;
     let mut files = BTreeMap::new();
     let mut total = 0u64;
+    let mut legacy_snapshots = false;
     for index in 0..archive.len() {
         let entry = archive.by_index(index).map_err(|e| e.to_string())?;
         let path = entry.name().map_err(|e| e.to_string())?.into_owned();
         validate_path(&path)?;
+        if group == "bundles/strategies.zip" && path.starts_with("source/strategy_snapshots/") {
+            legacy_snapshots = true;
+            continue;
+        }
         if for_path(&path) != Some(group) || files.contains_key(&path) {
             return Err("配置包内容分组错误或存在重复路径".into());
         }
@@ -112,7 +123,7 @@ pub(super) fn read(
         }
         files.insert(path, raw);
     }
-    if files.is_empty() {
+    if files.is_empty() && !legacy_snapshots {
         return Err("配置包为空，未替换本地数据".into());
     }
     Ok(files)

@@ -290,7 +290,7 @@ pub(super) fn transfer_bundle(
                 &local.join("objects").join(format!("{hash}.gz")),
                 &compressed,
             )?;
-            dav.manifest.format = 3;
+            dav.manifest.format = 5;
             let version = dav.manifest.add(
                 bundle,
                 &hash,

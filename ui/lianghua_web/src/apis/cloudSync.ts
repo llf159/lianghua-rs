@@ -67,9 +67,6 @@ export function deleteCloudVersion(item: CloudItem) {
     versionId: item.version.id,
   });
 }
-export function resolveLocalCloudSnapshot(path: string) {
-  return invoke<CloudSyncResult>("resolve_local_cloud_snapshot", { path });
-}
 export async function syncCloud(
   item?: CloudItem,
   downloadOnly = false,
@@ -184,7 +181,7 @@ export function cloudPathLabel(path: string) {
         "bundles/watchlists.zip": "自选与开关",
         "bundles/indicator_config.zip": "指标与详情图配置",
         "bundles/browser_settings.zip": "浏览习惯配置",
-        "ranking/scoring_result.zip": "总榜数据库快照（近五个结果日期）",
+        "ranking/scoring_result.zip": "总榜排名与策略快照（同策略最多五日）",
         "similarity/strategy_similarity.zip": "相似榜数据库快照（最新一天）",
       } as Record<string, string>
     )[path] ?? path
@@ -200,6 +197,10 @@ export type CloudPreviewSide = {
   id: string;
   createdAt: string | null;
   files: CloudPreviewFile[];
+  dates: string[];
+  overlapHash: string | null;
+  replaceAll: boolean;
+  receiveError: string | null;
 };
 export type CloudPreview = {
   path: string;
@@ -207,6 +208,8 @@ export type CloudPreview = {
   heads: string[];
   baseAvailable: boolean;
   sides: CloudPreviewSide[];
+  localDates: string[];
+  localRevision: string | null;
 };
 
 export async function previewCloudData(path: string, versionId?: string) {
@@ -230,4 +233,27 @@ export function resolveCloudStrategies(
   return invoke<CloudSyncResult>("resolve_cloud_strategy_conflicts", {
     resolution: { localHash: preview.localHash, heads: preview.heads, choices },
   });
+}
+
+export function resolveCloudRanking(preview: CloudPreview, sideId: string) {
+  const side = preview.sides.find((side) => side.id === sideId);
+  if (!side) throw new Error("请选择榜单来源");
+  return invoke<CloudSyncResult>(
+    sideId === "local"
+      ? "resolve_local_cloud_snapshot"
+      : "restore_cloud_sync_version",
+    {
+      path: preview.path,
+      versionId: sideId === "local" ? undefined : sideId,
+      settings: {},
+      decision: {
+        localHash: preview.localHash,
+        heads: preview.heads,
+        dates: side.dates,
+        overlapHash: side.overlapHash,
+        replaceAll: side.replaceAll,
+        localRevision: preview.localRevision,
+      },
+    },
+  );
 }

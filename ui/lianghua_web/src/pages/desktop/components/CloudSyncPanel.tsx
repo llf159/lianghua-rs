@@ -5,13 +5,13 @@ import {
   deleteCloudVersion,
   estimateCloudUpload,
   listCloudData,
-  resolveLocalCloudSnapshot,
   syncCloud,
   type CloudItem,
   type UploadEstimate,
 } from "../../../apis/cloudSync";
 import "../css/CloudSync.css";
 import CloudDataReview from "./CloudDataReview";
+import CloudRankingReview from "./CloudRankingReview";
 
 function bytes(value: number) {
   if (value < 1024) return `${value} B`;
@@ -69,8 +69,7 @@ export default function CloudSyncPanel({
       | "restore"
       | "resolve"
       | "delete"
-      | "estimate"
-      | "local",
+      | "estimate",
     item?: CloudItem,
   ) {
     if (busy || disabled) return;
@@ -90,19 +89,14 @@ export default function CloudSyncPanel({
         setNotice(`已删除云端版本：${item.path}；本地副本保留。`);
         setItems(await listCloudData());
       } else {
-        const result =
-          kind === "local" && localPath
-            ? await resolveLocalCloudSnapshot(localPath)
-            : await syncCloud(
-                kind === "restore" || kind === "resolve" ? item : undefined,
-                kind === "download",
-              );
-        if (kind === "restore" || kind === "resolve" || kind === "local") {
+        const result = await syncCloud(
+          kind === "restore" || kind === "resolve" ? item : undefined,
+          kind === "download",
+        );
+        if (kind === "restore" || kind === "resolve") {
           setConflicts((paths) => [
             ...new Set([
-              ...paths.filter(
-                (path) => path !== (kind === "local" ? localPath : item?.path),
-              ),
+              ...paths.filter((path) => path !== item?.path),
               ...result.conflicts,
               ...result.items
                 .filter((entry) => entry.isHead && entry.conflict)
@@ -119,7 +113,7 @@ export default function CloudSyncPanel({
         const paths = (values: string[]) =>
           values.map((path) => `${cloudPathLabel(path)}（${path}）`).join("、");
         setNotice(
-          `${kind === "download" ? "下载完成" : kind === "resolve" || kind === "local" ? "该项冲突已解决" : kind === "restore" ? "版本已恢复" : "同步完成"} · 上传 ${result.uploaded} 项${result.uploadedPaths.length ? `：${paths(result.uploadedPaths)}` : ""} · 接收 ${result.downloaded} 项${result.downloadedPaths.length ? `：${paths(result.downloadedPaths)}` : ""}${result.skipped ? ` · 跳过 ${result.skipped} 项` : ""} · 上传 ${bytes(result.uploadedBytes)} / 下载 ${bytes(result.downloadedBytes)}${result.warnings.length ? `；${result.warnings.join("；")}` : ""}`,
+          `${kind === "download" ? "下载完成" : kind === "resolve" ? "该项冲突已解决" : kind === "restore" ? "版本已恢复" : "同步完成"} · 上传 ${result.uploaded} 项${result.uploadedPaths.length ? `：${paths(result.uploadedPaths)}` : ""} · 接收 ${result.downloaded} 项${result.downloadedPaths.length ? `：${paths(result.downloadedPaths)}` : ""}${result.skipped ? ` · 跳过 ${result.skipped} 项` : ""} · 上传 ${bytes(result.uploadedBytes)} / 下载 ${bytes(result.downloadedBytes)}${result.warnings.length ? `；${result.warnings.join("；")}` : ""}`,
         );
         onSynced();
         setItems(result.items);
@@ -198,7 +192,7 @@ export default function CloudSyncPanel({
             type="button"
             disabled={busy || disabled}
             onClick={() => void operate("download")}
-            title="仅接收云端当前版本，替换前备份本地；冲突分组跳过"
+            title="仅接收云端当前版本；排名替换须确认且不备份，冲突分组跳过"
           >
             下载云端
           </button>
@@ -224,7 +218,7 @@ export default function CloudSyncPanel({
         <details className="cloud-sync-help">
           <summary>同步说明</summary>
           <p>
-            双向同步上传并接收改动，下载仅接收云端。替换前自动备份，冲突分组跳过。
+            双向同步上传并接收改动，下载仅接收云端。排名替换需确认且不备份；策略及配置沿用原有备份。
           </p>
         </details>
       </div>
@@ -407,7 +401,7 @@ export default function CloudSyncPanel({
           </div>
           <div className="cloud-manager-safety">
             <span aria-hidden="true">✓</span>
-            恢复前会备份本地文件，冲突不会自动覆盖；删除只影响选中的云端版本。
+            排名替换由你确认且不备份；策略及配置恢复前保留原文件。删除只影响选中的云端版本。
           </div>
           {conflictGroups.length > 0 && (
             <section
@@ -499,8 +493,15 @@ export default function CloudSyncPanel({
                           type="button"
                           disabled={busy || disabled}
                           onClick={() => {
-                            setSelected(item);
-                            setAction("resolve");
+                            if (
+                              item.path.startsWith("ranking/") ||
+                              item.path.startsWith("similarity/")
+                            ) {
+                              setReviewItem(item);
+                            } else {
+                              setSelected(item);
+                              setAction("resolve");
+                            }
                           }}
                         >
                           {group.versions.length === 1
@@ -588,8 +589,15 @@ export default function CloudSyncPanel({
                       type="button"
                       disabled={busy || disabled}
                       onClick={() => {
-                        setSelected(item);
-                        setAction("restore");
+                        if (
+                          item.path.startsWith("ranking/") ||
+                          item.path.startsWith("similarity/")
+                        ) {
+                          setReviewItem(item);
+                        } else {
+                          setSelected(item);
+                          setAction("restore");
+                        }
                       }}
                     >
                       恢复并启用
@@ -632,57 +640,75 @@ export default function CloudSyncPanel({
                 ×
               </button>
             </div>
-            <CloudDataReview
-              path={reviewItem.path}
-              versionId={reviewItem.version.id}
-              disabled={disabled}
-              onBusyChange={onReviewBusy}
-              onResolved={(items) => {
-                setReviewItem(null);
-                setConflicts((paths) =>
-                  paths.filter((path) => path !== "bundles/strategies.zip"),
-                );
-                setItems(items);
-                onSynced();
-              }}
-            />
+            {reviewItem.path.startsWith("ranking/") ||
+            reviewItem.path.startsWith("similarity/") ? (
+              <CloudRankingReview
+                path={reviewItem.path}
+                versionId={reviewItem.version.id}
+                disabled={disabled}
+                onBusyChange={onReviewBusy}
+                onResolved={(items) => {
+                  setConflicts((paths) =>
+                    paths.filter((path) => path !== reviewItem.path),
+                  );
+                  setReviewItem(null);
+                  setItems(items);
+                  setNotice("已按确认的来源和替换范围处理排名。");
+                  onSynced();
+                }}
+              />
+            ) : (
+              <CloudDataReview
+                path={reviewItem.path}
+                versionId={reviewItem.version.id}
+                disabled={disabled}
+                onBusyChange={onReviewBusy}
+                onResolved={(items) => {
+                  setReviewItem(null);
+                  setConflicts((paths) =>
+                    paths.filter((path) => path !== "bundles/strategies.zip"),
+                  );
+                  setItems(items);
+                  onSynced();
+                }}
+              />
+            )}
           </section>
         </div>
       )}
       {localPath && (
         <div className="settings-modal-backdrop cloud-modal-overlay">
           <section
-            className="settings-modal settings-modal-narrow cloud-version-dialog"
+            className="settings-modal cloud-review-dialog"
             role="dialog"
             aria-modal="true"
-            aria-label="使用本机榜单"
+            aria-label="选择本机榜单"
           >
-            <h3>使用本机榜单解决同步问题</h3>
-            <div className="cloud-dialog-file">
-              <strong>{cloudPathLabel(localPath)}</strong>
-              <code>{localPath}</code>
-            </div>
-            <p className="cloud-dialog-copy">
-              请确认本机榜单是要继续使用的完整结果。将以本机当前快照作为云端当前版本，保留现有云端分支为历史，并解除上次接收未完成的保护。本机数据不会被替换；如果本机接收后数据不完整，请先重新计算或恢复云端版本。
-            </p>
-            <div className="settings-actions cloud-dialog-actions">
+            <div className="cloud-config-head">
+              <h3>{cloudPathLabel(localPath)}</h3>
               <button
-                className="settings-secondary-btn"
                 type="button"
+                className="cloud-config-close"
                 disabled={busy}
                 onClick={() => setLocalPath(null)}
               >
-                取消
-              </button>
-              <button
-                className="settings-primary-btn"
-                type="button"
-                disabled={busy || disabled}
-                onClick={() => void operate("local")}
-              >
-                {busy ? "处理中…" : "确认使用本机榜单并上传"}
+                ×
               </button>
             </div>
+            <CloudRankingReview
+              path={localPath}
+              disabled={disabled}
+              onBusyChange={onReviewBusy}
+              onResolved={(items) => {
+                setConflicts((paths) =>
+                  paths.filter((path) => path !== localPath),
+                );
+                setLocalPath(null);
+                setItems(items);
+                setNotice("已按确认日期发布本机排名包，本地长历史库保持原状。");
+                onSynced();
+              }}
+            />
           </section>
         </div>
       )}

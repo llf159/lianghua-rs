@@ -611,6 +611,10 @@ mod tests {
 
         for (trade_date, total_score) in [("20240102", 1.0), ("20240103", 2.0)] {
             let (tx, rx) = channel();
+            tx.send(ScoreWriteMessage::StrategySnapshot(format!(
+                "strategy-{trade_date}"
+            )))
+            .unwrap();
             tx.send(ScoreWriteMessage::Batch(ScoreBatch {
                 summary_rows: vec![ScoreSummary {
                     ts_code: "000001.SZ".to_string(),
@@ -643,6 +647,7 @@ mod tests {
             .expect("count summary rows"),
             2
         );
+        assert_eq!(conn.query_row("SELECT string_agg(strategy_text, ',' ORDER BY trade_date) FROM rank_compute_strategy", [], |row| row.get::<_, String>(0)).unwrap(), "strategy-20240102,strategy-20240103");
         assert_eq!(explicit_result_index_names(&conn), Vec::<String>::new());
         for table_name in ["score_summary", "rule_details", "scene_details"] {
             assert!(
@@ -757,9 +762,12 @@ mod tests {
             [],
         )
         .expect("insert existing summary");
+        conn.execute_batch("CREATE TABLE rank_compute_strategy (trade_date VARCHAR PRIMARY KEY, strategy_text VARCHAR NOT NULL); INSERT INTO rank_compute_strategy VALUES ('20240102', 'old')").unwrap();
         drop(conn);
 
         let (tx, rx) = channel();
+        tx.send(ScoreWriteMessage::StrategySnapshot("new".into()))
+            .unwrap();
         tx.send(ScoreWriteMessage::Abort("test abort".to_string()))
             .expect("send abort");
         drop(tx);
@@ -776,6 +784,15 @@ mod tests {
         assert!(result.is_err());
 
         let conn = Connection::open(&db_path).expect("reopen result db");
+        assert_eq!(
+            conn.query_row(
+                "SELECT strategy_text FROM rank_compute_strategy",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            "old"
+        );
         assert_eq!(
             conn.query_row(
                 "SELECT total_score FROM score_summary WHERE ts_code = '000001.SZ' AND trade_date = '20240102'",
@@ -1191,6 +1208,7 @@ pub fn write_score_batches_from_channel(
         ))
         .map_err(|e| format!("创建结果库暂存表失败:{e}"))?;
 
+        let mut strategy_snapshot = None;
         let mut drained = false;
         while !drained {
             lianghua_model::task::checkpoint()?;
@@ -1219,6 +1237,10 @@ pub fn write_score_batches_from_channel(
                         break;
                     };
                     let batch = match message {
+                        ScoreWriteMessage::StrategySnapshot(text) => {
+                            strategy_snapshot = Some(text);
+                            continue;
+                        }
                         ScoreWriteMessage::TrackingCalendar(calendar) => {
                             tx.execute(
                                 "INSERT INTO strategy_tracking_meta_stage VALUES (?)",
@@ -1625,6 +1647,18 @@ pub fn write_score_batches_from_channel(
                     })(&tx)?;
                     profile.receive_and_append_batches_ms +=
                         merge_started_at.elapsed().as_millis() as u64;
+                }
+
+                tx.execute_batch("CREATE TABLE IF NOT EXISTS rank_compute_strategy (trade_date VARCHAR PRIMARY KEY, strategy_text VARCHAR NOT NULL)")
+                    .map_err(|e| format!("创建排名策略来源表失败:{e}"))?;
+                tx.execute(
+                    "DELETE FROM rank_compute_strategy WHERE trade_date >= ? AND trade_date <= ?",
+                    params![start_date, end_date],
+                )
+                .map_err(|e| format!("清理排名策略来源失败:{e}"))?;
+                if let Some(text) = &strategy_snapshot {
+                    tx.execute("INSERT INTO rank_compute_strategy SELECT DISTINCT trade_date, ? FROM score_summary WHERE trade_date >= ? AND trade_date <= ?", params![text, start_date, end_date])
+                        .map_err(|e| format!("保存排名策略来源失败:{e}"))?;
                 }
 
                 // Publish the final event states in the same transaction as scores and ranks.

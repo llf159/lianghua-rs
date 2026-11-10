@@ -87,6 +87,7 @@ pub async fn restore_cloud_sync_version(
     path: String,
     version_id: String,
     settings: BTreeMap<String, String>,
+    decision: Option<cloud_sync::SnapshotDecision>,
 ) -> Result<SyncResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = CLOUD_TASK.try_lock().map_err(|_| "云端操作正在进行")?;
@@ -97,6 +98,7 @@ pub async fn restore_cloud_sync_version(
             &path,
             &version_id,
             settings,
+            decision,
             |message| {
                 let _ = app.emit("cloud-sync-progress", message);
             },
@@ -110,6 +112,7 @@ pub async fn restore_cloud_sync_version(
 pub async fn resolve_local_cloud_snapshot(
     app: tauri::AppHandle,
     path: String,
+    decision: Option<cloud_sync::SnapshotDecision>,
 ) -> Result<SyncResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = CLOUD_TASK.try_lock().map_err(|_| "云端操作正在进行")?;
@@ -118,6 +121,7 @@ pub async fn resolve_local_cloud_snapshot(
             &app.path().app_data_dir().map_err(|e| e.to_string())?,
             &source,
             &path,
+            decision,
             |message| {
                 let _ = app.emit("cloud-sync-progress", message);
             },

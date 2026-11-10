@@ -273,6 +273,7 @@ fn two_devices_keep_conflicts_deduplicate_and_recover() {
         &selected.path,
         &selected.version.id,
         BTreeMap::new(),
+        None,
         |_| {},
     )
     .unwrap();
@@ -812,7 +813,14 @@ fn two_devices_keep_conflicts_deduplicate_and_recover() {
         .unwrap();
     }
     let rank_path = "ranking/scoring_result.zip";
-    let uploaded = resolve_local_snapshot(&app_rank, &source_rank, rank_path, |_| {}).unwrap();
+    let uploaded = resolve_local_snapshot(
+        &app_rank,
+        &source_rank,
+        rank_path,
+        Some(rank_decision(&app_rank, &source_rank, rank_path, "local")),
+        |_| {},
+    )
+    .unwrap();
     let head = uploaded
         .items
         .iter()
@@ -836,6 +844,12 @@ fn two_devices_keep_conflicts_deduplicate_and_recover() {
         rank_path,
         &head.version.id,
         BTreeMap::new(),
+        Some(rank_decision(
+            &app_rank,
+            &source_rank,
+            rank_path,
+            &head.version.id,
+        )),
         |_| {},
     )
     .unwrap();
@@ -858,7 +872,14 @@ fn two_devices_keep_conflicts_deduplicate_and_recover() {
             .iter()
             .any(|item| item.path == rank_path && item.is_head)
     );
-    let repaired = resolve_local_snapshot(&app_rank, &source_rank, rank_path, |_| {}).unwrap();
+    let repaired = resolve_local_snapshot(
+        &app_rank,
+        &source_rank,
+        rank_path,
+        Some(rank_decision(&app_rank, &source_rank, rank_path, "local")),
+        |_| {},
+    )
+    .unwrap();
     assert_eq!(
         repaired
             .items
@@ -870,13 +891,134 @@ fn two_devices_keep_conflicts_deduplicate_and_recover() {
     let retried = sync(&app_rank, &source_rank, BTreeMap::new(), false, |_| {}).unwrap();
     assert!(!retried.conflicts.contains(&rank_path.to_string()));
     assert!(!retried.uploaded_paths.contains(&rank_path.to_string()));
+    // 未知来源必须明确确认整库替换；预览后修改旧日期也必须使选择失效。
+    let app_history = temp.path().join("app-history");
+    let source_history = temp.path().join("source-history");
+    save_config(&app_history, config.clone()).unwrap();
+    lianghua_data::data::scoring_store::init_result_db(&source_history.join("scoring_result.db"))
+        .unwrap();
+    {
+        let conn = Connection::open(source_history.join("scoring_result.db")).unwrap();
+        conn.execute_batch("INSERT INTO score_summary VALUES ('000001.SZ','20261007',100,1)")
+            .unwrap();
+        for day in 1..=6 {
+            conn.execute(
+                "INSERT INTO score_summary VALUES ('000001.SZ',?,10,1)",
+                [format!("202611{day:02}")],
+            )
+            .unwrap();
+        }
+    }
+    let blocked = sync(
+        &app_history,
+        &source_history,
+        BTreeMap::new(),
+        false,
+        |_| {},
+    )
+    .unwrap();
+    assert!(blocked.conflicts.contains(&rank_path.to_string()));
+    assert!(!blocked.uploaded_paths.contains(&rank_path.to_string()));
+    let mutations_before = *mutations.lock().unwrap();
+    let blocked_download =
+        sync(&app_history, &source_history, BTreeMap::new(), true, |_| {}).unwrap();
+    assert!(blocked_download.conflicts.contains(&rank_path.to_string()));
+    assert_eq!(*mutations.lock().unwrap(), mutations_before);
+    let selected_rank = list_cloud(&app_history, &source_history)
+        .unwrap()
+        .into_iter()
+        .find(|item| item.path == rank_path && item.is_head)
+        .unwrap();
+    assert!(
+        restore(
+            &app_history,
+            &source_history,
+            rank_path,
+            &selected_rank.version.id,
+            BTreeMap::new(),
+            None,
+            |_| {}
+        )
+        .is_err()
+    );
+    let decision = rank_decision(
+        &app_history,
+        &source_history,
+        rank_path,
+        &selected_rank.version.id,
+    );
+    {
+        let conn = Connection::open(source_history.join("scoring_result.db")).unwrap();
+        conn.execute_batch("UPDATE score_summary SET total_score=101 WHERE trade_date='20261007'")
+            .unwrap();
+    }
+    assert!(
+        restore(
+            &app_history,
+            &source_history,
+            rank_path,
+            &selected_rank.version.id,
+            BTreeMap::new(),
+            Some(decision),
+            |_| {}
+        )
+        .err()
+        .unwrap()
+        .contains("预览后已变化")
+    );
+    restore(
+        &app_history,
+        &source_history,
+        rank_path,
+        &selected_rank.version.id,
+        BTreeMap::new(),
+        Some(rank_decision(
+            &app_history,
+            &source_history,
+            rank_path,
+            &selected_rank.version.id,
+        )),
+        |_| {},
+    )
+    .unwrap();
+    let conn = open_db_readonly(source_history.join("scoring_result.db")).unwrap();
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM score_summary", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT total_score FROM score_summary WHERE trade_date='20261007'",
+            [],
+            |row| row.get::<_, f64>(0)
+        )
+        .unwrap(),
+        1.0
+    );
+    drop(conn);
+    let unchanged_history = sync(
+        &app_history,
+        &source_history,
+        BTreeMap::new(),
+        false,
+        |_| {},
+    )
+    .unwrap();
+    assert!(!unchanged_history.conflicts.contains(&rank_path.to_string()));
+    assert!(
+        !unchanged_history
+            .uploaded_paths
+            .contains(&rank_path.to_string())
+    );
     stopped.store(true, Ordering::Relaxed);
     let _ = TcpStream::connect(address);
     worker.join().unwrap();
 }
 
 #[test]
-fn database_snapshot_keeps_five_dates_and_preserves_other_local_history() {
+fn database_snapshot_isolates_strategies_and_requires_explicit_full_replacement() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("source");
     let target = temp.path().join("target");
@@ -885,7 +1027,20 @@ fn database_snapshot_keeps_five_dates_and_preserves_other_local_history() {
     lianghua_data::data::scoring_store::init_result_db(&source.join("scoring_result.db")).unwrap();
     {
         let conn = Connection::open(source.join("scoring_result.db")).unwrap();
+        conn.execute_batch("CREATE TABLE rank_compute_strategy (trade_date VARCHAR PRIMARY KEY, strategy_text VARCHAR NOT NULL)").unwrap();
         for day in 1..=7 {
+            conn.execute(
+                "INSERT INTO rank_compute_strategy VALUES (?, ?)",
+                [
+                    format!("202610{day:02}"),
+                    if day < 5 {
+                        "strategy-a".into()
+                    } else {
+                        "strategy-b".into()
+                    },
+                ],
+            )
+            .unwrap();
             conn.execute(
                 "INSERT INTO score_summary VALUES ('000001.SZ', ?, 1, 1)",
                 [format!("202610{day:02}")],
@@ -899,29 +1054,54 @@ fn database_snapshot_keeps_five_dates_and_preserves_other_local_history() {
         }
     }
     let exported = database::export(&source).unwrap();
-    assert_eq!(exported.len(), 1);
     let day = "ranking/scoring_result.zip";
+    let sources = database::rank_sources(day, &exported[day]).unwrap();
+    assert_eq!(
+        sources.dates.keys().cloned().collect::<Vec<_>>(),
+        ["20261005", "20261006", "20261007"]
+    );
+    assert_eq!(sources.strategies.len(), 1);
     assert_eq!(exported[day], database::export(&source).unwrap()[day]);
-    database::import(&target, day, &exported[day]).unwrap();
+    database::import(&target, day, &exported[day], false).unwrap();
     {
         let conn = Connection::open(target.join("scoring_result.db")).unwrap();
-        conn.execute(
-            "INSERT INTO score_summary VALUES ('000002.SZ', '20260901', 2, 1)",
-            [],
-        )
-        .unwrap();
+        conn.execute_batch("INSERT INTO score_summary VALUES ('000002.SZ', '20260901', 2, 1); INSERT INTO rank_compute_strategy VALUES ('20260901', 'strategy-b')").unwrap();
     }
-    database::import(&target, day, &exported[day]).unwrap();
+    assert!(!database::rank_replaces_all(&target, day, &exported[day]).unwrap());
+    database::import(&target, day, &exported[day], false).unwrap();
     let conn = open_db_readonly(target.join("scoring_result.db")).unwrap();
     assert_eq!(
         conn.query_row("SELECT COUNT(*) FROM score_summary", [], |r| r
             .get::<_, i64>(0))
             .unwrap(),
-        6
+        4
+    );
+    drop(conn);
+    let other_strategy = database::export_day(&source, "ranking/20261003.zip")
+        .unwrap()
+        .unwrap();
+    assert!(database::rank_replaces_all(&target, "ranking/20261003.zip", &other_strategy).unwrap());
+    assert!(database::import(&target, "ranking/20261003.zip", &other_strategy, false).is_err());
+    database::import(&target, "ranking/20261003.zip", &other_strategy, true).unwrap();
+    let conn = open_db_readonly(target.join("scoring_result.db")).unwrap();
+    assert_eq!(
+        conn.query_row(
+            "SELECT string_agg(trade_date, ',') FROM score_summary",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "20261003"
+    );
+    assert_eq!(
+        conn.query_row("SELECT strategy_text FROM rank_compute_strategy", [], |r| r
+            .get::<_, String>(0))
+            .unwrap(),
+        "strategy-a"
     );
     assert_eq!(
         conn.query_row(
-            "SELECT COUNT(*) FROM score_summary WHERE trade_date IN ('20261001', '20261002')",
+            "SELECT COUNT(*) FROM rule_details WHERE trade_date <> '20261003'",
             [],
             |r| r.get::<_, i64>(0)
         )
@@ -929,11 +1109,8 @@ fn database_snapshot_keeps_five_dates_and_preserves_other_local_history() {
         0
     );
     drop(conn);
-    assert!(database::import(&target, "ranking/20261006.zip", &exported[day]).is_err());
-    let legacy = database::export_day(&source, "ranking/20261007.zip")
-        .unwrap()
-        .unwrap();
-    database::import(&target, "ranking/20261007.zip", &legacy).unwrap();
+    assert!(!target.join("cloud_sync_backups").exists());
+    assert!(database::import(&target, "ranking/20261006.zip", &exported[day], false).is_err());
     let mut manifest = Manifest::default();
     for day in 1..=7 {
         for kind in ["ranking", "similarity"] {
@@ -1074,4 +1251,17 @@ fn rejects_unsafe_paths_credentials_and_corrupt_payloads() {
         has_password: true,
     };
     assert!(config.root_url().is_err());
+}
+
+fn rank_decision(app: &Path, source: &Path, path: &str, id: &str) -> SnapshotDecision {
+    let preview = preview(app, source, path, None, &BTreeMap::new()).unwrap();
+    let side = preview.sides.iter().find(|side| side.id == id).unwrap();
+    SnapshotDecision {
+        local_hash: preview.local_hash.clone(),
+        heads: preview.heads.clone(),
+        dates: side.dates.clone(),
+        overlap_hash: side.overlap_hash.clone(),
+        replace_all: side.replace_all,
+        local_revision: preview.local_revision.clone(),
+    }
 }

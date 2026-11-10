@@ -11,19 +11,25 @@ pub struct PreviewFile {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PreviewSide {
-    id: String,
+    pub(super) id: String,
     created_at: Option<String>,
     files: Vec<PreviewFile>,
+    pub(super) dates: Vec<String>,
+    pub(super) overlap_hash: Option<String>,
+    pub(super) replace_all: bool,
+    receive_error: Option<String>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudPreview {
     path: String,
-    local_hash: Option<String>,
-    heads: Vec<String>,
+    pub(super) local_hash: Option<String>,
+    pub(super) heads: Vec<String>,
     base_available: bool,
-    sides: Vec<PreviewSide>,
+    pub(super) sides: Vec<PreviewSide>,
+    local_dates: Vec<String>,
+    pub(super) local_revision: Option<String>,
 }
 
 // 预览只读云端；基线只能使用已校验的本机缓存，缺失时不猜测修改来源。
@@ -35,9 +41,7 @@ pub fn preview(
     settings: &BTreeMap<String, String>,
 ) -> Result<CloudPreview, String> {
     validate_path(path)?;
-    if path.starts_with("ranking/") || path.starts_with("similarity/") {
-        return Err("数据库快照不提供文本对比".into());
-    }
+    let ranking = path.starts_with("ranking/") || path.starts_with("similarity/");
     let config = get_config(app_data)?;
     let local = local_root(app_data, source, &config)?;
     let state_path = local.join("state.json");
@@ -56,7 +60,7 @@ pub fn preview(
             current_bytes(app_data, source, path, settings)?
         }
     };
-    let local_hash = bytes.as_ref().map(|bytes| digest(bytes));
+    let mut local_hash = bytes.as_ref().map(|bytes| digest(bytes));
     let mut payloads = vec![("local".to_string(), None, bytes)];
     let mut base_available = false;
     if let Some(base) = state.base.get(path) {
@@ -94,9 +98,47 @@ pub fn preview(
         let bytes = dav.download(&version.hash, &local.join("objects"))?;
         payloads.push((version.id, Some(version.created_at), Some(bytes)));
     }
+    let _guard = SOURCE_ACCESS
+        .try_write()
+        .map_err(|_| "数据操作正在进行，请稍后查看差异")?;
+    let local_dates = if ranking {
+        database::local_date_summary(source, path)?
+    } else {
+        Vec::new()
+    };
+    if ranking {
+        let current = current_bytes(app_data, source, path, settings)?;
+        local_hash = current.as_ref().map(|bytes| digest(bytes));
+        payloads[0].2 = current;
+    }
     let mut sides = Vec::new();
     for (id, created_at, bytes) in payloads {
+        let mut dates = Vec::new();
+        let mut overlap_hash = None;
+        let mut replace_all = false;
+        let mut receive_error = None;
         let files = match bytes {
+            Some(bytes) if ranking => {
+                let sources = database::rank_sources(path, &bytes)?;
+                dates = sources.dates.keys().cloned().collect();
+                if id != "local" && id != "base" {
+                    match database::rank_replaces_all(source, path, &bytes) {
+                        Ok(value) => replace_all = value,
+                        Err(error) => receive_error = Some(error),
+                    }
+                    overlap_hash = database::export_dates(source, path, &dates)?
+                        .as_ref()
+                        .map(|bytes| digest(bytes));
+                }
+                let mut files = BTreeMap::from([(
+                    "日期与策略来源.json".into(),
+                    serde_json::to_vec_pretty(&sources.dates).map_err(|e| e.to_string())?,
+                )]);
+                for (hash, text) in sources.strategies {
+                    files.insert(format!("策略快照/{hash}.toml"), text.into_bytes());
+                }
+                files
+            }
             Some(bytes) if path.starts_with("bundles/") => {
                 bundles::read(path, &bytes, id != "local")?
             }
@@ -115,6 +157,10 @@ pub fn preview(
             id,
             created_at,
             files: preview_files,
+            dates,
+            overlap_hash,
+            replace_all,
+            receive_error,
         });
     }
     Ok(CloudPreview {
@@ -123,7 +169,24 @@ pub fn preview(
         heads,
         base_available,
         sides,
+        local_dates,
+        local_revision: if ranking {
+            Some(database::local_revision(source, path)?)
+        } else {
+            None
+        },
     })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotDecision {
+    pub local_hash: Option<String>,
+    pub heads: Vec<String>,
+    pub dates: Vec<String>,
+    pub overlap_hash: Option<String>,
+    pub replace_all: bool,
+    pub local_revision: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -224,7 +287,7 @@ pub fn resolve_strategies(
         bytes.len() as u64,
         compressed.len() as u64,
     );
-    dav.manifest.format = 3;
+    dav.manifest.format = 5;
     // 先提交保留所有分支的完整结果，再更新本地；失败后仍可从云端恢复。
     dav.persist()?;
     let mut result = SyncResult::default();

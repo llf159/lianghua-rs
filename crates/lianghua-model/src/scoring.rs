@@ -108,6 +108,7 @@ impl ScoreBatch {
 
 #[derive(Debug)]
 pub enum ScoreWriteMessage {
+    StrategySnapshot(String),
     TrackingCalendar(String),
     Batch(ScoreBatch),
     Abort(String),

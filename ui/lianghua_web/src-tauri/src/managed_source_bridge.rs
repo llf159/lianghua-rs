@@ -789,6 +789,30 @@ pub(crate) fn snapshot_rank_compute_strategy(
     Ok(backup_file_path)
 }
 
+// 数据库是已发布结果的来源；启动计算时生成的文件可能对应失败任务。
+fn latest_published_rank_strategy(source_root: &Path) -> Result<Option<(String, String)>, String> {
+    let db = source_root.join("scoring_result.db");
+    if !db.exists() {
+        return Ok(None);
+    }
+    let conn = lianghua_data::data::open_db_readonly(&db).map_err(|e| e.to_string())?;
+    let exists: bool = conn.query_row("SELECT COUNT(*)=2 FROM information_schema.tables WHERE table_name IN ('score_summary','rank_compute_strategy')", [], |row| row.get(0)).map_err(|e| e.to_string())?;
+    if !exists {
+        return Ok(None);
+    }
+    let mut stmt = conn.prepare("SELECT trade_date, strategy_text FROM rank_compute_strategy WHERE trade_date=(SELECT MAX(trade_date) FROM score_summary)").map_err(|e| e.to_string())?;
+    let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+    rows.next()
+        .map_err(|e| e.to_string())?
+        .map(|row| {
+            Ok((
+                row.get::<_, String>(0).map_err(|e| e.to_string())?,
+                row.get::<_, String>(1).map_err(|e| e.to_string())?,
+            ))
+        })
+        .transpose()
+}
+
 fn get_managed_strategy_assets_status_inner(
     data_root: &Path,
     source_dir: &str,
@@ -821,29 +845,19 @@ fn get_managed_strategy_assets_status_inner(
         }
     }
 
-    let snapshot_root = managed_rank_compute_snapshot_root(&source_root);
-    if snapshot_root.exists() {
-        for entry in std::fs::read_dir(&snapshot_root).map_err(|error| error.to_string())? {
-            let entry = entry.map_err(|error| error.to_string())?;
-            let entry_type = entry.file_type().map_err(|error| error.to_string())?;
-            if !entry_type.is_dir() {
-                continue;
-            }
-
-            let backup_id = entry.file_name().to_string_lossy().to_string();
-            let file_path = managed_rank_compute_snapshot_file_path(&source_root, &backup_id);
-            let meta_path = managed_rank_compute_snapshot_meta_path(&source_root, &backup_id);
-            if !file_path.exists() || !meta_path.exists() {
-                continue;
-            }
-
-            backups.push(build_managed_strategy_backup_item(
-                &source_root,
-                source_dir,
-                StrategyAssetLocation::RankComputeSnapshot,
-                &backup_id,
-            )?);
-        }
+    if let Some((date, text)) = latest_published_rank_strategy(&source_root)? {
+        backups.push(ManagedStrategyBackupItem {
+            backup_id: "rank-published".into(),
+            folder_name: "rank-published".into(),
+            relative_path: format!("{}/scoring_result.db", source_dir.trim_matches('/')),
+            absolute_path: source_root.join("scoring_result.db").display().to_string(),
+            created_at: String::new(),
+            modified_at: None,
+            size_bytes: text.len() as u64,
+            source_kind: "rank_compute".into(),
+            source_file_name: Some(STRATEGY_RULE_FILE_NAME.into()),
+            description: Some(format!("最新结果日 {date} 实际使用的策略")),
+        });
     }
 
     backups.sort_by(|left, right| right.backup_id.cmp(&left.backup_id));
@@ -885,36 +899,7 @@ pub(crate) fn rank_compute_strategy_changed(
     source_dir: &str,
 ) -> Result<bool, String> {
     let source_root = resolve_source_root(data_root, source_dir)?;
-    let snapshot_root = managed_rank_compute_snapshot_root(&source_root);
-    let mut latest_snapshot: Option<(String, PathBuf)> = None;
-
-    if snapshot_root.exists() {
-        for entry in std::fs::read_dir(&snapshot_root).map_err(|error| error.to_string())? {
-            let entry = entry.map_err(|error| error.to_string())?;
-            if !entry
-                .file_type()
-                .map_err(|error| error.to_string())?
-                .is_dir()
-            {
-                continue;
-            }
-            let backup_id = entry.file_name().to_string_lossy().to_string();
-            let Ok(meta) = read_strategy_backup_meta(&source_root, &backup_id) else {
-                continue;
-            };
-            if meta.source_kind == "rank_compute"
-                && latest_snapshot
-                    .as_ref()
-                    .is_none_or(|(current_id, _)| current_id < &backup_id)
-            {
-                let snapshot_file_path =
-                    managed_rank_compute_snapshot_file_path(&source_root, &backup_id);
-                latest_snapshot = Some((backup_id, snapshot_file_path));
-            }
-        }
-    }
-
-    let Some((_, snapshot_file_path)) = latest_snapshot else {
+    let Some((_, snapshot_text)) = latest_published_rank_strategy(&source_root)? else {
         return Ok(false);
     };
     let active_file_path = source_root.join(STRATEGY_RULE_FILE_NAME);
@@ -922,8 +907,6 @@ pub(crate) fn rank_compute_strategy_changed(
         return Err("当前没有可对比的生效策略文件".to_string());
     }
 
-    let snapshot_text = std::fs::read_to_string(&snapshot_file_path)
-        .map_err(|error| format!("读取排名计算快照失败: {error}"))?;
     let active_text = std::fs::read_to_string(&active_file_path)
         .map_err(|error| format!("读取当前生效策略失败: {error}"))?;
     Ok(!snapshot_text.lines().eq(active_text.lines()))
@@ -1827,24 +1810,22 @@ pub async fn get_managed_strategy_backup_diff(
          -> Result<ManagedStrategyBackupDiff, String> {
             let source_root = resolve_source_root(data_root, &source_dir)?;
             let normalized_backup_id = validate_strategy_backup_id(&backup_id)?.to_string();
-            let backup_file_path = locate_strategy_asset(&source_root, &normalized_backup_id)
-                .map(|(_, asset_dir)| asset_dir.join(STRATEGY_RULE_FILE_NAME))
-                .ok_or_else(|| "目标备份策略不存在".to_string())?;
-            if !backup_file_path.exists() || !backup_file_path.is_file() {
-                return Err("目标备份策略不存在".into());
-            }
-
+            let backup_text = if normalized_backup_id == "rank-published" {
+                latest_published_rank_strategy(&source_root)?
+                    .ok_or("最新排名结果的策略来源未知，请重新计算以记录来源")?
+                    .1
+            } else {
+                let backup_file_path = locate_strategy_asset(&source_root, &normalized_backup_id)
+                    .map(|(_, asset_dir)| asset_dir.join(STRATEGY_RULE_FILE_NAME))
+                    .ok_or_else(|| "目标备份策略不存在".to_string())?;
+                std::fs::read_to_string(&backup_file_path).map_err(|error| {
+                    format!(
+                        "读取备份策略失败: path={}, err={error}",
+                        backup_file_path.display()
+                    )
+                })?
+            };
             let active_file_path = source_root.join(STRATEGY_RULE_FILE_NAME);
-            if !active_file_path.exists() || !active_file_path.is_file() {
-                return Err("当前没有可对比的生效策略文件".into());
-            }
-
-            let backup_text = std::fs::read_to_string(&backup_file_path).map_err(|error| {
-                format!(
-                    "读取备份策略失败: path={}, err={error}",
-                    backup_file_path.display()
-                )
-            })?;
             let active_text = std::fs::read_to_string(&active_file_path).map_err(|error| {
                 format!(
                     "读取当前生效策略失败: path={}, err={error}",

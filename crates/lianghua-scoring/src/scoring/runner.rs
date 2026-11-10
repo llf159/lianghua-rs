@@ -807,6 +807,12 @@ pub fn scoring_all_to_db(
         .to_str()
         .ok_or_else(|| "原始数据库路径不是有效UTF-8".to_string())?;
 
+    let strategy_snapshot = std::fs::read_to_string(crate::data::resolve_strategy_path(
+        source_dir,
+        strategy_path,
+    ))
+    .map_err(|e| format!("读取评分策略快照失败:{e}"))?
+    .replace("\r\n", "\n");
     let tracking_calendar = serde_json::to_string(&tracking.calendar).map_err(|e| e.to_string())?;
     let (tx, rx) = sync_channel(2);
     let abort_tx = tx.clone();
@@ -832,6 +838,8 @@ pub fn scoring_all_to_db(
         )
     });
 
+    tx.send(ScoreWriteMessage::StrategySnapshot(strategy_snapshot))
+        .map_err(|e| format!("发送评分策略快照失败:{e}"))?;
     tx.send(ScoreWriteMessage::TrackingCalendar(tracking_calendar))
         .map_err(|e| format!("发送跟踪日历失败:{e}"))?;
     let compute_started_at = time::Instant::now();

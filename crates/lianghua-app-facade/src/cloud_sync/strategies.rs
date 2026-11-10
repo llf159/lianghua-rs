@@ -26,10 +26,12 @@ pub(super) fn merge_files(
     for files in sources {
         let mut groups = BTreeMap::<String, BTreeMap<String, Vec<u8>>>::new();
         for (path, bytes) in files {
-            if matches!(
-                path.as_str(),
-                "source/score_rule.toml" | "source/chip_change_rule.toml"
-            ) {
+            if path.starts_with("source/strategy_snapshots/")
+                || matches!(
+                    path.as_str(),
+                    "source/score_rule.toml" | "source/chip_change_rule.toml"
+                )
+            {
                 continue;
             }
             let parts = path.split('/').collect::<Vec<_>>();
@@ -206,9 +208,18 @@ mod tests {
             merged["source/chip_change_rule.toml"],
             local["source/chip_change_rule.toml"]
         );
-        for bytes in cloud.values().chain(local.values()) {
-            assert!(merged.values().any(|value| value == bytes));
+        for (path, bytes) in cloud
+            .iter()
+            .chain(local.iter())
+            .filter(|(path, _)| !path.starts_with("source/strategy_snapshots/"))
+        {
+            assert!(merged.values().any(|value| value == bytes), "{path}");
         }
+        assert!(
+            !merged
+                .keys()
+                .any(|path| path.starts_with("source/strategy_snapshots/"))
+        );
         assert_eq!(merge_files(&[cloud, merged.clone()]).unwrap(), merged);
         let bundle = super::super::bundles::snapshots(&merged).unwrap();
         assert_eq!(
@@ -217,6 +228,26 @@ mod tests {
                 &bundle["bundles/strategies.zip"]
             )
             .unwrap(),
+            merged
+        );
+        // 旧策略包仍能读取，但计算快照成员不再参与配置或再次上传。
+        let mut legacy = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (path, bytes) in &merged {
+            legacy
+                .start_file(path, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            std::io::Write::write_all(&mut legacy, bytes).unwrap();
+        }
+        legacy
+            .start_file(
+                "source/strategy_snapshots/rank_compute/old/score_rule.toml",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        std::io::Write::write_all(&mut legacy, b"old-compute").unwrap();
+        let legacy = legacy.finish().unwrap().into_inner();
+        assert_eq!(
+            super::super::bundles::unpack("bundles/strategies.zip", &legacy).unwrap(),
             merged
         );
     }
