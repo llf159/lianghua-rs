@@ -34,7 +34,7 @@
 
 - 问题：重复关联 workspace 根和已在成员列表中的 Tauri crate 会启动重复检查，手动编译与编辑器检查叠加也可能造成内存峰值；解决方案选择：rust-analyzer 只关联根 `Cargo.toml`，Cargo 并发数使用默认值，内存不足时按需以 `cargo check -j 1` 限制单次检查；解释：根工作区已包含 Tauri，无需重复关联；保留默认并发以利用可用 CPU，限制并发可降低内存占用，但会延长编译时间。
 
-- 问题：release 单个 crate 使用一个代码生成单元限制了并行编译；解决方案选择：设置 `codegen-units = 16`，保留 fat LTO；解释：增加代码生成阶段的并行机会，以可能增加内存占用和影响优化效果为代价，实际加速受依赖关系和 LTO 阶段限制。
+- 问题：release 构建需要优先追求运行性能；解决方案选择：设置 `codegen-units = 1`，保留 `opt-level = 3` 和 fat LTO；解释：单个代码生成单元扩大 crate 内的优化范围，以更长的编译时间和更低的代码生成并行度为代价，实际性能收益取决于程序和负载。
 
 - 问题：开发构建优化计算和数据库桥接组件可以加快回测及写入，但会延长编译时间；解决方案选择：dev 默认不单独启用优化，运行耗时任务时按需临时调整，例如 `cargo --config 'profile.dev.package.lianghua-core.opt-level=3' build`，也可对 `lianghua-app-strategy`、`lianghua-backtest`、`lianghua-data`、`lianghua-download`、`lianghua-scoring` 或 `duckdb` 使用同样的配置；解释：日常开发优先缩短编译时间，临时优化仅影响指定包的 dev 构建；DuckDB 配置优化的是 Rust 桥接，不改变原生引擎或 release 配置。
 

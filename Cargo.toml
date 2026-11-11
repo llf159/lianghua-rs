@@ -56,4 +56,4 @@ debug = 1
 [profile.release]
 opt-level = 3
 lto = "fat"
-codegen-units = 16
+codegen-units = 1

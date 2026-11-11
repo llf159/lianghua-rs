@@ -70,6 +70,7 @@ import { ExpressionSimilarity } from "./components/expressionBacktest/Expression
 import { ExpressionWalkForward } from "./components/expressionBacktest/ExpressionWalkForward";
 import "./css/SceneLayerBacktestPage.css";
 import "./css/ExpressionBacktestPage.css";
+import "./css/ResearchWorkbench.css";
 
 type RuleSummarySortKey =
   | "rule_name"
@@ -221,7 +222,7 @@ export default function SceneLayerBacktestPage() {
   const [totalMvMin, setTotalMvMin] = useState(storedCommonParams.totalMvMin);
   const [totalMvMax, setTotalMvMax] = useState(storedCommonParams.totalMvMax);
   const [rankMarketValueBoundaries, setRankMarketValueBoundaries] = useState(() =>
-    typeof window === "undefined" ? "" : window.localStorage.getItem("lh_rank_market_value_boundaries") ?? "",
+    typeof window === "undefined" ? "50, 200" : window.localStorage.getItem("lh_rank_market_value_boundaries") ?? "50, 200",
   );
   const [rankLayerCount, setRankLayerCount] = useState(storedCommonParams.rankLayerCount);
   const [rankLayerMethod, setRankLayerMethod] = useState<RankLayerMethod>(
@@ -237,6 +238,8 @@ export default function SceneLayerBacktestPage() {
   const [rankLoading, setRankLoading] = useState(false);
   const [rankTransientLoading, setRankTransientLoading] = useState(false);
   const [rankError, setRankError] = useState("");
+  const [rankResultView, setRankResultView] = useState("portfolios");
+  const [rankQuarterTopK, setRankQuarterTopK] = useState("100");
   const [rankResult, setRankResult] = useState<RankLayerBacktestData | null>(null);
   const [rankLayerSampleModal, setRankLayerSampleModal] = useState<RankLayerSampleGroup | null>(null);
   const [result, setResult] = useState<SceneLayerBacktestData | null>(null);
@@ -1145,7 +1148,7 @@ export default function SceneLayerBacktestPage() {
       <section className="scene-layer-card">
         <h2 className="scene-layer-title">排名整体回测</h2>
         <p className="scene-layer-caption">
-          使用 score_summary 中的总分检验后续残差收益，除分层与 IC 外，展示原榜固定席位覆盖，以及原有有效后验样本的 Top-K 和年度统计。
+          检验总分的排序能力与前排组合表现，结果按组合、季度、分层和市值分组展示。
         </p>
 
         <label className="scene-layer-field">
@@ -1169,81 +1172,28 @@ export default function SceneLayerBacktestPage() {
       </section>
 
       {rankResult ? (
-        <section className="scene-layer-card">
-          <p className="scene-layer-caption">回测指标：{rankResult.return_metric === "rise_amount" ? "上涨金额（亿）" : "残差收益率（%）"}</p>
-          <div className="scene-layer-layer-summary">
-            <h3>排名整体回测汇总</h3>
-            <div className="scene-layer-summary-section">
-              <h4>基础信息</h4>
-              <div className="scene-layer-contrib-table-wrap">
-                <table className="scene-layer-contrib-table">
-                  <thead>
-                    <tr>
-                      <th>对象</th>
-                      <th>区间</th>
-                      <th>指数</th>
-                      <th>Beta（指/概/行）</th>
-                      <th>限定板块</th>
-                      <th>市值区分</th>
-                      <th>有效交易日</th>
-                      <th>总样本数</th>
-                      <th>最小样本阈值</th>
-                      <th>分层层数</th>
-                      <th>分层方法</th>
-                      <th>最少上市交易日</th>
-                      <th>回测周期（天）</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr>
-                      <td>总分</td>
-                      <td>{formatDateLabel(rankResult.start_date)} ~ {formatDateLabel(rankResult.end_date)}</td>
-                      <td>{rankResult.index_ts_code}</td>
-                      <td>{formatNumber(rankResult.index_beta, 2)} / {formatNumber(rankResult.concept_beta, 2)} / {formatNumber(rankResult.industry_beta, 2)}</td>
-                      <td>{formatBacktestBoardLabel(rankResult)}</td>
-                      <td>{rankResult.market_value_grouping ? "自定义边界" : "不区分"}</td>
-                      <td>{rankResult.point_count}</td>
-                      <td>{rankResult.sample_count}</td>
-                      <td>{rankResult.min_samples_per_rank_day}</td>
-                      <td>{rankResult.layer_count}</td>
-                      <td>{rankResult.layer_method_label}</td>
-                      <td>{rankResult.min_listed_trade_days}</td>
-                      <td>{rankResult.backtest_period}</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-            </div>
-            <div className="scene-layer-summary-section">
-              <h4>回测表现</h4>
-              <div className="scene-layer-contrib-table-wrap">
-                <table className="scene-layer-contrib-table">
-                  <thead>
-                    <tr>
-                      <th>分层差均值（日度高分层-低分层）</th>
-                      <th title="收益统计区间最后一天 ER(20) 减触发日 ER(20)">ΔER(20)</th>
-                      <th>IC 均值</th>
-                      <th title="按回测持有期修正重叠样本的 Newey-West t值">IC HAC t值</th>
-                      <th>ICIR</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr>
-                      <td>{formatBacktestValue(rankResult.spread_mean, rankResult.return_metric)}</td>
-                      <td>{formatNumber(rankResult.avg_er_change, 4)}</td>
-                      <td className={metricHighlightClass("ic", rankResult.ic_mean)}>{formatNumber(rankResult.ic_mean)}</td>
-                      <td className={metricHighlightClass("t", rankResult.ic_t_value)}>{formatNumber(rankResult.ic_t_value)}</td>
-                      <td className={metricHighlightClass("ir", rankResult.icir)}>{formatNumber(rankResult.icir)}</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-            </div>
+        <section className="scene-layer-card research-workbench">
+          <h3>排名回测摘要</h3>
+          <p className="research-meta">{formatDateLabel(rankResult.start_date)} ~ {formatDateLabel(rankResult.end_date)} · 持有 {rankResult.backtest_period} 个交易日 · {formatBacktestBoardLabel(rankResult)} · {rankResult.return_metric === "rise_amount" ? "上涨金额（亿）" : "残差收益率（%）"}</p>
+          <div className="research-feedback-grid">
+            <div><span>高低分层收益差</span><strong>{formatBacktestValue(rankResult.spread_mean, rankResult.return_metric)}</strong><small>每日最高分层减最低分层，再按日等权。</small></div>
+            <div><span>排序能力 · Rank IC</span><strong className={metricHighlightClass("ic", rankResult.ic_mean)}>{formatNumber(rankResult.ic_mean)}</strong><small>分数与后验收益的秩相关，正值表示高分对应更高收益。</small></div>
+            <div><span>排序稳定性 · ICIR</span><strong className={metricHighlightClass("ir", rankResult.icir)}>{formatNumber(rankResult.icir)}</strong><small>日度 IC 均值／标准差，未年化。</small></div>
+            <div><span>IC HAC t值</span><strong className={metricHighlightClass("t", rankResult.ic_t_value)}>{formatNumber(rankResult.ic_t_value)}</strong><small>按持有期修正重叠样本的标准误。</small></div>
+            <div><span>有效交易日 / 股票日样本</span><strong>{rankResult.point_count.toLocaleString()} / {rankResult.sample_count.toLocaleString()}</strong><small>同一股票可在不同日期重复计数。</small></div>
           </div>
+          <p className="research-meta">收益对应所选持有期，并非账户累计收益；“—”表示无法估计或未计算。</p>
+          <nav className="research-result-tabs" aria-label="排名回测结果内容">
+            {[{value: "portfolios", label: "组合表现"}, {value: "quarters", label: "季度表现"}, {value: "layers", label: "分层与样本"}, {value: "size", label: "市值分组"}, {value: "diagnostics", label: "计算口径"}].map((item) => <button type="button" key={item.value} aria-pressed={rankResultView === item.value} onClick={() => setRankResultView(item.value)}>{item.label}</button>)}
+          </nav>
 
-          {(rankResult.fixed_top_k_summaries?.length ?? 0) > 0 ? (
+          {["portfolios", "quarters"].includes(rankResultView) ? (
             <div className="scene-layer-layer-summary">
-              <h3>原榜固定席位与季度覆盖</h3>
+              <h3>{rankResultView === "quarters" ? "固定席位季度表现" : "原榜固定席位组合"}</h3>
+              {rankResultView === "quarters" ? <label className="research-field">组合<select value={rankResult.fixed_top_k_summaries?.some((item) => String(item.top_k) === rankQuarterTopK) ? rankQuarterTopK : String(rankResult.fixed_top_k_summaries?.[0]?.top_k ?? "")} onChange={(event) => setRankQuarterTopK(event.target.value)}>{Array.from(new Set(rankResult.fixed_top_k_summaries?.map((item) => String(item.top_k)) ?? [])).map((value) => <option key={value} value={value}>Top {value}</option>)}</select></label> : null}
+              <p className="research-meta">先按原榜名次取前 K，不以后排补位；收益仅对有标签成员按日等权，缺失不补零。</p>
+              {!(rankResult.fixed_top_k_summaries?.length) ? <p className="research-meta">本次没有固定席位统计；旧结果可在计算口径中查看有效后验样本统计。</p> : null}
+              <details><summary>覆盖与资格口径</summary>
               <p className="scene-layer-caption">
                 在所选股票范围内先按已保存的原榜名次取前 K，再读取后验，不用后排补位。
                 统计只包含有有效名次且上市天数资格已知并满足条件的评分记录；资格不满足及未知数是所选范围的全部评分记录数量，未知者可能影响前 K 成员。
@@ -1251,19 +1201,19 @@ export default function SceneLayerBacktestPage() {
                 收益是有标签成员的每日均值再按日等权，缺标签不能视为零；无可用标签的日期不参与收益均值。
                 季度区间状态按交易日历核对；范围完整仅表示评分日覆盖，并不保证标签成熟或输入有效。
               </p>
+                <p className="research-meta">{rankResult.fixed_top_k_summaries?.filter((item) => item.period_label === "全部").map((item) => `Top ${item.top_k}：资格不满足 ${item.ineligible_count.toLocaleString()}，资格未知 ${item.unknown_eligibility_count.toLocaleString()}`).join("；")}</p>
+              </details>
               <div className="scene-layer-contrib-table-wrap">
                 <table className="scene-layer-contrib-table">
-                  <thead><tr><th>期间</th><th>区间状态</th><th>组合</th><th>排名日 / 季度交易日</th><th>有标签日</th><th>资格不满足 / 未知</th><th>有标签 / 成员席位</th><th>覆盖率</th><th>可观察日均收益</th></tr></thead>
+                  <thead><tr><th>{rankResultView === "quarters" ? "季度" : "组合"}</th><th>可观察日均收益</th><th>标签覆盖率</th><th>有标签日 / 排名日</th>{rankResultView === "quarters" ? <th>季度覆盖状态</th> : null}</tr></thead>
                   <tbody>
-                    {rankResult.fixed_top_k_summaries?.map((item) => (
+                    {rankResult.fixed_top_k_summaries?.filter((item) => rankResultView === "portfolios" ? item.period_label === "全部" : item.period_label !== "全部" && String(item.top_k) === (rankResult.fixed_top_k_summaries?.some((row) => String(row.top_k) === rankQuarterTopK) ? rankQuarterTopK : String(rankResult.fixed_top_k_summaries?.[0]?.top_k))).map((item) => (
                       <tr key={`${item.top_k}-${item.period_label}`}>
-                        <td>{item.period_label}</td>
-                        <td>{item.period_label === "全部" ? "—" : item.quarter_status === "partial" ? "区间截断" : item.quarter_status === "missing_rank_days" ? "缺少排名日" : item.quarter_status === "range_covered" ? "范围完整" : "日历不足"}</td>
-                        <td>Top {item.top_k}</td><td>{item.ranking_days} / {item.calendar_days ?? "—"}</td><td>{item.observed_days}</td>
-                        <td>{item.ineligible_count} / {item.unknown_eligibility_count}</td>
-                        <td>{item.label_count} / {item.member_count}</td>
-                        <td>{formatRate(item.member_count ? item.label_count / item.member_count : null)}</td>
+                        <td>{rankResultView === "quarters" ? item.period_label : `Top ${item.top_k}`}</td>
                         <td>{formatBacktestValue(item.avg_daily_return, rankResult.return_metric)}</td>
+                        <td>{formatRate(item.member_count ? item.label_count / item.member_count : null)}<small className="rank-result-cell-note">{item.label_count.toLocaleString()} / {item.member_count.toLocaleString()} 席位</small></td>
+                        <td>{item.observed_days} / {item.ranking_days}</td>
+                        {rankResultView === "quarters" ? <td>{item.quarter_status === "partial" ? "区间截断" : item.quarter_status === "missing_rank_days" ? "缺少排名日" : item.quarter_status === "range_covered" ? "范围完整" : "日历不足"}<small className="rank-result-cell-note">季度交易日 {item.calendar_days ?? "—"}</small></td> : null}
                       </tr>
                     ))}
                   </tbody>
@@ -1272,6 +1222,9 @@ export default function SceneLayerBacktestPage() {
             </div>
           ) : null}
 
+          {rankResultView === "diagnostics" ? <>
+            <p className="research-meta">指数 {rankResult.index_ts_code} · Beta（指／概／行）{formatNumber(rankResult.index_beta, 2)} / {formatNumber(rankResult.concept_beta, 2)} / {formatNumber(rankResult.industry_beta, 2)} · 最少上市 {rankResult.min_listed_trade_days} 日 · 每日至少 {rankResult.min_samples_per_rank_day} 个样本 · {rankResult.layer_count} 层（{rankResult.layer_method_label}） · ΔER(20) {formatNumber(rankResult.avg_er_change, 4)}</p>
+            <details><summary>旧口径 Top-K 与年度统计（有效后验样本，可能补位）</summary>
           {rankTopKSummaries.length > 0 ? (
             <div className="scene-layer-layer-summary">
               <h3>旧口径：有效后验样本 Top-K（每日等权）</h3>
@@ -1356,7 +1309,10 @@ export default function SceneLayerBacktestPage() {
             </div>
           ) : null}
 
-          {rankLayerSummaries.length === 0 ? (
+            </details>
+          </> : null}
+
+          {rankResultView === "layers" ? (rankLayerSummaries.length === 0 ? (
             <div className="scene-layer-empty">当前没有可用于分层的总分样本。</div>
           ) : (
             <div className="scene-layer-layer-summary">
@@ -1405,9 +1361,9 @@ export default function SceneLayerBacktestPage() {
                 </table>
               </div>
             </div>
-          )}
+          )) : null}
 
-          {rankResult.market_value_summaries && rankResult.market_value_summaries.length > 0 ? (
+          {rankResultView === "size" ? (rankResult.market_value_summaries && rankResult.market_value_summaries.length > 0 ? (
             <div className="scene-layer-layer-summary">
               <h3>推测市值分组回测表现</h3>
               <p className="scene-layer-caption">成员数包含评分记录；标签数只覆盖整体排名达到每日最少样本条件的日期。分组统计另有每日样本门槛，因此统计样本可能更少。</p>
@@ -1446,7 +1402,7 @@ export default function SceneLayerBacktestPage() {
                 </table>
               </div>
             </div>
-          ) : null}
+          ) : <p className="research-meta">本次没有市值分组结果，可设置市值边界后重新运行。</p>) : null}
 
           {rankLayerSampleModal && rankResult ? (
             <div className="scene-layer-modal-mask" onClick={closeRankLayerSampleModal}>
