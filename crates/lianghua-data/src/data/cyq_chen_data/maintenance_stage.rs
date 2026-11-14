@@ -126,14 +126,16 @@ pub(super) fn write_cyq_chen_maintenance_batches_from_channel(
 ) -> Result<(usize, usize), String> {
     let result = (|| -> Result<(usize, usize), String> {
         let mut stage = Connection::open(stage_path).map_err(|e| e.to_string())?;
+        let budget = super::CyqChenWriteBudget::detect();
         stage
-            .execute_batch("SET checkpoint_threshold = '256MB'")
+            .execute_batch(&format!(
+                "SET checkpoint_threshold = '256MB'; SET memory_limit = '{}MB'",
+                budget.memory_mb
+            ))
             .map_err(|e| e.to_string())?;
         let mut finished = false;
         let mut interrupted = None;
         while !finished && interrupted.is_none() {
-            let mut group_codes = Vec::new();
-            let mut retry_batches = Vec::new();
             let tx = stage.transaction().map_err(|e| e.to_string())?;
             {
                 let mut snapshots = tx
@@ -143,14 +145,11 @@ pub(super) fn write_cyq_chen_maintenance_batches_from_channel(
                 let mut done = tx
                     .appender("cyq_chen_maintenance_done")
                     .map_err(|e| e.to_string())?;
-                let mut unverified = tx
-                    .appender("cyq_chen_maintenance_unverified")
-                    .map_err(|e| e.to_string())?;
                 let mut stocks = 0;
                 let mut bin_rows = 0;
                 let mut checkpoint_bytes = 0;
                 let mut checkpoints = Vec::new();
-                for _ in 0..512 {
+                for _ in 0..512 * budget.queue_scale {
                     let batch = match rx.recv() {
                         #[cfg(test)]
                         Ok(CyqChenWriteMessage::Batch(batch)) => {
@@ -173,12 +172,7 @@ pub(super) fn write_cyq_chen_maintenance_batches_from_channel(
                     if !batch.errors.is_empty() {
                         return Err("维护批次包含未完成的个股错误".into());
                     }
-                    group_codes.extend(batch.completed_ts_codes.iter().cloned());
-                    group_codes.extend(batch.checkpoints.iter().map(|row| row.0.clone()));
                     for code in &batch.completed_ts_codes {
-                        unverified
-                            .append_row([code])
-                            .map_err(|e| format!("保存维护待校验股票失败:{e}"))?;
                         done.append_row(params![code, batch.replace_ts_codes.contains(code)])
                             .map_err(|e| format!("保存维护股票进度失败:{e}"))?;
                     }
@@ -189,7 +183,6 @@ pub(super) fn write_cyq_chen_maintenance_batches_from_channel(
                         .iter()
                         .map(|row| row.2.len() + row.3.as_ref().map_or(0, String::len))
                         .sum::<usize>();
-                    retry_batches.push(batch.clone());
                     append_prepared_cyq_chen_batch_rows(
                         &tx,
                         &mut snapshots,
@@ -197,75 +190,20 @@ pub(super) fn write_cyq_chen_maintenance_batches_from_channel(
                         batch,
                         &mut checkpoints,
                     )?;
-                    if stocks >= 512
-                        || bin_rows >= 1_000_000
-                        || checkpoint_bytes >= 32 * 1024 * 1024
+                    if stocks >= 512 * budget.queue_scale
+                        || bin_rows >= 1_000_000 * budget.queue_scale
+                        || checkpoint_bytes >= 32 * 1024 * 1024 * budget.queue_scale
                     {
                         break;
                     }
                 }
                 append_cyq_chen_checkpoints(&tx, checkpoints, true)?;
                 done.flush().map_err(|e| e.to_string())?;
-                unverified.flush().map_err(|e| e.to_string())?;
                 snapshots.flush().map_err(|e| e.to_string())?;
                 bins.flush().map_err(|e| e.to_string())?;
             }
             // Abort/断连也提交已成功收到的完整股票，正式结果仍完全不动。
             tx.commit().map_err(|e| format!("提交维护进度失败:{e}"))?;
-            if !group_codes.is_empty() {
-                group_codes.sort_unstable();
-                group_codes.dedup();
-                for attempt in 0..=2 {
-                    stage
-                        .execute_batch("CHECKPOINT")
-                        .map_err(|e| format!("落盘维护批次失败:{e}"))?;
-                    drop(stage);
-                    let verified =
-                        crate::data::read_with_retry("回读当前筹码维护批次", || {
-                            super::store::verify_cyq_chen_db(stage_path, Some(&group_codes))
-                        });
-                    match verified {
-                        Ok(()) => {
-                            stage = Connection::open(stage_path).map_err(|e| e.to_string())?;
-                            stage
-                                .execute_batch("SET checkpoint_threshold = '256MB'")
-                                .map_err(|e| e.to_string())?;
-                            break;
-                        }
-                        Err(error)
-                            if attempt < 2
-                                && crate::data::read_retry::is_retryable_read_error(&error) =>
-                        {
-                            eprintln!(
-                                "当前筹码维护批次校验失败，仅重写本批 {} 只股票，重试 {}/2: {error}",
-                                group_codes.len(),
-                                attempt + 1
-                            );
-                            stage = Connection::open(stage_path).map_err(|e| e.to_string())?;
-                            stage
-                                .execute_batch("SET checkpoint_threshold = '256MB'")
-                                .map_err(|e| e.to_string())?;
-                            super::compute::rewrite_unverified_cyq_batch(
-                                &mut stage,
-                                &retry_batches,
-                                &group_codes,
-                                Some("cyq_chen_maintenance"),
-                            )?;
-                        }
-                        Err(error) => return Err(error),
-                    }
-                }
-                let tx = stage.transaction().map_err(|e| e.to_string())?;
-                tx.execute(
-                    &format!(
-                        "DELETE FROM cyq_chen_maintenance_unverified WHERE ts_code IN ({})",
-                        vec!["?"; group_codes.len()].join(",")
-                    ),
-                    duckdb::params_from_iter(group_codes.iter()),
-                )
-                .map_err(|e| format!("确认维护批次校验完成失败:{e}"))?;
-                tx.commit().map_err(|e| e.to_string())?;
-            }
         }
         if let Some(reason) = interrupted {
             return Err(format!("新筹码维护计算中断:{reason}"));
@@ -276,6 +214,20 @@ pub(super) fn write_cyq_chen_maintenance_batches_from_channel(
         ).map_err(|e| e.to_string())?;
         if done != total {
             return Err(format!("维护股票未全部完成: {done}/{total}，拒绝发布"));
+        }
+        stage
+            .execute_batch("CHECKPOINT")
+            .map_err(|e| format!("落盘维护结果失败:{e}"))?;
+        if std::env::var_os("LIANGHUA_CYQ_VERIFY_WRITE").is_some() {
+            if let Err(error) =
+                crate::data::read_with_retry("回读完整筹码维护结果", || {
+                    super::store::verify_cyq_chen_db(stage_path, None)
+                })
+            {
+                stage.execute_batch("INSERT OR IGNORE INTO cyq_chen_maintenance_unverified SELECT ts_code FROM cyq_chen_maintenance_done")
+                    .map_err(|mark_error| format!("{error}；标记维护恢复范围失败:{mark_error}"))?;
+                return Err(error);
+            }
         }
         drop(stage);
 

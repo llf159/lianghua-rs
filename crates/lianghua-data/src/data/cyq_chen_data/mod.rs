@@ -27,8 +27,49 @@ pub(super) const CYQ_CHEN_SNAPSHOT_TABLE: &str = "cyq_chen_snapshot";
 pub(super) const CYQ_CHEN_BIN_TABLE: &str = "cyq_chen_bin";
 pub(super) const CYQ_CHEN_META_TABLE: &str = "cyq_chen_meta";
 pub(super) const DEFAULT_ADJ_TYPE: &str = "qfq";
-pub(super) const CYQ_CHEN_QUEUE_BOUND: usize = 2;
 pub(super) const CYQ_CHEN_SCHEMA_VERSION: &str = "5";
+
+// 在任务边界取样，避免运行中频繁收缩队列或修改共享数据库设置。
+#[derive(Clone, Copy)]
+pub(super) struct CyqChenWriteBudget {
+    queue_scale: usize,
+    memory_mb: usize,
+}
+
+impl CyqChenWriteBudget {
+    fn detect() -> Self {
+        let mut available = std::fs::read_to_string("/proc/meminfo")
+            .ok()
+            .and_then(|text| {
+                text.lines().find_map(|line| {
+                    line.strip_prefix("MemAvailable:")
+                        .and_then(|value| value.split_whitespace().next())
+                        .and_then(|value| value.parse::<u64>().ok())
+                })
+            })
+            .map(|kb| kb.saturating_mul(1024))
+            .unwrap_or(2 * 1024 * 1024 * 1024);
+        // cgroup v2根限制可用时，避免按宿主机空闲内存放大容器预算。
+        if let (Ok(limit), Ok(current)) = (
+            std::fs::read_to_string("/sys/fs/cgroup/memory.max"),
+            std::fs::read_to_string("/sys/fs/cgroup/memory.current"),
+        ) {
+            if let (Ok(limit), Ok(current)) =
+                (limit.trim().parse::<u64>(), current.trim().parse::<u64>())
+            {
+                available = available.min(limit.saturating_sub(current));
+            }
+        }
+        Self::from_available(available)
+    }
+
+    fn from_available(bytes: u64) -> Self {
+        Self {
+            queue_scale: (bytes / (8 * 1024 * 1024 * 1024)).clamp(1, 4) as usize,
+            memory_mb: (bytes / (4 * 1024 * 1024)).clamp(256, 8192) as usize,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CyqChenRebuildSummary {
