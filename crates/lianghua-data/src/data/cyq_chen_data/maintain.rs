@@ -248,6 +248,10 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
     // 独立只读实例也不参与写实例的块管理；续算状态必须与写线程共享实例。
     // scope 统一等待计算与写线程结束，再释放主连接。
     let replay_first_date = std::sync::OnceLock::new();
+    let reader_template = std::sync::Mutex::new(DataReader::new_with_runtime_keys(
+        source_dir,
+        &required_runtime_keys,
+    )?);
     let (compute_result, writer_result) = thread::scope(|scope| {
         let (tx, rx) = sync_channel(CYQ_CHEN_QUEUE_BOUND);
         let abort_tx = tx.clone();
@@ -276,8 +280,8 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
                     .map_err(|_| "新筹码数据库连接锁异常".to_string())?
                     .try_clone()
                     .map_err(|e| format!("克隆新筹码状态读取连接失败:{e}"))?;
-                let worker_reader =
-                    DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
+                let worker_reader = reader_template.lock()
+                    .map_err(|_| "行情读取模板连接锁异常".to_string())?.try_clone()?;
                 Ok((worker_reader, state_conn))
             },
             |worker_reader, ts_group| -> Result<(), String> {
@@ -625,6 +629,10 @@ pub fn repair_cyq_chen_stocks_if_db_exists(
     let write_start_date = start_date.clone();
     let write_end_date = end_date.clone();
     let writer_strategy_hash = strategy_hash.clone();
+    let reader_template = std::sync::Mutex::new(DataReader::new_with_runtime_keys(
+        source_dir,
+        &required_runtime_keys,
+    )?);
     let writer_handle = thread::spawn(move || {
         let conn =
             Connection::open(&cyq_chen_db_str).map_err(|e| format!("打开新筹码库失败:{e}"))?;
@@ -643,7 +651,12 @@ pub fn repair_cyq_chen_stocks_if_db_exists(
     let finished_stock_count = std::sync::atomic::AtomicUsize::new(resumed_stocks);
     let compute_group_size = cyq_chen_streaming_stock_block_size();
     let compute_result = ts_codes.par_chunks(compute_group_size).try_for_each_init(
-        || DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys),
+        || {
+            reader_template
+                .lock()
+                .map_err(|_| "行情读取模板连接锁异常".to_string())?
+                .try_clone()
+        },
         |worker_reader, ts_group| -> Result<(), String> {
             lianghua_model::task::checkpoint()?;
             let worker_reader = worker_reader.as_ref().map_err(Clone::clone)?;
@@ -923,6 +936,10 @@ pub fn rebuild_cyq_chen_all_with_progress(
     let compute_threads = std::thread::available_parallelism()
         .map(|count| count.get())
         .unwrap_or(1);
+    let reader_template = std::sync::Mutex::new(DataReader::new_with_runtime_keys(
+        source_dir,
+        &required_runtime_keys,
+    )?);
     let compute_group_size = cyq_chen_streaming_stock_block_size();
     let compute_pool = rayon::ThreadPoolBuilder::new()
         .num_threads(compute_threads)
@@ -946,7 +963,8 @@ pub fn rebuild_cyq_chen_all_with_progress(
     let profile_writes = std::env::var_os("LIANGHUA_CYQ_WRITE_PROFILE").is_some();
     let compute_result = compute_pool.install(|| {
         ts_codes.par_chunks(compute_group_size).try_for_each_init(
-            || DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys),
+            || reader_template.lock()
+                .map_err(|_| "行情读取模板连接锁异常".to_string())?.try_clone(),
             |worker_reader, ts_group| -> Result<(), String> {
                 lianghua_model::task::checkpoint()?;
                 let worker_reader = worker_reader.as_ref().map_err(Clone::clone)?;
@@ -1169,19 +1187,57 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap()
         };
+        // Sparse cohorts use lazy scaling; JSON continuation may differ by a few ULPs.
+        // Keep dates, availability and clocks exact, and compare feature masses numerically.
+        let assert_features = |actual: Vec<(
+            String,
+            Option<f64>,
+            Option<f64>,
+            Option<i32>,
+            Option<f64>,
+        )>,
+                               expected: &Vec<(
+            String,
+            Option<f64>,
+            Option<f64>,
+            Option<i32>,
+            Option<f64>,
+        )>| {
+            assert_eq!(actual.len(), expected.len());
+            for (actual, expected) in actual.iter().zip(expected) {
+                assert_eq!((&actual.0, actual.3), (&expected.0, expected.3));
+                for (a, b) in [
+                    (actual.1, expected.1),
+                    (actual.2, expected.2),
+                    (actual.4, expected.4),
+                ] {
+                    match (a, b) {
+                        (Some(a), Some(b)) => {
+                            assert!((a - b).abs() <= 1e-12, "{}: {a} != {b}", actual.0)
+                        }
+                        _ => assert_eq!(a, b),
+                    }
+                }
+            }
+        };
         let expected = features(full);
-        assert_eq!(features(incremental), expected);
-        assert_eq!(
-            snapshot_rows_for_compare(incremental),
-            snapshot_rows_for_compare(full)
-        );
+        assert_features(features(incremental), &expected);
+        let incremental_snapshots = snapshot_rows_for_compare(incremental);
+        let full_snapshots = snapshot_rows_for_compare(full);
+        assert_eq!(incremental_snapshots.len(), full_snapshots.len());
+        for (actual, expected) in incremental_snapshots.iter().zip(&full_snapshots) {
+            assert_eq!(
+                (&actual.0, &actual.1, actual.2, actual.3, actual.4),
+                (&expected.0, &expected.1, expected.2, expected.3, expected.4)
+            );
+        }
         let db = crate::data::cyq_chen_db_path(incremental);
         let conn = Connection::open(&db).unwrap();
         conn.execute("UPDATE cyq_chen_checkpoint SET feature_state = NULL", [])
             .unwrap();
         drop(conn);
         maintain_cyq_chen_incremental_if_db_exists(incremental, false, None).unwrap();
-        assert_eq!(features(incremental), expected);
+        assert_features(features(incremental), &expected);
         let conn = Connection::open(&db).unwrap();
         conn.execute(
             "DELETE FROM cyq_chen_meta WHERE key = 'feature_version'",
@@ -1190,7 +1246,7 @@ mod tests {
         .unwrap();
         drop(conn);
         maintain_cyq_chen_incremental_if_db_exists(incremental, false, None).unwrap();
-        assert_eq!(features(incremental), expected);
+        assert_features(features(incremental), &expected);
         let conn = Connection::open(&db).unwrap();
         conn.execute(
             "UPDATE cyq_chen_meta SET value = '1' WHERE key = 'feature_version'",
@@ -1204,7 +1260,7 @@ mod tests {
         .unwrap();
         drop(conn);
         maintain_cyq_chen_incremental_if_db_exists(incremental, false, None).unwrap();
-        assert_eq!(features(incremental), expected);
+        assert_features(features(incremental), &expected);
         let conn = Connection::open(crate::data::source_db_path(incremental)).unwrap();
         conn.execute(
             "UPDATE stock_data SET open=9, high=9, low=9, close=9 WHERE trade_date = ?",
@@ -1217,7 +1273,7 @@ mod tests {
         let repaired = features(incremental);
         assert_ne!(repaired, expected);
         rebuild_cyq_chen_all(incremental, config, Some(&dates[120]), None).unwrap();
-        assert_eq!(features(incremental), repaired);
+        assert_features(features(incremental), &repaired);
         fs::remove_dir_all(incremental_dir).unwrap();
         fs::remove_dir_all(full_dir).unwrap();
     }

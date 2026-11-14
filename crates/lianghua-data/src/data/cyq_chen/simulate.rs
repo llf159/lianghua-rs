@@ -20,12 +20,7 @@ pub(super) fn apply_posterior_for_day(
     len: usize,
     day: usize,
 ) -> Result<(f64, f64), String> {
-    let horizon = config
-        .strategies
-        .iter()
-        .map(|r| r.confirm_after)
-        .max()
-        .unwrap_or(0);
+    let horizon = config.posterior_horizon;
     if horizon == 0 {
         return Ok((0.0, 0.0));
     }
@@ -104,6 +99,7 @@ pub(super) fn apply_sell_for_day(
     sell_bias_cache: &mut HashMap<(u64, u64), Arc<Vec<(f64, f64)>>>,
     day_index: usize,
     turnover_rate: f64,
+    point_rates: bool,
 ) -> Result<(), String> {
     if turnover_rate <= EPS {
         return Ok(());
@@ -114,80 +110,120 @@ pub(super) fn apply_sell_for_day(
     let mut has_retail_bias = false;
     let (main_chip_total, retail_chip_total) = holder_chip_totals(buckets);
 
+    let mut point_strategies = Vec::new();
+    if point_rates {
+        for strategy in chip_config.strategies.iter().filter(|strategy| {
+            strategy.direction == ChipDirection::Sell && strategy.confirm_after == 0
+        }) {
+            if strategy.sell_uses_bucket_state
+                || strategy_triggered_at(bucket_runtime, strategy, bars.len(), day_index)?
+            {
+                point_strategies.push(strategy);
+            }
+        }
+    }
+
     for bucket_index in 0..buckets.len() {
         if buckets[bucket_index].main_chip <= EPS && buckets[bucket_index].retail_chip <= EPS {
             continue;
         }
 
-        (|runtime: &mut Runtime,
-          bucket: &ChipBucket,
-          main_ratio_history: Option<Arc<Vec<Option<f64>>>>,
-          main_chip_total: f64,
-          retail_chip_total: f64,
-          bars: &[Option<ChenChipBar>],
-          needs_bucket_rate_series: bool|
-         -> Result<(), String> {
+        let cache_key = (
+            buckets[bucket_index].price_low.to_bits(),
+            buckets[bucket_index].price_high.to_bits(),
+        );
+        if point_rates {
+            let bucket = &buckets[bucket_index];
+            let bar = bars[day_index]
+                .as_ref()
+                .ok_or_else(|| format!("第{day_index}根K线缺少有效数据"))?;
+            let cost = bucket.price();
+            for (needed, (key, alias, price)) in chip_config.sell_rate_fields.iter().zip([
+                ("RATEO", "rateo", bar.open),
+                ("RATEH", "rateh", bar.high),
+                ("RATEL", "ratel", bar.low),
+                ("RATEC", "ratec", bar.close),
+            ]) {
+                if *needed {
+                    set_num_with_alias(bucket_runtime, key, alias, (price - cost) / cost * 100.0);
+                }
+            }
+        } else if chip_config.sell_uses_bucket_dynamic_state
+            || !sell_bias_cache.contains_key(&cache_key)
+        {
+            let bucket = &buckets[bucket_index];
             if !bucket.price().is_finite() || bucket.price() <= 0.0 {
                 return Err("价格分桶中点价非法".to_string());
             }
             if !main_chip_total.is_finite() || !retail_chip_total.is_finite() {
                 return Err("主力/散户总筹码出现非有限数值".to_string());
             }
-
-            if needs_bucket_rate_series {
-                match (&bucket.rateo, &bucket.rateh, &bucket.ratel, &bucket.ratec) {
-                    (Some(rateo), Some(rateh), Some(ratel), Some(ratec)) => {
-                        set_num_series_arc_with_alias(runtime, "RATEO", "rateo", Arc::clone(rateo));
-                        set_num_series_arc_with_alias(runtime, "RATEH", "rateh", Arc::clone(rateh));
-                        set_num_series_arc_with_alias(runtime, "RATEL", "ratel", Arc::clone(ratel));
-                        set_num_series_arc_with_alias(runtime, "RATEC", "ratec", Arc::clone(ratec));
-                    }
-                    _ => {
-                        let cost_price = bucket.price();
-                        let (rateo, rateh, ratel, ratec) =
-                            compute_bucket_rate_series(bars, cost_price);
-                        set_num_series_arc_with_alias(runtime, "RATEO", "rateo", rateo);
-                        set_num_series_arc_with_alias(runtime, "RATEH", "rateh", rateh);
-                        set_num_series_arc_with_alias(runtime, "RATEL", "ratel", ratel);
-                        set_num_series_arc_with_alias(runtime, "RATEC", "ratec", ratec);
+            if chip_config.sell_rate_fields.iter().any(|needed| *needed) {
+                let rates = [&bucket.rateo, &bucket.rateh, &bucket.ratel, &bucket.ratec];
+                let missing =
+                    std::array::from_fn(|i| chip_config.sell_rate_fields[i] && rates[i].is_none());
+                let computed = if missing.iter().any(|needed| *needed) {
+                    compute_bucket_rate_series(bars, bucket.price(), missing)
+                } else {
+                    [None, None, None, None]
+                };
+                for (index, (key, alias)) in [
+                    ("RATEO", "rateo"),
+                    ("RATEH", "rateh"),
+                    ("RATEL", "ratel"),
+                    ("RATEC", "ratec"),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    if let Some(series) = rates[index].as_ref().or(computed[index].as_ref()) {
+                        set_num_series_arc_with_alias(
+                            bucket_runtime,
+                            key,
+                            alias,
+                            Arc::clone(series),
+                        );
                     }
                 }
             }
-
             if chip_config.sell_uses_bucket_dynamic_state {
-                if let Some(history) = main_ratio_history {
+                if let Some(history) = main_ratio_history.get(bucket_index) {
                     set_num_series_arc_with_alias(
-                        runtime,
+                        bucket_runtime,
                         "MAIN_CHIP_RATIO",
                         "main_chip_ratio",
-                        history,
+                        Arc::clone(history),
                     );
                 }
                 set_num_with_alias(
-                    runtime,
+                    bucket_runtime,
                     "MAIN_CHIP_TOTAL",
                     "main_chip_total",
                     main_chip_total,
                 );
                 set_num_with_alias(
-                    runtime,
+                    bucket_runtime,
                     "RETAIL_CHIP_TOTAL",
                     "retail_chip_total",
                     retail_chip_total,
                 );
             }
-
-            Ok(())
-        })(
-            bucket_runtime,
-            &buckets[bucket_index],
-            main_ratio_history.get(bucket_index).map(Arc::clone),
-            main_chip_total,
-            retail_chip_total,
-            bars,
-            chip_config.sell_uses_bucket_rate_series,
-        )?;
-        let (main_bias, retail_bias) = if chip_config.sell_uses_bucket_dynamic_state {
+        }
+        let (main_bias, retail_bias) = if point_rates {
+            let mut main = 0.0;
+            let mut retail = 0.0;
+            for strategy in &point_strategies {
+                if !strategy.sell_uses_bucket_state
+                    || strategy_triggered_at(bucket_runtime, strategy, bars.len(), day_index)?
+                {
+                    match strategy.holder {
+                        ChipHolder::Main => main += strategy.bias,
+                        ChipHolder::Retail => retail += strategy.bias,
+                    }
+                }
+            }
+            (main, retail)
+        } else if chip_config.sell_uses_bucket_dynamic_state {
             let (main, retail, _) = strategy_biases_at(
                 bucket_runtime,
                 chip_config,
@@ -197,10 +233,6 @@ pub(super) fn apply_sell_for_day(
             )?;
             (main, retail)
         } else {
-            let cache_key = (
-                buckets[bucket_index].price_low.to_bits(),
-                buckets[bucket_index].price_high.to_bits(),
-            );
             if !sell_bias_cache.contains_key(&cache_key) {
                 let mut main_biases = vec![0.0; bars.len()];
                 let mut retail_biases = vec![0.0; bars.len()];
@@ -489,11 +521,7 @@ pub(super) fn apply_buy_for_day(
 
         buckets[bucket_index].main_chip += bucket_buy_amount * main_share;
         buckets[bucket_index].retail_chip += bucket_buy_amount * retail_share;
-        if chip_config
-            .strategies
-            .iter()
-            .any(|rule| rule.confirm_after > 0)
-        {
+        if chip_config.posterior_horizon > 0 {
             buckets[bucket_index].pending.push(PosteriorChipLot {
                 trade_date: bar.trade_date.clone(),
                 age: 0,
@@ -509,40 +537,45 @@ pub(super) fn apply_buy_for_day(
 pub(super) fn build_new_participant_buy_runtime(
     base_runtime: &Runtime,
     bars: &[Option<ChenChipBar>],
+    fields: [bool; 4],
 ) -> Result<Runtime, String> {
-    let mut rateo = Vec::with_capacity(bars.len());
-    let mut rateh = Vec::with_capacity(bars.len());
-    let mut ratel = Vec::with_capacity(bars.len());
-    let mut ratec = Vec::with_capacity(bars.len());
-    let mut last_close: Option<f64> = None;
-
+    let mut runtime = base_runtime.clone();
+    if !fields.iter().any(|needed| *needed) {
+        return Ok(runtime);
+    }
+    let mut rates = fields.map(|needed| needed.then(|| Vec::with_capacity(bars.len())));
+    let mut last_close = None;
     for bar in bars {
         let Some(bar) = bar else {
-            rateo.push(None);
-            rateh.push(None);
-            ratel.push(None);
-            ratec.push(None);
+            for values in rates.iter_mut().flatten() {
+                values.push(None);
+            }
             continue;
         };
-        let reference_price = last_close.unwrap_or(bar.open);
-        if !reference_price.is_finite() || reference_price <= 0.0 {
+        let reference = last_close.unwrap_or(bar.open);
+        if !reference.is_finite() || reference <= 0.0 {
             return Err("新进买方参考价非法".to_string());
         }
-
-        rateo.push(Some((bar.open - reference_price) / reference_price * 100.0));
-        rateh.push(Some((bar.high - reference_price) / reference_price * 100.0));
-        ratel.push(Some((bar.low - reference_price) / reference_price * 100.0));
-        ratec.push(Some(
-            (bar.close - reference_price) / reference_price * 100.0,
-        ));
+        for (values, price) in rates
+            .iter_mut()
+            .zip([bar.open, bar.high, bar.low, bar.close])
+        {
+            if let Some(values) = values {
+                values.push(Some((price - reference) / reference * 100.0));
+            }
+        }
         last_close = Some(bar.close);
     }
-
-    let mut runtime = base_runtime.clone();
-    set_num_series_with_alias(&mut runtime, "RATEO", "rateo", rateo);
-    set_num_series_with_alias(&mut runtime, "RATEH", "rateh", rateh);
-    set_num_series_with_alias(&mut runtime, "RATEL", "ratel", ratel);
-    set_num_series_with_alias(&mut runtime, "RATEC", "ratec", ratec);
+    for (values, (key, alias)) in rates.into_iter().zip([
+        ("RATEO", "rateo"),
+        ("RATEH", "rateh"),
+        ("RATEL", "ratel"),
+        ("RATEC", "ratec"),
+    ]) {
+        if let Some(values) = values {
+            set_num_series_with_alias(&mut runtime, key, alias, values);
+        }
+    }
     Ok(runtime)
 }
 
@@ -558,22 +591,18 @@ pub(super) fn inject_strategy_expression_caches(
     {
         for cached_expr in &strategy.cached_exprs {
             let value =
-                eval_program_scoped(runtime, &cached_expr.program, &cached_expr.assigned_names)
-                    .map_err(|error| {
-                        format!("策略 {} 公共表达式预计算错误: {}", strategy.name, error.msg)
-                    })?;
-            runtime.vars.insert(
-                cached_expr.key.clone(),
-                (|value: Value| -> Value {
-                    match value {
-                        Value::NumSeries(series) => Value::SharedNumSeries(Arc::new(series)),
-                        Value::BoolSeries(series) => Value::SharedNumSeries(Arc::new(
-                            series.into_iter().map(|value| value.as_num()).collect(),
-                        )),
-                        other => other,
-                    }
-                })(value),
-            );
+                if let Some(key) = &cached_expr.reuse_key {
+                    runtime.vars.get(key).cloned().ok_or_else(|| {
+                        format!("策略 {} 公共表达式缓存缺失: {key}", strategy.name)
+                    })?
+                } else {
+                    eval_program_scoped(runtime, &cached_expr.program, &cached_expr.assigned_names)
+                        .map_err(|error| {
+                            format!("策略 {} 公共表达式预计算错误: {}", strategy.name, error.msg)
+                        })?
+                        .into_shared()
+                };
+            runtime.vars.insert(cached_expr.key.clone(), value);
         }
     }
     Ok(())
@@ -639,6 +668,32 @@ pub(super) fn set_num_series_with_alias(
     set_num_series_arc_with_alias(runtime, key, alias, series);
 }
 
+fn strategy_triggered_at(
+    runtime: &mut Runtime,
+    strategy: &super::CompiledChipChangeStrategy,
+    len: usize,
+    day_index: usize,
+) -> Result<bool, String> {
+    match runtime
+        .eval_program_bool_at(&strategy.optimized_when_ast, day_index)
+        .map_err(|error| format!("策略 {} 表达式计算错误: {}", strategy.name, error.msg))?
+    {
+        Some(triggered) => Ok(triggered),
+        None => {
+            let value = eval_program_scoped(
+                runtime,
+                &strategy.optimized_when_ast,
+                &strategy.assigned_names,
+            )
+            .map_err(|error| format!("策略 {} 表达式计算错误: {}", strategy.name, error.msg))?;
+            let triggers = Value::as_bool_series(&value, len).map_err(|error| {
+                format!("策略 {} 表达式返回值非布尔: {}", strategy.name, error.msg)
+            })?;
+            Ok(triggers.get(day_index).copied().unwrap_or(false))
+        }
+    }
+}
+
 pub(super) fn strategy_biases_at(
     bucket_runtime: &mut Runtime,
     chip_config: &CompiledChipChangeConfig,
@@ -655,24 +710,7 @@ pub(super) fn strategy_biases_at(
         .iter()
         .filter(|strategy| strategy.direction == direction && strategy.confirm_after == 0)
     {
-        let triggered = match bucket_runtime
-            .eval_program_bool_at(&strategy.optimized_when_ast, day_index)
-            .map_err(|error| format!("策略 {} 表达式计算错误: {}", strategy.name, error.msg))?
-        {
-            Some(triggered) => triggered,
-            None => {
-                let value = eval_program_scoped(
-                    bucket_runtime,
-                    &strategy.optimized_when_ast,
-                    &strategy.assigned_names,
-                )
-                .map_err(|error| format!("策略 {} 表达式计算错误: {}", strategy.name, error.msg))?;
-                let triggers = Value::as_bool_series(&value, len).map_err(|error| {
-                    format!("策略 {} 表达式返回值非布尔: {}", strategy.name, error.msg)
-                })?;
-                triggers.get(day_index).copied().unwrap_or(false)
-            }
-        };
+        let triggered = strategy_triggered_at(bucket_runtime, strategy, len, day_index)?;
 
         if triggered {
             let bias = strategy.bias
@@ -779,6 +817,7 @@ bias = 1.0
             &mut HashMap::new(),
             0,
             10.0,
+            false,
         )
         .unwrap();
         assert_close(buckets[0].main_chip, 40.0);
@@ -954,8 +993,8 @@ bias = 1.0
             turnover_rate: 10.0,
         })];
         let base_runtime = row_into_rt(row_data).expect("runtime should build");
-        let mut buy_runtime =
-            build_new_participant_buy_runtime(&base_runtime, &bars).expect("buy runtime");
+        let mut buy_runtime = build_new_participant_buy_runtime(&base_runtime, &bars, [true; 4])
+            .expect("buy runtime");
         let mut buckets = vec![
             ChipBucket {
                 price_low: 9.0,

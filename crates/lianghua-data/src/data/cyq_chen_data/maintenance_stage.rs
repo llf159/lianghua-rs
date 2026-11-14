@@ -193,7 +193,7 @@ pub(super) fn write_cyq_chen_maintenance_batches_from_channel(
                     append_prepared_cyq_chen_batch_rows(
                         &tx,
                         &mut snapshots,
-                        &mut bins,
+                        Some(&mut bins),
                         batch,
                         &mut checkpoints,
                     )?;
@@ -204,7 +204,7 @@ pub(super) fn write_cyq_chen_maintenance_batches_from_channel(
                         break;
                     }
                 }
-                append_cyq_chen_checkpoints(&tx, checkpoints)?;
+                append_cyq_chen_checkpoints(&tx, checkpoints, true)?;
                 done.flush().map_err(|e| e.to_string())?;
                 unverified.flush().map_err(|e| e.to_string())?;
                 snapshots.flush().map_err(|e| e.to_string())?;

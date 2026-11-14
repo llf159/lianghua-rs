@@ -1961,7 +1961,38 @@ impl Runtime {
                     self.day_value(name, day_index).map(Some)
                 }
             }
-            Expr::Call { .. } => Ok(None),
+            Expr::Call { name, args } => {
+                let function = ExpressionFunction::parse(name);
+                let arity = match function {
+                    Some(ExpressionFunction::Abs) => 1,
+                    Some(ExpressionFunction::Min | ExpressionFunction::Max) => 2,
+                    _ => return Ok(None),
+                };
+                if args.len() != arity {
+                    return Err(EvalErr {
+                        msg: format!("{name}需要{arity}个参数"),
+                    });
+                }
+                let Some(lhs) = self.eval_expr_bool_at(&args[0], locals, day_index)? else {
+                    return Ok(None);
+                };
+                let lhs = day_value_as_num(lhs);
+                let value = if arity == 1 {
+                    lhs.map(f64::abs)
+                } else {
+                    let Some(rhs) = self.eval_expr_bool_at(&args[1], locals, day_index)? else {
+                        return Ok(None);
+                    };
+                    lhs.zip(day_value_as_num(rhs)).map(|(x, y)| {
+                        if function == Some(ExpressionFunction::Min) {
+                            x.min(y)
+                        } else {
+                            x.max(y)
+                        }
+                    })
+                };
+                Ok(Some(DayValue::Num(value)))
+            }
             Expr::Unary { op, rhs } => {
                 let Some(rhs) = self.eval_expr_bool_at(rhs, locals, day_index)? else {
                     return Ok(None);
@@ -2323,10 +2354,10 @@ fn scalar_binary_keeps_scalar() {
 }
 
 #[test]
-fn eval_program_bool_at_matches_full_series_for_call_free_program() {
+fn eval_program_bool_at_matches_full_series_with_pointwise_functions() {
     use crate::expr::parser::{Parser, lex_all};
 
-    let expr = "spread := C - O; RATEC > 1 AND spread > 0 AND MAIN_CHIP_RATIO >= 0.5";
+    let expr = "spread := MAX(C - O, MIN(ABS(RATEC), 2)); RATEC > 1 AND spread > 0 AND MAIN_CHIP_RATIO >= 0.5";
     let toks = lex_all(expr);
     let mut p = Parser::new(toks);
     let stmts = p.parse_main().expect("parse failed");

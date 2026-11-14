@@ -15,6 +15,18 @@ use crate::expr::validation::parse_expression_program;
 use crate::expr::validation::validate_expression_functions;
 use std::collections::HashMap;
 use std::collections::HashSet;
+impl CompiledChipChangeConfig {
+    pub(super) fn sell_uses_point_rates_for_span(
+        &self,
+        input_days: usize,
+        processed_days: usize,
+    ) -> bool {
+        // Long replays amortize vector evaluation; short continuations avoid constructing
+        // bucket history for input days that will not actually advance inventory.
+        self.sell_uses_point_rates && processed_days.saturating_mul(4) <= input_days
+    }
+}
+
 impl ChipChangeConfig {
     pub fn load(source_dir: &str) -> Result<Self, String> {
         let path = chip_change_rule_path(source_dir);
@@ -42,7 +54,7 @@ impl ChipChangeConfig {
             let n = index + 1;
             let when_ast = parse_strategy_expression(&strategy.when, n, &strategy.name)?;
             let direction = strategy.direction;
-            let (optimized_when_ast, cached_exprs) =
+            let (mut optimized_when_ast, mut cached_exprs) =
                 (|program: &Stmts,
                   direction: ChipDirection,
                   strategy_index: usize|
@@ -112,6 +124,39 @@ impl ChipChangeConfig {
                         cached_exprs,
                     )
                 })(&when_ast, direction, index);
+            let sell_uses_bucket_state = direction == ChipDirection::Sell
+                && program_depends_on_runtime_keys(
+                    &when_ast,
+                    &[
+                        "RATEO",
+                        "RATEH",
+                        "RATEL",
+                        "RATEC",
+                        "MAIN_CHIP_RATIO",
+                        "MAIN_CHIP_TOTAL",
+                        "RETAIL_CHIP_TOTAL",
+                    ],
+                );
+            // Buy RATEs describe new participants, so they are stock-only inputs.
+            let stock_only = match direction {
+                ChipDirection::Sell => !sell_uses_bucket_state,
+                ChipDirection::Buy => !program_depends_on_runtime_keys(
+                    &when_ast,
+                    &["MAIN_CHIP_RATIO", "MAIN_CHIP_TOTAL", "RETAIL_CHIP_TOTAL"],
+                ),
+            };
+            if stock_only {
+                let key = format!("__CYQ_CHEN_STOCK_RULE_{index}");
+                cached_exprs = vec![CompiledChipCachedExpr {
+                    key: key.clone(),
+                    reuse_key: None,
+                    program: when_ast.clone(),
+                    assigned_names: collect_assigned_names_from_expr_program(&when_ast),
+                }];
+                optimized_when_ast = Stmts {
+                    item: vec![Stmt::Expr(Expr::Ident(key))],
+                };
+            }
             let assigned_names = collect_assigned_names_from_expr_program(&optimized_when_ast);
             strategies.push(CompiledChipChangeStrategy {
                 name: strategy.name.trim().to_string(),
@@ -126,36 +171,45 @@ impl ChipChangeConfig {
                 optimized_when_ast,
                 cached_exprs,
                 assigned_names,
+                sell_uses_bucket_state,
             });
         }
 
-        let sell_uses_bucket_rate_series = strategies.iter().any(|strategy| {
-            strategy.direction == ChipDirection::Sell
-                && (|program: &Stmts, runtime_keys: &[&str]| -> bool {
-                    let mut local_dynamic = HashMap::<String, bool>::new();
+        // Compare programs once at compilation, not once per stock.
+        let mut shared: Vec<(ChipDirection, Stmts, String)> = Vec::new();
+        for strategy in &mut strategies {
+            for cached in &mut strategy.cached_exprs {
+                if let Some((_, _, key)) = shared.iter().find(|(direction, program, _)| {
+                    *direction == strategy.direction && program.item == cached.program.item
+                }) {
+                    cached.reuse_key = Some(key.clone());
+                } else {
+                    shared.push((
+                        strategy.direction,
+                        cached.program.clone(),
+                        cached.key.clone(),
+                    ));
+                }
+            }
+        }
 
-                    for stmt in &program.item {
-                        match stmt {
-                            Stmt::Assign { name, value } => {
-                                let is_dynamic =
-                                    expr_depends_on_dynamic(value, &local_dynamic, runtime_keys);
-                                if is_dynamic {
-                                    return true;
-                                }
-                                local_dynamic.insert(name.clone(), false);
-                            }
-                            Stmt::Expr(expr) => {
-                                if expr_depends_on_dynamic(expr, &local_dynamic, runtime_keys) {
-                                    return true;
-                                }
-                            }
-                        }
-                    }
-
-                    false
-                })(&strategy.when_ast, &(["RATEO", "RATEH", "RATEL", "RATEC"]))
+        let buy_rate_fields = ["RATEO", "RATEH", "RATEL", "RATEC"].map(|key| {
+            strategies.iter().any(|strategy| {
+                strategy.direction == ChipDirection::Buy
+                    && program_depends_on_runtime_keys(&strategy.when_ast, &[key])
+            })
         });
-
+        let posterior_horizon = strategies
+            .iter()
+            .map(|strategy| strategy.confirm_after)
+            .max()
+            .unwrap_or(0);
+        let sell_rate_fields = ["RATEO", "RATEH", "RATEL", "RATEC"].map(|key| {
+            strategies.iter().any(|strategy| {
+                strategy.direction == ChipDirection::Sell
+                    && program_depends_on_runtime_keys(&strategy.when_ast, &[key])
+            })
+        });
         let sell_uses_main_ratio_history = strategies.iter().any(|strategy| {
             strategy.direction == ChipDirection::Sell
                 && ["MAIN_CHIP_RATIO", "main_chip_ratio"]
@@ -175,12 +229,27 @@ impl ChipChangeConfig {
                 .iter()
                 .any(|key| crate::data::expr_program_uses_runtime_key(&strategy.when_ast, key))
         });
+        let sell_uses_point_rates = !sell_uses_bucket_dynamic_state
+            && strategies
+                .iter()
+                .filter(|strategy| strategy.direction == ChipDirection::Sell)
+                .all(|strategy| {
+                    strategy.optimized_when_ast.item.iter().all(|stmt| {
+                        expr_supports_point_evaluation(match stmt {
+                            Stmt::Assign { value, .. } => value,
+                            Stmt::Expr(expr) => expr,
+                        })
+                    })
+                });
         Ok(CompiledChipChangeConfig {
             version: self.version,
             negative_evidence_scale: self.negative_evidence_scale.unwrap_or(3.0),
             independent_buy: self.independent_buy,
             strategies,
-            sell_uses_bucket_rate_series,
+            sell_rate_fields,
+            buy_rate_fields,
+            posterior_horizon,
+            sell_uses_point_rates,
             sell_uses_main_ratio_history,
             sell_uses_bucket_dynamic_state,
         })
@@ -438,6 +507,7 @@ pub(super) fn optimize_strategy_expr(
         let assigned_names = collect_assigned_names_from_expr_program(&program);
         cached_exprs.push(CompiledChipCachedExpr {
             key: key.clone(),
+            reuse_key: None,
             program,
             assigned_names,
         });
@@ -528,6 +598,38 @@ pub(super) fn expr_depends_on_dynamic(
     }
 }
 
+fn program_depends_on_runtime_keys(program: &Stmts, runtime_keys: &[&str]) -> bool {
+    let mut locals = HashMap::new();
+    for stmt in &program.item {
+        let (name, expr) = match stmt {
+            Stmt::Assign { name, value } => (Some(name), value),
+            Stmt::Expr(expr) => (None, expr),
+        };
+        let dependent = expr_depends_on_dynamic(expr, &locals, runtime_keys);
+        if dependent {
+            return true;
+        }
+        if let Some(name) = name {
+            locals.insert(name.clone(), false);
+        }
+    }
+    false
+}
+
+fn expr_supports_point_evaluation(expr: &Expr) -> bool {
+    match expr {
+        Expr::Call { name, args } => {
+            matches!(name.to_ascii_uppercase().as_str(), "ABS" | "MIN" | "MAX")
+                && args.iter().all(expr_supports_point_evaluation)
+        }
+        Expr::Unary { rhs, .. } => expr_supports_point_evaluation(rhs),
+        Expr::Binary { lhs, rhs, .. } => {
+            expr_supports_point_evaluation(lhs) && expr_supports_point_evaluation(rhs)
+        }
+        Expr::Number(_) | Expr::Ident(_) => true,
+    }
+}
+
 pub(super) fn validate_compute_config(config: ChenChipConfig) -> Result<(), String> {
     if !config.bucket_pct.is_finite() || config.bucket_pct <= 0.0 {
         return Err("bucket_pct必须是有限正数".to_string());
@@ -602,6 +704,7 @@ mod tests {
         .compile()
         .expect("config should compile");
         let mut uncached_config = config.clone();
+        uncached_config.sell_uses_point_rates = false;
         for strategy in &mut uncached_config.strategies {
             strategy.optimized_when_ast = strategy.when_ast.clone();
             strategy.cached_exprs.clear();
@@ -634,6 +737,84 @@ mod tests {
     }
 
     #[test]
+    fn point_rates_preserve_snapshots_and_production_selects_by_replay_span() {
+        let production = ChipChangeConfig::from_toml_str(include_str!(
+            "../../../../../docs/chip-independent-buy.toml"
+        ))
+        .unwrap()
+        .compile()
+        .unwrap();
+        assert!(production.sell_uses_point_rates);
+        assert!(production.sell_uses_point_rates_for_span(240, 1));
+        assert!(!production.sell_uses_point_rates_for_span(1342, 1037));
+        assert_eq!(production.sell_rate_fields, [false, false, false, true]);
+
+        let config = ChipChangeConfig::from_toml_str(
+            r#"
+version = 1
+[[strategy]]
+name = "stock main"
+holder = "main"
+direction = "sell"
+when = "C > O"
+bias = 0.3
+[[strategy]]
+name = "bucket main"
+holder = "main"
+direction = "sell"
+when = "R := RATEC; R >= MAX(-5, MIN(5, RATEH)) OR ABS(RATEL) > 1"
+bias = 0.7
+[[strategy]]
+name = "stock retail"
+holder = "retail"
+direction = "sell"
+when = "C > O"
+bias = 0.9
+[[strategy]]
+name = "bucket retail"
+holder = "retail"
+direction = "sell"
+when = "RATEO > REF(C, 1) / C - 1"
+bias = -0.1
+[[strategy]]
+name = "buy"
+holder = "main"
+direction = "buy"
+when = "C > REF(C, 1)"
+bias = 0.7
+"#,
+        )
+        .unwrap()
+        .compile()
+        .unwrap();
+        assert!(config.sell_uses_point_rates);
+        let mut historical = config.clone();
+        historical.sell_uses_point_rates = false;
+        let row = sample_row_data();
+        let settings = ChenChipConfig {
+            warmup_days: 0,
+            bucket_pct: 1.0,
+        };
+        let start = row.trade_dates.last().unwrap();
+        let point = crate::data::cyq_chen::compute_chen_chip_snapshots_with_compiled_config(
+            &row, start, &config, settings,
+        )
+        .unwrap();
+        let full = crate::data::cyq_chen::compute_chen_chip_snapshots_with_compiled_config(
+            &row,
+            start,
+            &historical,
+            settings,
+        )
+        .unwrap();
+        assert!(!point.is_empty());
+        assert_eq!(
+            serde_json::to_string(&point).unwrap(),
+            serde_json::to_string(&full).unwrap()
+        );
+    }
+
+    #[test]
     fn chip_change_config_parses_and_validates_expression() {
         let config = ChipChangeConfig::from_toml_str(
             r#"
@@ -659,7 +840,7 @@ mod tests {
     fn chip_change_config_rejects_bad_version() {
         let version_error = ChipChangeConfig::from_toml_str(
             r#"
-    version = 3
+    version = 4
     strategy = []
     "#,
         )

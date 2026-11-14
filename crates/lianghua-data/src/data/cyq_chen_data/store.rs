@@ -249,9 +249,28 @@ pub(super) fn verify_cyq_chen_db(
             if codes.is_empty() {
                 continue;
             }
+            let filter = format!("ts_code IN ({})", vec!["?"; codes.len()].join(","));
+            // Find the batch through the narrow code column first. Filtering a wide scan
+            // only by code can still decompress old string dictionaries in every row group.
+            let (first, last): (Option<i64>, Option<i64>) = conn
+                .query_row(
+                    &format!("SELECT min(rowid), max(rowid) FROM {table} WHERE {filter}"),
+                    duckdb::params_from_iter(codes.iter()),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|e| {
+                    format!(
+                        "定位新筹码回读批次失败，文件保留在 {}，表 {table}: {e}",
+                        db_path.display()
+                    )
+                })?;
+            let (Some(first), Some(last)) = (first, last) else {
+                continue;
+            };
+            // The exclusive verification gate keeps these rowids valid across both reads.
+            // Keep the code predicate as concurrent writer batches may be interleaved.
             sql.push_str(&format!(
-                " WHERE ts_code IN ({})",
-                vec!["?"; codes.len()].join(",")
+                " WHERE rowid BETWEEN {first} AND {last} AND {filter}"
             ));
         }
         conn.query_row(&sql, duckdb::params_from_iter(codes.iter()), |row| {

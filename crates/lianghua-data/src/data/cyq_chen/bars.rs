@@ -174,49 +174,40 @@ pub(super) fn build_initial_buckets(
 pub(super) fn compute_bucket_rate_series(
     bars: &[Option<ChenChipBar>],
     cost_price: f64,
-) -> (
-    Arc<Vec<Option<f64>>>,
-    Arc<Vec<Option<f64>>>,
-    Arc<Vec<Option<f64>>>,
-    Arc<Vec<Option<f64>>>,
-) {
-    let mut rateo = Vec::with_capacity(bars.len());
-    let mut rateh = Vec::with_capacity(bars.len());
-    let mut ratel = Vec::with_capacity(bars.len());
-    let mut ratec = Vec::with_capacity(bars.len());
-
-    for bar in bars {
-        if let Some(bar) = bar {
-            rateo.push(Some((bar.open - cost_price) / cost_price * 100.0));
-            rateh.push(Some((bar.high - cost_price) / cost_price * 100.0));
-            ratel.push(Some((bar.low - cost_price) / cost_price * 100.0));
-            ratec.push(Some((bar.close - cost_price) / cost_price * 100.0));
-        } else {
-            rateo.push(None);
-            rateh.push(None);
-            ratel.push(None);
-            ratec.push(None);
-        }
-    }
-
-    (
-        Arc::new(rateo),
-        Arc::new(rateh),
-        Arc::new(ratel),
-        Arc::new(ratec),
-    )
+    fields: [bool; 4],
+) -> [Option<Arc<Vec<Option<f64>>>>; 4] {
+    std::array::from_fn(|index| {
+        fields[index].then(|| {
+            Arc::new(
+                bars.iter()
+                    .map(|bar| {
+                        bar.as_ref().map(|bar| {
+                            let price = match index {
+                                0 => bar.open,
+                                1 => bar.high,
+                                2 => bar.low,
+                                _ => bar.close,
+                            };
+                            (price - cost_price) / cost_price * 100.0
+                        })
+                    })
+                    .collect(),
+            )
+        })
+    })
 }
 
-pub(super) fn ensure_bucket_rate_series(buckets: &mut [ChipBucket], bars: &[Option<ChenChipBar>]) {
+pub(super) fn ensure_bucket_rate_series(
+    buckets: &mut [ChipBucket],
+    bars: &[Option<ChenChipBar>],
+    fields: [bool; 4],
+) {
     for bucket in buckets {
-        if bucket.rateo.is_some() {
-            continue;
-        }
-        let (rateo, rateh, ratel, ratec) = compute_bucket_rate_series(bars, bucket.price());
-        bucket.rateo = Some(rateo);
-        bucket.rateh = Some(rateh);
-        bucket.ratel = Some(ratel);
-        bucket.ratec = Some(ratec);
+        let [rateo, rateh, ratel, ratec] = compute_bucket_rate_series(bars, bucket.price(), fields);
+        bucket.rateo = rateo;
+        bucket.rateh = rateh;
+        bucket.ratel = ratel;
+        bucket.ratec = ratec;
     }
 }
 
@@ -228,7 +219,7 @@ pub(super) fn expand_buckets_for_bar(
     high: f64,
     step: f64,
     bars: &[Option<ChenChipBar>],
-    needs_bucket_rate_series: bool,
+    rate_fields: [bool; 4],
 ) -> Result<(), String> {
     if buckets.is_empty() {
         return Err("价格分桶为空，无法计算筹码快照".to_string());
@@ -288,8 +279,8 @@ pub(super) fn expand_buckets_for_bar(
         });
         for w in new_boundaries.windows(2) {
             let (pl, ph) = (w[0], w[1]);
-            let rate_series =
-                needs_bucket_rate_series.then(|| compute_bucket_rate_series(bars, (pl + ph) / 2.0));
+            let [rateo, rateh, ratel, ratec] =
+                compute_bucket_rate_series(bars, (pl + ph) / 2.0, rate_fields);
             new_buckets.push(ChipBucket {
                 price_low: pl,
                 price_high: ph,
@@ -297,10 +288,10 @@ pub(super) fn expand_buckets_for_bar(
                 retail_chip: 0.0,
                 pending: Vec::new(),
                 origin: Some(Default::default()),
-                rateo: rate_series.as_ref().map(|series| Arc::clone(&series.0)),
-                rateh: rate_series.as_ref().map(|series| Arc::clone(&series.1)),
-                ratel: rate_series.as_ref().map(|series| Arc::clone(&series.2)),
-                ratec: rate_series.map(|series| series.3),
+                rateo,
+                rateh,
+                ratel,
+                ratec,
             });
             if track_main_ratio_history {
                 new_histories.push(Arc::new(vec![None; series_len]));
@@ -322,8 +313,8 @@ pub(super) fn expand_buckets_for_bar(
         });
         for _ in 0..high_expand_count {
             let new_high = boundary * step;
-            let rate_series = needs_bucket_rate_series
-                .then(|| compute_bucket_rate_series(bars, (boundary + new_high) / 2.0));
+            let [rateo, rateh, ratel, ratec] =
+                compute_bucket_rate_series(bars, (boundary + new_high) / 2.0, rate_fields);
             new_buckets.push(ChipBucket {
                 price_low: boundary,
                 price_high: new_high,
@@ -331,10 +322,10 @@ pub(super) fn expand_buckets_for_bar(
                 retail_chip: 0.0,
                 pending: Vec::new(),
                 origin: Some(Default::default()),
-                rateo: rate_series.as_ref().map(|series| Arc::clone(&series.0)),
-                rateh: rate_series.as_ref().map(|series| Arc::clone(&series.1)),
-                ratel: rate_series.as_ref().map(|series| Arc::clone(&series.2)),
-                ratec: rate_series.map(|series| series.3),
+                rateo,
+                rateh,
+                ratel,
+                ratec,
             });
             if track_main_ratio_history {
                 new_histories.push(Arc::new(vec![None; series_len]));
@@ -380,7 +371,7 @@ mod tests {
         .expect("config should parse")
         .compile()
         .expect("config should compile");
-        assert!(!no_rate.sell_uses_bucket_rate_series);
+        assert_eq!(no_rate.sell_rate_fields, [false; 4]);
 
         let with_rate = ChipChangeConfig::from_toml_str(
             r#"
@@ -397,7 +388,8 @@ mod tests {
         .expect("config should parse")
         .compile()
         .expect("config should compile");
-        assert!(with_rate.sell_uses_bucket_rate_series);
+        assert!(!with_rate.sell_uses_point_rates);
+        assert_eq!(with_rate.sell_rate_fields, [true, false, false, false]);
 
         let shadowed_rate = ChipChangeConfig::from_toml_str(
             r#"
@@ -414,7 +406,26 @@ mod tests {
         .expect("config should parse")
         .compile()
         .expect("config should compile");
-        assert!(!shadowed_rate.sell_uses_bucket_rate_series);
+        assert_eq!(shadowed_rate.sell_rate_fields, [false; 4]);
+    }
+
+    #[test]
+    fn rate_history_allocates_only_referenced_fields() {
+        let bars = vec![
+            Some(ChenChipBar {
+                trade_date: "20240102".into(),
+                open: 10.0,
+                high: 11.0,
+                low: 9.0,
+                close: 10.5,
+                turnover_rate: 1.0,
+            }),
+            None,
+        ];
+        let [open, high, low, close] =
+            super::compute_bucket_rate_series(&bars, 10.0, [false, false, false, true]);
+        assert!(open.is_none() && high.is_none() && low.is_none());
+        assert_eq!(close.unwrap().as_ref(), &vec![Some(5.0), None]);
     }
 
     #[test]
@@ -459,7 +470,7 @@ mod tests {
             12.2,
             1.1,
             &bars,
-            false,
+            [false; 4],
         )
         .expect("expand buckets");
 

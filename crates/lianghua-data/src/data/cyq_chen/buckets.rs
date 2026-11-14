@@ -432,6 +432,12 @@ mod tests {
             turnover_rate: 1.0,
         })];
         let mut base_runtime = row_into_rt(row_data).expect("runtime should build");
+        crate::data::cyq_chen::simulate::inject_strategy_expression_caches(
+            &mut base_runtime,
+            &chip_config,
+            crate::data::cyq_chen::ChipDirection::Sell,
+        )
+        .expect("prepare sell conditions");
         let main_ratio_history = vec![Arc::new(vec![Some(0.0)]), Arc::new(vec![Some(0.0)])];
         let mut buckets = vec![
             ChipBucket {
@@ -469,6 +475,7 @@ mod tests {
             &mut std::collections::HashMap::new(),
             0,
             1.0,
+            true,
         )
         .expect("sell should apply");
 

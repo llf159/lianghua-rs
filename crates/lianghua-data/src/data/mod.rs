@@ -428,6 +428,29 @@ impl DataReader {
         Self::new_inner(source_dir, Some(required_runtime_keys), None, None)
     }
 
+    /// Independent query connections sharing the same read-only database instances and schema.
+    pub fn try_clone(&self) -> Result<Self, String> {
+        Ok(Self {
+            conn: self
+                .conn
+                .try_clone()
+                .map_err(|e| format!("克隆行情读取连接失败:{e}"))?,
+            query_sql: self.query_sql.clone(),
+            query_tail_rows_sql: self.query_tail_rows_sql.clone(),
+            cols_table: self.cols_table.clone(),
+            runtime_index_cols: self.runtime_index_cols.clone(),
+            runtime_panel_fields: self.runtime_panel_fields.clone(),
+            source_dir: self.source_dir.clone(),
+            shareholder_conn: self
+                .shareholder_conn
+                .as_ref()
+                .map(Connection::try_clone)
+                .transpose()
+                .map_err(|e| format!("克隆股东数据读取连接失败:{e}"))?,
+            inject_tor_r: self.inject_tor_r,
+        })
+    }
+
     pub fn new_with_optional_tor_r(
         source_dir: &str,
         conn: Option<Connection>,
@@ -2273,6 +2296,34 @@ when = "C > O"
 
         let error = ScoreConfig::validate(&cfg).expect_err("zero-hit points must be zero");
         assert!(error.contains("points_by_hits[0] 必须为 0"));
+    }
+
+    #[test]
+    fn cloned_reader_shares_database_but_has_independent_connection() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE stock_data(ts_code VARCHAR,trade_date VARCHAR,adj_type VARCHAR,close DOUBLE)").unwrap();
+        let keys = ["C".to_string()].into_iter().collect();
+        let reader = DataReader::new_inner("", Some(&keys), Some(conn), None).unwrap();
+        let cloned = reader.try_clone().unwrap();
+        cloned
+            .conn
+            .execute_batch("INSERT INTO stock_data VALUES ('A','20240101','qfq',12)")
+            .unwrap();
+        assert_eq!(
+            reader
+                .conn
+                .query_row("SELECT close FROM stock_data", [], |r| r.get::<_, f64>(0))
+                .unwrap(),
+            12.0
+        );
+        drop(reader);
+        assert_eq!(
+            cloned
+                .load_one("A", "qfq", "20240101", "20240101")
+                .unwrap()
+                .cols["C"],
+            vec![Some(12.0)]
+        );
     }
 
     #[test]

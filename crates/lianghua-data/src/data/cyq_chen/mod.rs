@@ -155,7 +155,10 @@ pub struct CompiledChipChangeConfig {
     pub negative_evidence_scale: f64,
     pub independent_buy: Option<IndependentBuyConfig>,
     pub strategies: Vec<CompiledChipChangeStrategy>,
-    sell_uses_bucket_rate_series: bool,
+    sell_rate_fields: [bool; 4],
+    buy_rate_fields: [bool; 4],
+    posterior_horizon: usize,
+    sell_uses_point_rates: bool,
     pub(in crate::data) sell_uses_main_ratio_history: bool,
     pub(in crate::data) sell_uses_bucket_dynamic_state: bool,
 }
@@ -174,11 +177,13 @@ pub struct CompiledChipChangeStrategy {
     optimized_when_ast: Stmts,
     cached_exprs: Vec<CompiledChipCachedExpr>,
     assigned_names: Vec<String>,
+    sell_uses_bucket_state: bool,
 }
 
 #[derive(Debug, Clone)]
 pub(super) struct CompiledChipCachedExpr {
     key: String,
+    reuse_key: Option<String>,
     program: Stmts,
     assigned_names: Vec<String>,
 }
@@ -547,10 +552,16 @@ pub(super) fn replay_chen_chip_snapshots(
     if buckets.is_empty() {
         return Ok(());
     }
-    if chip_config.sell_uses_bucket_rate_series {
-        ensure_bucket_rate_series(&mut buckets, &bars);
-    }
     let len = row_data.trade_dates.len();
+    let point_rates = chip_config.sell_uses_point_rates_for_span(len, len - process_start_index);
+    let rate_fields = if point_rates {
+        [false; 4]
+    } else {
+        chip_config.sell_rate_fields
+    };
+    if rate_fields.iter().any(|needed| *needed) {
+        ensure_bucket_rate_series(&mut buckets, &bars, rate_fields);
+    }
     let mut main_ratio_history: Vec<Arc<Vec<Option<f64>>>> =
         if chip_config.sell_uses_main_ratio_history {
             (0..buckets.len())
@@ -566,7 +577,8 @@ pub(super) fn replay_chen_chip_snapshots(
         ),
         Cow::Owned(row) => (Cow::Owned(row.trade_dates), columns_to_shared_rt(row.cols)),
     };
-    let mut buy_runtime = build_new_participant_buy_runtime(&base_runtime, &bars)?;
+    let mut buy_runtime =
+        build_new_participant_buy_runtime(&base_runtime, &bars, chip_config.buy_rate_fields)?;
     inject_strategy_expression_caches(&mut base_runtime, chip_config, ChipDirection::Sell)?;
     inject_strategy_expression_caches(&mut buy_runtime, chip_config, ChipDirection::Buy)?;
 
@@ -576,6 +588,7 @@ pub(super) fn replay_chen_chip_snapshots(
     let mut frozen_bounds = std::collections::HashSet::new();
     let mut sell_bias_cache = std::collections::HashMap::new();
     for day_index in process_start_index..len {
+        lianghua_model::task::checkpoint()?;
         let Some(bar) = bars[day_index].as_ref() else {
             if day_index < output_start_index {
                 return Ok(());
@@ -591,7 +604,7 @@ pub(super) fn replay_chen_chip_snapshots(
             bar.high,
             step,
             &bars,
-            chip_config.sell_uses_bucket_rate_series,
+            rate_fields,
         )?;
         feature_state.align(&buckets)?;
         before.clear();
@@ -608,6 +621,7 @@ pub(super) fn replay_chen_chip_snapshots(
             &mut sell_bias_cache,
             day_index,
             bar.turnover_rate,
+            point_rates,
         )?;
         sanitize_buckets(&mut buckets)?;
         after_sell.clear();
@@ -853,10 +867,16 @@ pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config_with_f
         normalize_buckets(&mut buckets)?;
         Ok(buckets)
     })(initial_bins)?;
-    if chip_config.sell_uses_bucket_rate_series {
-        ensure_bucket_rate_series(&mut buckets, &bars);
-    }
     let len = row_data.trade_dates.len();
+    let point_rates = chip_config.sell_uses_point_rates_for_span(len, len - output_start_index);
+    let rate_fields = if point_rates {
+        [false; 4]
+    } else {
+        chip_config.sell_rate_fields
+    };
+    if rate_fields.iter().any(|needed| *needed) {
+        ensure_bucket_rate_series(&mut buckets, &bars, rate_fields);
+    }
     if !initial_main_ratio_history.is_empty() {
         if initial_main_ratio_history.len() != initial_bins.len() {
             return Err("初始MAIN_CHIP_RATIO历史分桶数不匹配".to_string());
@@ -878,7 +898,8 @@ pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config_with_f
         initial_main_ratio_history.to_vec()
     };
     let mut base_runtime = row_to_shared_rt(row_data);
-    let mut buy_runtime = build_new_participant_buy_runtime(&base_runtime, &bars)?;
+    let mut buy_runtime =
+        build_new_participant_buy_runtime(&base_runtime, &bars, chip_config.buy_rate_fields)?;
     inject_strategy_expression_caches(&mut base_runtime, chip_config, ChipDirection::Sell)?;
     inject_strategy_expression_caches(&mut buy_runtime, chip_config, ChipDirection::Buy)?;
     let mut snapshots = Vec::with_capacity(len.saturating_sub(output_start_index));
@@ -888,6 +909,7 @@ pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config_with_f
     let mut after_buy = Vec::new();
     let mut sell_bias_cache = std::collections::HashMap::new();
     for day_index in output_start_index..len {
+        lianghua_model::task::checkpoint()?;
         let Some(bar) = bars[day_index].as_ref() else {
             return Err(format!(
                 "{} 缺少有效K线数据",
@@ -903,7 +925,7 @@ pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config_with_f
             bar.high,
             step,
             &bars,
-            chip_config.sell_uses_bucket_rate_series,
+            rate_fields,
         )?;
         feature_state.align(&buckets)?;
         before.clear();
@@ -920,6 +942,7 @@ pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config_with_f
             &mut sell_bias_cache,
             day_index,
             bar.turnover_rate,
+            point_rates,
         )?;
         sanitize_buckets(&mut buckets)?;
         after_sell.clear();
@@ -975,6 +998,34 @@ mod tests {
     use crate::data::cyq_chen::round_chen_chip_value;
     use crate::data::cyq_chen::test_support::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn stop_chen_replay_between_days() {
+        let control = std::sync::Arc::new(lianghua_model::task::TaskControl::default());
+        let _active = lianghua_model::task::ActiveTask::enter_isolated(vec![control.clone()]);
+        let row = sample_row_data();
+        let mut emitted = 0;
+        let error = super::replay_chen_chip_snapshots(
+            std::borrow::Cow::Borrowed(&row),
+            &row.trade_dates[2],
+            &sample_config().compile().unwrap(),
+            ChenChipConfig {
+                warmup_days: 2,
+                bucket_pct: 5.0,
+            },
+            &mut super::ChenChipFeatureState::default(),
+            false,
+            None,
+            |_| {
+                emitted += 1;
+                control.request().unwrap();
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(emitted, 1);
+        assert_eq!(error, control.check().unwrap_err());
+    }
 
     #[test]
     fn chen_chip_rounding_matches_four_decimal_format_semantics() {

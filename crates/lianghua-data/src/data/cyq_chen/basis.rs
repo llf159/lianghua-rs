@@ -198,7 +198,7 @@ pub fn compute_chen_chip_basis(
             bar.high,
             step,
             &bars,
-            false,
+            [false; 4],
         )?;
         let tau = bar.turnover_rate / 100.0;
         for b in &mut buckets {
