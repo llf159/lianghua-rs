@@ -1781,6 +1781,7 @@ bias = 0.5
         let chip = crate::data::cyq_chen::ChipChangeConfig {
             version: 1,
             negative_evidence_scale: None,
+            independent_buy: None,
             strategy: Vec::new(),
         }
         .compile()
@@ -1913,6 +1914,7 @@ bias = 0.5
                 &crate::data::cyq_chen::ChipChangeConfig {
                     version: 1,
                     negative_evidence_scale: None,
+                    independent_buy: None,
                     strategy: Vec::new(),
                 }
                 .compile()

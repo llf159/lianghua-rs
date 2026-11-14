@@ -119,6 +119,8 @@ impl ChipChangeConfig {
                 direction,
                 when: strategy.when.trim().to_string(),
                 bias: strategy.bias,
+                market_response: strategy.market_response,
+                response_target: strategy.response_target,
                 confirm_after: strategy.confirm_after,
                 when_ast,
                 optimized_when_ast,
@@ -176,6 +178,7 @@ impl ChipChangeConfig {
         Ok(CompiledChipChangeConfig {
             version: self.version,
             negative_evidence_scale: self.negative_evidence_scale.unwrap_or(3.0),
+            independent_buy: self.independent_buy,
             strategies,
             sell_uses_bucket_rate_series,
             sell_uses_main_ratio_history,
@@ -197,25 +200,63 @@ impl ChipChangeConfig {
                 return Err("negative_evidence_scale 仅支持版本 2，且必须为非负有限数值".into());
             }
         }
-        if !matches!(self.version, 1 | 2) {
+        if !matches!(self.version, 1 | 2 | 3) {
             return Err(format!(
-                "筹码变化策略文件 version 只支持 1 或 2，当前为 {}",
+                "筹码变化策略文件 version 只支持 1、2 或 3，当前为 {}",
                 self.version
             ));
         }
 
+        match (self.version, self.independent_buy) {
+            (3, Some(model))
+                if model.positive_strength.is_finite()
+                    && (0.0..=1.0).contains(&model.positive_strength)
+                    && model.negative_strength.is_finite()
+                    && (0.0..=1.0).contains(&model.negative_strength)
+                    && model.initial_main_pct.is_finite()
+                    && (0.0..=100.0).contains(&model.initial_main_pct) => {}
+            (3, _) => return Err("版本 3 必须配置 independent_buy，正负力度为 [0,1]、初始主力占比为 [0,100] 的有限数值".into()),
+            (_, Some(_)) => return Err("independent_buy 仅支持版本 3".into()),
+            _ => {}
+        }
+        if let Some(response) = self
+            .independent_buy
+            .and_then(|model| model.positive_market_response)
+        {
+            response.validate()?;
+        }
         for (index, strategy) in self.strategy.iter().enumerate() {
             let n = index + 1;
+            if strategy.response_target.is_some()
+                && (self.version != 3
+                    || strategy.holder != super::ChipHolder::Main
+                    || strategy.direction != ChipDirection::Buy
+                    || strategy.confirm_after != 0)
+            {
+                return Err(format!("第{n}个策略的响应目标仅支持版本3主力买入"));
+            }
+            if let Some(response) = strategy.market_response {
+                response.validate()?;
+                if self.version != 3
+                    || strategy.holder != super::ChipHolder::Main
+                    || strategy.direction != ChipDirection::Buy
+                    || strategy.confirm_after != 0
+                {
+                    return Err(format!(
+                        "第{n}个策略的市场响应仅支持版本3的主力买入方向证据"
+                    ));
+                }
+            }
             if strategy.name.trim().starts_with("RESEARCH_") {
                 return Err(format!("第{n}个策略含研究标记，不能导入生产"));
             }
-            if self.version == 2
+            if matches!(self.version, 2 | 3)
                 && (strategy.confirm_after > 0
                     || (strategy.direction == ChipDirection::Buy
                         && strategy.holder != super::ChipHolder::Main))
             {
                 return Err(format!(
-                    "第{n}个策略不符合版本 2：仅支持主力买入方向证据，且不能使用后验归属"
+                    "第{n}个策略不符合方向证据模式：仅支持主力买入方向证据，且不能使用后验归属"
                 ));
             }
             if strategy.name.trim().is_empty() {
@@ -316,7 +357,7 @@ pub fn collect_chen_chip_runtime_keys(chip_config: &CompiledChipChangeConfig) ->
         .map(|strategy| &strategy.when_ast)
         .collect::<Vec<_>>();
 
-    collect_runtime_keys_from_expr_programs(
+    let mut keys = collect_runtime_keys_from_expr_programs(
         &programs,
         RuntimeKeyCollectOptions {
             always_keys: &(["O", "H", "L", "C", "TOR"]),
@@ -333,7 +374,20 @@ pub fn collect_chen_chip_runtime_keys(chip_config: &CompiledChipChangeConfig) ->
             ]),
             aliases: &[],
         },
-    )
+    );
+    for response in chip_config
+        .strategies
+        .iter()
+        .filter_map(|strategy| strategy.market_response)
+        .chain(
+            chip_config
+                .independent_buy
+                .and_then(|model| model.positive_market_response),
+        )
+    {
+        keys.insert(response.runtime_key().to_string());
+    }
+    keys
 }
 
 pub fn estimate_chen_chip_expression_warmup(
@@ -691,5 +745,32 @@ mod tests {
         config.strategy[buy].name = "RESEARCH_BALANCED_MEMORY".into();
         config.version = 1;
         assert!(config.compile().unwrap_err().contains("研究标记"));
+    }
+    #[test]
+    fn independent_buy_requires_explicit_valid_parameters_and_direction_rules() {
+        let mut config = super::super::test_support::sample_config();
+        config.version = 3;
+        assert!(config.compile().unwrap_err().contains("independent_buy"));
+        config.independent_buy = Some(super::super::IndependentBuyConfig {
+            positive_strength: 0.2,
+            negative_strength: 0.7,
+            initial_main_pct: 20.0,
+            positive_market_response: None,
+        });
+        assert!(config.compile().is_ok());
+        let restored = ChipChangeConfig::from_toml_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(restored.independent_buy, config.independent_buy);
+        for bad in [-1.0, 1.1, f64::NAN, f64::INFINITY] {
+            config.independent_buy.as_mut().unwrap().positive_strength = bad;
+            assert!(config.compile().is_err());
+        }
+        config.independent_buy.as_mut().unwrap().positive_strength = 0.2;
+        config.independent_buy.as_mut().unwrap().initial_main_pct = 101.0;
+        assert!(config.compile().is_err());
+        config.independent_buy.as_mut().unwrap().initial_main_pct = 0.0;
+        config.strategy[0].holder = super::super::ChipHolder::Retail;
+        assert!(config.compile().unwrap_err().contains("仅支持主力买入"));
+        config.version = 2;
+        assert!(config.compile().unwrap_err().contains("仅支持版本 3"));
     }
 }

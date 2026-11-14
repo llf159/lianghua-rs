@@ -30,6 +30,7 @@ pub use config::{
 
 use crate::data::RowData;
 use crate::data::runtime::{columns_to_shared_rt, row_to_shared_rt};
+use crate::expr::eval::{Runtime, Value};
 use crate::expr::parser::Stmts;
 use crate::utils::utils::round_f64_to_scale;
 use serde::Deserialize;
@@ -39,12 +40,84 @@ pub(super) const EPS: f64 = 1e-10;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChipChangeConfig {
-    /// 1: fixed buyer weights; 2: inventory-neutral directional migration.
+    /// 1: fixed buyer weights; 2: inventory memory; 3: independent buyer participation.
     pub version: u32,
     /// Version 2 net-negative evidence multiplier; omission preserves the legacy value 3.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub negative_evidence_scale: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub independent_buy: Option<IndependentBuyConfig>,
     pub strategy: Vec<ChipChangeStrategy>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IndependentBuyConfig {
+    pub positive_strength: f64,
+    pub negative_strength: f64,
+    pub initial_main_pct: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub positive_market_response: Option<ChipMarketResponse>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChipMarketIndicator {
+    Is5,
+    F5,
+    D10,
+    Cf20,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChipMarketResponse {
+    pub indicator: ChipMarketIndicator,
+    pub mean: f64,
+    pub std: f64,
+    pub coefficient: f64,
+}
+
+impl ChipMarketResponse {
+    pub fn runtime_key(&self) -> &'static str {
+        match self.indicator {
+            ChipMarketIndicator::Is5 => "CYQ_MKT_IS5_PREV",
+            ChipMarketIndicator::F5 => "CYQ_MKT_F5_PREV",
+            ChipMarketIndicator::D10 => "CYQ_MKT_D10_PREV",
+            ChipMarketIndicator::Cf20 => "CYQ_MKT_CF20_PREV",
+        }
+    }
+
+    fn adjustment_at(&self, runtime: &Runtime, len: usize, day: usize) -> f64 {
+        runtime
+            .vars
+            .get(self.runtime_key())
+            .and_then(|value| Value::as_num_series(value, len).ok())
+            .and_then(|series| series.get(day).copied().flatten())
+            .filter(|value| value.is_finite())
+            .map_or(0.0, |value| {
+                self.coefficient * ((value - self.mean) / self.std).clamp(-3.0, 3.0)
+            })
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.mean.is_finite()
+            && self.std.is_finite()
+            && self.std > 0.0
+            && self.coefficient.is_finite()
+        {
+            Ok(())
+        } else {
+            Err("市场响应需要有限均值、系数及正的有限标准差".into())
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChipMarketTarget {
+    Evidence,
+    PositiveStrength,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +127,10 @@ pub struct ChipChangeStrategy {
     pub direction: ChipDirection,
     pub when: String,
     pub bias: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub market_response: Option<ChipMarketResponse>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_target: Option<ChipMarketTarget>,
     #[serde(default)]
     pub confirm_after: usize,
 }
@@ -76,6 +153,7 @@ pub enum ChipDirection {
 pub struct CompiledChipChangeConfig {
     pub version: u32,
     pub negative_evidence_scale: f64,
+    pub independent_buy: Option<IndependentBuyConfig>,
     pub strategies: Vec<CompiledChipChangeStrategy>,
     sell_uses_bucket_rate_series: bool,
     pub(in crate::data) sell_uses_main_ratio_history: bool,
@@ -89,6 +167,8 @@ pub struct CompiledChipChangeStrategy {
     pub direction: ChipDirection,
     pub when: String,
     pub bias: f64,
+    pub market_response: Option<ChipMarketResponse>,
+    pub response_target: Option<ChipMarketTarget>,
     pub confirm_after: usize,
     pub when_ast: Stmts,
     optimized_when_ast: Stmts,
@@ -419,9 +499,9 @@ pub(super) fn replay_chen_chip_snapshots(
     mut emit: impl FnMut(ChenChipSnapshot) -> Result<(), String>,
 ) -> Result<(), String> {
     validate_compute_config(config)?;
-    if !matches!(chip_config.version, 1 | 2) {
+    if !matches!(chip_config.version, 1 | 2 | 3) {
         return Err(format!(
-            "筹码变化策略文件 version 只支持 1 或 2，当前为 {}",
+            "筹码变化策略文件 version 只支持 1、2 或 3，当前为 {}",
             chip_config.version
         ));
     }
@@ -454,6 +534,16 @@ pub(super) fn replay_chen_chip_snapshots(
     let initial_range = (initial_bar.low, initial_bar.high);
     let step = bucket_step(config.bucket_pct);
     let mut buckets = build_initial_buckets(initial_range.0, initial_range.1, step)?;
+    if let Some(model) = chip_config.independent_buy {
+        for bucket in &mut buckets {
+            bucket.main_chip *= model.initial_main_pct / 50.0;
+            bucket.retail_chip *= (100.0 - model.initial_main_pct) / 50.0;
+            if let Some(origin) = &mut bucket.origin {
+                origin.initial_main = bucket.main_chip;
+                origin.initial_retail = bucket.retail_chip;
+            }
+        }
+    }
     if buckets.is_empty() {
         return Ok(());
     }
@@ -686,9 +776,9 @@ pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config_with_f
     feature_state: &mut ChenChipFeatureState,
 ) -> Result<Vec<ChenChipSnapshot>, String> {
     validate_compute_config(config)?;
-    if !matches!(chip_config.version, 1 | 2) {
+    if !matches!(chip_config.version, 1 | 2 | 3) {
         return Err(format!(
-            "筹码变化策略文件 version 只支持 1 或 2，当前为 {}",
+            "筹码变化策略文件 version 只支持 1、2 或 3，当前为 {}",
             chip_config.version
         ));
     }

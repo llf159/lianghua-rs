@@ -14,9 +14,9 @@ use crate::{
         DataReader, RowData, chip_change_rule_path,
         cyq_chen::{
             ChenChipBasis, ChenChipConfig, ChenChipRetention, ChenChipRetentionRequest,
-            ChenChipSnapshot, ChipChangeConfig, ChipChangeStrategy, collect_chen_chip_runtime_keys,
-            compute_chen_chip_basis, compute_chen_chip_snapshots_with_retention,
-            round_chen_chip_snapshot,
+            ChenChipSnapshot, ChipChangeConfig, ChipChangeStrategy, IndependentBuyConfig,
+            collect_chen_chip_runtime_keys, compute_chen_chip_basis,
+            compute_chen_chip_snapshots_with_retention, round_chen_chip_snapshot,
         },
         load_trade_date_list, source_db_path,
     },
@@ -33,6 +33,7 @@ const EMPTY_CHIP_CHANGE_TEMPLATE: &str = "version = 1\n";
 pub struct CyqChenSingleStockRequest {
     pub version: Option<u32>,
     pub negative_evidence_scale: Option<f64>,
+    pub independent_buy: Option<IndependentBuyConfig>,
     pub retention: Option<ChenChipRetentionRequest>,
     pub source_path: String,
     pub ts_code: String,
@@ -59,6 +60,7 @@ pub struct CyqChenKlineRow {
 pub struct CyqChenSingleStockData {
     pub version: u32,
     pub negative_evidence_scale: Option<f64>,
+    pub independent_buy: Option<IndependentBuyConfig>,
     pub resolved_ts_code: String,
     pub start_date: String,
     pub end_date: String,
@@ -76,6 +78,7 @@ pub struct CyqChenSingleStockData {
 pub struct CyqChenStrategyPageData {
     pub version: u32,
     pub negative_evidence_scale: Option<f64>,
+    pub independent_buy: Option<IndependentBuyConfig>,
     pub file_path: String,
     pub exists: bool,
     pub strategies: Vec<ChipChangeStrategy>,
@@ -126,6 +129,7 @@ pub struct CyqChenStrategyBackupDiff {
 pub struct CyqChenStrategyFileDraft {
     pub version: Option<u32>,
     pub negative_evidence_scale: Option<f64>,
+    pub independent_buy: Option<IndependentBuyConfig>,
     pub strategies: Vec<ChipChangeStrategy>,
 }
 
@@ -147,6 +151,7 @@ fn validate_chip_change_draft(draft: CyqChenStrategyFileDraft) -> Result<ChipCha
     let config = ChipChangeConfig {
         version: draft.version.unwrap_or(1),
         negative_evidence_scale: draft.negative_evidence_scale,
+        independent_buy: draft.independent_buy,
         strategy: draft.strategies,
     };
     config.compile()?;
@@ -325,6 +330,7 @@ bias = -0.6
     Ok(CyqChenStrategyPageData {
         version: config.version,
         negative_evidence_scale: config.negative_evidence_scale,
+        independent_buy: config.independent_buy,
         file_path: path.display().to_string(),
         exists,
         strategies: config.strategy,
@@ -438,9 +444,16 @@ pub fn save_cyq_chen_strategy_file(
         return Err("数据目录为空，请先确认当前数据源".to_string());
     }
     let path = chip_change_rule_path(source_path);
-    if (draft.version.is_none() || draft.negative_evidence_scale.is_none()) && path.exists() {
+    if (draft.version.is_none()
+        || draft.negative_evidence_scale.is_none()
+        || draft.independent_buy.is_none())
+        && path.exists()
+    {
         let saved = ChipChangeConfig::load(source_path)?;
         draft.version = Some(draft.version.unwrap_or(saved.version));
+        if draft.version == Some(3) && saved.version == 3 && draft.independent_buy.is_none() {
+            draft.independent_buy = saved.independent_buy;
+        }
         if draft.version == Some(2) && draft.negative_evidence_scale.is_none() {
             draft.negative_evidence_scale = saved.negative_evidence_scale;
         }
@@ -968,7 +981,9 @@ pub fn run_cyq_chen_single_stock_test(
         warmup_days: request.warmup_days,
         bucket_pct: request.bucket_pct,
     };
-    let saved_config = if (request.version.is_none() || request.negative_evidence_scale.is_none())
+    let saved_config = if (request.version.is_none()
+        || request.negative_evidence_scale.is_none()
+        || request.independent_buy.is_none())
         && chip_change_rule_path(source_path).exists()
     {
         Some(ChipChangeConfig::load(source_path)?)
@@ -989,6 +1004,16 @@ pub fn run_cyq_chen_single_stock_test(
                         .is_none_or(|version| version == config.version)
                 })
                 .and_then(|config| config.negative_evidence_scale)
+        }),
+        independent_buy: request.independent_buy.or_else(|| {
+            saved_config
+                .as_ref()
+                .filter(|config| {
+                    request
+                        .version
+                        .is_none_or(|version| version == config.version)
+                })
+                .and_then(|config| config.independent_buy)
         }),
         strategy: request.strategies,
     };
@@ -1078,6 +1103,7 @@ pub fn run_cyq_chen_single_stock_test(
                 return Ok(CyqChenSingleStockData {
                     version: chip_config.version,
                     negative_evidence_scale: chip_config.negative_evidence_scale,
+                    independent_buy: chip_config.independent_buy,
                     resolved_ts_code: ts_code,
                     start_date,
                     end_date,
@@ -1097,6 +1123,7 @@ pub fn run_cyq_chen_single_stock_test(
         return Ok(CyqChenSingleStockData {
             version: chip_config.version,
             negative_evidence_scale: chip_config.negative_evidence_scale,
+            independent_buy: chip_config.independent_buy,
             resolved_ts_code: ts_code,
             start_date,
             end_date,
@@ -1219,6 +1246,7 @@ pub fn run_cyq_chen_single_stock_test(
     Ok(CyqChenSingleStockData {
         version: chip_config.version,
         negative_evidence_scale: chip_config.negative_evidence_scale,
+        independent_buy: chip_config.independent_buy,
         resolved_ts_code: ts_code,
         start_date,
         end_date,
@@ -1379,6 +1407,7 @@ mod tests {
         let request = CyqChenSingleStockRequest {
             version: None,
             negative_evidence_scale: None,
+            independent_buy: None,
             retention: Some(crate::data::cyq_chen::ChenChipRetentionRequest {
                 anchor_date: "20260403".into(),
                 evaluation_date: "20260407".into(),
@@ -1397,6 +1426,8 @@ mod tests {
                 direction: ChipDirection::Buy,
                 when: "C > O AND ZHANG > 0 AND TOTAL_MV_YI > 0".to_string(),
                 bias: 1.0,
+                market_response: None,
+                response_target: None,
                 confirm_after: 0,
             }],
         };
@@ -1437,6 +1468,7 @@ mod tests {
         let data = run_cyq_chen_single_stock_test(CyqChenSingleStockRequest {
             version: None,
             negative_evidence_scale: None,
+            independent_buy: None,
             retention: None,
             source_path: source_dir.to_str().expect("utf8 path").to_string(),
             ts_code: "000999".to_string(),
@@ -1450,6 +1482,8 @@ mod tests {
                 direction: ChipDirection::Buy,
                 when: "C > O AND ZHANG > 0 AND TOTAL_MV_YI > 0".to_string(),
                 bias: 1.0,
+                market_response: None,
+                response_target: None,
                 confirm_after: 0,
             }],
         })
@@ -1477,6 +1511,7 @@ mod tests {
             super::CyqChenStrategyFileDraft {
                 version: Some(2),
                 negative_evidence_scale: Some(1.0),
+                independent_buy: None,
                 strategies: config.strategy,
             },
         )
@@ -1489,6 +1524,7 @@ mod tests {
             super::CyqChenStrategyFileDraft {
                 version: None,
                 negative_evidence_scale: None,
+                independent_buy: None,
                 strategies: page.strategies,
             },
         )
@@ -1498,6 +1534,7 @@ mod tests {
         let data = run_cyq_chen_single_stock_test(CyqChenSingleStockRequest {
             version: Some(page.version),
             negative_evidence_scale: None,
+            independent_buy: None,
             retention: None,
             source_path: source_path.into(),
             ts_code: "000001".into(),
@@ -1516,6 +1553,89 @@ mod tests {
                 .iter()
                 .all(|s| (s.main_total - 50.0).abs() < 1e-8)
         );
+        assert!(!source_dir.join("cyq_chen.db").exists());
+        fs::remove_dir_all(source_dir).unwrap();
+    }
+    #[test]
+    fn independent_buy_editor_save_and_single_stock_preserve_parameters() {
+        let source_dir = unique_temp_source_dir();
+        prepare_source_db(&source_dir);
+        let source_path = source_dir.to_str().unwrap();
+        fs::write(source_dir.join("ind.toml"), "version=1\nind=[]\n").unwrap();
+        let config = crate::data::cyq_chen::ChipChangeConfig::from_toml_str(
+            r#"
+version = 3
+[independent_buy]
+positive_strength = 0.08
+negative_strength = 0.65
+initial_main_pct = 17
+[independent_buy.positive_market_response]
+indicator = "is5"
+mean = 0.29
+std = 0.30
+coefficient = 0.25
+[[strategy]]
+name = "neutral turnover"
+holder = "retail"
+direction = "sell"
+when = "C > 0"
+bias = 1
+[[strategy]]
+name = "market continuation"
+holder = "main"
+direction = "buy"
+when = "C > O"
+bias = 0
+response_target = "positive_strength"
+[strategy.market_response]
+indicator = "f5"
+mean = 0.04
+std = 0.44
+coefficient = 0.007
+"#,
+        )
+        .unwrap();
+        let page = super::save_cyq_chen_strategy_file(
+            source_path,
+            super::CyqChenStrategyFileDraft {
+                version: Some(3),
+                negative_evidence_scale: None,
+                independent_buy: config.independent_buy,
+                strategies: config.strategy,
+            },
+        )
+        .unwrap();
+        let page = super::save_cyq_chen_strategy_file(
+            source_path,
+            super::CyqChenStrategyFileDraft {
+                version: None,
+                negative_evidence_scale: None,
+                independent_buy: None,
+                strategies: page.strategies,
+            },
+        )
+        .unwrap();
+        assert_eq!(page.version, 3);
+        assert_eq!(page.independent_buy, config.independent_buy);
+        assert!(page.strategies[1].market_response.is_some());
+        assert!(page.strategies[1].response_target.is_some());
+        let result = run_cyq_chen_single_stock_test(CyqChenSingleStockRequest {
+            version: Some(3),
+            negative_evidence_scale: None,
+            independent_buy: None,
+            retention: None,
+            source_path: source_path.into(),
+            ts_code: "000001".into(),
+            start_date: Some("20260401".into()),
+            end_date: Some("20260407".into()),
+            warmup_days: 2,
+            bucket_pct: 5.0,
+            strategies: page.strategies,
+        })
+        .unwrap();
+        assert_eq!(result.independent_buy, config.independent_buy);
+        assert_eq!(result.version, 3);
+        assert!(!result.snapshots.is_empty());
         assert!(!source_dir.join("cyq_chen.db").exists());
         fs::remove_dir_all(source_dir).unwrap();
     }

@@ -147,11 +147,24 @@ pub fn config_signature(definitions: &[IndData]) -> Result<String, String> {
 }
 
 pub fn configured_fields(source: &str) -> Result<Vec<(String, IndicatorScope)>, String> {
-    Ok(definitions(source)?
+    let mut fields = definitions(source)?
         .into_iter()
         .filter(|d| d.scope != IndicatorScope::Stock)
         .map(|d| (d.name, d.scope))
-        .collect())
+        .collect::<Vec<_>>();
+    // Virtual inputs for chip generation; shifted on the market calendar before stock alignment.
+    for key in [
+        "CYQ_MKT_IS5_PREV",
+        "CYQ_MKT_F5_PREV",
+        "CYQ_MKT_D10_PREV",
+        "CYQ_MKT_CF20_PREV",
+    ] {
+        if fields.iter().any(|(name, _)| name == key) {
+            return Err(format!("{key} 是筹码市场输入的保留名称"));
+        }
+        fields.push((key.into(), IndicatorScope::Market));
+    }
+    Ok(fields)
 }
 
 pub fn has_values(conn: &Connection) -> Result<bool, String> {
@@ -210,8 +223,22 @@ pub fn load_values(
         .map(|s| format!("'{}'", s.replace('\'', "''")))
         .collect::<Vec<_>>()
         .join(",");
+    let sql = if fields.iter().any(|key| {
+        matches!(
+            key.as_str(),
+            "CYQ_MKT_IS5_PREV" | "CYQ_MKT_F5_PREV" | "CYQ_MKT_D10_PREV" | "CYQ_MKT_CF20_PREV"
+        )
+    }) {
+        format!(
+            "WITH request(signature,start_date,end_date) AS (VALUES (?::VARCHAR,?::VARCHAR,?::VARCHAR)), calendar AS (SELECT trade_date,lag(trade_date) OVER (ORDER BY trade_date) AS previous_date FROM indicator_panel_sessions), aliases(name,source_name) AS (VALUES ('CYQ_MKT_IS5_PREV','MKT_IS5'),('CYQ_MKT_F5_PREV','MKT_F5'),('CYQ_MKT_D10_PREV','MKT_D10'),('CYQ_MKT_CF20_PREV','MKT_CF20')) SELECT v.name,v.ts_code,v.trade_date,v.value FROM indicator_panel_values v JOIN indicator_panel_state s ON s.id=1 AND s.version=1 CROSS JOIN request r WHERE s.signature=r.signature AND v.name IN({names}) AND v.ts_code IN({codes}) AND v.trade_date BETWEEN r.start_date AND r.end_date AND (s.dirty_from IS NULL OR v.trade_date<s.dirty_from) UNION ALL SELECT a.name,'' AS ts_code,c.trade_date,v.value FROM calendar c CROSS JOIN aliases a CROSS JOIN request r JOIN indicator_panel_state s ON s.id=1 AND s.version=1 AND s.signature=r.signature LEFT JOIN indicator_panel_values v ON v.name=a.source_name AND v.ts_code='' AND v.trade_date=c.previous_date WHERE a.name IN({names}) AND c.trade_date BETWEEN r.start_date AND r.end_date AND (s.dirty_from IS NULL OR c.previous_date<s.dirty_from)"
+        )
+    } else {
+        format!(
+            "SELECT v.name,v.ts_code,v.trade_date,v.value FROM indicator_panel_values v JOIN indicator_panel_state s ON s.id=1 AND s.version=1 AND s.signature=? WHERE v.name IN({names}) AND v.ts_code IN({codes}) AND v.trade_date BETWEEN ? AND ? AND (s.dirty_from IS NULL OR v.trade_date<s.dirty_from)"
+        )
+    };
     super::read_with_retry("读取跨股票指标", || -> Result<_, String> {
-        let mut stmt=conn.prepare(&format!("SELECT v.name,v.ts_code,v.trade_date,v.value FROM indicator_panel_values v JOIN indicator_panel_state s ON s.id=1 AND s.version=1 AND s.signature=? WHERE v.name IN({names}) AND v.ts_code IN({codes}) AND v.trade_date BETWEEN ? AND ? AND (s.dirty_from IS NULL OR v.trade_date<s.dirty_from)")).map_err(|e|e.to_string())?;
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
         stmt.execute(params![signature, start, end])
             .map_err(|e| e.to_string())?;
         let mut out = PanelValues::new();
@@ -1383,6 +1410,49 @@ prec=12
         ).unwrap(), 0);
         drop(reader);
         drop(conn);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+    #[test]
+    fn market_response_uses_previous_market_session_across_stock_gaps() {
+        let path = std::env::temp_dir().join(format!("chip-market-{}", std::process::id()));
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(
+            path.join("ind.toml"),
+            "version=1\n[[ind]]\nname='MKT_IS5'\nscope='market'\nexpr='CS_MEAN(PCT_CHG)'\nprec=6\n",
+        )
+        .unwrap();
+        let source = path.to_str().unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE indicator_panel_values(name VARCHAR, ts_code VARCHAR, trade_date VARCHAR, value DOUBLE); CREATE TABLE indicator_panel_sessions(trade_date VARCHAR); CREATE TABLE indicator_panel_state(id INTEGER, version INTEGER, signature VARCHAR, dirty_from VARCHAR); INSERT INTO indicator_panel_sessions VALUES ('20240102'),('20240103'),('20240104'); INSERT INTO indicator_panel_values VALUES ('MKT_IS5','','20240102',1.0),('MKT_IS5','','20240103',2.0),('MKT_IS5','','20240104',3.0);").unwrap();
+        conn.execute(
+            "INSERT INTO indicator_panel_state VALUES(1,1,?,NULL)",
+            [config_signature(&definitions(source).unwrap()).unwrap()],
+        )
+        .unwrap();
+        let mut row = RowData {
+            trade_dates: vec!["20240102".into(), "20240104".into()],
+            cols: HashMap::new(),
+        };
+        inject_fields(
+            &conn,
+            source,
+            "X",
+            &mut row,
+            &HashSet::from(["CYQ_MKT_IS5_PREV".into()]),
+        )
+        .unwrap();
+        assert_eq!(row.cols["CYQ_MKT_IS5_PREV"], vec![None, Some(2.0)]);
+        conn.execute("UPDATE indicator_panel_state SET dirty_from='20240103'", [])
+            .unwrap();
+        inject_fields(
+            &conn,
+            source,
+            "X",
+            &mut row,
+            &HashSet::from(["CYQ_MKT_IS5_PREV".into()]),
+        )
+        .unwrap();
+        assert_eq!(row.cols["CYQ_MKT_IS5_PREV"], vec![None, None]);
         std::fs::remove_dir_all(path).unwrap();
     }
 }

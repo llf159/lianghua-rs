@@ -7,6 +7,7 @@ import {
   saveCyqChenStrategyFile,
   type CyqChenStrategyDraft,
   type CyqChenStrategyPageData,
+  type IndependentBuyConfig,
 } from '../../apis/cyqChen'
 import {
   editStrategyBacktestConfig,
@@ -437,6 +438,8 @@ function buildChipStrategyEditorDraft(strategy: CyqChenStrategyDraft): ChipStrat
     direction: strategy.direction,
     when: strategy.when,
     bias: String(strategy.bias),
+    market_response: strategy.market_response,
+    response_target: strategy.response_target,
     confirmAfterText: strategy.confirm_after == null ? '' : String(strategy.confirm_after),
   }
 }
@@ -498,6 +501,7 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
   const [deleteTarget, setDeleteTarget] = useState<StrategyManageRuleItem | null>(null)
   const [deleteSceneTarget, setDeleteSceneTarget] = useState<DeleteSceneTarget | null>(null)
   const [chipVersion, setChipVersion] = useState(1)
+  const [chipIndependentBuy, setChipIndependentBuy] = useState<IndependentBuyConfig | null>(null)
   const [chipNegativeEvidenceScale, setChipNegativeEvidenceScale] = useState<number | null>(null)
   const [chipStrategies, setChipStrategies] = useState<CyqChenStrategyDraft[]>([])
   const [chipStrategyFilePath, setChipStrategyFilePath] = useState('')
@@ -588,7 +592,7 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
   const groupedChipStrategies = useMemo(
     () =>
       CHIP_STRATEGY_GROUPS.filter(
-        (group) => chipVersion !== 2 || group.key !== 'retail-buy',
+        (group) => chipVersion === 1 || group.key !== 'retail-buy',
       ).map((group) => ({
         ...group,
         items: filteredChipStrategies.filter(
@@ -758,6 +762,7 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
   function applyChipStrategyPage(page: CyqChenStrategyPageData) {
     setChipVersion(page.version)
     setChipNegativeEvidenceScale(page.negativeEvidenceScale ?? null)
+    setChipIndependentBuy(page.independentBuy ?? null)
     setChipStrategies(page.strategies ?? [])
     setChipStrategyFilePath(page.filePath)
     setChipStrategyFileExists(page.exists)
@@ -1194,15 +1199,17 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
     const confirmAfterText = chipStrategyDraft.confirmAfterText.trim()
     const direction = chipStrategyDraft.direction
     const holder =
-      chipVersion === 2 && direction === 'buy' ? 'main' : chipStrategyDraft.holder
+      chipVersion >= 2 && direction === 'buy' ? 'main' : chipStrategyDraft.holder
     const prepared: CyqChenStrategyDraft = {
+      market_response: chipStrategyDraft.market_response,
+      response_target: chipStrategyDraft.response_target,
       name: chipStrategyDraft.name.trim(),
       holder,
       direction,
       when: chipStrategyDraft.when.trim(),
       bias: biasText === '' ? Number.NaN : Number(biasText),
       confirm_after:
-        chipVersion === 2 || confirmAfterText === ''
+        chipVersion >= 2 || confirmAfterText === ''
           ? undefined
           : Number(confirmAfterText),
     }
@@ -1235,7 +1242,7 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
   async function onCheckChipStrategyDraft() {
     try {
       const preparedDraft = buildPreparedChipStrategyDraft()
-      const message = await checkCyqChenStrategyFileDraft(buildNextChipStrategies(preparedDraft), chipVersion, chipNegativeEvidenceScale)
+      const message = await checkCyqChenStrategyFileDraft(buildNextChipStrategies(preparedDraft), chipVersion, chipNegativeEvidenceScale, chipIndependentBuy)
       setChipStrategyNotice(message)
       setChipStrategyError('')
     } catch (checkError) {
@@ -1252,7 +1259,7 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
     setChipStrategySaving(true)
     setChipStrategyError('')
     try {
-      const page = await saveCyqChenStrategyFile(sourcePath, nextStrategies, chipVersion, chipNegativeEvidenceScale)
+      const page = await saveCyqChenStrategyFile(sourcePath, nextStrategies, chipVersion, chipNegativeEvidenceScale, chipIndependentBuy)
       applyChipStrategyPage(page)
       setChipStrategyDraft(null)
       setChipStrategyEditingIndex(null)
@@ -1269,7 +1276,7 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
     try {
       const preparedDraft = buildPreparedChipStrategyDraft()
       const nextStrategies = buildNextChipStrategies(preparedDraft)
-      await checkCyqChenStrategyFileDraft(nextStrategies, chipVersion, chipNegativeEvidenceScale)
+      await checkCyqChenStrategyFileDraft(nextStrategies, chipVersion, chipNegativeEvidenceScale, chipIndependentBuy)
       await saveChipStrategies(
         nextStrategies,
         chipStrategyEditorMode === 'create' ? '筹码策略已新增。' : '筹码策略已更新。',
@@ -1637,7 +1644,9 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
             <h2 className="strategy-manage-title">{isChipView ? '筹码变动策略' : '打分策略管理'}</h2>
             <p className="strategy-manage-note">
               {isChipView
-                ? (chipVersion === 2
+                ? (chipVersion === 3
+                  ? '独立买入：以交易前库存为中性承接比例，主力方向证据调节买入，保留双方卖出行为。'
+                  : chipVersion === 2
                   ? '库存记忆：主力买入系数表示正负有向证据，散户成交余量自动形成。'
                   : '管理筹码变动策略，供筹码计算和筹码测试使用。')
                 : '管理当前生效的打分策略，导入和备份可在策略资产中心处理。'}
@@ -1694,7 +1703,7 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
           {isChipView ? (
             <>
               <div className="strategy-manage-summary-item">
-                <span>{chipVersion === 2 ? '库存记忆策略' : '筹码策略'}</span>
+                <span>{chipVersion === 3 ? '独立买入策略' : chipVersion === 2 ? '库存记忆策略' : '筹码策略'}</span>
                 <strong>{chipStrategies.length}</strong>
               </div>
               {chipVersion === 2 ? <div className="strategy-manage-summary-item">
@@ -1702,20 +1711,20 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
                 <strong>{chipNegativeEvidenceScale ?? 3}</strong>
               </div> : null}
               <div className="strategy-manage-summary-item">
-                <span>{chipVersion === 2 ? '主力方向证据' : '主力策略'}</span>
+                <span>{chipVersion >= 2 ? '主力方向证据' : '主力策略'}</span>
                 <strong>
                   {chipStrategies.filter((item) =>
-                    chipVersion === 2
+                    chipVersion >= 2
                       ? item.direction === 'buy'
                       : item.holder === 'main',
                   ).length}
                 </strong>
               </div>
               <div className="strategy-manage-summary-item">
-                <span>{chipVersion === 2 ? '卖出规则' : '散户策略'}</span>
+                <span>{chipVersion >= 2 ? '卖出规则' : '散户策略'}</span>
                 <strong>
                   {chipStrategies.filter((item) =>
-                    chipVersion === 2
+                    chipVersion >= 2
                       ? item.direction === 'sell'
                       : item.holder === 'retail',
                   ).length}
@@ -1978,7 +1987,7 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
                   onClick={() => setSelectedChipStrategyGroupKey(group.key)}
                 >
                   <span>
-                    {chipVersion === 2 && group.key === 'main-buy'
+                    {chipVersion >= 2 && group.key === 'main-buy'
                       ? '主力方向证据'
                       : group.title}
                   </span>
@@ -1999,7 +2008,7 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
                       <div>
                         <div className="strategy-manage-rule-card-name">{strategy.name}</div>
                         <div className="strategy-manage-rule-card-source">
-                          #{index + 1} · {chipVersion === 2 && strategy.direction === 'buy'
+                          #{index + 1} · {chipVersion >= 2 && strategy.direction === 'buy'
                             ? '主力方向证据'
                             : `${formatChipHolder(strategy.holder)} · ${formatChipDirection(strategy.direction)}`}
                         </div>
@@ -2018,8 +2027,8 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
                         </button>
                       </div>
                     </div>
-                    <div className={`strategy-manage-rule-metrics strategy-manage-rule-metrics-recent${chipVersion === 2 && strategy.direction === 'buy' ? ' is-direction' : ''}`}>
-                      {chipVersion === 2 && strategy.direction === 'buy' ? (
+                    <div className={`strategy-manage-rule-metrics strategy-manage-rule-metrics-recent${chipVersion >= 2 && strategy.direction === 'buy' ? ' is-direction' : ''}`}>
+                      {chipVersion >= 2 && strategy.direction === 'buy' ? (
                         <div className="strategy-manage-summary-item">
                           <span>主力/散户方向</span>
                           <strong>{`${strategy.bias > 0 ? '+' : ''}${formatNumber(Number(strategy.bias))}`}</strong>
@@ -2097,7 +2106,7 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
                   : `编辑筹码策略 · ${chipStrategyDraft.name}`}
               </strong>
               <span>
-                {chipVersion === 2 && chipStrategyDraft.direction === 'buy'
+                {chipVersion >= 2 && chipStrategyDraft.direction === 'buy'
                   ? '主力方向证据'
                   : `${formatChipHolder(chipStrategyDraft.holder)} · ${formatChipDirection(chipStrategyDraft.direction)}`}
               </span>
@@ -2116,7 +2125,7 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
                   }
                 />
               </label>
-              {chipVersion === 2 ? (
+              {chipVersion >= 2 ? (
                 <label className="strategy-manage-field">
                   <span>规则类型</span>
                   <select
@@ -2174,7 +2183,7 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
                   </label>
                 </>
               )}
-              {chipVersion !== 2 ? (
+              {chipVersion === 1 ? (
                 <label className="strategy-manage-field">
                   <span>确认延迟（0 为当天规则）</span>
                   <input type="number" min={0} step={1} value={chipStrategyDraft.confirmAfterText} placeholder="0"
@@ -2183,7 +2192,7 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
               ) : null}
               <label className="strategy-manage-field">
                 <span>
-                  {chipVersion === 2 && chipStrategyDraft.direction === 'buy'
+                  {chipVersion >= 2 && chipStrategyDraft.direction === 'buy'
                     ? '主力/散户方向'
                     : Number(chipStrategyDraft.confirmAfterText) > 0
                       ? '归属修正比例（0～1，仅买入方向）'
@@ -2199,18 +2208,20 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
                     )
                   }
                 />
-                {chipVersion === 2 &&
+                {chipVersion >= 2 &&
                   chipStrategyDraft.direction === 'buy' &&
                   Number.isFinite(Number(chipStrategyDraft.bias)) &&
                   chipStrategyDraft.bias.trim() !== '' ? (
                     <small className="strategy-manage-field-help">
                       {Number(chipStrategyDraft.bias) === 0
-                        ? '中性：不改变买方结构。'
-                        : `${Number(chipStrategyDraft.bias) > 0 ? '偏主力' : '偏散户'}；单独命中时移动强度为 ${formatNumber(
+                        ? '中性：本条不调整主力承接份额。'
+                        : chipVersion === 3
+                          ? '正向证据提高主力承接份额，负向证据降低；同日证据相加后按策略力度换算。'
+                          : `${Number(chipStrategyDraft.bias) > 0 ? '偏主力' : '偏散户'}；单独命中时移动强度为 ${formatNumber(
                             Math.min(
                               Math.abs(Number(chipStrategyDraft.bias)) *
                                 4 *
-                                (Number(chipStrategyDraft.bias) < 0 ? 3 : 1),
+                                (Number(chipStrategyDraft.bias) < 0 ? (chipNegativeEvidenceScale ?? 3) : 1),
                               1,
                             ) * 100,
                             1,

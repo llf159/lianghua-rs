@@ -66,6 +66,7 @@ impl ChenChipRetention {
                 version: chip_config.version,
                 negative_evidence_scale: (chip_config.version == 2)
                     .then_some(chip_config.negative_evidence_scale),
+                independent_buy: chip_config.independent_buy,
                 strategy: chip_config
                     .strategies
                     .iter()
@@ -75,6 +76,8 @@ impl ChenChipRetention {
                         direction: strategy.direction,
                         when: strategy.when.clone(),
                         bias: strategy.bias,
+                        market_response: strategy.market_response,
+                        response_target: strategy.response_target,
                         confirm_after: strategy.confirm_after,
                     })
                     .collect(),
@@ -158,6 +161,7 @@ mod tests {
         let chip = ChipChangeConfig {
             version: 2,
             negative_evidence_scale: None,
+            independent_buy: None,
             strategy: vec![],
         }
         .compile()

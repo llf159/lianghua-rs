@@ -12,6 +12,7 @@ import {
   getCyqChenStrategyPage,
   runCyqChenSingleStockTest,
   type CyqChenBin,
+  type IndependentBuyConfig,
   type CyqChenKlineRow,
   type CyqChenSingleStockData,
   type CyqChenSnapshot,
@@ -2453,6 +2454,7 @@ export default function CyqChenPage() {
   const [warmupDaysInput, setWarmupDaysInput] = useState(persistedDraft.warmupDaysInput)
   const [bucketPctInput, setBucketPctInput] = useState(persistedDraft.bucketPctInput)
   const [strategyVersion, setStrategyVersion] = useState(1)
+  const [independentBuy, setIndependentBuy] = useState<IndependentBuyConfig | null>(null)
   const [negativeEvidenceScale, setNegativeEvidenceScale] = useState<number | null>(null)
   const [strategies, setStrategies] = useState<CyqChenStrategyDraft[]>(() => cloneDefaultStrategies())
   const [sourcePath, setSourcePath] = useState('')
@@ -2561,8 +2563,9 @@ export default function CyqChenPage() {
         setSourcePath(nextSourcePath)
         setStrategyVersion(page.version)
         setNegativeEvidenceScale(page.negativeEvidenceScale ?? null)
+        setIndependentBuy(page.independentBuy ?? null)
         setStrategies(page.strategies.map((strategy) => ({ ...strategy })))
-        setNotice(page.exists ? `已读取 ${page.version === 2 ? '库存记忆' : '旧版'}筹码策略。` : '策略文件不存在，已载入默认测试配置。')
+        setNotice(page.exists ? `已读取 ${page.version === 3 ? '独立买入' : page.version === 2 ? '库存记忆' : '旧版'}筹码策略。` : '策略文件不存在，已载入默认测试配置。')
       } catch (loadError) {
         if (!canceled) {
           setError(`读取筹码策略失败: ${String(loadError)}`)
@@ -2667,6 +2670,7 @@ export default function CyqChenPage() {
       const nextResult = await runCyqChenSingleStockTest({
         version: strategyVersion,
         negativeEvidenceScale,
+        independentBuy,
         retention: retentionEnabled ? {
           anchorDate: normalizeDateInput(retentionAnchor),
           evaluationDate: normalizeDateInput(retentionEvaluation),
@@ -2689,7 +2693,7 @@ export default function CyqChenPage() {
       setSavedRuns((items) => [
         {
           id: `${Date.now()}`,
-          label: `${nextResult.version === 2 ? `库存记忆·负向×${nextResult.negativeEvidenceScale ?? 3}` : '旧版'} ${nextResult.resolvedTsCode} ${nextResult.startDate}-${nextResult.endDate}`,
+          label: `${nextResult.version === 3 ? '独立买入' : nextResult.version === 2 ? `库存记忆·负向×${nextResult.negativeEvidenceScale ?? 3}` : '旧版'} ${nextResult.resolvedTsCode} ${nextResult.startDate}-${nextResult.endDate}`,
           data: nextResult,
         },
         ...items,
@@ -2861,7 +2865,7 @@ export default function CyqChenPage() {
             </div>
             <p>
               {result
-                ? `${result.version === 2 ? '库存记忆' : '旧版筹码'} · ${result.startDate} 至 ${result.endDate} · 输出起点 ${result.outputStartDate ?? '--'}`
+                ? `${result.version === 3 ? '独立买入' : result.version === 2 ? '库存记忆' : '旧版筹码'} · ${result.startDate} 至 ${result.endDate} · 输出起点 ${result.outputStartDate ?? '--'}`
                 : '设置单票参数后运行计算'}
             </p>
           </div>

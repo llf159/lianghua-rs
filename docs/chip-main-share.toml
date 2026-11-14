@@ -1,0 +1,48 @@
+version = 1
+
+[[scene]]
+name = "筹码多维观察"
+direction = "long"
+observe_threshold = 1.0
+trigger_threshold = 16.0
+confirm_threshold = 21.0
+fail_threshold = 21.0
+
+[[rule]]
+id="rule_chip_main_share_large"
+name="主力持仓占比分档"
+kind="combination"
+scene="筹码多维观察"
+stage="base"
+scope_windows=1
+scope_way="LAST"
+when=""
+points=0.0
+points_by_hits=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+explain="流通规模代理大于68.752116亿元时，模型主力持仓占比按6.659%、8.0267%、9.172%、10.5029%分五档，分别计−3、−1.5、0、1.5、3分；当日计分，不累计。"
+
+[[rule.condition]]
+name="低占比"
+when="FEATURE0 := (DIV(CYQ_MT,CYQ_MT+CYQ_RT)); SIZE := DIV(AMOUNT,TOR)/1000; (FEATURE0<=0.066589999999999996) AND (CYQ_MT>=0 AND CYQ_RT>=0 AND CYQ_MT+CYQ_RT>0 AND CYQ_MAC>0) AND (TOR>0 AND AMOUNT>0) AND (SIZE>68.752116176127984)"
+bonus_points=-3.0
+
+[[rule.condition]]
+name="较低占比"
+when="FEATURE0 := (DIV(CYQ_MT,CYQ_MT+CYQ_RT)); SIZE := DIV(AMOUNT,TOR)/1000; (FEATURE0>0.066589999999999996 AND FEATURE0<=0.080267000000000005) AND (CYQ_MT>=0 AND CYQ_RT>=0 AND CYQ_MT+CYQ_RT>0 AND CYQ_MAC>0) AND (TOR>0 AND AMOUNT>0) AND (SIZE>68.752116176127984)"
+bonus_points=-1.5
+
+[[rule.condition]]
+name="中等占比"
+when="FEATURE0 := (DIV(CYQ_MT,CYQ_MT+CYQ_RT)); SIZE := DIV(AMOUNT,TOR)/1000; (FEATURE0>0.080267000000000005 AND FEATURE0<=0.09172000000000001) AND (CYQ_MT>=0 AND CYQ_RT>=0 AND CYQ_MT+CYQ_RT>0 AND CYQ_MAC>0) AND (TOR>0 AND AMOUNT>0) AND (SIZE>68.752116176127984)"
+bonus_points=0.0
+
+[[rule.condition]]
+name="较高占比"
+when="FEATURE0 := (DIV(CYQ_MT,CYQ_MT+CYQ_RT)); SIZE := DIV(AMOUNT,TOR)/1000; (FEATURE0>0.09172000000000001 AND FEATURE0<=0.105029) AND (CYQ_MT>=0 AND CYQ_RT>=0 AND CYQ_MT+CYQ_RT>0 AND CYQ_MAC>0) AND (TOR>0 AND AMOUNT>0) AND (SIZE>68.752116176127984)"
+bonus_points=1.5
+
+[[rule.condition]]
+name="高占比"
+when="FEATURE0 := (DIV(CYQ_MT,CYQ_MT+CYQ_RT)); SIZE := DIV(AMOUNT,TOR)/1000; (FEATURE0>0.105029 AND FEATURE0>0.105029) AND (CYQ_MT>=0 AND CYQ_RT>=0 AND CYQ_MT+CYQ_RT>0 AND CYQ_MAC>0) AND (TOR>0 AND AMOUNT>0) AND (SIZE>68.752116176127984)"
+bonus_points=3.0
+

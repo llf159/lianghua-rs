@@ -347,8 +347,31 @@ pub(super) fn current_chip_change_strategy_hash(source_dir: &str) -> Result<Stri
     })?;
     let header =
         toml::from_str::<toml::Table>(&text).map_err(|e| format!("读取筹码算法版本失败: {e}"))?;
+    let market_response = header
+        .get("independent_buy")
+        .and_then(|model| model.get("positive_market_response"))
+        .is_some()
+        || header
+            .get("strategy")
+            .and_then(toml::Value::as_array)
+            .is_some_and(|rules| {
+                rules
+                    .iter()
+                    .any(|rule| rule.get("market_response").is_some())
+            });
+    let text = if market_response {
+        format!(
+            "{text}\n{}",
+            read_to_string(std::path::Path::new(source_dir).join("ind.toml"))
+                .map_err(|e| format!("读取筹码市场指标定义失败: {e}"))?
+        )
+    } else {
+        text
+    };
     let algorithm = match header.get("version").and_then(toml::Value::as_integer) {
         Some(2) => "inventory-memory-v1:",
+        Some(3) if market_response => "market-independent-buyer-v1:",
+        Some(3) => "independent-buyer-v1:",
         _ => "",
     };
     Ok((|text: &str| -> String {

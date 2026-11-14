@@ -188,13 +188,14 @@ pub(super) fn apply_sell_for_day(
             chip_config.sell_uses_bucket_rate_series,
         )?;
         let (main_bias, retail_bias) = if chip_config.sell_uses_bucket_dynamic_state {
-            strategy_biases_at(
+            let (main, retail, _) = strategy_biases_at(
                 bucket_runtime,
                 chip_config,
                 ChipDirection::Sell,
                 bars.len(),
                 day_index,
-            )?
+            )?;
+            (main, retail)
         } else {
             let cache_key = (
                 buckets[bucket_index].price_low.to_bits(),
@@ -428,14 +429,34 @@ pub(super) fn apply_buy_for_day(
             retail_chip_total,
         );
     })(buy_runtime, main_chip_total, retail_chip_total);
-    let (main_bias, retail_bias) = strategy_biases_at(
+    let (main_bias, retail_bias, positive_adjustment) = strategy_biases_at(
         buy_runtime,
         chip_config,
         ChipDirection::Buy,
         runtime_len,
         day_index,
     )?;
-    let (main_share, retail_share) = if chip_config.version == 2 {
+    let (main_share, retail_share) = if let Some(model) = chip_config.independent_buy {
+        let adjustment = positive_adjustment
+            + model.positive_market_response.map_or(0.0, |response| {
+                response.adjustment_at(buy_runtime, runtime_len, day_index)
+            });
+        let positive_strength = if adjustment != 0.0
+            && model.positive_strength > 0.0
+            && model.positive_strength < 1.0
+        {
+            1.0 / (1.0
+                + (-(model.positive_strength / (1.0 - model.positive_strength)).ln() - adjustment)
+                    .exp())
+        } else {
+            model.positive_strength
+        };
+        let main = (main_before_sell / 100.0
+            + positive_strength * (4.0 * main_bias).clamp(0.0, 1.0)
+            - model.negative_strength * (-4.0 * main_bias).clamp(0.0, 1.0))
+        .clamp(0.0, 1.0);
+        (main, 1.0 - main)
+    } else if chip_config.version == 2 {
         // Version 2 buy biases are signed direction evidence, with zero as neutral.
         let evidence = main_bias;
         let direction = if evidence > 1e-12 {
@@ -624,8 +645,9 @@ pub(super) fn strategy_biases_at(
     direction: ChipDirection,
     len: usize,
     day_index: usize,
-) -> Result<(f64, f64), String> {
+) -> Result<(f64, f64, f64), String> {
     let mut main_bias = 0.0;
+    let mut positive_adjustment = 0.0;
     let mut retail_bias = 0.0;
 
     for strategy in chip_config
@@ -653,14 +675,22 @@ pub(super) fn strategy_biases_at(
         };
 
         if triggered {
+            let bias = strategy.bias
+                + strategy.market_response.map_or(0.0, |response| {
+                    response.adjustment_at(bucket_runtime, len, day_index)
+                });
+            if strategy.response_target == Some(super::ChipMarketTarget::PositiveStrength) {
+                positive_adjustment += bias;
+                continue;
+            }
             match strategy.holder {
-                ChipHolder::Main => main_bias += strategy.bias,
-                ChipHolder::Retail => retail_bias += strategy.bias,
+                ChipHolder::Main => main_bias += bias,
+                ChipHolder::Retail => retail_bias += bias,
             }
         }
     }
 
-    Ok((main_bias, retail_bias))
+    Ok((main_bias, retail_bias, positive_adjustment))
 }
 
 pub(super) fn buy_holder_shares(main_bias: f64, retail_bias: f64) -> (f64, f64) {
@@ -1103,5 +1133,190 @@ bias = {retail_sell}
                 assert_close(a.retail_chip, b.retail_chip);
             }
         }
+    }
+    #[test]
+    fn independent_buy_preserves_initialization_and_resume_without_sell_replenishment() {
+        for (evidence, expected_buy) in [(0.0, 2.0), (0.25, 4.0), (-0.25, 0.0)] {
+            let config = ChipChangeConfig::from_toml_str(&format!(
+                r#"
+version = 3
+[independent_buy]
+positive_strength = 0.2
+negative_strength = 0.7
+initial_main_pct = 20
+[[strategy]]
+name = "direction"
+holder = "main"
+direction = "buy"
+when = "C > 0"
+bias = {evidence}
+[[strategy]]
+name = "main sells"
+holder = "main"
+direction = "sell"
+when = "C > 0"
+bias = 1
+[[strategy]]
+name = "retail sells"
+holder = "retail"
+direction = "sell"
+when = "C > 0"
+bias = 3
+"#
+            ))
+            .unwrap()
+            .compile()
+            .unwrap();
+            let mut row = sample_row_data();
+            row.cols.get_mut("TOR").unwrap()[2] = Some(0.0);
+            let compute = ChenChipConfig {
+                warmup_days: 0,
+                bucket_pct: 5.0,
+            };
+            let full = super::super::compute_chen_chip_snapshots_with_compiled_config(
+                &row,
+                &row.trade_dates[0],
+                &config,
+                compute,
+            )
+            .unwrap();
+            assert_close(full[0].flow.as_ref().unwrap().main_bought, expected_buy);
+            assert_close(
+                full[0].main_total,
+                20.0 - 10.0 * 20.0 / 260.0 + expected_buy,
+            );
+            assert_close(full[2].main_total, full[1].main_total);
+            let resumed =
+                super::super::compute_chen_chip_snapshots_from_initial_bins_with_compiled_config(
+                    &row,
+                    &row.trade_dates[2],
+                    &full[1].bins,
+                    &[],
+                    &config,
+                    compute,
+                )
+                .unwrap();
+            for (actual, expected) in resumed.iter().zip(&full[2..]) {
+                assert_close(actual.main_total, expected.main_total);
+                assert_close(actual.total_chips, 100.0);
+                assert_close(
+                    actual.origin.unwrap().initial_main,
+                    expected.origin.unwrap().initial_main,
+                );
+                assert!(
+                    actual
+                        .bins
+                        .iter()
+                        .all(|b| b.main_chip >= 0.0 && b.retail_chip >= 0.0)
+                );
+            }
+        }
+    }
+    #[test]
+    fn market_response_modulates_buying_and_preserves_resume_and_missing_fallback() {
+        use super::super::{ChipMarketIndicator, ChipMarketResponse, IndependentBuyConfig};
+        let mut config = super::super::test_support::sample_config();
+        config.version = 3;
+        config.independent_buy = Some(IndependentBuyConfig {
+            positive_strength: 0.2,
+            negative_strength: 0.7,
+            initial_main_pct: 20.0,
+            positive_market_response: Some(ChipMarketResponse {
+                indicator: ChipMarketIndicator::Is5,
+                mean: 0.0,
+                std: 1.0,
+                coefficient: 2.0_f64.ln(),
+            }),
+        });
+        config.strategy[0].bias = 0.05;
+        config.strategy[0].market_response = Some(ChipMarketResponse {
+            indicator: ChipMarketIndicator::F5,
+            mean: 0.0,
+            std: 1.0,
+            coefficient: 0.1,
+        });
+        let restored = ChipChangeConfig::from_toml_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(restored.independent_buy, config.independent_buy);
+        assert_eq!(
+            restored.strategy[0].market_response,
+            config.strategy[0].market_response
+        );
+        let compiled = config.compile().unwrap();
+        let keys = super::super::collect_chen_chip_runtime_keys(&compiled);
+        assert!(keys.contains("CYQ_MKT_IS5_PREV") && keys.contains("CYQ_MKT_F5_PREV"));
+        let mut row = sample_row_data();
+        let compute = ChenChipConfig {
+            warmup_days: 0,
+            bucket_pct: 5.0,
+        };
+        let fallback = super::super::compute_chen_chip_snapshots_with_compiled_config(
+            &row,
+            &row.trade_dates[0],
+            &compiled,
+            compute,
+        )
+        .unwrap();
+        assert_close(fallback[0].flow.as_ref().unwrap().main_bought, 2.4);
+        row.cols
+            .insert("CYQ_MKT_IS5_PREV".into(), vec![Some(1.0); 5]);
+        row.cols
+            .insert("CYQ_MKT_F5_PREV".into(), vec![Some(1.0); 5]);
+        let full = super::super::compute_chen_chip_snapshots_with_compiled_config(
+            &row,
+            &row.trade_dates[0],
+            &compiled,
+            compute,
+        )
+        .unwrap();
+        assert_close(full[0].flow.as_ref().unwrap().main_bought, 4.0);
+        let mut gated = config.clone();
+        let mut strength_rule = gated.strategy[0].clone();
+        strength_rule.name = "gated positive strength".into();
+        strength_rule.bias = 0.0;
+        strength_rule.response_target = Some(super::super::ChipMarketTarget::PositiveStrength);
+        strength_rule.market_response = Some(ChipMarketResponse {
+            indicator: ChipMarketIndicator::Is5,
+            mean: 0.0,
+            std: 1.0,
+            coefficient: 2.0_f64.ln(),
+        });
+        gated.strategy.push(strength_rule);
+        let restored = ChipChangeConfig::from_toml_str(&toml::to_string(&gated).unwrap()).unwrap();
+        assert_eq!(
+            restored.strategy[1].response_target,
+            gated.strategy[1].response_target
+        );
+        let gated = super::super::compute_chen_chip_snapshots_with_compiled_config(
+            &row,
+            &row.trade_dates[0],
+            &gated.compile().unwrap(),
+            compute,
+        )
+        .unwrap();
+        assert_close(gated[0].flow.as_ref().unwrap().main_bought, 5.0);
+
+        let resumed =
+            super::super::compute_chen_chip_snapshots_from_initial_bins_with_compiled_config(
+                &row,
+                &row.trade_dates[2],
+                &full[1].bins,
+                &[],
+                &compiled,
+                compute,
+            )
+            .unwrap();
+        for (a, b) in resumed.iter().zip(&full[2..]) {
+            assert_close(a.main_total, b.main_total);
+            assert_close(a.total_chips, 100.0);
+        }
+        config
+            .independent_buy
+            .as_mut()
+            .unwrap()
+            .positive_market_response
+            .as_mut()
+            .unwrap()
+            .std = 0.0;
+        assert!(config.compile().is_err());
     }
 }

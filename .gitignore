@@ -48,3 +48,7 @@ research_runs_v1/
 /.tmp/
 
 !/docs/realtime-monitor.md
+
+!/docs/chip-independent-buy.toml
+!/docs/chip-main-share.toml
+!/docs/chip-share-cost.toml

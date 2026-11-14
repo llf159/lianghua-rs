@@ -1,3 +1,17 @@
+export type ChipMarketResponse = {
+  indicator: 'is5' | 'f5' | 'd10' | 'cf20'
+  mean: number
+  std: number
+  coefficient: number
+}
+
+export type IndependentBuyConfig = {
+  positive_strength: number
+  negative_strength: number
+  initial_main_pct: number
+  positive_market_response?: ChipMarketResponse | null
+}
+
 import { invoke } from '@tauri-apps/api/core'
 import { open, save } from '@tauri-apps/plugin-dialog'
 import type { DetailKlinePayload } from './details'
@@ -12,6 +26,8 @@ export type CyqChenStrategyDraft = {
   direction: CyqChenDirection
   when: string
   bias: number
+  response_target?: 'evidence' | 'positive_strength' | null
+  market_response?: ChipMarketResponse | null
   confirm_after?: number
 }
 
@@ -117,6 +133,7 @@ export type CyqChenBasis = {
 
 export type CyqChenSingleStockData = {
   version: number
+  independentBuy?: IndependentBuyConfig | null
   negativeEvidenceScale?: number | null
   basis?: CyqChenBasis | null
   resolvedTsCode: string
@@ -156,6 +173,7 @@ export type CyqChenRetention = {
 export type CyqChenSingleStockRequest = {
   retention?: CyqChenRetentionRequest | null
   version: number
+  independentBuy?: IndependentBuyConfig | null
   negativeEvidenceScale?: number | null
   sourcePath: string
   tsCode: string
@@ -180,6 +198,7 @@ export type CyqChenStrategyBackupItem = {
 
 export type CyqChenStrategyPageData = {
   version: number
+  independentBuy?: IndependentBuyConfig | null
   negativeEvidenceScale?: number | null
   filePath: string
   exists: boolean
@@ -225,16 +244,17 @@ export async function saveCyqChenStrategyFile(
   strategies: CyqChenStrategyDraft[],
   version: number,
   negativeEvidenceScale?: number | null,
+  independentBuy?: IndependentBuyConfig | null,
 ) {
   return invoke<CyqChenStrategyPageData>('save_cyq_chen_strategy_file', {
     sourcePath,
-    draft: { version, negativeEvidenceScale, strategies },
+    draft: { version, negativeEvidenceScale, independentBuy, strategies },
   })
 }
 
-export async function checkCyqChenStrategyFileDraft(strategies: CyqChenStrategyDraft[], version: number, negativeEvidenceScale?: number | null) {
+export async function checkCyqChenStrategyFileDraft(strategies: CyqChenStrategyDraft[], version: number, negativeEvidenceScale?: number | null, independentBuy?: IndependentBuyConfig | null) {
   return invoke<string>('check_cyq_chen_strategy_file_draft', {
-    draft: { version, negativeEvidenceScale, strategies },
+    draft: { version, negativeEvidenceScale, independentBuy, strategies },
   })
 }
 

@@ -555,7 +555,10 @@ impl DataReader {
         let runtime_panel_fields = configured_panel
             .iter()
             .filter(|(key, _)| {
-                required_runtime_keys.map_or(include_panel, |keys| keys.contains(key))
+                required_runtime_keys
+                    .map_or(include_panel && !key.starts_with("CYQ_MKT_"), |keys| {
+                        keys.contains(key)
+                    })
             })
             .map(|(key, _)| key.clone())
             .collect::<Vec<_>>();

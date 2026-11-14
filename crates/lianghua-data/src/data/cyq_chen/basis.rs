@@ -286,6 +286,7 @@ mod tests {
         let uniform = ChipChangeConfig {
             version: 1,
             negative_evidence_scale: None,
+            independent_buy: None,
             strategy: [ChipDirection::Buy, ChipDirection::Sell]
                 .into_iter()
                 .flat_map(|direction| {
@@ -297,6 +298,8 @@ mod tests {
                             direction,
                             when: "C > 0".into(),
                             bias: 1.0,
+                            market_response: None,
+                            response_target: None,
                             confirm_after: 0,
                         })
                 })
