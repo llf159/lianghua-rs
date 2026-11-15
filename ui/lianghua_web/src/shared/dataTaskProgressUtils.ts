@@ -248,11 +248,10 @@ export function formatProgressDuration(value: number | null) {
 
 export function formatProgressEstimate(value: number | null) {
   if (value === null || !Number.isFinite(value)) return '估算中'
-  if (value < 60000) return `约${Math.max(5, Math.ceil(value / 5000) * 5)}秒`
-  const minutes = Math.ceil(value / 60000)
-  return minutes >= 60
-    ? `约${Math.floor(minutes / 60)}小时${minutes % 60 ? ` ${minutes % 60}分` : ''}`
-    : `约${minutes}分钟`
+  const precisionMs = value < 60000 ? 1000 : value < 3600000 ? 10000 : 60000
+  return `约${formatProgressDuration(
+    Math.ceil(Math.max(0, value) / precisionMs) * precisionMs,
+  )}`
 }
 
 export function useProgressTiming(
@@ -305,9 +304,9 @@ export function useProgressTiming(
         // 并行回调可能乱序送达，较小的计数不能清空本阶段已经积累的速度样本。
         if (current.finished >= progress.finished) return current
 
-        // 一批并行回调可能集中在几毫秒内；累计至少 5 秒再取样，保留最近约一分钟。
+        // 按秒采样，短任务也能尽早估算；保留最近约一分钟。
         let samples = current.samples
-        if (progress.elapsedMs - samples[samples.length - 1].elapsedMs >= 5000) {
+        if (progress.elapsedMs - samples[samples.length - 1].elapsedMs >= 1000) {
           samples = [...samples, { elapsedMs: progress.elapsedMs, finished: progress.finished }]
           while (samples.length > 2 && samples[1].elapsedMs <= progress.elapsedMs - 60000) {
             samples.shift()
@@ -340,8 +339,8 @@ export function useProgressTiming(
   let estimatedRemainingMs: number | null = null
   // 计数不动时不能沿旧结束时间继续倒计时；等待也必须计入实际吞吐。
   // 单股计算可能较慢，不按固定上报间隔撤掉估计；仅样本不足或收尾时不显示数字。
-  if (sample.finished < sample.total && phaseElapsedMs >= 30000
-    && sample.samples.length >= 3) {
+  if (sample.finished < sample.total && phaseElapsedMs >= 1000
+    && sample.finished > sample.phaseStartFinished) {
     const recentStart = sample.samples.findLast(
       (point) => point.elapsedMs <= sample.sampledElapsedMs - 20000,
     ) ?? sample.samples[0]

@@ -22,7 +22,7 @@ export function ResearchRunProgress({ actionLabel, mode, phase, cancelling, onCa
     : Number((batch ?? scoring)?.[2] ?? 0);
   const phaseKey = combination
     ? "参数组合"
-    : batch?.[0] ?? scoring?.[1] ?? phase;
+    : batch ? "本批组合信号计算" : scoring?.[1] ?? phase;
   const localRatio = total > 0 ? Math.max(0, Math.min(1, finished / total)) : null;
   let detectedStage: number | null = null;
   if (mode === "comparison") {
