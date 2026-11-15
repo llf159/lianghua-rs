@@ -152,12 +152,16 @@ pub fn configured_fields(source: &str) -> Result<Vec<(String, IndicatorScope)>, 
         .filter(|d| d.scope != IndicatorScope::Stock)
         .map(|d| (d.name, d.scope))
         .collect::<Vec<_>>();
-    // Virtual inputs for chip generation; shifted on the market calendar before stock alignment.
+    // Chip responses use the same market session; PREV aliases retain explicit lag semantics.
     for key in [
         "CYQ_MKT_IS5_PREV",
         "CYQ_MKT_F5_PREV",
         "CYQ_MKT_D10_PREV",
         "CYQ_MKT_CF20_PREV",
+        "CYQ_MKT_IS5_TODAY",
+        "CYQ_MKT_F5_TODAY",
+        "CYQ_MKT_D10_TODAY",
+        "CYQ_MKT_CF20_TODAY",
     ] {
         if fields.iter().any(|(name, _)| name == key) {
             return Err(format!("{key} 是筹码市场输入的保留名称"));
@@ -226,11 +230,18 @@ pub fn load_values(
     let sql = if fields.iter().any(|key| {
         matches!(
             key.as_str(),
-            "CYQ_MKT_IS5_PREV" | "CYQ_MKT_F5_PREV" | "CYQ_MKT_D10_PREV" | "CYQ_MKT_CF20_PREV"
+            "CYQ_MKT_IS5_PREV"
+                | "CYQ_MKT_F5_PREV"
+                | "CYQ_MKT_D10_PREV"
+                | "CYQ_MKT_CF20_PREV"
+                | "CYQ_MKT_IS5_TODAY"
+                | "CYQ_MKT_F5_TODAY"
+                | "CYQ_MKT_D10_TODAY"
+                | "CYQ_MKT_CF20_TODAY"
         )
     }) {
         format!(
-            "WITH request(signature,start_date,end_date) AS (VALUES (?::VARCHAR,?::VARCHAR,?::VARCHAR)), calendar AS (SELECT trade_date,lag(trade_date) OVER (ORDER BY trade_date) AS previous_date FROM indicator_panel_sessions), aliases(name,source_name) AS (VALUES ('CYQ_MKT_IS5_PREV','MKT_IS5'),('CYQ_MKT_F5_PREV','MKT_F5'),('CYQ_MKT_D10_PREV','MKT_D10'),('CYQ_MKT_CF20_PREV','MKT_CF20')) SELECT v.name,v.ts_code,v.trade_date,v.value FROM indicator_panel_values v JOIN indicator_panel_state s ON s.id=1 AND s.version=1 CROSS JOIN request r WHERE s.signature=r.signature AND v.name IN({names}) AND v.ts_code IN({codes}) AND v.trade_date BETWEEN r.start_date AND r.end_date AND (s.dirty_from IS NULL OR v.trade_date<s.dirty_from) UNION ALL SELECT a.name,'' AS ts_code,c.trade_date,v.value FROM calendar c CROSS JOIN aliases a CROSS JOIN request r JOIN indicator_panel_state s ON s.id=1 AND s.version=1 AND s.signature=r.signature LEFT JOIN indicator_panel_values v ON v.name=a.source_name AND v.ts_code='' AND v.trade_date=c.previous_date WHERE a.name IN({names}) AND c.trade_date BETWEEN r.start_date AND r.end_date AND (s.dirty_from IS NULL OR c.previous_date<s.dirty_from)"
+            "WITH request(signature,start_date,end_date) AS (VALUES (?::VARCHAR,?::VARCHAR,?::VARCHAR)), calendar AS (SELECT trade_date,lag(trade_date) OVER (ORDER BY trade_date) AS previous_date FROM indicator_panel_sessions), aliases(name,source_name) AS (VALUES ('CYQ_MKT_IS5_PREV','MKT_IS5'),('CYQ_MKT_F5_PREV','MKT_F5'),('CYQ_MKT_D10_PREV','MKT_D10'),('CYQ_MKT_CF20_PREV','MKT_CF20'),('CYQ_MKT_IS5_TODAY','MKT_IS5'),('CYQ_MKT_F5_TODAY','MKT_F5'),('CYQ_MKT_D10_TODAY','MKT_D10'),('CYQ_MKT_CF20_TODAY','MKT_CF20')) SELECT v.name,v.ts_code,v.trade_date,v.value FROM indicator_panel_values v JOIN indicator_panel_state s ON s.id=1 AND s.version=1 CROSS JOIN request r WHERE s.signature=r.signature AND v.name IN({names}) AND v.ts_code IN({codes}) AND v.trade_date BETWEEN r.start_date AND r.end_date AND (s.dirty_from IS NULL OR v.trade_date<s.dirty_from) UNION ALL SELECT a.name,'' AS ts_code,c.trade_date,v.value FROM calendar c CROSS JOIN aliases a CROSS JOIN request r JOIN indicator_panel_state s ON s.id=1 AND s.version=1 AND s.signature=r.signature LEFT JOIN indicator_panel_values v ON v.name=a.source_name AND v.ts_code='' AND v.trade_date=CASE WHEN ends_with(a.name,'_TODAY') THEN c.trade_date ELSE c.previous_date END WHERE a.name IN({names}) AND c.trade_date BETWEEN r.start_date AND r.end_date AND (s.dirty_from IS NULL OR CASE WHEN ends_with(a.name,'_TODAY') THEN c.trade_date ELSE c.previous_date END<s.dirty_from)"
         )
     } else {
         format!(
@@ -673,6 +684,12 @@ fn refresh_inner(
         serde_json::from_str(&old_calendar).map_err(|e| e.to_string())?;
     let old_listing: BTreeMap<String, String> =
         serde_json::from_str(&old_listing).map_err(|e| e.to_string())?;
+    // The current download list omits delisted stocks. Their historical quotes
+    // still participate, so retain the listing dates used by published results.
+    // Explicit dates in the current list take precedence, including corrections.
+    for (code, date) in &old_listing {
+        listing.entry(code.clone()).or_insert_with(|| date.clone());
+    }
     let metadata_changed = old_listing.iter().any(|(k, v)| listing.get(k) != Some(v))
         || listing.iter().any(|(k, v)| {
             !old_listing.contains_key(k) && saved_last.is_some_and(|end| v.is_empty() || v <= end)
@@ -692,7 +709,7 @@ fn refresh_inner(
     let start = if rebuild || version != 1 || old_signature != signature || metadata_changed {
         Some(first.clone())
     } else {
-        match (dirty, missing) {
+        match (dirty.clone(), missing) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         }
@@ -701,8 +718,42 @@ fn refresh_inner(
         return Ok(0);
     };
     if new_dates_only && saved_last.is_some_and(|end| &start <= end) {
+        let mut reasons = Vec::new();
+        if version != 1 {
+            reasons.push("指标存储版本变化".to_string());
+        }
+        if old_signature != signature {
+            reasons.push("指标配置或计算口径版本变化".to_string());
+        }
+        if old_listing.iter().any(|(k, v)| listing.get(k) != Some(v)) {
+            reasons.push("已有股票的上市日期变化".to_string());
+        }
+        if listing.iter().any(|(k, v)| {
+            !old_listing.contains_key(k) && saved_last.is_some_and(|end| v.is_empty() || v <= end)
+        }) {
+            reasons.push("股票列表新增了历史已上市股票（或上市日期为空）".to_string());
+        }
+        if saved_last.is_some_and(|end| {
+            calendar
+                .iter()
+                .filter(|d| *d <= end)
+                .cloned()
+                .collect::<Vec<_>>()
+                != old_calendar
+        }) {
+            reasons.push("已计算区间的交易日历变化".to_string());
+        }
+        if let Some(dirty) = dirty {
+            reasons.push(format!("存在待修复记录，起点{dirty}"));
+        }
+        if let Some(missing) = calendar.iter().find(|d| {
+            *d >= &first && saved_last.is_some_and(|end| *d <= end) && !saved.contains(*d)
+        }) {
+            reasons.push(format!("历史指标缺少交易日{missing}"));
+        }
         return Err(format!(
-            "跨股票指标需要从{start}修复历史；日常增量不会自动回退重算，请在数据管理中手动执行指标列补算"
+            "跨股票指标需要从{start}修复历史（原因：{}）；日常增量不会自动回退重算，请在数据管理中手动执行指标列补算",
+            reasons.join("；")
         ));
     }
     let end_index = calendar.partition_point(|d| d <= &last);
@@ -1315,6 +1366,11 @@ prec=12
         );
         refresh(&conn, source, false).unwrap();
         invalidate(&conn, &dates[95]).unwrap();
+        let error = refresh_new_dates_with_progress(&conn, source, None).unwrap_err();
+        assert!(
+            error.contains(&format!("存在待修复记录，起点{}", dates[95])),
+            "{error}"
+        );
         assert_eq!(refresh(&conn, source, false).unwrap(), 5);
         // The incremental reader's temporary stock_data must neither hide nor
         // replace persistent history (including index inputs) for the caller.
@@ -1413,7 +1469,67 @@ prec=12
         std::fs::remove_dir_all(path).unwrap();
     }
     #[test]
-    fn market_response_uses_previous_market_session_across_stock_gaps() {
+    fn removed_stock_retains_listing_date_without_historical_repair() {
+        let path = std::env::temp_dir().join(format!("panel-delist-{}", std::process::id()));
+        std::fs::create_dir_all(&path).unwrap();
+        let source = path.to_str().unwrap();
+        std::fs::write(
+            path.join("trade_calendar.csv"),
+            "cal_date\n20240102\n20240103\n20240104\n",
+        )
+        .unwrap();
+        std::fs::write(
+            path.join("stock_list.csv"),
+            "ts_code,list_date\nA,20240103\nB,20240102\n",
+        )
+        .unwrap();
+        std::fs::write(ind_toml_path(source), "version=1\n[[ind]]\nname='AGE_MEAN'\nscope='market'\nexpr='CS_MEAN(PCT_CHG,LISTED_DAYS>=2)'\nprec=6\n").unwrap();
+        init_stock_data_db(super::super::source_db_path(source).to_str().unwrap()).unwrap();
+        let conn = Connection::open(super::super::source_db_path(source)).unwrap();
+        conn.execute_batch("INSERT INTO stock_data(ts_code,trade_date,adj_type,pct_chg) VALUES ('B','20240102','qfq',2),('B','20240103','qfq',2),('A','20240103','qfq',10)").unwrap();
+        assert_eq!(refresh(&conn, source, false).unwrap(), 2);
+        std::fs::write(
+            path.join("stock_list.csv"),
+            "ts_code,list_date\nB,20240102\n",
+        )
+        .unwrap();
+        assert_eq!(
+            refresh_new_dates_with_progress(&conn, source, None).unwrap(),
+            0
+        );
+        conn.execute_batch("INSERT INTO stock_data(ts_code,trade_date,adj_type,pct_chg) VALUES ('B','20240104','qfq',2)").unwrap();
+        invalidate(&conn, "20240104").unwrap();
+        assert_eq!(
+            refresh_new_dates_with_progress(&conn, source, None).unwrap(),
+            1
+        );
+        let listing: String = conn
+            .query_row(
+                "SELECT listing_json FROM indicator_panel_state WHERE id=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<BTreeMap<String, String>>(&listing).unwrap()["A"],
+            "20240103"
+        );
+        assert_eq!(refresh(&conn, source, true).unwrap(), 3);
+        let value: f64 = conn.query_row("SELECT value FROM indicator_panel_values WHERE name='AGE_MEAN' AND trade_date='20240103'", [], |r| r.get(0)).unwrap();
+        assert_eq!(value, 2.);
+        std::fs::write(
+            path.join("stock_list.csv"),
+            "ts_code,list_date\nA,20240102\nB,20240102\n",
+        )
+        .unwrap();
+        let error = refresh_new_dates_with_progress(&conn, source, None).unwrap_err();
+        assert!(error.contains("已有股票的上市日期变化"), "{error}");
+        drop(conn);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn market_response_uses_same_market_session_across_stock_gaps() {
         let path = std::env::temp_dir().join(format!("chip-market-{}", std::process::id()));
         std::fs::create_dir_all(&path).unwrap();
         std::fs::write(
@@ -1438,10 +1554,10 @@ prec=12
             source,
             "X",
             &mut row,
-            &HashSet::from(["CYQ_MKT_IS5_PREV".into()]),
+            &HashSet::from(["CYQ_MKT_IS5_TODAY".into()]),
         )
         .unwrap();
-        assert_eq!(row.cols["CYQ_MKT_IS5_PREV"], vec![None, Some(2.0)]);
+        assert_eq!(row.cols["CYQ_MKT_IS5_TODAY"], vec![Some(1.0), Some(3.0)]);
         conn.execute("UPDATE indicator_panel_state SET dirty_from='20240103'", [])
             .unwrap();
         inject_fields(
@@ -1449,10 +1565,10 @@ prec=12
             source,
             "X",
             &mut row,
-            &HashSet::from(["CYQ_MKT_IS5_PREV".into()]),
+            &HashSet::from(["CYQ_MKT_IS5_TODAY".into()]),
         )
         .unwrap();
-        assert_eq!(row.cols["CYQ_MKT_IS5_PREV"], vec![None, None]);
+        assert_eq!(row.cols["CYQ_MKT_IS5_TODAY"], vec![Some(1.0), None]);
         std::fs::remove_dir_all(path).unwrap();
     }
 }

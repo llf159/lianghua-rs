@@ -389,7 +389,7 @@ pub(super) fn current_chip_change_strategy_hash(source_dir: &str) -> Result<Stri
     };
     let algorithm = match header.get("version").and_then(toml::Value::as_integer) {
         Some(2) => "inventory-memory-v1:",
-        Some(3) if market_response => "market-independent-buyer-v1:",
+        Some(3) if market_response => "market-independent-buyer-v2:",
         Some(3) => "independent-buyer-v1:",
         _ => "",
     };

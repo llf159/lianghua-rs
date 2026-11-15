@@ -81,10 +81,10 @@ pub struct ChipMarketResponse {
 impl ChipMarketResponse {
     pub fn runtime_key(&self) -> &'static str {
         match self.indicator {
-            ChipMarketIndicator::Is5 => "CYQ_MKT_IS5_PREV",
-            ChipMarketIndicator::F5 => "CYQ_MKT_F5_PREV",
-            ChipMarketIndicator::D10 => "CYQ_MKT_D10_PREV",
-            ChipMarketIndicator::Cf20 => "CYQ_MKT_CF20_PREV",
+            ChipMarketIndicator::Is5 => "CYQ_MKT_IS5_TODAY",
+            ChipMarketIndicator::F5 => "CYQ_MKT_F5_TODAY",
+            ChipMarketIndicator::D10 => "CYQ_MKT_D10_TODAY",
+            ChipMarketIndicator::Cf20 => "CYQ_MKT_CF20_TODAY",
         }
     }
 
@@ -118,6 +118,8 @@ impl ChipMarketResponse {
 pub enum ChipMarketTarget {
     Evidence,
     PositiveStrength,
+    /// Also contributes its fixed negative bias to a ceiling on combined evidence.
+    NegativeEvidenceCeiling,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

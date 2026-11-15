@@ -304,6 +304,15 @@ impl ChipChangeConfig {
             {
                 return Err(format!("第{n}个策略的响应目标仅支持版本3主力买入"));
             }
+            if strategy.response_target == Some(super::ChipMarketTarget::NegativeEvidenceCeiling)
+                && (!strategy.bias.is_finite()
+                    || strategy.bias >= 0.0
+                    || strategy.market_response.is_some())
+            {
+                return Err(format!(
+                    "第{n}个策略的负证据上限需要固定的有限负bias，不能叠加市场响应"
+                ));
+            }
             if let Some(response) = strategy.market_response {
                 response.validate()?;
                 if self.version != 3

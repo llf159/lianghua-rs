@@ -26,7 +26,7 @@ export type CyqChenStrategyDraft = {
   direction: CyqChenDirection
   when: string
   bias: number
-  response_target?: 'evidence' | 'positive_strength' | null
+  response_target?: 'evidence' | 'positive_strength' | 'negative_evidence_ceiling' | null
   market_response?: ChipMarketResponse | null
   confirm_after?: number
 }

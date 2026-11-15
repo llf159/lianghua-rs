@@ -5,6 +5,7 @@ import {
   checkCyqChenStrategyFileDraft,
   getCyqChenStrategyPage,
   saveCyqChenStrategyFile,
+  type ChipMarketResponse,
   type CyqChenStrategyDraft,
   type CyqChenStrategyPageData,
   type IndependentBuyConfig,
@@ -72,13 +73,37 @@ type EditorMode = 'create' | 'edit'
 type SceneEditorMode = 'create' | 'edit'
 type DeleteSceneTarget = Pick<StrategyManageSceneItem, 'name' | 'rule_count'>
 type ChipStrategyDeleteTarget = { index: number; name: string }
-type ChipStrategyEditorDraft = Omit<CyqChenStrategyDraft, 'bias' | 'confirm_after'> & {
+type MarketResponseDraft = { indicator: ChipMarketResponse['indicator']; mean: string; std: string; coefficient: string }
+type ChipStrategyEditorDraft = Omit<CyqChenStrategyDraft, 'bias' | 'confirm_after' | 'market_response'> & {
+  market_response: MarketResponseDraft | null
   bias: string
   confirmAfterText: string
 }
 type RefactorSceneDraft = StrategyManageSceneDraft & { id: string }
 type RefactorRuleDraft = StrategyManageRuleDraft
 type StrategyManageView = 'rules' | 'chip'
+
+function marketResponseDraft(response?: ChipMarketResponse | null): MarketResponseDraft {
+  return { indicator: response?.indicator ?? 'is5', mean: String(response?.mean ?? 0), std: String(response?.std ?? 1), coefficient: String(response?.coefficient ?? 0) }
+}
+
+function parseMarketResponse(draft: MarketResponseDraft | null): ChipMarketResponse | null {
+  if (!draft) return null
+  const values = [draft.mean, draft.std, draft.coefficient]
+  if (values.some((value) => value.trim() === '' || !Number.isFinite(Number(value))) || Number(draft.std) <= 0) throw new Error('市场响应的均值和系数须为有限数字，标准差须为大于 0 的有限数字')
+  return { indicator: draft.indicator, mean: Number(draft.mean), std: Number(draft.std), coefficient: Number(draft.coefficient) }
+}
+
+function MarketResponseFields({ value, onChange }: { value: MarketResponseDraft | null; onChange: (value: MarketResponseDraft | null) => void }) {
+  return <>
+    <label className="strategy-manage-field strategy-manage-field-span-full"><span>市场响应</span>
+      <select value={value ? 'on' : 'off'} onChange={(event) => onChange(event.target.value === 'on' ? marketResponseDraft() : null)}><option value="off">不启用</option><option value="on">启用</option></select>
+    </label>
+    {value ? <><label className="strategy-manage-field"><span>市场指标</span><select value={value.indicator} onChange={(event) => onChange({ ...value, indicator: event.target.value as MarketResponseDraft['indicator'] })}><option value="is5">IS5</option><option value="f5">F5</option><option value="d10">D10</option><option value="cf20">CF20</option></select></label>
+      {(['mean', 'std', 'coefficient'] as const).map((field) => <label className="strategy-manage-field" key={field}><span>{field === 'mean' ? '均值' : field === 'std' ? '标准差' : '系数'}</span><input type="text" inputMode="decimal" value={value[field]} onChange={(event) => onChange({ ...value, [field]: event.target.value })} /></label>)}
+    </> : null}
+  </>
+}
 
 function formatNumber(value: number, digits = 2) {
   if (!Number.isFinite(value)) {
@@ -438,7 +463,7 @@ function buildChipStrategyEditorDraft(strategy: CyqChenStrategyDraft): ChipStrat
     direction: strategy.direction,
     when: strategy.when,
     bias: String(strategy.bias),
-    market_response: strategy.market_response,
+    market_response: strategy.market_response ? marketResponseDraft(strategy.market_response) : null,
     response_target: strategy.response_target,
     confirmAfterText: strategy.confirm_after == null ? '' : String(strategy.confirm_after),
   }
@@ -452,6 +477,7 @@ function buildEmptyChipStrategyDraft(): ChipStrategyEditorDraft {
     when: '',
     bias: '',
     confirmAfterText: '',
+    market_response: null,
   }
 }
 
@@ -500,6 +526,7 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
   const [sceneDraft, setSceneDraft] = useState<StrategyManageSceneDraft | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<StrategyManageRuleItem | null>(null)
   const [deleteSceneTarget, setDeleteSceneTarget] = useState<DeleteSceneTarget | null>(null)
+  const [chipGlobalResponseDraft, setChipGlobalResponseDraft] = useState<{ response: MarketResponseDraft | null } | null>(null)
   const [chipVersion, setChipVersion] = useState(1)
   const [chipIndependentBuy, setChipIndependentBuy] = useState<IndependentBuyConfig | null>(null)
   const [chipNegativeEvidenceScale, setChipNegativeEvidenceScale] = useState<number | null>(null)
@@ -1201,7 +1228,7 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
     const holder =
       chipVersion >= 2 && direction === 'buy' ? 'main' : chipStrategyDraft.holder
     const prepared: CyqChenStrategyDraft = {
-      market_response: chipStrategyDraft.market_response,
+      market_response: parseMarketResponse(chipStrategyDraft.market_response),
       response_target: chipStrategyDraft.response_target,
       name: chipStrategyDraft.name.trim(),
       holder,
@@ -1695,6 +1722,10 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
                 </button> : null}
               </>
             )}
+            {isChipView && chipVersion === 3 && chipIndependentBuy ? <button className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-secondary" type="button" onClick={() => {
+              setChipStrategyError(''); setChipStrategyNotice('')
+              setChipGlobalResponseDraft({ response: chipIndependentBuy.positive_market_response ? marketResponseDraft(chipIndependentBuy.positive_market_response) : null })
+            }}>全局市场响应</button> : null}
             {isEditing || chipStrategyDraft ? <span className="strategy-manage-tip">当前有未提交草稿</span> : null}
           </div>
         </div>
@@ -2096,6 +2127,28 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
         </div>
       ) : null}
 
+      {chipGlobalResponseDraft && chipIndependentBuy ? (
+        <div className="strategy-manage-modal-backdrop strategy-manage-modal-backdrop-top" role="presentation"><div className="strategy-manage-modal strategy-manage-editor-modal" role="dialog" aria-modal="true" aria-label="全局市场响应">
+          <div className="strategy-manage-list-head"><strong>全局正向买入力度市场响应</strong></div>
+          {chipStrategyError ? <div className="strategy-manage-message strategy-manage-message-error">{chipStrategyError}</div> : null}
+          <div className="strategy-manage-editor-grid"><MarketResponseFields value={chipGlobalResponseDraft.response} onChange={(response) => setChipGlobalResponseDraft({ response })} /></div>
+          <div className="strategy-manage-editor-actions">
+            <button className="strategy-manage-toolbar-btn strategy-manage-toolbar-btn-primary" type="button" disabled={chipStrategySaving} onClick={() => void (async () => {
+              try {
+                const model = { ...chipIndependentBuy, positive_market_response: parseMarketResponse(chipGlobalResponseDraft.response) }
+                if (!sourcePath.trim()) throw new Error('当前数据目录为空，请先到数据管理页确认目录')
+                setChipStrategySaving(true); setChipStrategyError('')
+                await checkCyqChenStrategyFileDraft(chipStrategies, chipVersion, chipNegativeEvidenceScale, model)
+                const page = await saveCyqChenStrategyFile(sourcePath, chipStrategies, chipVersion, chipNegativeEvidenceScale, model)
+                applyChipStrategyPage(page); setChipGlobalResponseDraft(null); setChipStrategyNotice('全局市场响应已保存。')
+              } catch (error) { setChipStrategyError(`保存市场响应失败: ${String(error)}`) }
+              finally { setChipStrategySaving(false) }
+            })()}>保存</button>
+            <button className="strategy-manage-toolbar-btn" type="button" disabled={chipStrategySaving} onClick={() => { setChipGlobalResponseDraft(null); setChipStrategyError('') }}>取消</button>
+          </div>
+        </div></div>
+      ) : null}
+
       {chipStrategyDraft ? (
         <div className="strategy-manage-modal-backdrop strategy-manage-modal-backdrop-top" role="presentation">
           <div className="strategy-manage-modal strategy-manage-editor-modal" role="dialog" aria-modal="true">
@@ -2229,6 +2282,10 @@ export default function StrategyManagePage({ view = 'rules', backtest }: {
                     </small>
                   ) : null}
               </label>
+              {chipVersion === 3 && chipStrategyDraft.direction === 'buy' ? <>
+                <label className="strategy-manage-field strategy-manage-field-span-full"><span>响应目标</span><select value={chipStrategyDraft.response_target ?? 'evidence'} onChange={(event) => setChipStrategyDraft((current) => current ? { ...current, response_target: event.target.value as CyqChenStrategyDraft['response_target'] } : current)}><option value="evidence">方向证据</option><option value="positive_strength">正向买入力度</option><option value="negative_evidence_ceiling">失守负证据上限</option></select></label>
+                <MarketResponseFields value={chipStrategyDraft.market_response} onChange={(value) => setChipStrategyDraft((current) => current ? { ...current, market_response: value } : current)} />
+              </> : null}
               <label className="strategy-manage-field strategy-manage-field-span-full">
                 <span>表达式</span>
                 <textarea
