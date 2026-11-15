@@ -1,5 +1,5 @@
 import { NavLink, Outlet, useLocation } from "react-router-dom";
-import { useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import GlobalStockSearch from "./shared/GlobalStockSearch";
 import "./Desktop.css";
 
@@ -51,6 +51,9 @@ export default function PageDesktop() {
   const [isStrategyOpen, setIsStrategyOpen] = useState(true);
   const [isBacktestOpen, setIsBacktestOpen] = useState(true);
   const contentRef = useRef<HTMLElement | null>(null);
+  const scrollPositionsRef = useRef(
+    new Map<string, { top: number; left: number }>(),
+  );
   const isOverviewActive = location.pathname.startsWith("/overview");
   const isStockPickActive = location.pathname.startsWith("/stock-pick");
   const isRawDataActive = location.pathname.startsWith("/raw-data");
@@ -58,6 +61,15 @@ export default function PageDesktop() {
     location.pathname.startsWith("/strategy") ||
     location.pathname === "/cyq-chen";
   const isBacktestActive = location.pathname.startsWith("/backtest");
+
+  useLayoutEffect(() => {
+    contentRef.current?.scrollTo({
+      top: 0,
+      left: 0,
+      ...scrollPositionsRef.current.get(location.pathname),
+      behavior: "instant",
+    });
+  }, [location.pathname]);
 
   return (
     <div className={isCollapsed ? "desktop-shell collapsed" : "desktop-shell"}>
@@ -279,7 +291,16 @@ export default function PageDesktop() {
         </nav>
       </aside>
 
-      <main className="content" ref={contentRef}>
+      <main
+        className="content"
+        ref={contentRef}
+        onScroll={(event) => {
+          scrollPositionsRef.current.set(location.pathname, {
+            top: event.currentTarget.scrollTop,
+            left: event.currentTarget.scrollLeft,
+          });
+        }}
+      >
         <Outlet />
       </main>
       <GlobalStockSearch />
