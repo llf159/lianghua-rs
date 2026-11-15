@@ -15,6 +15,7 @@ type DataTaskProgressProps = {
   elapsedText: string
   estimatedRemainingText?: string
   estimatedTotalText?: string
+  estimateNote?: string
   shownProgressPercent: number
   progressCounterText: string
   currentObjectText?: string
@@ -35,6 +36,7 @@ export default function DataTaskProgress({
   elapsedText,
   estimatedRemainingText,
   estimatedTotalText,
+  estimateNote,
   shownProgressPercent,
   progressCounterText,
   currentObjectText,
@@ -128,7 +130,10 @@ export default function DataTaskProgress({
         ) : null}
       </div>
       <div className="data-download-progress-footer">
-        <div className="data-download-progress-text">{message ?? fallbackMessage}</div>
+        <div className="data-download-progress-text">
+          <div>{message ?? fallbackMessage}</div>
+          {estimateNote ? <div>{estimateNote}</div> : null}
+        </div>
         {onCancel || onRollback ? (
           <div className="data-download-progress-actions">
             {onCancel ? (

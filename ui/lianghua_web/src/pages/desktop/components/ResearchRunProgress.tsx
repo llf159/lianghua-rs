@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import DataTaskProgress, { type DataTaskProgressSegment } from "../../../shared/DataTaskProgress";
-import { formatProgressDuration, useAnimatedProgressPercent, useProgressTiming } from "../../../shared/dataTaskProgressUtils";
+import { formatProgressDuration, formatProgressEstimate, useAnimatedProgressPercent, useProgressTiming } from "../../../shared/dataTaskProgressUtils";
 import "../css/DataDownloadPage.css";
 
 export function ResearchRunProgress({ actionLabel, mode, phase, cancelling, onCancel }: {
@@ -77,7 +77,7 @@ export function ResearchRunProgress({ actionLabel, mode, phase, cancelling, onCa
       progressSegments={progressSegments}
       shownProgressPercent={shownPercent}
       elapsedText={`已用时 ${formatProgressDuration(timing.elapsedMs)}`}
-      estimatedRemainingText={total > 1 && finished < total ? formatProgressDuration(timing.estimatedRemainingMs) : undefined}
+      estimatedRemainingText={total > 1 && finished < total ? formatProgressEstimate(timing.estimatedRemainingMs) : undefined}
       progressCounterText={total ? `${combination ? "当前评价周期" : "已完成股票"} ${finished} / ${total}` : "等待进度反馈"}
       message={phase || null}
       fallbackMessage="准备运行"

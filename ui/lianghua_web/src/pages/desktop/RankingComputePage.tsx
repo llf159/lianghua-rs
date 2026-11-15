@@ -49,6 +49,7 @@ import DataTaskProgress from '../../shared/DataTaskProgress'
 import {
   calcProgressPercent,
   formatProgressDuration,
+  formatProgressEstimate,
   getCurrentObjectText,
   getPhaseStep,
   getProgressCounterText,
@@ -837,11 +838,14 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
         progressCounterText={progressCounterText}
         currentObjectText={showEstimatedTime ? undefined : getCurrentObjectText(deferredProgress)}
         estimatedRemainingText={
-          showEstimatedTime ? formatProgressDuration(progressTiming.estimatedRemainingMs) : undefined
+          showEstimatedTime ? formatProgressEstimate(progressTiming.estimatedRemainingMs) : undefined
         }
         estimatedTotalText={
-          showEstimatedTime ? formatProgressDuration(progressTiming.estimatedTotalMs) : undefined
+          showEstimatedTime ? formatProgressEstimate(progressTiming.estimatedTotalMs) : undefined
         }
+        estimateNote={busyAction === 'cyq-computing' || busyAction === 'cyq-chen-computing'
+          ? '按已完成股票估算计算时间，写入和收尾另计。'
+          : undefined}
         message={taskControl.message || deferredProgress?.message}
         fallbackMessage={fallbackMessage}
       />
@@ -1967,7 +1971,7 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
         </div>
 
         {busyAction === 'cyq-computing'
-          ? renderProgressCard('筹码计算已经启动，正在等待后端返回当前股票进度。')
+          ? renderProgressCard('筹码计算已经启动，正在等待后端返回当前股票进度。', true)
           : null}
 
         {renderCardFeedback('cyq')}

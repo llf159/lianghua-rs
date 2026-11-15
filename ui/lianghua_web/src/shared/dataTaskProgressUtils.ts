@@ -33,12 +33,12 @@ type ProgressTimingInput = {
 type ProgressTimingSample = {
   taskPhase: string
   phaseStartElapsedMs: number
+  phaseStartFinished: number
   sampledElapsedMs: number
   sampledAtMs: number
   finished: number
   total: number
   samples: Array<{ elapsedMs: number; finished: number }>
-  estimatedFinishElapsedMs: number | null
 }
 
 export type ProgressTiming = {
@@ -246,6 +246,15 @@ export function formatProgressDuration(value: number | null) {
   return `${seconds}秒`
 }
 
+export function formatProgressEstimate(value: number | null) {
+  if (value === null || !Number.isFinite(value)) return '估算中'
+  if (value < 60000) return `约${Math.max(5, Math.ceil(value / 5000) * 5)}秒`
+  const minutes = Math.ceil(value / 60000)
+  return minutes >= 60
+    ? `约${Math.floor(minutes / 60)}小时${minutes % 60 ? ` ${minutes % 60}分` : ''}`
+    : `约${minutes}分钟`
+}
+
 export function useProgressTiming(
   isRunning: boolean,
   progress: ProgressTimingInput | null | undefined,
@@ -280,33 +289,29 @@ export function useProgressTiming(
           : `${progress.action}::${progress.phase}`
         const phaseChanged = !current || current.taskPhase !== taskPhase
           || current.total !== progress.total
-          || progress.finished < current.finished || progress.elapsedMs < current.sampledElapsedMs
+          || progress.elapsedMs < current.sampledElapsedMs
         if (phaseChanged) {
           return {
             taskPhase,
             phaseStartElapsedMs: progress.elapsedMs,
+            phaseStartFinished: progress.finished,
             sampledElapsedMs: progress.elapsedMs,
             sampledAtMs,
             finished: progress.finished,
             total: progress.total,
             samples: [{ elapsedMs: progress.elapsedMs, finished: progress.finished }],
-            estimatedFinishElapsedMs: null,
           }
         }
-        if (current.finished === progress.finished) return current
+        // 并行回调可能乱序送达，较小的计数不能清空本阶段已经积累的速度样本。
+        if (current.finished >= progress.finished) return current
 
-        // 一批并行回调可能集中在几毫秒内；累计至少 5 秒再校正，保留最近约一分钟的吞吐。
+        // 一批并行回调可能集中在几毫秒内；累计至少 5 秒再取样，保留最近约一分钟。
         let samples = current.samples
-        let estimatedFinishElapsedMs = current.estimatedFinishElapsedMs
         if (progress.elapsedMs - samples[samples.length - 1].elapsedMs >= 5000) {
           samples = [...samples, { elapsedMs: progress.elapsedMs, finished: progress.finished }]
           while (samples.length > 2 && samples[1].elapsedMs <= progress.elapsedMs - 60000) {
             samples.shift()
           }
-          estimatedFinishElapsedMs = progress.elapsedMs
-            + (progress.total - progress.finished)
-              * (progress.elapsedMs - samples[0].elapsedMs)
-              / (progress.finished - samples[0].finished)
         }
         return {
           ...current,
@@ -314,7 +319,6 @@ export function useProgressTiming(
           sampledAtMs,
           finished: progress.finished,
           samples,
-          estimatedFinishElapsedMs,
         }
       })
     })
@@ -333,14 +337,26 @@ export function useProgressTiming(
   const elapsedMs =
     sample.sampledElapsedMs + Math.max(0, Math.max(clockMs, sample.sampledAtMs) - sample.sampledAtMs)
   const phaseElapsedMs = Math.max(0, elapsedMs - sample.phaseStartElapsedMs)
-  // 完成计数仅代表计算完成，后端可能还在写入、校验和发布；没有收尾耗时依据时继续估算。
-  const estimatedRemainingMs = sample.finished < sample.total
-    && sample.estimatedFinishElapsedMs !== null && sample.estimatedFinishElapsedMs > elapsedMs
-    ? sample.estimatedFinishElapsedMs - elapsedMs
-    : null
+  let estimatedRemainingMs: number | null = null
+  // 计数不动时不能沿旧结束时间继续倒计时；等待也必须计入实际吞吐。
+  // 单股计算可能较慢，不按固定上报间隔撤掉估计；仅样本不足或收尾时不显示数字。
+  if (sample.finished < sample.total && phaseElapsedMs >= 30000
+    && sample.samples.length >= 3) {
+    const recentStart = sample.samples.findLast(
+      (point) => point.elapsedMs <= sample.sampledElapsedMs - 20000,
+    ) ?? sample.samples[0]
+    const msPerUnit = Math.max(
+      phaseElapsedMs / (sample.finished - sample.phaseStartFinished),
+      (elapsedMs - sample.samples[0].elapsedMs) / (sample.finished - sample.samples[0].finished),
+      (elapsedMs - recentStart.elapsedMs) / (sample.finished - recentStart.finished),
+    )
+    if (Number.isFinite(msPerUnit)) {
+      estimatedRemainingMs = (sample.total - sample.finished) * msPerUnit
+    }
+  }
   const estimatedTotalMs = estimatedRemainingMs === null
     ? null
-    : sample.estimatedFinishElapsedMs! - sample.phaseStartElapsedMs
+    : phaseElapsedMs + estimatedRemainingMs
 
   return { elapsedMs, phaseElapsedMs, estimatedTotalMs, estimatedRemainingMs }
 }

@@ -25,7 +25,7 @@ import DatabaseIntegrityPanel from './components/DatabaseIntegrityPanel'
 import { runRankingScoreCalculation } from '../../apis/rankingCompute'
 import {
   calcProgressPercent,
-  formatProgressDuration,
+  formatProgressEstimate,
   getCurrentObjectText,
   getPhaseStep,
   getProgressCounterText,
@@ -601,8 +601,8 @@ function IndependentDownloadProgress({ task, label }: {
       elapsedText={formatElapsedMs(task.timing.elapsedMs)}
       shownProgressPercent={task.shownPercent}
       progressCounterText={getProgressCounterText(task.progress, formatPhaseLabel)}
-      estimatedRemainingText={formatProgressDuration(task.timing.estimatedRemainingMs)}
-      estimatedTotalText={formatProgressDuration(task.timing.estimatedTotalMs)}
+      estimatedRemainingText={formatProgressEstimate(task.timing.estimatedRemainingMs)}
+      estimatedTotalText={formatProgressEstimate(task.timing.estimatedTotalMs)}
       message={task.control.message || task.progress?.message}
       fallbackMessage={`正在准备${label}。`}
     /> : null}
@@ -1571,8 +1571,11 @@ const DataDownloadPage = forwardRef<DataDownloadPageHandle, DataDownloadPageProp
             elapsedText={formatElapsedMs(progressTiming.elapsedMs)}
             shownProgressPercent={shownProgressPercent}
             progressCounterText={progressCounterText}
-            estimatedRemainingText={formatProgressDuration(progressTiming.estimatedRemainingMs)}
-            estimatedTotalText={formatProgressDuration(progressTiming.estimatedTotalMs)}
+            estimatedRemainingText={formatProgressEstimate(progressTiming.estimatedRemainingMs)}
+            estimatedTotalText={formatProgressEstimate(progressTiming.estimatedTotalMs)}
+            estimateNote={['rebuild_cyq_history', 'repair_cyq_history', 'maintain_cyq_incremental'].includes(progress?.phase ?? '')
+              ? '按已完成股票估算计算时间，写入和收尾另计。'
+              : undefined}
             message={taskControl.message || progress?.message}
             fallbackMessage="下载已经启动，正在等待后端返回当前状态。安卓端长时间无响应时，可以先看这里的阶段提示和耗时。"
           />
