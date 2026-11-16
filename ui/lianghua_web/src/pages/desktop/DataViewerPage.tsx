@@ -30,10 +30,18 @@ const DATASET_OPTIONS: DatasetOption[] = [
   {
     id: 'stock-data-base',
     label: '原始行情库',
-    description: '查看原始行情及指标列，市场及横截面指标按日期与股票显示。',
+    description: '查看原始行情、个股及横截面指标。',
     requiredFileId: 'source-db',
     supportsTradeDate: true,
     supportsTsCode: true,
+  },
+  {
+    id: 'ind_m',
+    label: 'ind_m',
+    description: '按交易日查看市场指标，数值保留三位小数。',
+    requiredFileId: 'source-db',
+    supportsTradeDate: true,
+    supportsTsCode: false,
   },
   {
     id: 'dragon-tiger-top-list',

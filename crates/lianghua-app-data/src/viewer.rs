@@ -219,18 +219,19 @@ pub fn preview_managed_source_dataset(
             let relation = quote_ident("stock_data");
             let mut columns = load_relation_columns(&conn, &relation)?;
             let definitions = crate::data::panel::definitions(source_path_str)?;
+            let names = definitions
+                .iter()
+                .filter(|field| field.scope != crate::data::IndicatorScope::Stock)
+                .map(|field| field.name.to_ascii_uppercase())
+                .collect::<HashSet<_>>();
+            columns.retain(|name| !names.contains(&name.to_ascii_uppercase()));
             if crate::data::panel::has_values(&conn)? {
                 panel_signature = crate::data::panel::config_signature(&definitions)?;
                 panel_fields = definitions
                     .into_iter()
-                    .filter(|field| field.scope != crate::data::IndicatorScope::Stock)
+                    .filter(|field| field.scope == crate::data::IndicatorScope::CrossSection)
                     .map(|field| (field.name, field.scope))
                     .collect();
-                let names = panel_fields
-                    .iter()
-                    .map(|(name, _)| name.to_ascii_uppercase())
-                    .collect::<HashSet<_>>();
-                columns.retain(|name| !names.contains(&name.to_ascii_uppercase()));
                 columns.extend(panel_fields.iter().map(|(name, _)| name.clone()));
             }
             let base_columns = [
@@ -270,6 +271,70 @@ pub fn preview_managed_source_dataset(
             all_columns = columns;
             selected_columns = selected;
             order_by_sql = "trade_date DESC, ts_code ASC";
+        }
+        "ind_m" => {
+            let db_path = source_db_path(source_path_str);
+            let db_path_str = db_path.to_str().ok_or("stock_data.db 路径不是有效 UTF-8")?;
+            conn = crate::data::open_db_readonly(db_path_str)
+                .map_err(|error| format!("打开 stock_data.db 失败: {error}"))?;
+            let definitions = crate::data::panel::definitions(source_path_str)?;
+            let signature = crate::data::panel::config_signature(&definitions)?;
+            let market_fields = definitions
+                .iter()
+                .filter(|field| field.scope == crate::data::IndicatorScope::Market)
+                .collect::<Vec<_>>();
+            let mut columns = vec!["trade_date".to_string()];
+            columns.extend(market_fields.iter().map(|field| field.name.clone()));
+            relation_sql = if !market_fields.is_empty() && crate::data::panel::has_values(&conn)? {
+                let expressions = market_fields
+                    .iter()
+                    .map(|field| {
+                        format!(
+                            "max(CASE WHEN v.name = {} THEN v.value END) AS {}",
+                            quote_sql_string(&field.name),
+                            quote_ident(&field.name)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let names = market_fields
+                    .iter()
+                    .map(|field| quote_sql_string(&field.name))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "(SELECT v.trade_date, {expressions} FROM indicator_panel_values v \
+                     JOIN indicator_panel_state m ON m.id = 1 AND m.version = 1 AND m.signature = {} \
+                     WHERE v.ts_code = '' AND v.name IN ({names}) \
+                     AND (m.dirty_from IS NULL OR v.trade_date < m.dirty_from) GROUP BY v.trade_date)",
+                    quote_sql_string(&signature)
+                )
+            } else {
+                format!(
+                    "(SELECT {} WHERE false)",
+                    columns
+                        .iter()
+                        .map(|column| {
+                            format!(
+                                "CAST(NULL AS {}) AS {}",
+                                if column == "trade_date" {
+                                    "VARCHAR"
+                                } else {
+                                    "DOUBLE"
+                                },
+                                quote_ident(column)
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+            dataset_label = "ind_m";
+            target_path = db_path.display().to_string();
+            filter_trade_column = Some("trade_date");
+            selected_columns = columns.clone();
+            all_columns = columns;
+            order_by_sql = "trade_date DESC";
         }
         "dragon-tiger-top-list" | "dragon-tiger-top-inst" => {
             let db_path = dragon_tiger_db_path(source_path_str);
@@ -742,11 +807,19 @@ pub fn preview_managed_source_dataset(
     let select_sql = selected_columns[..physical_column_count]
         .iter()
         .map(|column| {
-            format!(
-                "COALESCE(CAST({} AS VARCHAR), '') AS {}",
-                quote_ident(column),
-                quote_ident(column)
-            )
+            if normalized_dataset_id == "ind_m" && column != "trade_date" {
+                format!(
+                    "COALESCE(printf('%.3f', {}), '') AS {}",
+                    quote_ident(column),
+                    quote_ident(column)
+                )
+            } else {
+                format!(
+                    "COALESCE(CAST({} AS VARCHAR), '') AS {}",
+                    quote_ident(column),
+                    quote_ident(column)
+                )
+            }
         })
         .collect::<Vec<_>>()
         .join(", ");
@@ -826,18 +899,11 @@ pub fn preview_managed_source_dataset(
             .ok_or("原始行情库缺少 trade_date 列")?;
         let mut keys = HashSet::new();
         for row in &preview_rows {
-            for (_, scope) in &panel_fields {
-                let code = if *scope == crate::data::IndicatorScope::Market {
-                    ""
-                } else {
-                    &row[code_index]
-                };
-                keys.insert(format!(
-                    "({}, {})",
-                    quote_sql_string(code),
-                    quote_sql_string(&row[date_index])
-                ));
-            }
+            keys.insert(format!(
+                "({}, {})",
+                quote_sql_string(&row[code_index]),
+                quote_sql_string(&row[date_index])
+            ));
         }
         let names = panel_fields
             .iter()
@@ -878,12 +944,8 @@ pub fn preview_managed_source_dataset(
             values.insert(key, value);
         }
         for row in &mut preview_rows {
-            for (index, (name, scope)) in panel_fields.iter().enumerate() {
-                let code = if *scope == crate::data::IndicatorScope::Market {
-                    ""
-                } else {
-                    &row[code_index]
-                };
+            for (index, (name, _)) in panel_fields.iter().enumerate() {
+                let code = &row[code_index];
                 if let Some(value) =
                     values.get(&(name.clone(), code.to_string(), row[date_index].clone()))
                 {
@@ -1115,7 +1177,8 @@ prec=2
              CREATE TABLE indicator_panel_values(name VARCHAR, ts_code VARCHAR, trade_date VARCHAR, value DOUBLE,
                  PRIMARY KEY(name, ts_code, trade_date));
              INSERT INTO indicator_panel_values VALUES
-                 ('MY_MARKET', '', '20260808', 12.5),
+                 ('MY_MARKET', '', '20260808', 12.34567),
+                 ('MY_MARKET', '', '20260807', NULL),
                  ('MY_MARKET', '', '20260809', 50),
                  ('MY_RANK', '000001.SZ', '20260808', 0.5),
                  ('MY_RANK', '000002.SZ', '20260808', NULL);"
@@ -1143,11 +1206,7 @@ prec=2
             .unwrap();
             assert_eq!((preview.row_count, preview.matched_rows), (4, matched));
             assert_eq!(preview.rows.len() as u64, matched);
-            let market = preview
-                .columns
-                .iter()
-                .position(|name| name == "MY_MARKET")
-                .unwrap();
+            assert!(!preview.columns.iter().any(|name| name == "MY_MARKET"));
             let rank = preview
                 .columns
                 .iter()
@@ -1163,13 +1222,30 @@ prec=2
             );
             for row in preview.rows {
                 if row[1] == "20260809" {
-                    assert_eq!(row[market], "");
                     assert_eq!(row[rank], "");
                 } else {
-                    assert_eq!(row[market], "12.5");
                     assert_eq!(row[rank], if row[0] == "000001.SZ" { "0.5" } else { "" });
                 }
             }
+        }
+        for (date, expected) in [
+            (None, vec![vec!["20260808", "12.346"], vec!["20260807", ""]]),
+            (Some("20260808"), vec![vec!["20260808", "12.346"]]),
+            (Some("20260101"), vec![]),
+        ] {
+            let market = preview_managed_source_dataset(
+                &root,
+                "source".into(),
+                "ind_m".into(),
+                date.map(str::to_string),
+                Some("000001.SZ".into()),
+                100,
+            )
+            .unwrap();
+            assert_eq!(market.columns, vec!["trade_date", "MY_MARKET"]);
+            assert_eq!(market.row_count, 2);
+            assert_eq!(market.matched_rows, expected.len() as u64);
+            assert_eq!(market.rows, expected);
         }
         let conn = duckdb::Connection::open(source.join("stock_data.db")).unwrap();
         conn.execute("UPDATE indicator_panel_state SET signature = 'stale'", [])
@@ -1188,8 +1264,12 @@ prec=2
             stale
                 .rows
                 .iter()
-                .all(|row| row[row.len() - 2..].iter().all(String::is_empty))
+                .all(|row| row[row.len() - 1..].iter().all(String::is_empty))
         );
+        let stale_market =
+            preview_managed_source_dataset(&root, "source".into(), "ind_m".into(), None, None, 100)
+                .unwrap();
+        assert!(stale_market.rows.is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 

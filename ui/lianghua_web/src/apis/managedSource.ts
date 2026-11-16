@@ -295,6 +295,7 @@ export type ManagedSourceDbPreviewResult = {
 export type ManagedSourceDatasetId =
   | 'stock-data-base'
   | 'stock-data-indicators'
+  | 'ind_m'
   | 'dragon-tiger-top-list'
   | 'dragon-tiger-top-inst'
   | 'score-summary'
