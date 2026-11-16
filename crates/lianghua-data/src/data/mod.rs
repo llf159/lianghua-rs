@@ -46,10 +46,50 @@ pub fn open_db_readonly(path: impl AsRef<Path>) -> Result<Connection, duckdb::Er
     read_with_retry(
         &format!("打开只读数据库 {}", path.as_ref().display()),
         || {
-            let config = duckdb::Config::default().access_mode(duckdb::AccessMode::ReadOnly)?;
-            Connection::open_with_flags(path.as_ref(), config)
+            open_db_with_wal_recovery(path.as_ref(), || {
+                Connection::open_with_flags(
+                    path.as_ref(),
+                    duckdb::Config::default().access_mode(duckdb::AccessMode::ReadOnly)?,
+                )
+            })
         },
     )
+}
+
+/// WAL 重放损坏时丢弃未 checkpoint 的数据，只重试一次；锁和权限错误不触发删除。
+pub(super) fn open_db_with_wal_recovery(
+    path: &Path,
+    mut open: impl FnMut() -> Result<Connection, duckdb::Error>,
+) -> Result<Connection, duckdb::Error> {
+    match open() {
+        Err(error) => {
+            let message = error.to_string().to_ascii_lowercase();
+            if !message.contains("failure while replaying wal file")
+                || !(message.contains("corruption")
+                    || message.contains("serialization")
+                    || message.contains("checksum"))
+            {
+                return Err(error);
+            }
+            let mut wal_path = path.as_os_str().to_os_string();
+            wal_path.push(".wal");
+            let wal_path = PathBuf::from(wal_path);
+            match fs::remove_file(&wal_path) {
+                Ok(()) => {}
+                Err(remove_error) if remove_error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(remove_error) => {
+                    eprintln!("删除损坏 WAL {} 失败: {remove_error}", wal_path.display());
+                    return Err(error);
+                }
+            }
+            eprintln!(
+                "已清理损坏 WAL {}，重新打开数据库: {error}",
+                wal_path.display()
+            );
+            open()
+        }
+        result => result,
+    }
 }
 
 pub fn source_db_path(source_dir: &str) -> PathBuf {
@@ -2083,6 +2123,62 @@ mod tests {
             .expect("system time")
             .as_nanos();
         std::env::temp_dir().join(format!("lianghua-rs-{prefix}-{nanos}"))
+    }
+
+    #[test]
+    fn wal_recovery_only_removes_corrupt_wal_and_retries_once() {
+        let dir = temp_dir_path("wal-recovery");
+        create_dir_all(&dir).unwrap();
+        let path = dir.join("result.db");
+        let wal = dir.join("result.db.wal");
+        for (message, expected_calls, keep_wal) in [
+            (
+                "Data Corruption Error: Failure while replaying WAL file result.db.wal: WAL cannot contain more than one checkpoint marker",
+                2,
+                false,
+            ),
+            (
+                "IO Error: Failure while replaying WAL file result.db.wal: Permission denied",
+                1,
+                true,
+            ),
+            ("Data Corruption Error: invalid database header", 1, true),
+            ("IO Error: Could not set lock on file", 1, true),
+        ] {
+            std::fs::write(&wal, b"wal").unwrap();
+            let mut calls = 0;
+            let result = super::open_db_with_wal_recovery(&path, || {
+                calls += 1;
+                Err(duckdb::Error::DuckDBFailure(
+                    duckdb::ffi::Error::new(1),
+                    Some(message.to_string()),
+                ))
+            });
+            assert!(result.is_err());
+            assert_eq!(calls, expected_calls);
+            assert_eq!(wal.exists(), keep_wal);
+        }
+        std::fs::write(&wal, b"wal").unwrap();
+        let mut calls = 0;
+        let conn = super::open_db_with_wal_recovery(&path, || {
+            calls += 1;
+            if calls == 1 {
+                Err(duckdb::Error::DuckDBFailure(
+                    duckdb::ffi::Error::new(1),
+                    Some(
+                        "Data Corruption Error: Failure while replaying WAL file result.db.wal"
+                            .into(),
+                    ),
+                ))
+            } else {
+                Connection::open_in_memory()
+            }
+        })
+        .unwrap();
+        assert_eq!(calls, 2);
+        assert!(!wal.exists());
+        drop(conn);
+        remove_dir_all(dir).unwrap();
     }
 
     #[test]

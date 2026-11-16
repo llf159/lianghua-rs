@@ -37,7 +37,8 @@ pub fn init_result_db(db_path: &Path) -> Result<(), String> {
         }
     }
 
-    let conn = Connection::open(db_path).map_err(|e| format!("打开数据库失败:{e}"))?;
+    let conn = super::open_db_with_wal_recovery(db_path, || Connection::open(db_path))
+        .map_err(|e| format!("打开数据库失败:{e}"))?;
 
     ensure_result_table_schema(&conn, SCORE_SUMMARY_TABLE)?;
     ensure_result_table_schema(&conn, RULE_DETAILS_TABLE)?;
@@ -385,7 +386,10 @@ pub fn build_rank_tiebreak(
 ) -> Result<RankTiebreakProfile, String> {
     let total_started_at = time::Instant::now();
     let mut profile = RankTiebreakProfile::default();
-    let conn = Connection::open(result_db_path).map_err(|e| format!("结果库连接失败:{e}"))?;
+    let conn = super::open_db_with_wal_recovery(Path::new(result_db_path), || {
+        Connection::open(result_db_path)
+    })
+    .map_err(|e| format!("结果库连接失败:{e}"))?;
 
     if let TieBreakWay::KdjJ = tie_break {
         let attach_started_at = time::Instant::now();
@@ -1112,7 +1116,9 @@ pub fn write_score_batches_from_channel(
 ) -> Result<ScoreWriteProfile, String> {
     let total_started_at = time::Instant::now();
     let mut profile = ScoreWriteProfile::default();
-    let mut conn = Connection::open(db_path).map_err(|e| format!("结果库连接失败:{e}"))?;
+    let mut conn =
+        super::open_db_with_wal_recovery(Path::new(db_path), || Connection::open(db_path))
+            .map_err(|e| format!("结果库连接失败:{e}"))?;
     if progress_cb.is_some() {
         conn.set_query_progress_tracking(true)
             .map_err(|e| format!("启用排名查询进度失败:{e}"))?;
