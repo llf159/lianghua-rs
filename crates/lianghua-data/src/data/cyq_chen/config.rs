@@ -49,31 +49,68 @@ impl ChipChangeConfig {
     pub fn compile(&self) -> Result<CompiledChipChangeConfig, String> {
         self.validate()?;
 
+        let age_names = super::ages::age_runtime_keys();
+        let age_refs = age_names.iter().map(String::as_str).collect::<Vec<_>>();
         let mut strategies = Vec::with_capacity(self.strategy.len());
         for (index, strategy) in self.strategy.iter().enumerate() {
             let n = index + 1;
             let when_ast = parse_strategy_expression(&strategy.when, n, &strategy.name)?;
             let direction = strategy.direction;
+            if direction == ChipDirection::Buy
+                && program_depends_on_runtime_keys(
+                    &when_ast,
+                    &age_refs
+                        .iter()
+                        .copied()
+                        .filter(|key| key.starts_with("BUCKET_"))
+                        .collect::<Vec<_>>(),
+                )
+            {
+                return Err(format!(
+                    "筹码规则 {}：BUCKET_年龄仅供卖方当前成本桶使用，买方使用MAIN_AGE_/RETAIL_AGE_",
+                    strategy.name
+                ));
+            }
+            let mut age_locals = HashMap::new();
+            for stmt in &when_ast.item {
+                let expr = match stmt {
+                    Stmt::Assign { value, .. } => value,
+                    Stmt::Expr(expr) => expr,
+                };
+                validate_age_expression(expr, &age_locals, &age_refs)?;
+                if let Stmt::Assign { name, value } = stmt {
+                    age_locals.insert(
+                        name.clone(),
+                        expr_depends_on_dynamic(value, &age_locals, &age_refs),
+                    );
+                }
+            }
             let (mut optimized_when_ast, mut cached_exprs) =
                 (|program: &Stmts,
                   direction: ChipDirection,
                   strategy_index: usize|
                  -> (Stmts, Vec<CompiledChipCachedExpr>) {
-                    let dynamic_runtime_keys = match direction {
-                        ChipDirection::Buy => {
-                            (["MAIN_CHIP_RATIO", "MAIN_CHIP_TOTAL", "RETAIL_CHIP_TOTAL"]).as_slice()
-                        }
-                        ChipDirection::Sell => ([
-                            "RATEO",
-                            "RATEH",
-                            "RATEL",
-                            "RATEC",
-                            "MAIN_CHIP_RATIO",
-                            "MAIN_CHIP_TOTAL",
-                            "RETAIL_CHIP_TOTAL",
-                        ])
-                        .as_slice(),
-                    };
+                    let dynamic_runtime_keys = [
+                        match direction {
+                            ChipDirection::Buy => {
+                                (["MAIN_CHIP_RATIO", "MAIN_CHIP_TOTAL", "RETAIL_CHIP_TOTAL"])
+                                    .as_slice()
+                            }
+                            ChipDirection::Sell => ([
+                                "RATEO",
+                                "RATEH",
+                                "RATEL",
+                                "RATEC",
+                                "MAIN_CHIP_RATIO",
+                                "MAIN_CHIP_TOTAL",
+                                "RETAIL_CHIP_TOTAL",
+                            ])
+                            .as_slice(),
+                        },
+                        age_refs.as_slice(),
+                    ]
+                    .concat();
+                    let dynamic_runtime_keys = dynamic_runtime_keys.as_slice();
                     let mut local_dynamic = HashMap::<String, bool>::new();
                     let mut static_prefix = Vec::<Stmt>::new();
                     let mut cached_exprs = Vec::<CompiledChipCachedExpr>::new();
@@ -128,21 +165,29 @@ impl ChipChangeConfig {
                 && program_depends_on_runtime_keys(
                     &when_ast,
                     &[
-                        "RATEO",
-                        "RATEH",
-                        "RATEL",
-                        "RATEC",
-                        "MAIN_CHIP_RATIO",
-                        "MAIN_CHIP_TOTAL",
-                        "RETAIL_CHIP_TOTAL",
-                    ],
+                        &[
+                            "RATEO",
+                            "RATEH",
+                            "RATEL",
+                            "RATEC",
+                            "MAIN_CHIP_RATIO",
+                            "MAIN_CHIP_TOTAL",
+                            "RETAIL_CHIP_TOTAL",
+                        ][..],
+                        age_refs.as_slice(),
+                    ]
+                    .concat(),
                 );
             // Buy RATEs describe new participants, so they are stock-only inputs.
             let stock_only = match direction {
                 ChipDirection::Sell => !sell_uses_bucket_state,
                 ChipDirection::Buy => !program_depends_on_runtime_keys(
                     &when_ast,
-                    &["MAIN_CHIP_RATIO", "MAIN_CHIP_TOTAL", "RETAIL_CHIP_TOTAL"],
+                    &[
+                        &["MAIN_CHIP_RATIO", "MAIN_CHIP_TOTAL", "RETAIL_CHIP_TOTAL"][..],
+                        age_refs.as_slice(),
+                    ]
+                    .concat(),
                 ),
             };
             if stock_only {
@@ -158,6 +203,15 @@ impl ChipChangeConfig {
                 };
             }
             let assigned_names = collect_assigned_names_from_expr_program(&optimized_when_ast);
+            let sell_uses_dynamic_state = direction == ChipDirection::Sell
+                && program_depends_on_runtime_keys(
+                    &when_ast,
+                    &[
+                        &["MAIN_CHIP_RATIO", "MAIN_CHIP_TOTAL", "RETAIL_CHIP_TOTAL"][..],
+                        age_refs.as_slice(),
+                    ]
+                    .concat(),
+                );
             strategies.push(CompiledChipChangeStrategy {
                 name: strategy.name.trim().to_string(),
                 holder: strategy.holder,
@@ -172,6 +226,7 @@ impl ChipChangeConfig {
                 cached_exprs,
                 assigned_names,
                 sell_uses_bucket_state,
+                sell_uses_dynamic_state,
             });
         }
 
@@ -216,19 +271,21 @@ impl ChipChangeConfig {
                     .iter()
                     .any(|key| crate::data::expr_program_uses_runtime_key(&strategy.when_ast, key))
         });
-        let sell_uses_bucket_dynamic_state = strategies.iter().any(|strategy| {
-            strategy.direction == ChipDirection::Sell
-                && [
-                    "MAIN_CHIP_RATIO",
-                    "main_chip_ratio",
-                    "MAIN_CHIP_TOTAL",
-                    "main_chip_total",
-                    "RETAIL_CHIP_TOTAL",
-                    "retail_chip_total",
-                ]
-                .iter()
-                .any(|key| crate::data::expr_program_uses_runtime_key(&strategy.when_ast, key))
-        });
+        let age_keys = age_names
+            .into_iter()
+            .filter(|key| {
+                strategies.iter().any(|strategy| {
+                    crate::data::expr_program_uses_runtime_key(&strategy.when_ast, key)
+                        || crate::data::expr_program_uses_runtime_key(
+                            &strategy.when_ast,
+                            &key.to_ascii_lowercase(),
+                        )
+                })
+            })
+            .collect::<Vec<_>>();
+        let sell_uses_bucket_dynamic_state = strategies
+            .iter()
+            .any(|strategy| strategy.sell_uses_dynamic_state);
         let sell_uses_point_rates = !sell_uses_bucket_dynamic_state
             && strategies
                 .iter()
@@ -249,6 +306,7 @@ impl ChipChangeConfig {
             sell_rate_fields,
             buy_rate_fields,
             posterior_horizon,
+            age_keys,
             sell_uses_point_rates,
             sell_uses_main_ratio_history,
             sell_uses_bucket_dynamic_state,
@@ -435,21 +493,30 @@ pub fn collect_chen_chip_runtime_keys(chip_config: &CompiledChipChangeConfig) ->
         .map(|strategy| &strategy.when_ast)
         .collect::<Vec<_>>();
 
+    let age_names = super::ages::age_runtime_keys();
     let mut keys = collect_runtime_keys_from_expr_programs(
         &programs,
         RuntimeKeyCollectOptions {
             always_keys: &(["O", "H", "L", "C", "TOR"]),
-            injected_keys: &([
-                "RATEO",
-                "RATEH",
-                "RATEL",
-                "RATEC",
-                "MAIN_CHIP_RATIO",
-                "MAIN_CHIP_TOTAL",
-                "RETAIL_CHIP_TOTAL",
-                "ZHANG",
-                "TOTAL_MV_YI",
-            ]),
+            injected_keys: &[
+                &[
+                    "RATEO",
+                    "RATEH",
+                    "RATEL",
+                    "RATEC",
+                    "MAIN_CHIP_RATIO",
+                    "MAIN_CHIP_TOTAL",
+                    "RETAIL_CHIP_TOTAL",
+                    "ZHANG",
+                    "TOTAL_MV_YI",
+                ][..],
+                age_names
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .as_slice(),
+            ]
+            .concat(),
             aliases: &[],
         },
     );
@@ -625,6 +692,48 @@ fn program_depends_on_runtime_keys(program: &Stmts, runtime_keys: &[&str]) -> bo
     false
 }
 
+fn validate_age_expression(
+    expr: &Expr,
+    locals: &HashMap<String, bool>,
+    keys: &[&str],
+) -> Result<(), String> {
+    match expr {
+        Expr::Call { name, args } => {
+            if expr_depends_on_dynamic(expr, locals, keys)
+                && !matches!(
+                    name.to_ascii_uppercase().as_str(),
+                    "ABS"
+                        | "MIN"
+                        | "MAX"
+                        | "IF"
+                        | "ISVALID"
+                        | "DIV"
+                        | "NULL"
+                        | "EXP"
+                        | "LN"
+                        | "LOG"
+                        | "SQRT"
+                        | "POW"
+                )
+            {
+                return Err(format!(
+                    "持有人年龄是当前交易前状态，不能使用{name}时序调用；请直接使用年龄分档条件"
+                ));
+            }
+            for arg in args {
+                validate_age_expression(arg, locals, keys)?;
+            }
+        }
+        Expr::Unary { rhs, .. } => validate_age_expression(rhs, locals, keys)?,
+        Expr::Binary { lhs, rhs, .. } => {
+            validate_age_expression(lhs, locals, keys)?;
+            validate_age_expression(rhs, locals, keys)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn expr_supports_point_evaluation(expr: &Expr) -> bool {
     match expr {
         Expr::Call { name, args } => {
@@ -686,6 +795,85 @@ mod tests {
         let bucket_history = &config.strategies[1];
         assert_eq!(bucket_history.cached_exprs.len(), 1);
         assert!(program_contains_call(&bucket_history.optimized_when_ast));
+    }
+
+    #[test]
+    fn mixed_sell_history_cache_preserves_dynamic_rules_and_sum_order() {
+        let config = ChipChangeConfig::from_toml_str(
+            r#"
+version=1
+[[strategy]]
+name="static prefix"
+holder="main"
+direction="sell"
+when="RATEC > -5"
+bias=0.1
+[[strategy]]
+name="age rule"
+holder="main"
+direction="sell"
+when="BUCKET_MAIN_AGE_NEW5 >= 0 AND RATEC < 10"
+bias=0.2
+[[strategy]]
+name="static history tail"
+holder="main"
+direction="sell"
+when="HHV(RATEH,2) > 0"
+bias=0.3
+[[strategy]]
+name="inventory rule"
+holder="retail"
+direction="sell"
+when="MAIN_CHIP_RATIO >= 0 AND MAIN_CHIP_TOTAL > 0"
+bias=0.4
+[[strategy]]
+name="static stock tail"
+holder="retail"
+direction="sell"
+when="C > REF(C,1)"
+bias=0.5
+[[strategy]]
+name="buy"
+holder="main"
+direction="buy"
+when="C > 0"
+bias=1
+"#,
+        )
+        .unwrap()
+        .compile()
+        .unwrap();
+        assert_eq!(
+            config
+                .strategies
+                .iter()
+                .map(|s| s.sell_uses_dynamic_state)
+                .collect::<Vec<_>>(),
+            vec![false, true, false, true, false, false]
+        );
+        let mut uncached = config.clone();
+        for strategy in &mut uncached.strategies {
+            if strategy.direction == ChipDirection::Sell {
+                strategy.sell_uses_dynamic_state = true;
+            }
+        }
+        let row = sample_row_data();
+        let settings = ChenChipConfig {
+            warmup_days: 0,
+            bucket_pct: 2.0,
+        };
+        let cached = crate::data::cyq_chen::compute_chen_chip_snapshots_with_compiled_config(
+            &row, "20240102", &config, settings,
+        )
+        .unwrap();
+        let reference = crate::data::cyq_chen::compute_chen_chip_snapshots_with_compiled_config(
+            &row, "20240102", &uncached, settings,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_string(&cached).unwrap(),
+            serde_json::to_string(&reference).unwrap()
+        );
     }
 
     #[test]

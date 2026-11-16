@@ -13,6 +13,8 @@ pub struct ChenChipFeatureState {
     #[serde(default)]
     pub observation_start_date: Option<String>,
     pub(super) buckets: Vec<FeatureBucket>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) holder_ages: Option<super::ages::HolderAgeState>,
     losses: Vec<f64>,
 }
 
@@ -186,6 +188,9 @@ impl ChenChipFeatureState {
                     bin.price_high
                 ));
             }
+        }
+        if let Some(ages) = &self.holder_ages {
+            ages.validate(bins, self.observed_days)?;
         }
         Ok(())
     }
@@ -380,6 +385,17 @@ impl ChenChipFeatureState {
                 unknown += bucket.initial;
             }
         }
+        snapshot.holder_age_pcts = self.holder_ages.as_ref().map(|ages| {
+            ages.masses(self.observed_days, None).map(|mass| {
+                let total = mass.iter().sum::<f64>();
+                [
+                    (total > EPS && self.observed_days >= 5).then(|| 100.0 * mass[0] / total),
+                    (total > EPS && self.observed_days >= 21)
+                        .then(|| 100.0 * mass[2..5].iter().sum::<f64>() / total),
+                    (total > EPS).then(|| 100.0 * mass[5] / total),
+                ]
+            })
+        });
         snapshot.age_summary =
             (self.version == CYQ_CHEN_FEATURE_VERSION && self.observed_days > 0 && mass > EPS)
                 .then(|| ChenChipAgeSummary {

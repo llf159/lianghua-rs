@@ -12,6 +12,12 @@ use crate::expr::eval::Value;
 use crate::expr::parser::Stmts;
 use std::collections::HashMap;
 use std::sync::Arc;
+pub(super) struct SellBiasHistory {
+    biases: Vec<(f64, f64)>,
+    // Keep static trigger masks after the first dynamic rule to preserve bias addition order.
+    tail_triggers: Vec<(usize, Option<Vec<bool>>)>,
+}
+
 pub(super) fn apply_posterior_for_day(
     buckets: &mut [ChipBucket],
     bar: &ChenChipBar,
@@ -19,6 +25,7 @@ pub(super) fn apply_posterior_for_day(
     config: &CompiledChipChangeConfig,
     len: usize,
     day: usize,
+    mut holder_ages: Option<(&mut super::ages::HolderAgeState, usize)>,
 ) -> Result<(f64, f64), String> {
     let horizon = config.posterior_horizon;
     if horizon == 0 {
@@ -48,7 +55,7 @@ pub(super) fn apply_posterior_for_day(
     }
     let mut to_main = 0.0;
     let mut to_retail = 0.0;
-    for bucket in buckets {
+    for (bucket_index, bucket) in buckets.iter_mut().enumerate() {
         for lot in &mut bucket.pending {
             if lot.trade_date == bar.trade_date {
                 continue;
@@ -59,6 +66,11 @@ pub(super) fn apply_posterior_for_day(
                     ChipHolder::Main => lot.retail_chip * rule.bias,
                     ChipHolder::Retail => -lot.main_chip * rule.bias,
                 };
+                if delta != 0.0 {
+                    if let Some((ages, observed_day)) = holder_ages.as_mut() {
+                        ages.reclassify(bucket_index, *observed_day, lot.age, delta)?;
+                    }
+                }
                 to_main += delta.max(0.0);
                 to_retail += (-delta).max(0.0);
                 lot.main_chip += delta;
@@ -96,10 +108,11 @@ pub(super) fn apply_sell_for_day(
     bucket_runtime: &mut Runtime,
     chip_config: &CompiledChipChangeConfig,
     main_ratio_history: &[Arc<Vec<Option<f64>>>],
-    sell_bias_cache: &mut HashMap<(u64, u64), Arc<Vec<(f64, f64)>>>,
+    sell_bias_cache: &mut HashMap<(u64, u64), SellBiasHistory>,
     day_index: usize,
     turnover_rate: f64,
     point_rates: bool,
+    holder_ages: Option<(&super::ages::HolderAgeState, usize)>,
 ) -> Result<(), String> {
     if turnover_rate <= EPS {
         return Ok(());
@@ -209,6 +222,20 @@ pub(super) fn apply_sell_for_day(
                 );
             }
         }
+        if chip_config
+            .age_keys
+            .iter()
+            .any(|key| key.starts_with("BUCKET_"))
+        {
+            if let Some((ages, day)) = holder_ages {
+                ages.inject(
+                    bucket_runtime,
+                    day,
+                    Some(bucket_index),
+                    &chip_config.age_keys,
+                );
+            }
+        }
         let (main_bias, retail_bias) = if point_rates {
             let mut main = 0.0;
             let mut retail = 0.0;
@@ -223,22 +250,26 @@ pub(super) fn apply_sell_for_day(
                 }
             }
             (main, retail)
-        } else if chip_config.sell_uses_bucket_dynamic_state {
-            let (main, retail, _) = strategy_biases_at(
-                bucket_runtime,
-                chip_config,
-                ChipDirection::Sell,
-                bars.len(),
-                day_index,
-            )?;
-            (main, retail)
         } else {
             if !sell_bias_cache.contains_key(&cache_key) {
                 let mut main_biases = vec![0.0; bars.len()];
                 let mut retail_biases = vec![0.0; bars.len()];
-                for strategy in chip_config.strategies.iter().filter(|strategy| {
-                    strategy.direction == ChipDirection::Sell && strategy.confirm_after == 0
-                }) {
+                let mut tail_triggers = Vec::new();
+                let mut dynamic_tail = false;
+                for (strategy_index, strategy) in
+                    chip_config
+                        .strategies
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, strategy)| {
+                            strategy.direction == ChipDirection::Sell && strategy.confirm_after == 0
+                        })
+                {
+                    if strategy.sell_uses_dynamic_state {
+                        dynamic_tail = true;
+                        tail_triggers.push((strategy_index, None));
+                        continue;
+                    }
                     let value = eval_program_scoped(
                         bucket_runtime,
                         &strategy.optimized_when_ast,
@@ -250,6 +281,18 @@ pub(super) fn apply_sell_for_day(
                     let triggers = Value::as_truth_series(&value, bars.len()).map_err(|error| {
                         format!("策略 {} 表达式返回值非布尔: {}", strategy.name, error.msg)
                     })?;
+                    if dynamic_tail {
+                        tail_triggers.push((
+                            strategy_index,
+                            Some(
+                                triggers
+                                    .iter()
+                                    .map(|triggered| triggered.is_true())
+                                    .collect(),
+                            ),
+                        ));
+                        continue;
+                    }
                     for (index, triggered) in triggers.iter().enumerate() {
                         if triggered.is_true() {
                             match strategy.holder {
@@ -261,15 +304,29 @@ pub(super) fn apply_sell_for_day(
                 }
                 sell_bias_cache.insert(
                     cache_key,
-                    Arc::new(
-                        main_biases
-                            .into_iter()
-                            .zip(retail_biases)
-                            .collect::<Vec<_>>(),
-                    ),
+                    SellBiasHistory {
+                        biases: main_biases.into_iter().zip(retail_biases).collect(),
+                        tail_triggers,
+                    },
                 );
             }
-            sell_bias_cache[&cache_key][day_index]
+            let history = &sell_bias_cache[&cache_key];
+            let (mut main, mut retail) = history.biases[day_index];
+            for (strategy_index, triggers) in &history.tail_triggers {
+                let strategy = &chip_config.strategies[*strategy_index];
+                let triggered = if let Some(triggers) = triggers {
+                    triggers[day_index]
+                } else {
+                    strategy_triggered_at(bucket_runtime, strategy, bars.len(), day_index)?
+                };
+                if triggered {
+                    match strategy.holder {
+                        ChipHolder::Main => main += strategy.bias,
+                        ChipHolder::Retail => retail += strategy.bias,
+                    }
+                }
+            }
+            (main, retail)
         };
         let main_effective = main_bias.max(0.0);
         let retail_effective = retail_bias.max(0.0);
@@ -825,6 +882,7 @@ bias = 1.0
             0,
             10.0,
             false,
+            None,
         )
         .unwrap();
         assert_close(buckets[0].main_chip, 40.0);

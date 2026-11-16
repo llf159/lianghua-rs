@@ -328,6 +328,7 @@ pub(super) fn build_snapshot(
         real_loss20: None,
         feature_version: None,
         age_summary: None,
+        holder_age_pcts: None,
         feature_days: None,
         unknown_trapped: None,
         trade_date: Some(bar.trade_date.clone()),
@@ -476,6 +477,7 @@ mod tests {
             0,
             1.0,
             true,
+            None,
         )
         .expect("sell should apply");
 

@@ -18,7 +18,7 @@ use crate::expr::{
     },
 };
 
-pub const CYQ_CHEN_RUNTIME_FIELDS: [(&str, &str); 21] = [
+pub const CYQ_CHEN_RUNTIME_FIELDS: [(&str, &str); 33] = [
     ("CYQ_MIN", "min_price"),
     ("CYQ_MAX", "max_price"),
     ("CYQ_MT", "main_total"),
@@ -30,6 +30,18 @@ pub const CYQ_CHEN_RUNTIME_FIELDS: [(&str, &str); 21] = [
     ("CYQ_AGE_NEW5", "age_new5"),
     ("CYQ_AGE_KNOWN_GE20", "age_known_ge20"),
     ("CYQ_AGE_INITIAL", "age_initial"),
+    ("CYQ_MAIN_AGE_NEW5", "main_age_new5"),
+    ("CYQ_MAIN_AGE_KNOWN_GE20", "main_age_known_ge20"),
+    ("CYQ_MAIN_AGE_INITIAL", "main_age_initial"),
+    ("CYQ_RETAIL_AGE_NEW5", "retail_age_new5"),
+    ("CYQ_RETAIL_AGE_KNOWN_GE20", "retail_age_known_ge20"),
+    ("CYQ_RETAIL_AGE_INITIAL", "retail_age_initial"),
+    ("CYQ_MAIN_BOUGHT", "main_bought"),
+    ("CYQ_MAIN_SOLD", "main_sold"),
+    ("CYQ_RETAIL_BOUGHT", "retail_bought"),
+    ("CYQ_RETAIL_SOLD", "retail_sold"),
+    ("CYQ_RECLASSIFIED_TO_MAIN", "reclassified_to_main"),
+    ("CYQ_RECLASSIFIED_TO_RETAIL", "reclassified_to_retail"),
     ("CYQ_MPR", "main_profit_ratio"),
     ("CYQ_MTR", "main_trapped_ratio"),
     ("CYQ_MAC", "main_avg_cost"),
@@ -395,7 +407,9 @@ impl CyqChenFieldInjector {
                 existing_columns.contains(&db_col.to_ascii_lowercase())
                     && (!matches!(*runtime_key, "CYQ_TRAP_COEF" | "CYQ_REAL_LOSS20")
                         || (feature_current && existing_columns.contains("feature_version")))
-                    && (!runtime_key.starts_with("CYQ_AGE_")
+                    && (!(runtime_key.starts_with("CYQ_AGE_")
+                        || runtime_key.starts_with("CYQ_MAIN_AGE_")
+                        || runtime_key.starts_with("CYQ_RETAIL_AGE_"))
                         || existing_columns.contains("age_summary_version"))
             })
             .collect::<Vec<_>>();
@@ -416,7 +430,7 @@ impl CyqChenFieldInjector {
             "CASE WHEN snap.feature_version = {} THEN TRY_CAST(snap.\"{db_col}\" AS DOUBLE) ELSE NULL END AS \"{db_col}\"",
             crate::data::cyq_chen::CYQ_CHEN_FEATURE_VERSION
         ),
-        "CYQ_AGE_NEW5" | "CYQ_AGE_KNOWN_GE20" | "CYQ_AGE_INITIAL" => format!(
+        "CYQ_AGE_NEW5" | "CYQ_AGE_KNOWN_GE20" | "CYQ_AGE_INITIAL" | "CYQ_MAIN_AGE_NEW5" | "CYQ_MAIN_AGE_KNOWN_GE20" | "CYQ_MAIN_AGE_INITIAL" | "CYQ_RETAIL_AGE_NEW5" | "CYQ_RETAIL_AGE_KNOWN_GE20" | "CYQ_RETAIL_AGE_INITIAL" => format!(
             "CASE WHEN snap.age_summary_version = {} THEN TRY_CAST(snap.\"{db_col}\" AS DOUBLE) ELSE NULL END AS \"{db_col}\"",
             crate::data::cyq_chen::CYQ_CHEN_AGE_SUMMARY_VERSION
         ),
@@ -1127,6 +1141,42 @@ mod tests {
             vec![Some(100.0), None, None]
         );
         assert_eq!(single.cols["CYQ_AGE_KNOWN_GE20"], vec![None, None, None]);
+        let conn = duckdb::Connection::open(directory.join("cyq_chen.db")).unwrap();
+        conn.execute_batch("ALTER TABLE cyq_chen_snapshot ADD COLUMN main_age_new5 DOUBLE;
+            ALTER TABLE cyq_chen_snapshot ADD COLUMN retail_age_new5 DOUBLE;
+            ALTER TABLE cyq_chen_snapshot ADD COLUMN main_bought DOUBLE;
+            ALTER TABLE cyq_chen_snapshot ADD COLUMN main_sold DOUBLE;
+            UPDATE cyq_chen_snapshot SET main_age_new5=25, retail_age_new5=10, main_bought=2, main_sold=1 WHERE trade_date='20240102';
+            UPDATE cyq_chen_snapshot SET main_age_new5=50 WHERE trade_date='20240103';").unwrap();
+        drop(conn);
+        let process_keys = HashSet::from([
+            "CYQ_MAIN_AGE_NEW5".into(),
+            "CYQ_RETAIL_AGE_NEW5".into(),
+            "CYQ_MAIN_BOUGHT".into(),
+            "CYQ_MAIN_SOLD".into(),
+        ]);
+        let process = CyqChenFieldInjector::new(directory.to_str().unwrap(), &process_keys);
+        let mut process_single = row();
+        let mut process_batch = vec![("000001.SZ".into(), row())];
+        assert!(process.inject(&mut process_single, "000001.SZ").is_empty());
+        assert!(process.inject_batch(&mut process_batch).is_empty());
+        assert_eq!(process_single.cols, process_batch[0].1.cols);
+        assert_eq!(
+            process_single.cols["CYQ_MAIN_AGE_NEW5"],
+            vec![Some(25.0), None, None]
+        );
+        assert_eq!(
+            process_single.cols["CYQ_RETAIL_AGE_NEW5"],
+            vec![Some(10.0), None, None]
+        );
+        assert_eq!(
+            process_single.cols["CYQ_MAIN_BOUGHT"],
+            vec![Some(2.0), None, None]
+        );
+        assert_eq!(
+            process_single.cols["CYQ_MAIN_SOLD"],
+            vec![Some(1.0), None, None]
+        );
         let program = crate::expr::validation::parse_expression_program(
             "CYQ_AGE_NEW5 < 30 AND CYQ_AGE_KNOWN_GE20 > 40 AND CYQ_AGE_INITIAL < 10",
         )

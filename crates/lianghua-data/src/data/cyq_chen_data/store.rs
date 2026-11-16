@@ -115,6 +115,18 @@ pub fn init_cyq_chen_db(db_path: &Path) -> Result<(), String> {
             ("age_new5", "DOUBLE"),
             ("age_known_ge20", "DOUBLE"),
             ("age_initial", "DOUBLE"),
+            ("main_age_new5", "DOUBLE"),
+            ("main_age_known_ge20", "DOUBLE"),
+            ("main_age_initial", "DOUBLE"),
+            ("retail_age_new5", "DOUBLE"),
+            ("retail_age_known_ge20", "DOUBLE"),
+            ("retail_age_initial", "DOUBLE"),
+            ("main_bought", "DOUBLE"),
+            ("main_sold", "DOUBLE"),
+            ("retail_bought", "DOUBLE"),
+            ("retail_sold", "DOUBLE"),
+            ("reclassified_to_main", "DOUBLE"),
+            ("reclassified_to_retail", "DOUBLE"),
         ] {
             let exists = conn
                 .query_row(
@@ -791,6 +803,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(legacy, (None, None, None));
+        let process: (Option<f64>, Option<f64>, Option<f64>) = conn
+            .query_row(
+                "SELECT main_age_new5, retail_age_known_ge20, main_bought FROM cyq_chen_snapshot",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(process, (None, None, None));
         drop(conn);
         fs::remove_dir_all(source_dir).unwrap();
     }

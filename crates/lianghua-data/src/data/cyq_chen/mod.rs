@@ -1,3 +1,4 @@
+mod ages;
 mod basis;
 pub use basis::{ChenChipBasis, compute_chen_chip_basis};
 mod bars;
@@ -160,6 +161,7 @@ pub struct CompiledChipChangeConfig {
     sell_rate_fields: [bool; 4],
     buy_rate_fields: [bool; 4],
     posterior_horizon: usize,
+    age_keys: Vec<String>,
     sell_uses_point_rates: bool,
     pub(in crate::data) sell_uses_main_ratio_history: bool,
     pub(in crate::data) sell_uses_bucket_dynamic_state: bool,
@@ -180,6 +182,7 @@ pub struct CompiledChipChangeStrategy {
     cached_exprs: Vec<CompiledChipCachedExpr>,
     assigned_names: Vec<String>,
     sell_uses_bucket_state: bool,
+    sell_uses_dynamic_state: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -239,6 +242,8 @@ pub struct ChenChipSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub flow: Option<ChenChipFlow>,
     pub age_summary: Option<ChenChipAgeSummary>,
+    /// Closing holder ages: new 0–4, known 20+, initial unknown; own-holder percentages.
+    pub holder_age_pcts: Option<[[Option<f64>; 3]; 2]>,
     pub trap_coef: Option<f64>,
     pub real_loss20: Option<f64>,
     pub feature_version: Option<u32>,
@@ -609,6 +614,27 @@ pub(super) fn replay_chen_chip_snapshots(
             rate_fields,
         )?;
         feature_state.align(&buckets)?;
+        if !chip_config.age_keys.is_empty() {
+            if feature_state.holder_ages.is_none() && feature_state.observed_days > 0 {
+                return Err("检查点缺少主散年龄账本，请从历史起点重建筹码".into());
+            }
+            let ages = feature_state
+                .holder_ages
+                .get_or_insert_with(Default::default);
+            ages.align(&buckets, feature_state.observed_days + 1)?;
+            ages.inject(
+                &mut base_runtime,
+                feature_state.observed_days + 1,
+                None,
+                &chip_config.age_keys,
+            );
+            ages.inject(
+                &mut buy_runtime,
+                feature_state.observed_days + 1,
+                None,
+                &chip_config.age_keys,
+            );
+        }
         before.clear();
         before.extend(buckets.iter().map(ChipBucket::total_chip));
         write_main_ratio_for_day(&buckets, &mut main_ratio_history, day_index);
@@ -624,8 +650,15 @@ pub(super) fn replay_chen_chip_snapshots(
             day_index,
             bar.turnover_rate,
             point_rates,
+            feature_state
+                .holder_ages
+                .as_ref()
+                .map(|ages| (ages, feature_state.observed_days + 1)),
         )?;
         sanitize_buckets(&mut buckets)?;
+        if let Some(ages) = feature_state.holder_ages.as_mut() {
+            ages.update(&buckets, feature_state.observed_days + 1, false)?;
+        }
         after_sell.clear();
         after_sell.extend(buckets.iter().map(ChipBucket::total_chip));
 
@@ -640,6 +673,9 @@ pub(super) fn replay_chen_chip_snapshots(
             bar.turnover_rate,
             main_before,
         )?;
+        if let Some(ages) = feature_state.holder_ages.as_mut() {
+            ages.update(&buckets, feature_state.observed_days + 1, true)?;
+        }
         after_buy.clear();
         after_buy.extend(buckets.iter().map(ChipBucket::total_chip));
         let main_after_buy = buckets.iter().map(|bucket| bucket.main_chip).sum::<f64>();
@@ -650,8 +686,15 @@ pub(super) fn replay_chen_chip_snapshots(
             chip_config,
             len,
             day_index,
+            feature_state
+                .holder_ages
+                .as_mut()
+                .map(|ages| (ages, feature_state.observed_days + 1)),
         )?;
         normalize_buckets(&mut buckets)?;
+        if let Some(ages) = feature_state.holder_ages.as_mut() {
+            ages.normalize(&buckets);
+        }
         feature_state.observe(bar, &buckets, &before, &after_sell, &after_buy)?;
         if let Some(capture) = retention.as_mut() {
             let request = capture.request;
@@ -930,6 +973,27 @@ pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config_with_f
             rate_fields,
         )?;
         feature_state.align(&buckets)?;
+        if !chip_config.age_keys.is_empty() {
+            if feature_state.holder_ages.is_none() && feature_state.observed_days > 0 {
+                return Err("检查点缺少主散年龄账本，请从历史起点重建筹码".into());
+            }
+            let ages = feature_state
+                .holder_ages
+                .get_or_insert_with(Default::default);
+            ages.align(&buckets, feature_state.observed_days + 1)?;
+            ages.inject(
+                &mut base_runtime,
+                feature_state.observed_days + 1,
+                None,
+                &chip_config.age_keys,
+            );
+            ages.inject(
+                &mut buy_runtime,
+                feature_state.observed_days + 1,
+                None,
+                &chip_config.age_keys,
+            );
+        }
         before.clear();
         before.extend(buckets.iter().map(ChipBucket::total_chip));
         write_main_ratio_for_day(&buckets, &mut main_ratio_history, day_index);
@@ -945,8 +1009,15 @@ pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config_with_f
             day_index,
             bar.turnover_rate,
             point_rates,
+            feature_state
+                .holder_ages
+                .as_ref()
+                .map(|ages| (ages, feature_state.observed_days + 1)),
         )?;
         sanitize_buckets(&mut buckets)?;
+        if let Some(ages) = feature_state.holder_ages.as_mut() {
+            ages.update(&buckets, feature_state.observed_days + 1, false)?;
+        }
         after_sell.clear();
         after_sell.extend(buckets.iter().map(ChipBucket::total_chip));
 
@@ -961,6 +1032,9 @@ pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config_with_f
             bar.turnover_rate,
             main_before,
         )?;
+        if let Some(ages) = feature_state.holder_ages.as_mut() {
+            ages.update(&buckets, feature_state.observed_days + 1, true)?;
+        }
         after_buy.clear();
         after_buy.extend(buckets.iter().map(ChipBucket::total_chip));
         let main_after_buy = buckets.iter().map(|bucket| bucket.main_chip).sum::<f64>();
@@ -971,8 +1045,15 @@ pub fn compute_chen_chip_snapshots_from_initial_bins_with_compiled_config_with_f
             chip_config,
             len,
             day_index,
+            feature_state
+                .holder_ages
+                .as_mut()
+                .map(|ages| (ages, feature_state.observed_days + 1)),
         )?;
         normalize_buckets(&mut buckets)?;
+        if let Some(ages) = feature_state.holder_ages.as_mut() {
+            ages.normalize(&buckets);
+        }
         feature_state.observe(bar, &buckets, &before, &after_sell, &after_buy)?;
 
         let mut snapshot = build_snapshot(bar, &buckets, true)?;

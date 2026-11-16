@@ -52,6 +52,19 @@ pub(super) struct CyqChenBatchBuilder {
     snapshot_age_new5: Float64Builder,
     snapshot_age_known_ge20: Float64Builder,
     snapshot_age_initial: Float64Builder,
+    snapshot_main_age_new5: Float64Builder,
+    snapshot_main_age_known_ge20: Float64Builder,
+    snapshot_main_age_initial: Float64Builder,
+    snapshot_retail_age_new5: Float64Builder,
+    snapshot_retail_age_known_ge20: Float64Builder,
+    snapshot_retail_age_initial: Float64Builder,
+    snapshot_main_bought: Float64Builder,
+    snapshot_main_sold: Float64Builder,
+    snapshot_retail_bought: Float64Builder,
+    snapshot_retail_sold: Float64Builder,
+    snapshot_reclassified_to_main: Float64Builder,
+    snapshot_reclassified_to_retail: Float64Builder,
+
     bin_ts_code: StringBuilder,
     bin_trade_date: StringBuilder,
     bin_adj_type: StringBuilder,
@@ -120,6 +133,19 @@ impl CyqChenBatchBuilder {
             snapshot_age_new5: Float64Builder::with_capacity(snapshot_capacity),
             snapshot_age_known_ge20: Float64Builder::with_capacity(snapshot_capacity),
             snapshot_age_initial: Float64Builder::with_capacity(snapshot_capacity),
+            snapshot_main_age_new5: Float64Builder::with_capacity(snapshot_capacity),
+            snapshot_main_age_known_ge20: Float64Builder::with_capacity(snapshot_capacity),
+            snapshot_main_age_initial: Float64Builder::with_capacity(snapshot_capacity),
+            snapshot_retail_age_new5: Float64Builder::with_capacity(snapshot_capacity),
+            snapshot_retail_age_known_ge20: Float64Builder::with_capacity(snapshot_capacity),
+            snapshot_retail_age_initial: Float64Builder::with_capacity(snapshot_capacity),
+            snapshot_main_bought: Float64Builder::with_capacity(snapshot_capacity),
+            snapshot_main_sold: Float64Builder::with_capacity(snapshot_capacity),
+            snapshot_retail_bought: Float64Builder::with_capacity(snapshot_capacity),
+            snapshot_retail_sold: Float64Builder::with_capacity(snapshot_capacity),
+            snapshot_reclassified_to_main: Float64Builder::with_capacity(snapshot_capacity),
+            snapshot_reclassified_to_retail: Float64Builder::with_capacity(snapshot_capacity),
+
             bin_ts_code: StringBuilder::with_capacity(bin_capacity, bin_capacity.saturating_mul(9)),
             bin_trade_date: StringBuilder::with_capacity(
                 bin_capacity,
@@ -211,6 +237,58 @@ impl CyqChenBatchBuilder {
         );
         self.snapshot_age_initial
             .append_option(snapshot.age_summary.as_ref().map(|age| age.initial_pct));
+        self.snapshot_main_age_new5.append_option(
+            snapshot
+                .holder_age_pcts
+                .as_ref()
+                .and_then(|ages| ages[0][0]),
+        );
+        self.snapshot_main_age_known_ge20.append_option(
+            snapshot
+                .holder_age_pcts
+                .as_ref()
+                .and_then(|ages| ages[0][1]),
+        );
+        self.snapshot_main_age_initial.append_option(
+            snapshot
+                .holder_age_pcts
+                .as_ref()
+                .and_then(|ages| ages[0][2]),
+        );
+        self.snapshot_retail_age_new5.append_option(
+            snapshot
+                .holder_age_pcts
+                .as_ref()
+                .and_then(|ages| ages[1][0]),
+        );
+        self.snapshot_retail_age_known_ge20.append_option(
+            snapshot
+                .holder_age_pcts
+                .as_ref()
+                .and_then(|ages| ages[1][1]),
+        );
+        self.snapshot_retail_age_initial.append_option(
+            snapshot
+                .holder_age_pcts
+                .as_ref()
+                .and_then(|ages| ages[1][2]),
+        );
+        self.snapshot_main_bought
+            .append_option(snapshot.flow.as_ref().map(|flow| flow.main_bought));
+        self.snapshot_main_sold
+            .append_option(snapshot.flow.as_ref().map(|flow| flow.main_sold));
+        self.snapshot_retail_bought
+            .append_option(snapshot.flow.as_ref().map(|flow| flow.retail_bought));
+        self.snapshot_retail_sold
+            .append_option(snapshot.flow.as_ref().map(|flow| flow.retail_sold));
+        self.snapshot_reclassified_to_main
+            .append_option(snapshot.flow.as_ref().map(|flow| flow.reclassified_to_main));
+        self.snapshot_reclassified_to_retail.append_option(
+            snapshot
+                .flow
+                .as_ref()
+                .map(|flow| flow.reclassified_to_retail),
+        );
         for bin in snapshot.bins {
             self.bin_ts_code.append_value(&ts_code);
             self.bin_trade_date.append_value(&trade_date);
@@ -290,6 +368,18 @@ impl CyqChenBatchBuilder {
                 Field::new("age_new5", DataType::Float64, true),
                 Field::new("age_known_ge20", DataType::Float64, true),
                 Field::new("age_initial", DataType::Float64, true),
+                Field::new("main_age_new5", DataType::Float64, true),
+                Field::new("main_age_known_ge20", DataType::Float64, true),
+                Field::new("main_age_initial", DataType::Float64, true),
+                Field::new("retail_age_new5", DataType::Float64, true),
+                Field::new("retail_age_known_ge20", DataType::Float64, true),
+                Field::new("retail_age_initial", DataType::Float64, true),
+                Field::new("main_bought", DataType::Float64, true),
+                Field::new("main_sold", DataType::Float64, true),
+                Field::new("retail_bought", DataType::Float64, true),
+                Field::new("retail_sold", DataType::Float64, true),
+                Field::new("reclassified_to_main", DataType::Float64, true),
+                Field::new("reclassified_to_retail", DataType::Float64, true),
             ]);
             Some(
                 RecordBatch::try_new(
@@ -334,6 +424,18 @@ impl CyqChenBatchBuilder {
                         Arc::new(self.snapshot_age_new5.finish()) as ArrayRef,
                         Arc::new(self.snapshot_age_known_ge20.finish()) as ArrayRef,
                         Arc::new(self.snapshot_age_initial.finish()) as ArrayRef,
+                        Arc::new(self.snapshot_main_age_new5.finish()) as ArrayRef,
+                        Arc::new(self.snapshot_main_age_known_ge20.finish()) as ArrayRef,
+                        Arc::new(self.snapshot_main_age_initial.finish()) as ArrayRef,
+                        Arc::new(self.snapshot_retail_age_new5.finish()) as ArrayRef,
+                        Arc::new(self.snapshot_retail_age_known_ge20.finish()) as ArrayRef,
+                        Arc::new(self.snapshot_retail_age_initial.finish()) as ArrayRef,
+                        Arc::new(self.snapshot_main_bought.finish()) as ArrayRef,
+                        Arc::new(self.snapshot_main_sold.finish()) as ArrayRef,
+                        Arc::new(self.snapshot_retail_bought.finish()) as ArrayRef,
+                        Arc::new(self.snapshot_retail_sold.finish()) as ArrayRef,
+                        Arc::new(self.snapshot_reclassified_to_main.finish()) as ArrayRef,
+                        Arc::new(self.snapshot_reclassified_to_retail.finish()) as ArrayRef,
                     ],
                 )
                 .map_err(|e| format!("创建cyq_chen_snapshot批次失败:{e}"))?,
