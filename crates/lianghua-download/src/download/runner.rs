@@ -39,7 +39,8 @@ use crate::{
         PreparedStockDownload, ProBarRow, TushareClient,
         ind_calc::{
             IndsCache, cache_ind_build, calc_increment_inds_from_history,
-            load_many_tail_rows_with_warmup_need, warmup_ind_estimate,
+            incremental_ind_history_need, load_many_tail_rows_with_warmup_need,
+            warmup_ind_estimate,
         },
     },
 };
@@ -2102,7 +2103,8 @@ pub fn download_selected_indices(
                     return Ok(());
                 }
 
-                let warmup_need = warmup_ind_estimate(source_dir)?;
+                let warmup_need =
+                    incremental_ind_history_need(&inds_cache, warmup_ind_estimate(source_dir)?);
                 let history_anchor_date = prepared_items
                     .iter()
                     .map(|item| item.start_date.as_str())
@@ -2372,7 +2374,7 @@ fn download_pending_all_market_after_basic_data(
     let client = TushareClient::new(config.token.clone(), config.limit_calls_per_min)?;
     let pool = build_download_pool(config.threads)?;
     let inds_cache = cache_ind_build(source_dir)?;
-    let warmup_need = warmup_ind_estimate(source_dir)?;
+    let warmup_need = incremental_ind_history_need(&inds_cache, warmup_ind_estimate(source_dir)?);
     let indicator_names = inds_cache
         .iter()
         .map(|ind| ind.name.clone())
@@ -2542,7 +2544,11 @@ fn download_pending_all_market_after_basic_data(
 
             let chunk_results = pool.install(|| {
                 stock_rows
-                    .par_chunks(256)
+                    .par_chunks(if warmup_need == i64::MAX as usize {
+                        64
+                    } else {
+                        256
+                    })
                     .map(|chunk| -> Result<Vec<PreparedStockDownload>, String> {
                         let dr = DataReader::new_with_optional_tor_r(
                             source_dir,

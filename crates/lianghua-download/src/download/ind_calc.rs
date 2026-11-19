@@ -16,7 +16,7 @@ use crate::{
     download::ProBarRow,
     expr::eval::Value,
     expr::{
-        parser::{Stmt, Stmts},
+        parser::{Expr, Stmt, Stmts},
         validation::{
             estimate_expression_warmup, expression_input_identifiers, parse_expression_program,
             validate_expression_functions,
@@ -196,6 +196,39 @@ pub fn warmup_ind_estimate(source_dir: &str) -> Result<usize, String> {
     }
 
     Ok(all_ind_max_need)
+}
+
+/// Stateful formulas must replay their original prefix to preserve initial values.
+pub fn incremental_ind_history_need(inds_cache: &[IndsCache], warmup_need: usize) -> usize {
+    let mut pending = inds_cache
+        .iter()
+        .flat_map(|ind| &ind.expr.item)
+        .map(|stmt| match stmt {
+            Stmt::Assign { value, .. } => value,
+            Stmt::Expr(expr) => expr,
+        })
+        .collect::<Vec<_>>();
+    while let Some(expr) = pending.pop() {
+        match expr {
+            Expr::Call { name, args } => {
+                if matches!(
+                    name.to_ascii_uppercase().as_str(),
+                    "EMA" | "SMA" | "BARSLAST" | "LAST"
+                ) {
+                    // Both history readers use a SQL row limit; keep it within BIGINT.
+                    return i64::MAX as usize;
+                }
+                pending.extend(args);
+            }
+            Expr::Unary { rhs, .. } => pending.push(rhs),
+            Expr::Binary { lhs, rhs, .. } => {
+                pending.push(lhs);
+                pending.push(rhs);
+            }
+            Expr::Number(_) | Expr::Ident(_) => {}
+        }
+    }
+    warmup_need
 }
 
 pub fn load_many_tail_rows_with_warmup_need(
@@ -487,6 +520,7 @@ pub fn calc_increment_one_stock_inds(
     history_end_date: Option<&str>,
     new_rows: &[ProBarRow],
 ) -> Result<HashMap<String, Vec<Option<f64>>>, String> {
+    let warmup_need = incremental_ind_history_need(inds_cache, warmup_need);
     let history = match history_end_date {
         Some(end_date) => (|dr: &DataReader,
                             ts_code: &str,
@@ -573,6 +607,134 @@ mod tests {
     use super::{calc_inds_for_rows_with_cache, calc_inds_with_cache, compile_indicator_defs};
     use crate::data::{IndsData, RowData};
     use crate::download::{MoneyflowRow, ProBarRow};
+
+    #[test]
+    fn incremental_history_preserves_stateful_formulas() {
+        for expression in [
+            "EMA(C, 520)",
+            "F := EMA(C,240); S := EMA(C,520); F-S",
+            "-SMA(C, 61, 1)",
+            "IF(C>0, BARSLAST(C>20), 0)",
+            "LAST(C, 20)",
+            "MA(ema(C, 520), 5)",
+        ] {
+            let cache = compile_indicator_defs(vec![crate::data::IndData {
+                name: "TEST".into(),
+                expr: expression.into(),
+                prec: 4,
+                scope: crate::data::IndicatorScope::Stock,
+            }])
+            .unwrap();
+            assert_eq!(
+                super::incremental_ind_history_need(&cache, 169),
+                i64::MAX as usize,
+                "{expression}"
+            );
+        }
+        let cache = compile_indicator_defs(vec![crate::data::IndData {
+            name: "TEST".into(),
+            expr: "MA(C, 20) + REF(C, 5)".into(),
+            prec: 4,
+            scope: crate::data::IndicatorScope::Stock,
+        }])
+        .unwrap();
+        assert_eq!(super::incremental_ind_history_need(&cache, 19), 19);
+        assert_eq!(super::incremental_ind_history_need(&[], 0), 0);
+    }
+
+    #[test]
+    fn incremental_monthly_dif_matches_full_history_across_downloads() {
+        let cache = compile_indicator_defs(
+            IndsData::parse_from_text(
+                r#"version = 1
+                [[ind]]
+                name = "DIF_M"
+                expr = "F := EMA(C,240); S := EMA(C,520); F-S+2/13*(C-F)-2/27*(C-S)"
+                prec = 4
+                [[ind]]
+                name = "DEA_M"
+                expr = "F := EMA(C,240); S := EMA(C,520); X := F-S+2/13*(C-F)-2/27*(C-S); A := EMA(X,180); A+0.1*(X-A)"
+                prec = 4
+                [[ind]]
+                name = "SMOOTH"
+                expr = "SMA(C,61,1)"
+                prec = 4
+                "#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let rows = (0..600)
+            .map(|i| {
+                let close = 10.0 + i as f64 * 0.01 + (i % 71) as f64 * 0.1;
+                ProBarRow {
+                    ts_code: "001216.SZ".into(),
+                    trade_date: (chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()
+                        + chrono::Duration::days(i))
+                    .format("%Y%m%d")
+                    .to_string(),
+                    open: close,
+                    high: close,
+                    low: close,
+                    close,
+                    pre_close: close,
+                    change: 0.0,
+                    pct_chg: 0.0,
+                    vol: 1000.0,
+                    amount: 10000.0,
+                    turnover_rate: None,
+                    volume_ratio: None,
+                    moneyflow: None,
+                }
+            })
+            .collect::<Vec<_>>();
+        let expected = calc_inds_for_rows_with_cache(&cache, &rows).unwrap();
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE stock_data (ts_code VARCHAR, trade_date VARCHAR, adj_type VARCHAR, open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE, pre_close DOUBLE, change DOUBLE, pct_chg DOUBLE, vol DOUBLE, amount DOUBLE, tor DOUBLE)").unwrap();
+        let reader =
+            crate::data::DataReader::new_with_optional_tor_r("", Some(conn), false).unwrap();
+        for (i, row) in rows.iter().enumerate() {
+            if i >= 597 {
+                let end_dates =
+                    HashMap::from([(row.ts_code.clone(), rows[i - 1].trade_date.clone())]);
+                let mut history = super::load_many_tail_rows_with_warmup_need(
+                    &reader,
+                    "qfq",
+                    &end_dates,
+                    super::incremental_ind_history_need(&cache, 169),
+                )
+                .unwrap();
+                assert_eq!(history[&row.ts_code].trade_dates.len(), i);
+                let batch = super::calc_increment_inds_from_history(
+                    &reader,
+                    &row.ts_code,
+                    &HashMap::new(),
+                    &cache,
+                    history.remove(&row.ts_code),
+                    std::slice::from_ref(row),
+                )
+                .unwrap();
+                let single = super::calc_increment_one_stock_inds(
+                    &reader,
+                    &cache,
+                    169,
+                    &row.ts_code,
+                    "qfq",
+                    Some(&rows[i - 1].trade_date),
+                    std::slice::from_ref(row),
+                )
+                .unwrap();
+                for (name, series) in &expected {
+                    assert_eq!(batch[name], vec![series[i]], "{name} at {i}");
+                    assert_eq!(single[name], vec![series[i]], "{name} at {i}");
+                }
+            }
+            reader.conn.execute(
+                "INSERT INTO stock_data (ts_code, trade_date, adj_type, close) VALUES (?, ?, 'qfq', ?)",
+                duckdb::params![row.ts_code, row.trade_date, row.close],
+            ).unwrap();
+        }
+    }
 
     #[test]
     fn calculated_indicator_remains_available_to_later_indicators() {

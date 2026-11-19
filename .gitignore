@@ -12,6 +12,7 @@ __pycache__
 /.vscode
 .sisyphus
 /docs/*
+!/docs/strategy-meaning.md
 !/docs/tracking-strategies.md
 !/docs/cloud-sync.md
 !/docs/indicator-system.md

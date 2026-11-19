@@ -6,6 +6,8 @@
 
 ## 使用说明
 
+- [打分策略与筹码策略：含义与计算](docs/strategy-meaning.md)
+
 - [实时监控：双源抓取、量比与耗时](docs/realtime-monitor.md)
 
 - [跟踪策略：配置、观察与续算](docs/tracking-strategies.md)
