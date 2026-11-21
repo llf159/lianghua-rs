@@ -102,6 +102,8 @@ pub struct StrategyTriggerRankingMatch {
     pub similarity_score: f64,
     pub forward_excess_return_pct: Option<f64>,
     pub mfe_pct: f64,
+    #[serde(default)]
+    pub peak_close_return_pct: Option<f64>,
     pub mae_pct: f64,
 }
 
@@ -134,6 +136,7 @@ pub struct StrategyTriggerRankingRow {
     pub original_rank: Option<i64>,
     pub best_rank_3d: Option<i64>,
     pub ranking_score: Option<f64>,
+    /// Similarity-squared weighted share of rating neighbors reaching a closing return >= 15%, in percent.
     pub prediction_signal: Option<f64>,
     pub confidence: f64,
     pub sample_count: usize,

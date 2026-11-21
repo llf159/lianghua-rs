@@ -825,28 +825,8 @@ fn compute_strategy_trigger_similarity_ranking(
                         ).into_iter().map(|index| scored_candidates[index]).collect::<Vec<_>>();
                         let (summary, confidence, prediction_signal, average_similarity, diagnostics) =
                             super::samples::summarize_ranking_matches(&rating_candidates, candidates, background_p90);
-                        let mut display_candidates = Vec::with_capacity(5);
-                        for template_class in [1_i8, -1_i8] {
-                            if let Some(scored) = rating_candidates.iter().find(|scored| {
-                                candidates[scored.candidate_index].template_class == template_class
-                            }) {
-                                display_candidates.push(scored);
-                            }
-                        }
-                        for scored in &rating_candidates {
-                            if display_candidates
-                                .iter()
-                                .any(|selected| selected.candidate_index == scored.candidate_index)
-                            {
-                                continue;
-                            }
-                            display_candidates.push(scored);
-                            if display_candidates.len() >= 5 {
-                                break;
-                            }
-                        }
-                        let top_matches = display_candidates
-                            .into_iter()
+                        let top_matches = rating_candidates
+                            .iter()
                             .filter_map(|scored| {
                                 let candidate = &candidates[scored.candidate_index];
                                 let outcome = candidate.outcome.as_ref()?;
@@ -864,6 +844,7 @@ fn compute_strategy_trigger_similarity_ranking(
                                     similarity_score: scored.score,
                                     forward_excess_return_pct: outcome.excess_return_pct,
                                     mfe_pct: outcome.mfe_pct,
+                                    peak_close_return_pct: Some(outcome.peak_close_return_pct),
                                     mae_pct: outcome.mae_pct,
                                 })
                             })

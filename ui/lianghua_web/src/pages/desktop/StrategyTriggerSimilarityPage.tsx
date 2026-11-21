@@ -28,7 +28,7 @@ import './css/StrategyTriggerSimilarityPage.css'
 const MAX_STOCK_NAME_CANDIDATES = 12
 const DEFAULT_WINDOW_TRADE_DAYS = '30'
 const DEFAULT_POOL_SEGMENTS = '3'
-const DEFAULT_OUTCOME_TRADE_DAYS = '5'
+const DEFAULT_OUTCOME_TRADE_DAYS = '10'
 const DEFAULT_LIMIT = '30'
 const DEFAULT_BENCHMARK_INDEX_CODE = '000001.SH'
 const SHOW_FULL_MARKET_RANKING = false
@@ -559,7 +559,7 @@ export default function StrategyTriggerSimilarityPage() {
               </span>
             </div>
             <p className="trigger-sim-direction-note">
-              按相似历史的收缩超额收益排序，收益从次日开盘至评价末日收盘，未扣交易成本。
+              按评级近邻收盘涨幅至少15%的加权比例排序，同值比较平均MFE。收益从次报价开盘至评价末日收盘，未扣交易成本。
               有效样本数至少达到 8 才进入排名；匹配提升仅作参考，不参与排名门槛。样本支持不是置信概率。
 
             </p>
@@ -588,6 +588,7 @@ export default function StrategyTriggerSimilarityPage() {
                   <th>排名</th>
                   <th>股票</th>
                   <th>榜内分</th>
+                  <th>收盘≥15%</th>
                   <th>模板收缩超额</th>
                   <th>模板超额胜率</th>
                   <th>模板收益 / 超额</th>
@@ -622,6 +623,7 @@ export default function StrategyTriggerSimilarityPage() {
                         </DetailsLink>
                       </td>
                       <td>{formatNumber(row.rankingScore, 1)}</td>
+                      <td>{formatPercent(row.predictionSignal, 1)}</td>
                       <td className={outcomeTone(row.shrunkExcessReturnPct)}>
                         {formatPercent(row.shrunkExcessReturnPct)}
                       </td>

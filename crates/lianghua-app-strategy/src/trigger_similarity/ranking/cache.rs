@@ -412,6 +412,7 @@ mod tests {
                 return_pct: 2.1,
                 excess_return_pct: Some(1.1),
                 mfe_pct: 3.1,
+                peak_close_return_pct: 2.0,
                 mae_pct: -1.1,
             }),
             total_score: None,

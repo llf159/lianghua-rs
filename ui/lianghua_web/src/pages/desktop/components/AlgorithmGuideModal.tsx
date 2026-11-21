@@ -151,7 +151,7 @@ const ALGORITHM_SECTIONS: AlgorithmSection[] = [
       {
         heading: "截取目标窗口",
         description:
-          "以参考日为终点，取最近一段交易日作为目标形态。默认窗口 20 日、评价期 5 日，页面参数可以调整。",
+          "以参考日为终点，取最近一段交易日作为目标形态。默认窗口 20 日、评价期 10 报价日，页面参数可以调整。",
       },
       {
         heading: "隔离未来信息",
@@ -176,7 +176,7 @@ const ALGORITHM_SECTIONS: AlgorithmSection[] = [
       {
         heading: "形成相似榜",
         description:
-          "以相似度的平方加权历史超额收益，再按有效样本数收缩。只有有效样本足够时产生预测信号，并按信号形成榜内名次分。",
+          "以相似度平方加权评级近邻收盘涨幅至少15%的命中比例，有效样本数至少8时形成排名，同值比较平均MFE。超额收益及其收缩值继续作为参考。",
       },
     ],
     designs: [
@@ -209,7 +209,7 @@ const ALGORITHM_SECTIONS: AlgorithmSection[] = [
     reading: [
       "similarity_score 表示在本算法定义下“有多像”，不是未来上涨概率，也不是置信度百分比。",
       "N_eff 是有效样本数；它明显低于样本数时，说明结论主要由少数高相似窗口贡献。N_eff 至少达到 8，才生成预测排名。",
-      "prediction_signal 是相似历史的条件超额估计。ranking_score 是本次榜单内部的 0—100 名次分，不是预期收益。",
+      "prediction_signal 是评级近邻收盘涨幅至少15%的加权比例（0—100），尚未校准为未来成功概率。ranking_score 是本次榜内的名次刻度。",
       "MFE / MAE 只描述历史路径；匹配提升是近邻相对背景候选的诊断值，不参与排名门槛。",
     ],
     boundary:

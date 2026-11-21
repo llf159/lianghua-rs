@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 pub(super) const DEFAULT_WINDOW_TRADE_DAYS: usize = 20;
 pub(super) const DEFAULT_POOL_SEGMENTS: usize = 5;
-pub(super) const DEFAULT_OUTCOME_TRADE_DAYS: usize = 5;
+pub(super) const DEFAULT_OUTCOME_TRADE_DAYS: usize = 10;
 pub(super) const DEFAULT_LIMIT: usize = 30;
 pub(super) const MAX_POOL_SEGMENTS: usize = 12;
 pub(super) const MIN_SAMPLE_GAP_TRADE_DAYS: usize = 90;
@@ -188,6 +188,7 @@ pub(super) struct Outcome {
     return_pct: f64,
     excess_return_pct: Option<f64>,
     mfe_pct: f64,
+    peak_close_return_pct: f64,
     mae_pct: f64,
 }
 

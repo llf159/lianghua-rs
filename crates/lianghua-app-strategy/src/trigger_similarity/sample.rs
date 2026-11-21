@@ -45,6 +45,10 @@ pub(super) fn build_outcome(
         .iter()
         .map(|r| (r.high / entry - 1.0) * 100.0)
         .fold(f64::NEG_INFINITY, f64::max);
+    let peak_close_return_pct = future_rows
+        .iter()
+        .map(|row| (row.close / entry - 1.0) * 100.0)
+        .fold(f64::NEG_INFINITY, f64::max);
     let mae_pct = future_rows
         .iter()
         .map(|r| (r.low / entry - 1.0) * 100.0)
@@ -64,6 +68,7 @@ pub(super) fn build_outcome(
         return_pct,
         excess_return_pct,
         mfe_pct,
+        peak_close_return_pct,
         mae_pct,
     })
 }
@@ -457,7 +462,13 @@ mod tests {
         assert!((outcome.return_pct - 21.0).abs() < 1e-9);
         assert!((outcome.excess_return_pct.expect("excess") - 11.0).abs() < 1e-9);
         assert!((outcome.mfe_pct - 25.0).abs() < 1e-9);
+        assert!((outcome.peak_close_return_pct - 21.0).abs() < 1e-9);
         assert!((outcome.mae_pct + 5.0).abs() < 1e-9);
+        let mut wick_only = future.clone();
+        wick_only[1].close = 110.0;
+        let outcome = build_outcome(&[], &wick_only, 2, &benchmark).expect("wick outcome");
+        assert!((outcome.mfe_pct - 25.0).abs() < 1e-9);
+        assert!((outcome.peak_close_return_pct - 10.0).abs() < 1e-9);
     }
 
     #[test]

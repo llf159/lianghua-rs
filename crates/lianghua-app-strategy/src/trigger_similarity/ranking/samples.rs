@@ -282,9 +282,20 @@ pub(super) fn summarize_ranking_matches(
         .zip(background_similarity_p90)
         .map(|(near, background)| near - background);
     let supported = summary.effective_sample_count + EPS >= SHRINKAGE_STRENGTH;
-    let prediction_signal = supported
-        .then_some(summary.shrunk_excess_return_pct)
-        .flatten();
+    let prediction_signal = (supported && weight_sum > EPS).then(|| {
+        100.0
+            * rating_candidates
+                .iter()
+                .filter(|row| {
+                    candidates[row.candidate_index]
+                        .outcome
+                        .as_ref()
+                        .is_some_and(|outcome| outcome.peak_close_return_pct >= 15.0 - EPS)
+                })
+                .map(|row| (row.score / 100.0).powi(2))
+                .sum::<f64>()
+            / weight_sum
+    });
     let mut periods = rating_candidates
         .iter()
         .filter_map(|row| {
@@ -333,9 +344,9 @@ pub(super) fn assign_ranks(rows: &mut [StrategyTriggerRankingRow]) {
                 .total_cmp(&left_signal)
                 .then_with(|| {
                     right
-                        .excess_positive_rate
+                        .expected_mfe_pct
                         .unwrap_or(f64::NEG_INFINITY)
-                        .total_cmp(&left.excess_positive_rate.unwrap_or(f64::NEG_INFINITY))
+                        .total_cmp(&left.expected_mfe_pct.unwrap_or(f64::NEG_INFINITY))
                 })
                 .then_with(|| {
                     right
@@ -539,7 +550,7 @@ mod tests {
     }
 
     #[test]
-    fn prediction_uses_real_returns_and_keeps_matching_diagnostic_only() {
+    fn prediction_uses_peak_hit_share_and_keeps_matching_diagnostic_only() {
         use super::*;
         let dates = (1..=10)
             .map(|day| format!("202401{day:02}"))
@@ -565,7 +576,8 @@ mod tests {
                     end_trade_date: dates[index + 1].clone(),
                     return_pct: 2.0,
                     excess_return_pct: Some(2.0),
-                    mfe_pct: 100.0 * index as f64,
+                    mfe_pct: 100.0 * (index + 1) as f64,
+                    peak_close_return_pct: 20.0 * index as f64,
                     mae_pct: -100.0,
                 }),
                 total_score: None,
@@ -582,7 +594,7 @@ mod tests {
         let (summary, confidence, signal, _, diagnostics) =
             summarize_ranking_matches(&matches, &candidates, Some(60.0));
         assert!((summary.effective_sample_count - 8.0).abs() < 1e-12);
-        assert!((signal.unwrap() - 1.0).abs() < 1e-12);
+        assert!((signal.unwrap() - 87.5).abs() < 1e-12);
         assert_eq!(diagnostics.status, "available");
         assert_eq!(diagnostics.outcome_period_count, 8);
         assert_eq!(diagnostics.excess_return_std_pct, Some(0.0));
@@ -592,16 +604,35 @@ mod tests {
         let (_, flat_confidence, signal, _, diagnostics) =
             summarize_ranking_matches(&matches, &candidates, Some(50.0));
         assert!((confidence - flat_confidence).abs() < 1e-12);
-        assert_eq!(signal, Some(1.0));
+        assert_eq!(signal, Some(87.5));
         assert_eq!(diagnostics.status, "available");
         assert_eq!(diagnostics.similarity_lift, Some(0.0));
         let (_, _, signal, _, diagnostics) =
             summarize_ranking_matches(&matches, &candidates, Some(60.0));
-        assert_eq!(signal, Some(1.0));
+        assert_eq!(signal, Some(87.5));
         assert_eq!(diagnostics.similarity_lift, Some(-10.0));
         let (_, _, signal, _, diagnostics) = summarize_ranking_matches(&matches, &candidates, None);
-        assert_eq!(signal, Some(1.0));
+        assert_eq!(signal, Some(87.5));
         assert_eq!(diagnostics.similarity_lift, None);
+        // The opportunity signal remains available without a benchmark outcome.
+        for candidate in &mut candidates {
+            candidate.outcome.as_mut().unwrap().excess_return_pct = None;
+        }
+        candidates[0]
+            .outcome
+            .as_mut()
+            .unwrap()
+            .peak_close_return_pct = 15.0;
+        let (summary, _, signal, _, _) = summarize_ranking_matches(&matches, &candidates, None);
+        assert_eq!(summary.shrunk_excess_return_pct, None);
+        assert_eq!(signal, Some(100.0));
+        candidates[0]
+            .outcome
+            .as_mut()
+            .unwrap()
+            .peak_close_return_pct = 14.99;
+        let (_, _, signal, _, _) = summarize_ranking_matches(&matches, &candidates, None);
+        assert_eq!(signal, Some(87.5));
         candidates[0].outcome.as_mut().unwrap().end_trade_date = dates[8].clone();
         let (_, _, _, _, diagnostics) =
             summarize_ranking_matches(&matches, &candidates, Some(50.0));

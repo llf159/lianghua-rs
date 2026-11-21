@@ -45,6 +45,7 @@ export type StrategyTriggerSimilarityRow = {
   matchedRuleNames: string[]
   forwardReturnPct: number
   forwardExcessReturnPct?: number | null
+  peakCloseReturnPct?: number | null
   mfePct: number
   maePct: number
   totalScore?: number | null
@@ -99,6 +100,7 @@ export type StrategyTriggerRankingMatch = {
   templateClass: number
   similarityScore: number
   forwardExcessReturnPct?: number | null
+  peakCloseReturnPct?: number | null
   mfePct: number
   maePct: number
 }

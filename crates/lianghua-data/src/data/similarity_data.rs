@@ -2,7 +2,7 @@ use duckdb::{Connection, params};
 
 use super::similarity_db_path;
 
-pub const SIMILARITY_ALGORITHM_VERSION: &str = "representative-return-ranking-v15";
+pub const SIMILARITY_ALGORITHM_VERSION: &str = "representative-close-opportunity-ranking-v17";
 
 pub fn similarity_algorithm_is_current(conn: &Connection, database: &str) -> Result<bool, String> {
     let exists: bool = conn.query_row(

@@ -257,7 +257,8 @@ export default function OverviewSimilarityRankingPage() {
           <th>股票</th>
           <th>三日优排名</th>
           <th>总市值(亿)</th>
-          <th title="按收缩超额排序后的榜内名次刻度，不是收益率或成功概率">榜内分</th>
+          <th title="按近邻收盘达标比例排序的榜内名次刻度">榜内分</th>
+          <th title="相似度平方加权的历史近邻收盘涨幅至少15%比例">收盘≥15%</th>
           <th>收缩超额</th>
           <th>超额胜率</th>
           <th>收益 / 超额</th>
@@ -424,7 +425,7 @@ export default function OverviewSimilarityRankingPage() {
             </span>
           </div>
           <p className="trigger-sim-direction-note">
-            历史样本覆盖上涨、普通与下跌结果，按相似历史的收缩超额收益排序。有效样本数至少达到8才排名；匹配提升仅作参考，不参与排名门槛。榜内分和样本支持均不代表成功概率。
+            按评级近邻在评价期内收盘涨幅至少15%的加权比例排序，同值时比较平均MFE。有效样本数至少8才排名；该比例是历史近邻统计，未经未来概率校准。
           </p>
           <details className="trigger-sim-indicator-details">
             <summary>计算耗时与样本口径</summary>
@@ -484,6 +485,7 @@ export default function OverviewSimilarityRankingPage() {
                       <td>{row.bestRank3d ?? '--'}</td>
                       <td>{formatNumber(row.totalMvYi, 2)}</td>
                       <td>{formatNumber(row.rankingScore)}</td>
+                      <td>{formatPercent(row.predictionSignal, 1)}</td>
                       <td className={outcomeTone(row.shrunkExcessReturnPct)}>
                         {formatPercent(row.shrunkExcessReturnPct)}
                       </td>
