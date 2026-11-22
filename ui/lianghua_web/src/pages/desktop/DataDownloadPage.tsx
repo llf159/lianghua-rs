@@ -200,7 +200,7 @@ function formatPhaseLabel(phase: string | null | undefined) {
     case 'score_write': return '完成批次写入'
     case 'score_scene_rank': return '计算场景排名'
     case 'score_summary_rank': return '计算总榜排名'
-    case 'score_keys': return '构建结果主键'
+    case 'score_keys': return '校验结果键'
     case 'score_publish': return '发布评分及排名'
     case 'score_checkpoint': return '结果库落盘'
     case 'prepare': return '准备相似度数据'

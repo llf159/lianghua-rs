@@ -696,16 +696,23 @@ pub fn run_strategy_paper_validation(
         HashMap::new()
     };
 
+    let worker_sources = std::sync::Mutex::new((
+        reader,
+        CyqChenFieldInjector::new(source_path, &used_cyq_chen_keys),
+        SimilarityRankFieldInjector::new(source_path, needs_similarity_rank),
+    ));
     let prepared_stocks = Mutex::new(Vec::new());
     ts_codes
         .par_chunks(128)
         .try_for_each(|ts_group| -> Result<(), String> {
-            let worker_buy_program = buy_program.clone();
-            let worker_reader =
-                DataReader::new_with_runtime_keys(source_path, &required_runtime_keys)?;
-            let cyq_chen_injector = CyqChenFieldInjector::new(source_path, &used_cyq_chen_keys);
-            let similarity_rank_injector =
-                SimilarityRankFieldInjector::new(source_path, needs_similarity_rank);
+            let (worker_reader, cyq_chen_injector, similarity_rank_injector) = {
+                let sources = worker_sources.lock().map_err(|e| e.to_string())?;
+                (
+                    sources.0.try_clone()?,
+                    sources.1.try_clone()?,
+                    sources.2.try_clone()?,
+                )
+            };
             let mut out = Vec::new();
 
             for ts_code in ts_group {
@@ -880,7 +887,7 @@ pub fn run_strategy_paper_validation(
                         name_map.get(ts_code),
                         st_list.contains(ts_code),
                         total_share_map.get(ts_code).copied(),
-                        &worker_buy_program,
+                        &buy_program,
                         &sell_runtime_keys,
                         &rank_score_series_map,
                         needs_rank_score,

@@ -407,10 +407,6 @@ pub fn check_databases(source_path: &str) -> Result<DatabaseCheckReport, String>
 fn open_check_connection(path: &Path) -> Result<Connection, String> {
     let config = Config::default()
         .access_mode(AccessMode::ReadOnly)
-        .map_err(|e| e.to_string())?
-        .threads(4)
-        .map_err(|e| e.to_string())?
-        .max_memory("2GB")
         .map_err(|e| e.to_string())?;
     Connection::open_with_flags(path, config)
         .map_err(|e| format!("只读打开 {} 失败: {e}", path.display()))

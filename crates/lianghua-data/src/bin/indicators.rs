@@ -17,8 +17,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !path.exists() {
         return Err(format!("原始库不存在：{}", path.display()).into());
     }
+    let control = std::sync::Arc::new(lianghua_model::task::TaskControl::default());
+    let _memory = lianghua_model::resource::TaskMemory::enter(control.clone(), false)?;
+    let _active = lianghua_model::task::ActiveTask::enter(vec![control]);
     let conn = duckdb::Connection::open(path)?;
-    conn.execute_batch("SET threads=1; SET memory_limit='2GB'")?;
     let count = refresh_with_progress(
         &conn,
         &source,

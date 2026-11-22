@@ -4,6 +4,7 @@ version = "0.2.0"
 edition = "2024"
 
 [dependencies]
+lianghua-model = { path = "../lianghua-model" }
 lianghua-app-chart = { path = "../lianghua-app-chart" }
 lianghua-app-market = { path = "../lianghua-app-market" }
 lianghua-app-shared = { path = "../lianghua-app-shared" }
@@ -15,7 +16,7 @@ lianghua-provider = { path = "../lianghua-provider" }
 lianghua-scoring = { path = "../lianghua-scoring" }
 chrono = "0.4.45"
 csv = "1.4.0"
-duckdb = { version = "~1.20000.0", features = ["appender-arrow"] }
+duckdb = { package = "lianghua-duckdb", path = "../lianghua-duckdb", features = ["appender-arrow"] }
 reqwest = { version = "0.13.5", features = ["blocking", "json", "query"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.149"

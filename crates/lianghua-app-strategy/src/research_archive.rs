@@ -8,9 +8,15 @@ use serde_json::Value;
 
 static RESEARCH_EXECUTION: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
-pub fn try_research_execution() -> Result<std::sync::RwLockWriteGuard<'static, ()>, String> {
-    match RESEARCH_EXECUTION.try_write() {
-        Ok(guard) => Ok(guard),
+pub struct ResearchExecution {
+    _active: lianghua_model::task::ActiveTask,
+    _memory: lianghua_model::resource::TaskMemory,
+    _guard: std::sync::RwLockWriteGuard<'static, ()>,
+}
+
+pub fn try_research_execution() -> Result<ResearchExecution, String> {
+    let guard = match RESEARCH_EXECUTION.try_write() {
+        Ok(guard) => Ok::<_, String>(guard),
         Err(std::sync::TryLockError::Poisoned(error)) => {
             RESEARCH_EXECUTION.clear_poison();
             Ok(error.into_inner())
@@ -18,7 +24,14 @@ pub fn try_research_execution() -> Result<std::sync::RwLockWriteGuard<'static, (
         Err(std::sync::TryLockError::WouldBlock) => {
             Err("已有研究或模拟任务正在运行，请等待完成或取消".into())
         }
-    }
+    }?;
+    let control = std::sync::Arc::new(lianghua_model::task::TaskControl::default());
+    let memory = lianghua_model::resource::TaskMemory::enter(control.clone(), false)?;
+    Ok(ResearchExecution {
+        _active: lianghua_model::task::ActiveTask::enter(vec![control]),
+        _memory: memory,
+        _guard: guard,
+    })
 }
 
 pub fn try_data_execution() -> Result<std::sync::RwLockReadGuard<'static, ()>, String> {

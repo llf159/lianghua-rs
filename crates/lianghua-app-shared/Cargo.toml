@@ -4,5 +4,6 @@ version = "0.2.0"
 edition = "2024"
 
 [dependencies]
+lianghua-model = { path = "../lianghua-model" }
 lianghua-data = { path = "../lianghua-data" }
-duckdb = { version = "~1.20000.0", features = ["appender-arrow"] }
+duckdb = { package = "lianghua-duckdb", path = "../lianghua-duckdb", features = ["appender-arrow"] }

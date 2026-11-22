@@ -1,3 +1,4 @@
+use lianghua_model::resource::MemoryCache;
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -45,7 +46,7 @@ struct IndicatorCacheEntry {
     caches: Vec<IndsCache>,
 }
 
-static INDICATOR_CACHE: OnceLock<Mutex<HashMap<String, IndicatorCacheEntry>>> = OnceLock::new();
+static INDICATOR_CACHE: OnceLock<Mutex<MemoryCache<String, IndicatorCacheEntry>>> = OnceLock::new();
 
 fn round_series(mut series: Vec<Option<f64>>, scale: usize) -> Vec<Option<f64>> {
     for value in &mut series {
@@ -140,12 +141,12 @@ pub fn cache_ind_build_from_path(indicator_path: &Path) -> Result<Vec<IndsCache>
         })
     })(indicator_path)?;
     let cache_key = indicator_path.to_string_lossy().to_string();
-    let cache_store = (|| -> &'static Mutex<HashMap<String, IndicatorCacheEntry>> {
-        INDICATOR_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+    let cache_store = (|| -> &'static Mutex<MemoryCache<String, IndicatorCacheEntry>> {
+        INDICATOR_CACHE.get_or_init(|| Mutex::new(MemoryCache::default()))
     })();
 
     {
-        let cache_map = cache_store
+        let mut cache_map = cache_store
             .lock()
             .map_err(|_| "指标缓存锁已中毒".to_string())?;
         if let Some(entry) = cache_map.get(&cache_key) {
@@ -177,6 +178,7 @@ pub fn cache_ind_build_from_path(indicator_path: &Path) -> Result<Vec<IndsCache>
             stamp,
             caches: caches.clone(),
         },
+        (text.len().saturating_mul(16)) as u64,
     );
 
     Ok(caches)

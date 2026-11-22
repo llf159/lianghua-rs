@@ -1,3 +1,4 @@
+pub mod resource;
 pub mod scoring;
 pub mod task;
 

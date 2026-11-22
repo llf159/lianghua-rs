@@ -37,6 +37,11 @@ export type RankingComputeStatus = {
   strategyPath: string
   sourceDb: RankComputeDbRange
   resultDb: RankComputeDbRange
+  scoreResume: {
+    startDate: string
+    endDate: string
+    adjType: string
+  } | null
   similarityRankDb: RankComputeDbRange
   similarityActiveConfig?: StrategySimilarityActiveConfig | null
   conceptPerformanceDb: RankComputeDbRange

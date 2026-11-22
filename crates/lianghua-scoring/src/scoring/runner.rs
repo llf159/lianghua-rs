@@ -5,7 +5,8 @@ use lianghua_model::scoring::{
 use lianghua_model::{DownloadProgress, DownloadProgressCallback};
 use rayon::prelude::*;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, hash_map::DefaultHasher},
+    hash::{Hash, Hasher},
     sync::mpsc::{channel, sync_channel},
     sync::{Arc, Mutex},
     thread, time,
@@ -15,7 +16,10 @@ use crate::data::{
     DataReader, RowData, RuntimeKeyCollectOptions, ScoreRule, ScoreScene,
     collect_runtime_keys_from_expr_programs, expr_program_uses_runtime_key, result_db_path,
     runtime::row_into_rt,
-    scoring_store::{init_result_db, rank_scene_rows, write_score_batches_from_channel},
+    scoring_store::{
+        init_result_db, rank_scene_rows, score_compute_checkpoint_matches,
+        write_score_batches_from_channel,
+    },
     source_db_path,
 };
 use crate::scoring::{
@@ -36,8 +40,6 @@ use crate::scoring::{
 
 use super::tracking::ScoringTrackingPlan;
 use lianghua_core::expr::eval::Value;
-
-const SCORING_MEMORY_GROUP_SIZE: usize = 32;
 
 fn emit_scoring_progress(
     progress_cb: Option<&DownloadProgressCallback<'_>>,
@@ -251,7 +253,7 @@ fn rank_summary_rows_preserving_order(
 }
 
 fn scoring_single_core(
-    row_data: RowData,
+    mut row_data: RowData,
     ts_code: &str,
     score_start_date: &str,
     rules_cache: &[CachedRule],
@@ -270,7 +272,7 @@ fn scoring_single_core(
     ),
     String,
 > {
-    let trade_dates = row_data.trade_dates.clone();
+    let trade_dates = std::mem::take(&mut row_data.trade_dates);
     let mut rt = row_into_rt(row_data)?;
     if !tracking.is_empty() {
         for value in rt.vars.values_mut() {
@@ -327,9 +329,11 @@ fn scoring_single_core(
     )?;
     let kept_scores = &total_scores[keep_from..];
 
-    for rule in &mut details_series {
-        rule.series = rule.series.split_off(keep_from);
-        rule.triggered = rule.triggered.split_off(keep_from);
+    if keep_from > 0 {
+        for rule in &mut details_series {
+            rule.series.drain(..keep_from);
+            rule.triggered.drain(..keep_from);
+        }
     }
 
     let summary = if matches!(
@@ -632,18 +636,10 @@ fn scoring_stock_group_batch(
         }
         let mut row = match rows_map.remove(ts_code.as_str()) {
             Some(r) => r,
-            None => {
-                let tail =
-                    worker_reader.load_one_tail_rows(ts_code, adj_type, end_date, need_rows)?;
-                if tail.trade_dates.is_empty() {
-                    RowData {
-                        trade_dates: Vec::new(),
-                        cols: HashMap::new(),
-                    }
-                } else {
-                    tail
-                }
-            }
+            None => RowData {
+                trade_dates: Vec::new(),
+                cols: HashMap::new(),
+            },
         };
         if row.trade_dates.len() < need_rows {
             let tail = worker_reader.load_one_tail_rows(ts_code, adj_type, end_date, need_rows)?;
@@ -722,6 +718,53 @@ fn scoring_stock_group_batch(
         group_batch.extend(batch);
     }
     Ok(group_batch)
+}
+
+// Shared by execution and the status page so only matching input generations are offered.
+pub fn scoring_compute_resume_key(
+    source_dir: &str,
+    strategy_path: Option<&str>,
+    adj_type: &str,
+    start_date: &str,
+    end_date: &str,
+) -> Result<String, String> {
+    // Bump the format tag when scoring semantics change without changing the strategy.
+    let mut hash = DefaultHasher::new();
+    ("score-compute-stage-v1", adj_type, start_date, end_date).hash(&mut hash);
+    std::fs::read_to_string(crate::data::resolve_strategy_path(
+        source_dir,
+        strategy_path,
+    ))
+    .map_err(|e| e.to_string())?
+    .replace("\r\n", "\n")
+    .hash(&mut hash);
+    let mut inputs = std::fs::read_dir(source_dir)
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    inputs.sort_by_key(|entry| entry.file_name());
+    for entry in inputs {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("scoring_result.db")
+            || ![".db", ".db.wal", ".csv", ".toml"]
+                .iter()
+                .any(|suffix| name.ends_with(suffix))
+        {
+            continue;
+        }
+        let metadata = entry.metadata().map_err(|e| e.to_string())?;
+        if !metadata.is_file() {
+            continue;
+        }
+        name.hash(&mut hash);
+        metadata.len().hash(&mut hash);
+        metadata
+            .modified()
+            .map_err(|e| e.to_string())?
+            .hash(&mut hash);
+    }
+    Ok(hash.finish().to_string())
 }
 
 pub fn scoring_all_to_db(
@@ -813,7 +856,12 @@ pub fn scoring_all_to_db(
     ))
     .map_err(|e| format!("读取评分策略快照失败:{e}"))?
     .replace("\r\n", "\n");
+    let compute_resume_key =
+        || scoring_compute_resume_key(source_dir, strategy_path, adj_type, start_date, end_date);
+    let resume_key = compute_resume_key()?;
+    let resume = score_compute_checkpoint_matches(out_db_path, &resume_key)?;
     let tracking_calendar = serde_json::to_string(&tracking.calendar).map_err(|e| e.to_string())?;
+    let queue_memory = lianghua_model::resource::ByteBudget::new(32, 256 << 20)?;
     let (tx, rx) = sync_channel(2);
     let abort_tx = tx.clone();
     let db_path = out_db_path.to_string();
@@ -838,76 +886,110 @@ pub fn scoring_all_to_db(
         )
     });
 
-    tx.send(ScoreWriteMessage::StrategySnapshot(strategy_snapshot))
-        .map_err(|e| format!("发送评分策略快照失败:{e}"))?;
-    tx.send(ScoreWriteMessage::TrackingCalendar(tracking_calendar))
-        .map_err(|e| format!("发送跟踪日历失败:{e}"))?;
+    tx.send(ScoreWriteMessage::Begin {
+        resume_key: resume_key.clone(),
+        resume,
+    })
+    .map_err(|e| format!("发送评分阶段状态失败:{e}"))?;
     let compute_started_at = time::Instant::now();
-    let progress_counter = Mutex::new(0_usize);
-    let total_stock_count = tc_list.len();
-    emit_scoring_progress(
-        progress_cb,
-        "score_compute",
-        0,
-        total_stock_count,
-        format!("评分数据准备完成，开始计算 {total_stock_count} 只股票。"),
-    );
-    let compute_result = tc_list
-        .par_chunks(SCORING_MEMORY_GROUP_SIZE)
-        .try_for_each_init(
-            || {
-                DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys).map(
-                    |reader| {
-                        (
-                            tx.clone(),
-                            reader,
-                            CyqChenFieldInjector::new(source_dir, &used_cyq_chen_keys),
-                            SimilarityRankFieldInjector::new(source_dir, uses_similarity_rank),
-                        )
-                    },
-                )
-            },
-            |worker, ts_group| -> Result<(), String> {
-                lianghua_model::task::checkpoint()?;
-                let (sender, worker_reader, cyq_chen_injector, similarity_rank_injector) =
-                    worker.as_ref().map_err(Clone::clone)?;
-                let batch = scoring_stock_group_batch(
-                    worker_reader,
-                    adj_type,
-                    start_date,
-                    end_date,
-                    &query_start_date,
-                    need_rows,
-                    &rules_cache,
-                    &rule_scene_meta,
-                    &scenes,
-                    &st_list,
-                    &total_share_map,
-                    cyq_chen_injector,
-                    similarity_rank_injector,
-                    uses_similarity_rank,
-                    ts_group,
-                    ScoringMemoryMode::All,
-                    &tracking,
-                    true,
-                )?;
-                sender
-                    .send(ScoreWriteMessage::Batch(batch))
-                    .map_err(|e| format!("发送评分批次失败:{e}"))?;
-                let mut processed = progress_counter.lock().expect("评分进度锁被污染");
-                *processed += ts_group.len();
-                let processed = *processed;
-                emit_scoring_progress(
-                    progress_cb,
-                    "score_compute",
-                    processed,
-                    total_stock_count,
-                    format!("已完成 {processed}/{total_stock_count} 只股票评分。"),
-                );
-                Ok(())
-            },
+    let compute_result = if resume {
+        emit_scoring_progress(
+            progress_cb,
+            "score_write",
+            0,
+            0,
+            "发现已提交的评分、触发计算断点，跳过逐股重算，直接继续排名。",
         );
-    let compute_result = compute_result.and_then(|()| tracking.ensure_unchanged(source_dir));
+        Ok(())
+    } else {
+        tx.send(ScoreWriteMessage::StrategySnapshot(strategy_snapshot))
+            .map_err(|e| format!("发送评分策略快照失败:{e}"))?;
+        tx.send(ScoreWriteMessage::TrackingCalendar(tracking_calendar))
+            .map_err(|e| format!("发送跟踪日历失败:{e}"))?;
+        let progress_counter = Mutex::new(0_usize);
+        let total_stock_count = tc_list.len();
+        emit_scoring_progress(
+            progress_cb,
+            "score_compute",
+            0,
+            total_stock_count,
+            format!("评分数据准备完成，开始计算 {total_stock_count} 只股票。"),
+        );
+        let group_size = lianghua_model::resource::ResourcePlan::detect().batch(
+            need_rows
+                .max(1)
+                .saturating_mul((rules_cache.len() + 8).saturating_mul(64)),
+            128,
+        );
+        let worker_sources = Mutex::new((
+            dr,
+            CyqChenFieldInjector::new(source_dir, &used_cyq_chen_keys),
+            SimilarityRankFieldInjector::new(source_dir, uses_similarity_rank),
+        ));
+        let compute_pool = crate::data::resource::compute_pool(128 << 20)?;
+        let compute_result = compute_pool.install(|| {
+            tc_list.par_chunks(group_size).try_for_each_init(
+                || -> Result<_, String> {
+                    let sources = worker_sources.lock().map_err(|e| e.to_string())?;
+                    Ok((
+                        tx.clone(),
+                        sources.0.try_clone()?,
+                        sources.1.try_clone()?,
+                        sources.2.try_clone()?,
+                    ))
+                },
+                |worker, ts_group| -> Result<(), String> {
+                    lianghua_model::task::checkpoint()?;
+                    let (sender, worker_reader, cyq_chen_injector, similarity_rank_injector) =
+                        worker.as_ref().map_err(Clone::clone)?;
+                    let batch = scoring_stock_group_batch(
+                        worker_reader,
+                        adj_type,
+                        start_date,
+                        end_date,
+                        &query_start_date,
+                        need_rows,
+                        &rules_cache,
+                        &rule_scene_meta,
+                        &scenes,
+                        &st_list,
+                        &total_share_map,
+                        cyq_chen_injector,
+                        similarity_rank_injector,
+                        uses_similarity_rank,
+                        ts_group,
+                        ScoringMemoryMode::All,
+                        &tracking,
+                        true,
+                    )?;
+                    let queue_permit = queue_memory.acquire(batch.memory_bytes() as u64)?;
+                    sender
+                        .send(ScoreWriteMessage::BudgetedBatch(batch, queue_permit))
+                        .map_err(|e| format!("发送评分批次失败:{e}"))?;
+                    let mut processed = progress_counter.lock().expect("评分进度锁被污染");
+                    *processed += ts_group.len();
+                    let processed = *processed;
+                    emit_scoring_progress(
+                        progress_cb,
+                        "score_compute",
+                        processed,
+                        total_stock_count,
+                        format!("已完成 {processed}/{total_stock_count} 只股票评分。"),
+                    );
+                    Ok(())
+                },
+            )
+        });
+        drop(worker_sources);
+        compute_result
+    };
+    let compute_result = compute_result.and_then(|()| {
+        tracking.ensure_unchanged(source_dir)?;
+        if compute_resume_key()? != resume_key {
+            return Err("计算期间行情或策略发生变化，评分断点未确认，请重新计算".into());
+        }
+        Ok(())
+    });
     let compute_and_send_batches_ms = compute_started_at.elapsed().as_millis() as u64;
     emit_scoring_progress(
         progress_cb,
@@ -919,6 +1001,9 @@ pub fn scoring_all_to_db(
 
     if let Err(err) = &compute_result {
         let _ = abort_tx.send(ScoreWriteMessage::Abort(err.clone()));
+    } else {
+        tx.send(ScoreWriteMessage::Finish)
+            .map_err(|e| format!("确认评分计算完成失败:{e}"))?;
     }
     drop(abort_tx);
     drop(tx);
@@ -982,7 +1067,6 @@ pub fn scoring_all_to_db(
             profile.writer.batch_count,
         );
     })(&profile);
-    drop(dr);
     if adj_type == "qfq" {
         let tracking_inputs_unchanged = tracking.ensure_unchanged(source_dir).is_ok();
         crate::data::download_state::clear_pending_derived_rebuild(
@@ -1082,58 +1166,71 @@ pub fn scoring_all_to_memory_with_mode(
     if let Some(progress) = progress {
         progress(0, tc_list.len())?;
     }
-    let batch = tc_list
-        .par_chunks(SCORING_MEMORY_GROUP_SIZE)
-        .map_init(
-            || {
-                DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys).map(
-                    |reader| {
-                        (
-                            reader,
-                            CyqChenFieldInjector::new(source_dir, &used_cyq_chen_keys),
-                            SimilarityRankFieldInjector::new(source_dir, uses_similarity_rank),
-                        )
-                    },
-                )
-            },
-            |worker, ts_group| -> Result<ScoreBatch, String> {
-                let (worker_reader, cyq_chen_injector, similarity_rank_injector) =
-                    worker.as_ref().map_err(Clone::clone)?;
-                let batch = scoring_stock_group_batch(
-                    worker_reader,
-                    adj_type,
-                    start_date,
-                    end_date,
-                    &query_start_date,
-                    need_rows,
-                    &rules_cache,
-                    &rule_scene_meta,
-                    &scenes,
-                    &st_list,
-                    &total_share_map,
-                    cyq_chen_injector,
-                    similarity_rank_injector,
-                    uses_similarity_rank,
-                    ts_group,
-                    memory_mode,
-                    &tracking,
-                    false,
-                )?;
-                if let Some(progress) = progress {
-                    let mut finished = progress_counter.lock().map_err(|_| "评分进度锁已损坏")?;
-                    *finished += ts_group.len();
-                    progress(*finished, tc_list.len())?;
-                }
-                Ok(batch)
-            },
-        )
-        .try_reduce(ScoreBatch::default, |mut left, right| {
-            left.extend(right);
-            Ok(left)
-        })?;
+    let group_size = lianghua_model::resource::ResourcePlan::detect().batch(
+        need_rows
+            .max(1)
+            .saturating_mul((rules_cache.len() + 8).saturating_mul(64)),
+        128,
+    );
+    let worker_sources = Mutex::new((
+        dr,
+        CyqChenFieldInjector::new(source_dir, &used_cyq_chen_keys),
+        SimilarityRankFieldInjector::new(source_dir, uses_similarity_rank),
+    ));
+    let compute_pool = crate::data::resource::compute_pool(128 << 20)?;
+    let batch = compute_pool.install(|| {
+        tc_list
+            .par_chunks(group_size)
+            .map_init(
+                || -> Result<_, String> {
+                    let sources = worker_sources.lock().map_err(|e| e.to_string())?;
+                    Ok((
+                        sources.0.try_clone()?,
+                        sources.1.try_clone()?,
+                        sources.2.try_clone()?,
+                    ))
+                },
+                |worker, ts_group| -> Result<ScoreBatch, String> {
+                    let (worker_reader, cyq_chen_injector, similarity_rank_injector) =
+                        worker.as_ref().map_err(Clone::clone)?;
+                    let batch = scoring_stock_group_batch(
+                        worker_reader,
+                        adj_type,
+                        start_date,
+                        end_date,
+                        &query_start_date,
+                        need_rows,
+                        &rules_cache,
+                        &rule_scene_meta,
+                        &scenes,
+                        &st_list,
+                        &total_share_map,
+                        cyq_chen_injector,
+                        similarity_rank_injector,
+                        uses_similarity_rank,
+                        ts_group,
+                        memory_mode,
+                        &tracking,
+                        false,
+                    )?;
+                    if let Some(progress) = progress {
+                        let mut finished =
+                            progress_counter.lock().map_err(|_| "评分进度锁已损坏")?;
+                        *finished += ts_group.len();
+                        progress(*finished, tc_list.len())?;
+                    }
+                    Ok(batch)
+                },
+            )
+            .try_reduce(ScoreBatch::default, |mut left, right| {
+                left.extend(right);
+                Ok(left)
+            })
+    })?;
+    drop(worker_sources);
     let compute_and_send_batches_ms = compute_started_at.elapsed().as_millis() as u64;
 
-    let batch_count = (tc_list.len() + SCORING_MEMORY_GROUP_SIZE - 1) / SCORING_MEMORY_GROUP_SIZE;
+    let batch_count = tc_list.len().div_ceil(group_size);
 
     let mut batch = batch;
     if !batch.summary_rows.is_empty() {

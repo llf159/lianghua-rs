@@ -91,6 +91,45 @@ pub struct ScoreBatch {
 }
 
 impl ScoreBatch {
+    pub fn memory_bytes(&self) -> usize {
+        self.summary_rows.capacity() * std::mem::size_of::<ScoreSummary>()
+            + self.detail_rows.capacity() * std::mem::size_of::<ScoreDetails>()
+            + self.compact_rule_rows.capacity() * std::mem::size_of::<CompactRuleScore>()
+            + self.scene_rows.capacity() * std::mem::size_of::<SceneDetails>()
+            + self.tracking_states.capacity() * std::mem::size_of::<TrackingScoreState>()
+            + self
+                .summary_rows
+                .iter()
+                .map(|r| r.ts_code.capacity() + r.trade_date.capacity())
+                .sum::<usize>()
+            + self
+                .detail_rows
+                .iter()
+                .map(|r| r.ts_code.capacity() + r.trade_date.capacity() + r.rule_name.capacity())
+                .sum::<usize>()
+            + self
+                .scene_rows
+                .iter()
+                .map(|r| {
+                    r.ts_code.capacity()
+                        + r.trade_date.capacity()
+                        + r.scene_name.capacity()
+                        + r.direction.capacity()
+                        + r.stage.as_ref().map_or(0, String::capacity)
+                })
+                .sum::<usize>()
+            + self
+                .tracking_states
+                .iter()
+                .map(|r| {
+                    r.ts_code.capacity()
+                        + r.trade_date.capacity()
+                        + r.config_hash.capacity()
+                        + r.input_stamp.capacity()
+                        + r.state_json.capacity()
+                })
+                .sum::<usize>()
+    }
     pub fn extend(&mut self, other: ScoreBatch) {
         let summary_offset = self.summary_rows.len() as u32;
         self.summary_rows.extend(other.summary_rows);
@@ -108,9 +147,12 @@ impl ScoreBatch {
 
 #[derive(Debug)]
 pub enum ScoreWriteMessage {
+    Begin { resume_key: String, resume: bool },
+    Finish,
     StrategySnapshot(String),
     TrackingCalendar(String),
     Batch(ScoreBatch),
+    BudgetedBatch(ScoreBatch, Arc<crate::resource::BytePermit>),
     Abort(String),
 }
 

@@ -11,17 +11,23 @@ pub enum TaskState {
     Finishing,
 }
 
-pub struct TaskControl(AtomicU8);
+pub struct TaskControl {
+    state: AtomicU8,
+    pub(crate) memory: RwLock<Option<Arc<crate::resource::MemoryLease>>>,
+}
 
 impl Default for TaskControl {
     fn default() -> Self {
-        Self(AtomicU8::new(TaskState::Running as u8))
+        Self {
+            state: AtomicU8::new(TaskState::Running as u8),
+            memory: RwLock::new(None),
+        }
     }
 }
 
 impl TaskControl {
     pub fn request(&self) -> Result<(), String> {
-        self.0
+        self.state
             .compare_exchange(
                 TaskState::Running as u8,
                 TaskState::Stop as u8,
@@ -32,14 +38,17 @@ impl TaskControl {
             .map_err(|_| "任务已停止或正在结束，不能重复操作".into())
     }
     pub fn state(&self) -> TaskState {
-        match self.0.load(Ordering::SeqCst) {
+        match self.state.load(Ordering::SeqCst) {
             0 => TaskState::Running,
             1 => TaskState::Stop,
             _ => TaskState::Finishing,
         }
     }
     pub fn seal(&self) -> TaskState {
-        match self.0.swap(TaskState::Finishing as u8, Ordering::SeqCst) {
+        match self
+            .state
+            .swap(TaskState::Finishing as u8, Ordering::SeqCst)
+        {
             0 => TaskState::Running,
             1 => TaskState::Stop,
             _ => TaskState::Finishing,

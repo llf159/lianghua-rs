@@ -1,3 +1,4 @@
+use lianghua_model::resource::MemoryCache;
 use std::{
     collections::HashMap,
     fs,
@@ -14,17 +15,17 @@ use crate::data::{
 
 const DEFAULT_ADJ_TYPE: &str = "qfq";
 
-static STOCK_TEXT_MAP_CACHE: OnceLock<Mutex<HashMap<String, HashMap<String, String>>>> =
+static STOCK_TEXT_MAP_CACHE: OnceLock<Mutex<MemoryCache<String, HashMap<String, String>>>> =
     OnceLock::new();
-static STOCK_NUM_MAP_CACHE: OnceLock<Mutex<HashMap<String, HashMap<String, f64>>>> =
+static STOCK_NUM_MAP_CACHE: OnceLock<Mutex<MemoryCache<String, HashMap<String, f64>>>> =
     OnceLock::new();
 
-fn stock_text_map_cache() -> &'static Mutex<HashMap<String, HashMap<String, String>>> {
-    STOCK_TEXT_MAP_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+fn stock_text_map_cache() -> &'static Mutex<MemoryCache<String, HashMap<String, String>>> {
+    STOCK_TEXT_MAP_CACHE.get_or_init(|| Mutex::new(MemoryCache::default()))
 }
 
-fn stock_num_map_cache() -> &'static Mutex<HashMap<String, HashMap<String, f64>>> {
-    STOCK_NUM_MAP_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+fn stock_num_map_cache() -> &'static Mutex<MemoryCache<String, HashMap<String, f64>>> {
+    STOCK_NUM_MAP_CACHE.get_or_init(|| Mutex::new(MemoryCache::default()))
 }
 
 fn cached_string_map(
@@ -44,7 +45,14 @@ fn cached_string_map(
     stock_text_map_cache()
         .lock()
         .map_err(|_| "基础文本缓存锁已损坏".to_string())?
-        .insert(cache_key, value.clone());
+        .insert(
+            cache_key,
+            value.clone(),
+            value
+                .iter()
+                .map(|(k, v)| (k.capacity() + v.capacity() + 64) as u64)
+                .sum(),
+        );
     Ok(value)
 }
 
@@ -65,7 +73,11 @@ fn cached_number_map(
     stock_num_map_cache()
         .lock()
         .map_err(|_| "基础数值缓存锁已损坏".to_string())?
-        .insert(cache_key, value.clone());
+        .insert(
+            cache_key,
+            value.clone(),
+            value.iter().map(|(k, _)| (k.capacity() + 64) as u64).sum(),
+        );
     Ok(value)
 }
 

@@ -125,13 +125,18 @@ pub(super) fn write_cyq_chen_maintenance_batches_from_channel(
     repair_ts_codes: Option<&[String]>,
 ) -> Result<(usize, usize), String> {
     let result = (|| -> Result<(usize, usize), String> {
-        let mut stage = Connection::open(stage_path).map_err(|e| e.to_string())?;
-        let budget = super::CyqChenWriteBudget::detect();
+        let device = lianghua_model::resource::DeviceMemory::current();
+        let mut stage = Connection::open_with_budget(
+            stage_path,
+            duckdb::Config::default(),
+            (device.available / 4).min(8 << 30),
+            1,
+        )
+        .map_err(|e| e.to_string())?;
+        let budget =
+            super::CyqChenWriteBudget::from_available(stage.memory_budget().saturating_mul(4));
         stage
-            .execute_batch(&format!(
-                "SET checkpoint_threshold = '256MB'; SET memory_limit = '{}MB'",
-                budget.memory_mb
-            ))
+            .execute_batch("SET checkpoint_threshold = '256MB'")
             .map_err(|e| e.to_string())?;
         let mut finished = false;
         let mut interrupted = None;

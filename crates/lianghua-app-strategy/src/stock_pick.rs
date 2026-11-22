@@ -636,14 +636,22 @@ pub fn run_expression_stock_pick(
         })
         .collect::<Vec<_>>();
 
+    let worker_sources = std::sync::Mutex::new((
+        reader,
+        CyqChenFieldInjector::new(source_path, &used_cyq_chen_keys),
+        SimilarityRankFieldInjector::new(source_path, needs_similarity_rank),
+    ));
     let rows = filtered_ts_codes
         .par_chunks(256)
         .map(|ts_group| -> Result<Vec<StockPickRow>, String> {
-            let worker_reader =
-                DataReader::new_with_runtime_keys(source_path, &required_runtime_keys)?;
-            let cyq_chen_injector = CyqChenFieldInjector::new(source_path, &used_cyq_chen_keys);
-            let similarity_rank_injector =
-                SimilarityRankFieldInjector::new(source_path, needs_similarity_rank);
+            let (worker_reader, cyq_chen_injector, similarity_rank_injector) = {
+                let sources = worker_sources.lock().map_err(|e| e.to_string())?;
+                (
+                    sources.0.try_clone()?,
+                    sources.1.try_clone()?,
+                    sources.2.try_clone()?,
+                )
+            };
             let mut group_rows = Vec::new();
 
             for ts_code in ts_group {

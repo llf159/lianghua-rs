@@ -62,6 +62,17 @@ pub struct SimilarityRankFieldInjector {
 }
 
 impl SimilarityRankFieldInjector {
+    pub fn try_clone(&self) -> Result<Self, String> {
+        Ok(Self {
+            conn: self
+                .conn
+                .as_ref()
+                .map(Connection::try_clone)
+                .transpose()
+                .map_err(|e| format!("克隆相似度读取连接失败:{e}"))?,
+        })
+    }
+
     pub fn new(source_dir: &str, enabled: bool) -> Self {
         if !enabled {
             return Self { conn: None };
@@ -336,6 +347,21 @@ pub struct CyqChenFieldInjector {
 }
 
 impl CyqChenFieldInjector {
+    pub fn try_clone(&self) -> Result<Self, String> {
+        Ok(Self {
+            conn: self
+                .conn
+                .as_ref()
+                .map(Connection::try_clone)
+                .transpose()
+                .map_err(|e| format!("克隆筹码读取连接失败:{e}"))?,
+            fields: self.fields.clone(),
+            available_fields: self.available_fields.clone(),
+            select_columns: self.select_columns.clone(),
+            unavailable_warning: self.unavailable_warning.clone(),
+        })
+    }
+
     pub fn new(source_dir: &str, used_keys: &HashSet<String>) -> Self {
         let fields = used_cyq_chen_fields(used_keys);
         if fields.is_empty() {

@@ -1,3 +1,4 @@
+use lianghua_model::resource::MemoryCache;
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -23,7 +24,7 @@ use crate::{
 pub const CHART_INDICATORS_FILE_NAME: &str = "chart_indicators.toml";
 
 static CHART_INDICATOR_COMPILE_CACHE: OnceLock<
-    Mutex<HashMap<ChartIndicatorCacheKey, CompiledChartIndicatorConfig>>,
+    Mutex<MemoryCache<ChartIndicatorCacheKey, CompiledChartIndicatorConfig>>,
 > = OnceLock::new();
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -441,7 +442,7 @@ pub fn load_compiled_chart_indicator_config(
         }),
     };
 
-    let cache = CHART_INDICATOR_COMPILE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let cache = CHART_INDICATOR_COMPILE_CACHE.get_or_init(|| Mutex::new(MemoryCache::default()));
     if let Some(compiled) = cache
         .lock()
         .map_err(|_| "chart indicator compile cache poisoned".to_string())?
@@ -453,10 +454,13 @@ pub fn load_compiled_chart_indicator_config(
 
     let config = load_chart_indicator_config(source_path)?;
     let compiled = compile_chart_indicator_config(&config, available_db_columns)?;
+    let bytes = std::fs::metadata(&cache_key.config_path)
+        .map_or(4096, |m| m.len())
+        .saturating_mul(16);
     cache
         .lock()
         .map_err(|_| "chart indicator compile cache poisoned".to_string())?
-        .insert(cache_key, compiled.clone());
+        .insert(cache_key, compiled.clone(), bytes);
 
     Ok(compiled)
 }

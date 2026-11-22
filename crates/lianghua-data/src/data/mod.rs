@@ -12,6 +12,7 @@ pub mod extras;
 pub mod panel;
 mod panel_scale;
 mod read_retry;
+pub mod resource;
 pub mod runtime;
 pub use read_retry::read_with_retry;
 pub mod scoring_store;

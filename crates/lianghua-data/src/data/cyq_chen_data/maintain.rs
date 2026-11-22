@@ -268,10 +268,9 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
     // 独立只读实例也不参与写实例的块管理；续算状态必须与写线程共享实例。
     // scope 统一等待计算与写线程结束，再释放主连接。
     let replay_first_date = std::sync::OnceLock::new();
-    let reader_template = std::sync::Mutex::new(DataReader::new_with_runtime_keys(
-        source_dir,
-        &required_runtime_keys,
-    )?);
+    let reader_template = std::sync::Mutex::new(reader);
+    let queue_memory = lianghua_model::resource::ByteBudget::new(32, 512 << 20)?;
+    let compute_pool = crate::data::resource::compute_pool(128 << 20)?;
     let (compute_result, writer_result) = thread::scope(|scope| {
         let (tx, rx) = sync_channel(2 * super::CyqChenWriteBudget::detect().queue_scale);
         let abort_tx = tx.clone();
@@ -292,7 +291,7 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
         });
 
         let finished_stock_count = std::sync::atomic::AtomicUsize::new(resumed_stocks);
-        let compute_result = cyq_chen_stock_groups(&ts_codes, rayon::current_num_threads())
+        let compute_result = compute_pool.install(|| { cyq_chen_stock_groups(&ts_codes, rayon::current_num_threads())
             .par_bridge()
             .try_for_each_init(
             || -> Result<(DataReader, Connection), String> {
@@ -353,14 +352,15 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
                         first_date: &replay_first_date,
                         report: &checkpoint_recovery,
                     }),
-                    &mut |batch| {
+                    &mut |mut batch| {
+                        batch.reserve_memory(&queue_memory)?;
                         tx.send(CyqChenWriteMessage::PreparedBatch(batch))
                             .map_err(|e| format!("发送新筹码增量批次失败:{e}"))
                     },
                 )?;
                 Ok(())
             },
-        );
+        ) });
 
         let compute_result = compute_result.and_then(|()| lianghua_model::task::checkpoint());
         match &compute_result {
@@ -645,6 +645,7 @@ pub fn repair_cyq_chen_stocks_if_db_exists(
         });
     }
 
+    let queue_memory = lianghua_model::resource::ByteBudget::new(32, 512 << 20)?;
     let (tx, rx) = sync_channel(2 * super::CyqChenWriteBudget::detect().queue_scale);
     let abort_tx = tx.clone();
     let write_start_date = start_date.clone();
@@ -670,55 +671,59 @@ pub fn repair_cyq_chen_stocks_if_db_exists(
     });
 
     let finished_stock_count = std::sync::atomic::AtomicUsize::new(resumed_stocks);
-    let compute_result = cyq_chen_stock_groups(&ts_codes, rayon::current_num_threads())
-        .par_bridge()
-        .try_for_each_init(
-            || {
-                reader_template
-                    .lock()
-                    .map_err(|_| "行情读取模板连接锁异常".to_string())?
-                    .try_clone()
-            },
-            |worker_reader, ts_group| -> Result<(), String> {
-                lianghua_model::task::checkpoint()?;
-                let worker_reader = worker_reader.as_ref().map_err(Clone::clone)?;
-                let progress_stock_done = |ts_code: &str| {
-                    if let Some(progress_cb) = progress_cb {
-                        let finished = finished_stock_count
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                            + 1;
-                        progress_cb(DownloadProgress {
-                            phase: "compute_cyq_chen".to_string(),
-                            finished,
-                            total: total_stocks,
-                            current_label: Some(ts_code.to_string()),
-                            message: format!(
-                                "新筹码局部修复计算中，已计算 {finished} / {} 只股票。",
-                                total_stocks
-                            ),
-                        });
-                    }
-                };
-                compute_prepared_cyq_chen_stock_group_batch(
-                    worker_reader,
-                    &load_start_date,
-                    &start_date,
-                    &end_date,
-                    &chip_config,
-                    config,
-                    &st_list,
-                    &total_share_map,
-                    ts_group,
-                    Some(&progress_stock_done),
-                    false,
-                    &mut |batch| {
-                        tx.send(CyqChenWriteMessage::PreparedBatch(batch))
-                            .map_err(|e| format!("发送新筹码局部修复批次失败:{e}"))
-                    },
-                )?;
-                Ok(())
-            },
-        );
+    let compute_pool = crate::data::resource::compute_pool(128 << 20)?;
+    let compute_result = compute_pool.install(|| {
+        cyq_chen_stock_groups(&ts_codes, rayon::current_num_threads())
+            .par_bridge()
+            .try_for_each_init(
+                || {
+                    reader_template
+                        .lock()
+                        .map_err(|_| "行情读取模板连接锁异常".to_string())?
+                        .try_clone()
+                },
+                |worker_reader, ts_group| -> Result<(), String> {
+                    lianghua_model::task::checkpoint()?;
+                    let worker_reader = worker_reader.as_ref().map_err(Clone::clone)?;
+                    let progress_stock_done = |ts_code: &str| {
+                        if let Some(progress_cb) = progress_cb {
+                            let finished = finished_stock_count
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                                + 1;
+                            progress_cb(DownloadProgress {
+                                phase: "compute_cyq_chen".to_string(),
+                                finished,
+                                total: total_stocks,
+                                current_label: Some(ts_code.to_string()),
+                                message: format!(
+                                    "新筹码局部修复计算中，已计算 {finished} / {} 只股票。",
+                                    total_stocks
+                                ),
+                            });
+                        }
+                    };
+                    compute_prepared_cyq_chen_stock_group_batch(
+                        worker_reader,
+                        &load_start_date,
+                        &start_date,
+                        &end_date,
+                        &chip_config,
+                        config,
+                        &st_list,
+                        &total_share_map,
+                        ts_group,
+                        Some(&progress_stock_done),
+                        false,
+                        &mut |mut batch| {
+                            batch.reserve_memory(&queue_memory)?;
+                            tx.send(CyqChenWriteMessage::PreparedBatch(batch))
+                                .map_err(|e| format!("发送新筹码局部修复批次失败:{e}"))
+                        },
+                    )?;
+                    Ok(())
+                },
+            )
+    });
 
     let compute_result = compute_result.and_then(|()| lianghua_model::task::checkpoint());
     match &compute_result {
@@ -956,17 +961,14 @@ pub fn rebuild_cyq_chen_all_with_progress(
         });
     }
 
-    let compute_threads = std::thread::available_parallelism()
-        .map(|count| count.get())
-        .unwrap_or(1);
-    let reader_template = std::sync::Mutex::new(DataReader::new_with_runtime_keys(
-        source_dir,
-        &required_runtime_keys,
-    )?);
+    let resources = lianghua_model::resource::ResourcePlan::detect();
+    let compute_threads = resources.workers(resources.cpus, 128 << 20);
+    let reader_template = std::sync::Mutex::new(reader);
     let compute_pool = rayon::ThreadPoolBuilder::new()
         .num_threads(compute_threads)
         .build()
         .map_err(|e| format!("创建新筹码计算线程池失败:{e}"))?;
+    let queue_memory = lianghua_model::resource::ByteBudget::new(32, 512 << 20)?;
     let (tx, rx) = sync_channel(4 * super::CyqChenWriteBudget::detect().queue_scale);
     let abort_tx = tx.clone();
     let written_stocks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(resumed_stocks));
@@ -1027,10 +1029,10 @@ pub fn rebuild_cyq_chen_all_with_progress(
                     ts_group,
                     Some(&progress_stock_done),
                     true,
-                    &mut |batch| {
+                    &mut |mut batch| {
                         let send_started = std::time::Instant::now();
-                        let result = tx
-                            .send(CyqChenWriteMessage::PreparedBatch(batch))
+                        batch.reserve_memory(&queue_memory)?;
+                        let result = tx.send(CyqChenWriteMessage::PreparedBatch(batch))
                             .map_err(|e| format!("发送筹码批次失败:{e}"));
                         send_wait_ms += send_started.elapsed().as_millis() as u64;
                         result
@@ -1131,7 +1133,7 @@ pub fn rebuild_cyq_chen_all_with_progress(
             rebuild_db.display()
         ));
     }
-    drop(reader);
+    drop(reader_template);
     drop(source_conn);
     crate::data::download_state::complete_chip_rebuild(source_dir, "chen", &start_date, &end_date)?;
     if let Some(progress_cb) = progress_cb {

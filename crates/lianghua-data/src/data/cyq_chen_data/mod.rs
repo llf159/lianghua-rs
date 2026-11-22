@@ -33,40 +33,16 @@ pub(super) const CYQ_CHEN_SCHEMA_VERSION: &str = "5";
 #[derive(Clone, Copy)]
 pub(super) struct CyqChenWriteBudget {
     queue_scale: usize,
-    memory_mb: usize,
 }
 
 impl CyqChenWriteBudget {
     fn detect() -> Self {
-        let mut available = std::fs::read_to_string("/proc/meminfo")
-            .ok()
-            .and_then(|text| {
-                text.lines().find_map(|line| {
-                    line.strip_prefix("MemAvailable:")
-                        .and_then(|value| value.split_whitespace().next())
-                        .and_then(|value| value.parse::<u64>().ok())
-                })
-            })
-            .map(|kb| kb.saturating_mul(1024))
-            .unwrap_or(2 * 1024 * 1024 * 1024);
-        // cgroup v2根限制可用时，避免按宿主机空闲内存放大容器预算。
-        if let (Ok(limit), Ok(current)) = (
-            std::fs::read_to_string("/sys/fs/cgroup/memory.max"),
-            std::fs::read_to_string("/sys/fs/cgroup/memory.current"),
-        ) {
-            if let (Ok(limit), Ok(current)) =
-                (limit.trim().parse::<u64>(), current.trim().parse::<u64>())
-            {
-                available = available.min(limit.saturating_sub(current));
-            }
-        }
-        Self::from_available(available)
+        Self::from_available(lianghua_model::resource::DeviceMemory::current().available)
     }
 
     fn from_available(bytes: u64) -> Self {
         Self {
             queue_scale: (bytes / (8 * 1024 * 1024 * 1024)).clamp(1, 4) as usize,
-            memory_mb: (bytes / (4 * 1024 * 1024)).clamp(256, 8192) as usize,
         }
     }
 }
@@ -178,9 +154,34 @@ pub(super) struct PreparedCyqChenWriteBatch {
     checkpoints: Vec<(String, String, String, Option<String>)>,
     snapshot_batch: Option<RecordBatch>,
     bin_batch: Option<RecordBatch>,
+    memory_permit: Option<Arc<lianghua_model::resource::BytePermit>>,
 }
 
 impl PreparedCyqChenWriteBatch {
+    fn reserve_memory(
+        &mut self,
+        budget: &Arc<lianghua_model::resource::ByteBudget>,
+    ) -> Result<(), String> {
+        let bytes = self
+            .snapshot_batch
+            .iter()
+            .chain(self.bin_batch.iter())
+            .map(|batch| batch.get_array_memory_size() as u64)
+            .sum::<u64>()
+            + self
+                .checkpoints
+                .iter()
+                .map(|row| {
+                    (row.0.capacity()
+                        + row.1.capacity()
+                        + row.2.capacity()
+                        + row.3.as_ref().map_or(0, String::capacity)) as u64
+                })
+                .sum::<u64>();
+        self.memory_permit = Some(budget.acquire(bytes)?);
+        Ok(())
+    }
+
     pub(super) fn with_error(ts_code: &str, error: String) -> Self {
         Self {
             stock_count: 0,
@@ -195,6 +196,7 @@ impl PreparedCyqChenWriteBatch {
             checkpoints: Vec::new(),
             snapshot_batch: None,
             bin_batch: None,
+            memory_permit: None,
         }
     }
 }

@@ -24,7 +24,8 @@ pub(super) struct Store {
 impl Store {
     pub(super) fn new(mut conn: rusqlite::Connection, date: String) -> Result<Self, String> {
         // Keep the queue bounded even when SQLite is busy or repeatedly failing.
-        let (sender, receiver) = mpsc::sync_channel(4096);
+        let (sender, receiver) =
+            mpsc::sync_channel(lianghua_model::resource::ResourcePlan::detect().batch(2048, 4096));
         let error = Arc::new(Mutex::new(None));
         let worker_error = Arc::clone(&error);
         let worker = thread::Builder::new()

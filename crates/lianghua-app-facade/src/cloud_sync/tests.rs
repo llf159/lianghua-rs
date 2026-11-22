@@ -904,7 +904,7 @@ fn two_devices_keep_conflicts_deduplicate_and_recover() {
         for day in 1..=6 {
             conn.execute(
                 "INSERT INTO score_summary VALUES ('000001.SZ',?,10,1)",
-                [format!("202611{day:02}")],
+                [format!("202609{day:02}")],
             )
             .unwrap();
         }
@@ -1012,6 +1012,29 @@ fn two_devices_keep_conflicts_deduplicate_and_recover() {
             .uploaded_paths
             .contains(&rank_path.to_string())
     );
+    // 策略不同的新日期仍直接取代云端当前榜单。
+    {
+        let conn = Connection::open(source_history.join("scoring_result.db")).unwrap();
+        conn.execute_batch("INSERT INTO score_summary VALUES ('000001.SZ','20261101',99,1); INSERT INTO rank_compute_strategy VALUES ('20261101','new strategy')").unwrap();
+    }
+    let newer = sync(
+        &app_history,
+        &source_history,
+        BTreeMap::new(),
+        false,
+        |_| {},
+    )
+    .unwrap();
+    assert!(newer.uploaded_paths.contains(&rank_path.to_string()));
+    assert!(!newer.conflicts.contains(&rank_path.to_string()));
+    assert_eq!(
+        newer
+            .items
+            .iter()
+            .filter(|item| item.path == rank_path && item.is_head)
+            .count(),
+        1
+    );
     stopped.store(true, Ordering::Relaxed);
     let _ = TcpStream::connect(address);
     worker.join().unwrap();
@@ -1025,6 +1048,7 @@ fn database_snapshot_isolates_strategies_and_requires_explicit_full_replacement(
     fs::create_dir_all(&source).unwrap();
     fs::create_dir_all(&target).unwrap();
     lianghua_data::data::scoring_store::init_result_db(&source.join("scoring_result.db")).unwrap();
+    lianghua_data::data::scoring_store::init_result_db(&target.join("scoring_result.db")).unwrap();
     {
         let conn = Connection::open(source.join("scoring_result.db")).unwrap();
         conn.execute_batch("CREATE TABLE rank_compute_strategy (trade_date VARCHAR PRIMARY KEY, strategy_text VARCHAR NOT NULL)").unwrap();
@@ -1138,6 +1162,26 @@ fn database_snapshot_isolates_strategies_and_requires_explicit_full_replacement(
             .keys()
             .filter(|p| p.starts_with("similarity/"))
             .count(),
+        1
+    );
+    let conn = Connection::open(source.join("scoring_result.db")).unwrap();
+    conn.execute_batch("INSERT INTO score_summary VALUES ('000001.SZ', '20261007', 1, 1)")
+        .unwrap();
+    drop(conn);
+    let duplicate = database::export(&source).unwrap();
+    assert!(
+        database::import(&target, day, &duplicate[day], true)
+            .unwrap_err()
+            .contains("结果键无效")
+    );
+    let conn = open_db_readonly(target.join("scoring_result.db")).unwrap();
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM score_summary WHERE trade_date='20261003'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
         1
     );
 }

@@ -188,13 +188,10 @@ fn load_cyq_chen_group_rows(
                     lookback.max(1) * 2,
                 )?;
                 if tail.trade_dates.is_empty() {
-                    RowData {
-                        trade_dates: Vec::new(),
-                        cols: HashMap::new(),
-                    }
-                } else {
-                    tail
+                    rows_map.insert(ts_code.clone(), tail);
+                    continue;
                 }
+                tail
             }
         };
 
@@ -937,6 +934,7 @@ pub(super) fn append_prepared_cyq_chen_batch_rows(
             .map_err(|e| format!("替换重放股票筹码失败, ts_code={ts_code}: {e}"))?;
         }
     }
+    let _memory_permit = batch.memory_permit;
     checkpoints.extend(batch.checkpoints);
     if let Some(snapshot_batch) = batch.snapshot_batch {
         snapshot_app
@@ -1099,7 +1097,14 @@ pub(super) fn write_cyq_chen_batches_from_channel(
             *stage.lock().unwrap_or_else(|e| e.into_inner()) = message;
         }
     };
-    let mut conn = Connection::open(db_path).map_err(|e| format!("打开筹码库失败:{e}"))?;
+    let device = lianghua_model::resource::DeviceMemory::current();
+    let mut conn = Connection::open_with_budget(
+        db_path,
+        duckdb::Config::default(),
+        (device.available / 4).min(8 << 30),
+        device.cpus.min(8),
+    )
+    .map_err(|e| format!("打开筹码库失败:{e}"))?;
     let occupied: bool = conn
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM cyq_chen_snapshot LIMIT 1)
@@ -1125,15 +1130,7 @@ pub(super) fn write_cyq_chen_batches_from_channel(
         return Err("新筹码分批重建只允许写入空临时库，禁止覆盖已有数据".to_string());
     }
     let bulk = crate::data::bulk_write::BulkWriteSettings::apply(&conn)?;
-    let budget = super::CyqChenWriteBudget::detect();
-    let database_threads = std::thread::available_parallelism()
-        .map(|count| count.get().min(8))
-        .unwrap_or(4);
-    conn.execute_batch(&format!(
-        "SET memory_limit = '{}MB'; SET threads = {database_threads};",
-        budget.memory_mb
-    ))
-    .map_err(|e| format!("设置新筹码写库资源上限失败:{e}"))?;
+    let budget = super::CyqChenWriteBudget::from_available(conn.memory_budget().saturating_mul(4));
     drop_cyq_chen_db_indexes(&conn)?;
     conn.register_table_function::<super::bin_write::BinScan>("cyq_chen_bin_input")
         .map_err(|e| format!("注册筹码分桶导入器失败:{e}"))?;

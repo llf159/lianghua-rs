@@ -10,6 +10,20 @@ use std::{
 };
 use tauri::Emitter;
 
+#[tauri::command]
+pub fn get_resource_budget() -> serde_json::Value {
+    let device = lianghua_model::resource::DeviceMemory::detect();
+    let plan = lianghua_model::resource::ResourcePlan::detect();
+    serde_json::json!({
+        "source": device.source,
+        "availableBytes": device.available,
+        "rssBytes": device.rss,
+        "workingBytes": plan.bytes,
+        "effectiveCpus": plan.cpus,
+        "frontendCacheBytes": (plan.bytes / 64).clamp(1 << 20, 128 << 20),
+    })
+}
+
 struct Session {
     id: String,
     lane: &'static str,
@@ -300,6 +314,10 @@ pub async fn run_in_lane<T: Send + 'static>(
             } else {
                 ActiveTask::enter_isolated(vec![worker.control.clone(), control.clone()])
             };
+            let _memory = lianghua_model::resource::TaskMemory::enter(
+                control.clone(),
+                worker.lane != "main",
+            )?;
             let output = action();
             drop(active);
             let mode = if grouped {

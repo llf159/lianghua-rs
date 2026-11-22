@@ -2,9 +2,8 @@ use crate::simulate::rule::residual::{
     load_most_related_concept_map, load_stock_industry_map, stream_residual_maps,
 };
 use crate::simulate::rule::{
-    RESIDUAL_SERIES_TARGET_POINTS, RESIDUAL_STOCK_BATCH_MAX, RESIDUAL_STOCK_BATCH_MIN,
-    ResidualCacheInput, RuleDayBaseSample, RuleDayGroup, RuleLayerConfig, RuleLayerRuntimeCache,
-    RuleUniverseRow, TriggeredScoreMap,
+    RESIDUAL_STOCK_BATCH_MAX, ResidualCacheInput, RuleDayBaseSample, RuleDayGroup, RuleLayerConfig,
+    RuleLayerRuntimeCache, RuleUniverseRow, TriggeredScoreMap,
 };
 
 #[cfg(test)]
@@ -441,8 +440,10 @@ pub(super) fn build_rule_layer_runtime_cache_from_universe_rows(
     let residual_stock_batch_size = if trade_day_count == 0 {
         RESIDUAL_STOCK_BATCH_MAX
     } else {
-        (RESIDUAL_SERIES_TARGET_POINTS / trade_day_count)
-            .clamp(RESIDUAL_STOCK_BATCH_MIN, RESIDUAL_STOCK_BATCH_MAX)
+        lianghua_model::resource::ResourcePlan::detect().batch(
+            trade_day_count.saturating_mul(192),
+            RESIDUAL_STOCK_BATCH_MAX,
+        )
     };
     stream_residual_maps(
         source_conn,

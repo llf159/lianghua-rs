@@ -478,6 +478,7 @@ impl CyqChenBatchBuilder {
             None
         };
         Ok(PreparedCyqChenWriteBatch {
+            memory_permit: None,
             completed_ts_codes: self.checkpoints.iter().map(|row| row.0.clone()).collect(),
             stock_count: self.stock_count,
             replace_ts_codes: self.replace_ts_codes,

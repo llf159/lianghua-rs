@@ -478,7 +478,7 @@ pub fn fetch_all_market_mixed_realtime_quote_map_for_codes(
     let (pool, http) = NETWORK
         .get_or_init(|| {
             let pool = rayon::ThreadPoolBuilder::new()
-                .num_threads(16)
+                .num_threads(lianghua_model::resource::ResourcePlan::detect().network_workers(16))
                 .thread_name(|index| format!("monitor-quote-{index}"))
                 .build()
                 .map_err(|error| format!("创建双源行情线程池失败: {error}"))?;

@@ -282,7 +282,12 @@ pub(in crate::statistics) fn build_validation_triggered_scores_for_combos(
     );
     // One bounded producer batches database work; Rayon workers only evaluate expressions.
     // A batch and queue each target ~64K stock-days, with at least one stock.
-    let batch_size = (65_536 / need_rows.max(1)).clamp(1, 64);
+    let batch_size = lianghua_model::resource::ResourcePlan::detect().batch(
+        need_rows
+            .max(1)
+            .saturating_mul(required_runtime_keys.len().max(1) * 16 + 128),
+        64,
+    );
     let processed = Mutex::new(0_usize);
     if let Some(progress) = progress {
         progress(0, ts_codes.len())?;

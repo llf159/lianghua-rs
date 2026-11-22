@@ -19,6 +19,9 @@ fn main() -> Result<(), String> {
         return Err("用法: lianghua-rs <数据目录> [策略文件路径]".to_string());
     }
 
+    let control = std::sync::Arc::new(lianghua_model::task::TaskControl::default());
+    let _memory = lianghua_model::resource::TaskMemory::enter(control.clone(), false)?;
+    let _active = lianghua_model::task::ActiveTask::enter(vec![control]);
     let source_db = source_db_path(&source_path);
     if !source_db.is_file() {
         return Err(format!("原始行情库不存在: {}", source_db.display()));

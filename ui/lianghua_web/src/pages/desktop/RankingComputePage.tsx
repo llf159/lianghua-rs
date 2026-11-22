@@ -266,7 +266,7 @@ function formatPhaseLabel(phase: string | null | undefined) {
     case 'score_write': return '完成批次写入'
     case 'score_scene_rank': return '计算场景排名'
     case 'score_summary_rank': return '计算总榜排名'
-    case 'score_keys': return '构建结果主键'
+    case 'score_keys': return '校验结果键'
     case 'score_publish': return '发布评分及排名'
     case 'score_checkpoint': return '结果库落盘'
     case 'compute_cyq':
@@ -397,6 +397,7 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
   const progressUnlistenRef = useRef<UnlistenFn | null>(null)
   const pendingStatusRefreshRef = useRef(false)
   const similarityConfigLoadedRef = useRef(false)
+  const scoreResumeInputsRef = useRef('')
   const busyActionRef = useRef(busyAction)
   busyActionRef.current = busyAction
 
@@ -440,6 +441,9 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
   const progressCounterText = getProgressCounterText(deferredProgress, formatPhaseLabel)
   const sourceLatestTradeDate = status?.sourceDb.maxTradeDate
   const resultLatestTradeDate = status?.resultDb.maxTradeDate
+  const canResumeScore = Boolean(status?.scoreResume
+    && inputDateToCompact(startDateInput) === status.scoreResume.startDate
+    && inputDateToCompact(endDateInput) === status.scoreResume.endDate)
   const isResultStale = isCalculationBehind(status?.resultDb, sourceLatestTradeDate)
   const isResultDiscontinuous = Boolean(
     status?.resultDbContinuity.checked && !status.resultDbContinuity.isContinuous,
@@ -881,15 +885,21 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
         clearAllFeedback()
       }
 
+      const resumeInputsKey = nextStatus.scoreResume
+        ? `${nextStatus.sourcePath}:${nextStatus.scoreResume.startDate}:${nextStatus.scoreResume.endDate}`
+        : ''
+      const refillScoreInputs = syncSuggestedInputs
+        || (resumeInputsKey !== '' && scoreResumeInputsRef.current !== resumeInputsKey)
+      scoreResumeInputsRef.current = resumeInputsKey
       setStartDateInput((current) =>
-        syncSuggestedInputs
-          ? compactDateToInput(nextStatus.suggestedStartDate)
-          : current || compactDateToInput(nextStatus.suggestedStartDate),
+        refillScoreInputs
+          ? compactDateToInput(nextStatus.scoreResume?.startDate ?? nextStatus.suggestedStartDate)
+          : current || compactDateToInput(nextStatus.scoreResume?.startDate ?? nextStatus.suggestedStartDate),
       )
       setEndDateInput((current) =>
-        syncSuggestedInputs
-          ? compactDateToInput(nextStatus.suggestedEndDate)
-          : current || compactDateToInput(nextStatus.suggestedEndDate),
+        refillScoreInputs
+          ? compactDateToInput(nextStatus.scoreResume?.endDate ?? nextStatus.suggestedEndDate)
+          : current || compactDateToInput(nextStatus.scoreResume?.endDate ?? nextStatus.suggestedEndDate),
       )
       setSimilarityTradeDateInput((current) =>
         syncSuggestedInputs
@@ -1186,8 +1196,12 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
     strategyDiffRequestRef.current += 1
     setStrategyDiff(null)
     try {
-      const assetsStatus = await getManagedStrategyAssetsStatus()
-      const latestComputeSnapshot = assetsStatus.backups.find(
+      const currentStatus = await getRankingComputeStatus(sourcePath)
+      setStatus(currentStatus)
+      const assetsStatus = currentStatus.resultDb.rowCount > 0
+        ? await getManagedStrategyAssetsStatus()
+        : null
+      const latestComputeSnapshot = assetsStatus?.backups.find(
         (item) => item.sourceKind === 'rank_compute',
       )
       if (latestComputeSnapshot) {
@@ -1290,8 +1304,12 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
       try {
         clearFeedback('rank')
         clearFeedback('similarityRank')
-        const assetsStatus = await getManagedStrategyAssetsStatus()
-        const latestComputeSnapshot = assetsStatus.backups.find(
+        const dailyStatus = await getRankingComputeStatus(sourcePath)
+        setStatus(dailyStatus)
+        const assetsStatus = dailyStatus.resultDb.rowCount > 0
+          ? await getManagedStrategyAssetsStatus()
+          : null
+        const latestComputeSnapshot = assetsStatus?.backups.find(
           (item) => item.sourceKind === 'rank_compute',
         )
         if (latestComputeSnapshot) {
@@ -1306,7 +1324,6 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
           }
         }
 
-        const dailyStatus = await getRankingComputeStatus(sourcePath)
         const rankingStartDate = dailyStatus.suggestedStartDate ?? tradeDate
         const rankingEndDate = dailyStatus.suggestedEndDate ?? tradeDate
         setStrategyDiff(null)
@@ -1374,6 +1391,13 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
     setStrategyDiff(null)
     clearFeedback('rank')
     try {
+      const currentStatus = await getRankingComputeStatus(sourcePath)
+      if (requestId !== strategyDiffRequestRef.current) return
+      setStatus(currentStatus)
+      if (currentStatus.resultDb.rowCount === 0) {
+        setFeedbackNotice('rank', '当前没有排名结果，首次计算无需比较策略变化。')
+        return
+      }
       const assetsStatus = await getManagedStrategyAssetsStatus()
       if (requestId !== strategyDiffRequestRef.current) return
       const latestComputeSnapshot = assetsStatus.backups.find((item) => item.sourceKind === 'rank_compute')
@@ -1714,6 +1738,9 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
             <span>排名计算</span>
             <strong>score_summary / rule_details / scene_details + 排名</strong>
             <small>按区间重算总分、明细和排名。</small>
+            {canResumeScore ? (
+              <small>已恢复上次计算区间，评分已完成，可直接继续排名。</small>
+            ) : null}
             {(status?.pendingRankingRebuilds ?? []).length > 0 ? (
               <small className="ranking-compute-summary-alert">
                 行情变更后待重算：{status?.pendingRankingRebuilds.map((item) => `${formatTradeDate(item.startDate)} 至 ${formatTradeDate(item.endDate)}`).join('、')}。需覆盖这些区间；局部计算成功会保留其余欠账。
@@ -1735,13 +1762,13 @@ const RankingComputePage = forwardRef<RankingComputePageHandle, RankingComputePa
 
           <div className="ranking-compute-actions">
             <button className="ranking-compute-primary-btn" type="button" onClick={() => void onRunCompute()} disabled={isBusy || sourcePath === ''}>
-              {busyAction === 'computing' ? '计算中...' : '计算排名'}
+              {busyAction === 'computing' ? '计算中...' : canResumeScore ? '继续排名' : '计算排名'}
             </button>
             <button
               className="ranking-compute-secondary-btn"
               type="button"
               onClick={() => void onViewStrategyDiff()}
-              disabled={isBusy || strategyDiffLoading || sourcePath === ''}
+              disabled={isBusy || strategyDiffLoading || sourcePath === '' || !status?.resultDb.rowCount}
             >
               {strategyDiffLoading ? '对比中...' : '显示计算快照 diff'}
             </button>

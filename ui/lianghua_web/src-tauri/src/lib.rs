@@ -3481,6 +3481,54 @@ pub fn run() {
         if let Err(error) = warehouse::allow_warehouse_root(app.handle()) {
             log::warn!("failed to allow warehouse root in fs scope: {error}");
         }
+        #[cfg(target_os = "linux")]
+        if let Some(window) = app.get_webview_window("main") {
+            use std::{cell::Cell, time::Duration};
+            use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+            use webkit2gtk::{
+                glib::{self, prelude::ObjectExt},
+                WebViewExt,
+            };
+
+            let app = app.handle().clone();
+            window.with_webview(move |platform| {
+                let attempts = Cell::new(0_usize);
+                let last_termination = Cell::new(None::<std::time::Instant>);
+                platform
+                    .inner()
+                    .connect_web_process_terminated(move |view, reason| {
+                        if last_termination
+                            .replace(Some(std::time::Instant::now()))
+                            .is_some_and(|last| last.elapsed() >= Duration::from_secs(60))
+                        {
+                            attempts.set(0);
+                        }
+                        let delays = [250, 500, 1_000];
+                        let attempt = attempts.get();
+                        if let Some(&delay) = delays.get(attempt) {
+                            attempts.set(attempt + 1);
+                            eprintln!(
+                            "WebKit 渲染进程退出（{reason:?}），{delay}ms 后重新加载主界面 {}/{}",
+                            attempt + 1,
+                            delays.len()
+                        );
+                            let view = view.downgrade();
+                            glib::timeout_add_local_once(Duration::from_millis(delay), move || {
+                                if let Some(view) = view.upgrade() {
+                                    view.reload();
+                                }
+                            });
+                        } else if attempt == delays.len() {
+                            attempts.set(attempt + 1);
+                            eprintln!("WebKit 渲染进程退出（{reason:?}），已用完自动重试");
+                            app.dialog()
+                                .message("主界面连续崩溃，自动恢复失败。请关闭并重新打开软件。")
+                                .kind(MessageDialogKind::Error)
+                                .show(|_| {});
+                        }
+                    });
+            })?;
+        }
         Ok(())
     });
 
@@ -3491,6 +3539,7 @@ pub fn run() {
 
     builder
         .invoke_handler(tauri::generate_handler![
+            task_control::get_resource_budget,
             task_control::begin_task_group,
             task_control::finish_task_group,
             task_control::control_task,

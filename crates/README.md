@@ -4,6 +4,8 @@
 
 | 组件 | 工程取舍 |
 |---|---|
+| `lianghua-model` | [AGENTS.md](lianghua-model/AGENTS.md) |
+| `lianghua-duckdb` | [AGENTS.md](lianghua-duckdb/AGENTS.md) |
 | `lianghua-data` | [AGENTS.md](lianghua-data/AGENTS.md) |
 | `lianghua-scoring` | [AGENTS.md](lianghua-scoring/AGENTS.md) |
 | `lianghua-backtest` | [AGENTS.md](lianghua-backtest/AGENTS.md) |

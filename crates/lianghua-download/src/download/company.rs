@@ -324,7 +324,9 @@ pub fn download_company(
             })?;
             Ok(())
         })
-        .num_threads(config.threads.max(1))
+        .num_threads(
+            lianghua_model::resource::ResourcePlan::detect().network_workers(config.threads),
+        )
         .build()
         .map_err(|e| format!("创建公司数据下载线程池失败: {e}"))?;
     let mut conn = open_company_db(&config.source_dir, config.database)?;

@@ -69,7 +69,7 @@ impl ValidationResearchOutput {
         self.grouping.validate()?;
         self.statistics.validate()?;
         let conn = Connection::open(&self.path).map_err(|e| e.to_string())?;
-        conn.execute_batch("SET memory_limit='256MB'; SET threads=1;
+        conn.execute_batch("SET threads=1;
             CREATE TABLE IF NOT EXISTS observations(ts_code VARCHAR,trade_date VARCHAR,board VARCHAR,market_cap DOUBLE,cap_group VARCHAR,eligibility SMALLINT,quote_present BOOLEAN);
             CREATE TABLE IF NOT EXISTS labels(horizon BIGINT,ts_code VARCHAR,trade_date VARCHAR,entry_date VARCHAR,label_end_date VARCHAR,residual_return DOUBLE);
             CREATE TABLE IF NOT EXISTS signals(combo_key VARCHAR,ts_code VARCHAR,trade_date VARCHAR,score DOUBLE);

@@ -251,7 +251,7 @@ pub(super) fn verify_cyq_chen_db(
     // Writers must be quiescent and checkpointed throughout this independent read-only open.
     let conn = crate::data::open_db_readonly(db_path)
         .map_err(|e| format!("打开新筹码回读校验库失败, path={}: {e}", db_path.display()))?;
-    conn.execute_batch("SET threads = 1; SET memory_limit = '1GB'")
+    conn.execute_batch("SET threads = 1")
         .map_err(|e| format!("设置新筹码回读校验资源上限失败:{e}"))?;
     for table in ["cyq_chen_snapshot", "cyq_chen_bin", "cyq_chen_checkpoint"] {
         // count(*) can use metadata; hashing every column forces actual block reads and decoding.

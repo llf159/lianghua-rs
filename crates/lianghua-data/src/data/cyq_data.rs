@@ -31,8 +31,6 @@ use crate::data::{
 const CYQ_SNAPSHOT_TABLE: &str = "cyq_snapshot";
 const CYQ_BIN_TABLE: &str = "cyq_bin";
 const DEFAULT_ADJ_TYPE: &str = "qfq";
-const CYQ_GROUP_SIZE_INCREMENTAL: usize = 8;
-const CYQ_QUEUE_BOUND: usize = 8;
 const CYQ_FLUSH_BATCH_SIZE: usize = 32;
 const CYQ_RUNTIME_KEYS: [&str; 5] = ["O", "H", "L", "C", "TOR"];
 
@@ -55,6 +53,34 @@ struct ComputedCyqStock {
 #[derive(Debug, Default)]
 struct CyqWriteBatch {
     stocks: Vec<ComputedCyqStock>,
+    memory_permit: Option<Arc<lianghua_model::resource::BytePermit>>,
+}
+impl CyqWriteBatch {
+    fn reserve_memory(
+        &mut self,
+        budget: &Arc<lianghua_model::resource::ByteBudget>,
+    ) -> Result<(), String> {
+        let bytes = self
+            .stocks
+            .iter()
+            .map(|stock| {
+                stock.ts_code.capacity()
+                    + stock.snapshots.capacity() * std::mem::size_of::<(String, CyqSnapshot)>()
+                    + stock
+                        .snapshots
+                        .iter()
+                        .map(|(date, snapshot)| {
+                            date.capacity()
+                                + snapshot.trade_date.as_ref().map_or(0, String::capacity)
+                                + snapshot.bins.capacity()
+                                    * std::mem::size_of::<super::cyq::CyqBin>()
+                        })
+                        .sum::<usize>()
+            })
+            .sum::<usize>();
+        self.memory_permit = Some(budget.acquire(bytes as u64)?);
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -451,6 +477,7 @@ fn append_cyq_batch_rows(
     batch: CyqWriteBatch,
     config: CyqConfig,
 ) -> Result<(usize, usize), String> {
+    let _memory_permit = batch.memory_permit;
     let snapshot_rows = batch
         .stocks
         .iter()
@@ -803,7 +830,9 @@ pub fn maintain_cyq_incremental_if_db_exists(
         .ok_or_else(|| "筹码库路径不是有效UTF-8".to_string())?
         .to_string();
 
-    let (tx, rx) = sync_channel(CYQ_QUEUE_BOUND);
+    let queue_memory = lianghua_model::resource::ByteBudget::new(32, 256 << 20)?;
+    let (tx, rx) =
+        sync_channel(lianghua_model::resource::ResourcePlan::detect().batch(16 << 20, 16));
     let abort_tx = tx.clone();
     let write_start_date = start_date.clone();
     let write_end_date = end_date.clone();
@@ -888,25 +917,33 @@ pub fn maintain_cyq_incremental_if_db_exists(
         })(&cyq_db_str, rx, config, &write_start_date, &write_end_date)
     });
 
-    let compute_result = ts_codes
-        .par_chunks(CYQ_GROUP_SIZE_INCREMENTAL)
-        .try_for_each_with(tx, |sender, ts_group| -> Result<(), String> {
-            lianghua_model::task::checkpoint()?;
-            let worker_reader = DataReader::new_with_optional_tor_r(source_dir, None, false)?;
-            let batch = compute_cyq_stock_group_batch(
-                &worker_reader,
-                &load_start_date,
-                &start_date,
-                &end_date,
-                config,
-                ts_group,
-                None,
-            )?;
-            sender
-                .send(CyqWriteMessage::Batch(batch))
-                .map_err(|e| format!("发送筹码增量批次失败:{e}"))?;
-            Ok(())
-        });
+    let reader_template = std::sync::Mutex::new(reader);
+    let compute_pool = crate::data::resource::compute_pool(128 << 20)?;
+    let compute_result = compute_pool.install(|| {
+        ts_codes
+            .par_chunks(lianghua_model::resource::ResourcePlan::detect().batch(8 << 20, 32))
+            .try_for_each_with(tx, |sender, ts_group| -> Result<(), String> {
+                lianghua_model::task::checkpoint()?;
+                let worker_reader = reader_template
+                    .lock()
+                    .map_err(|e| e.to_string())?
+                    .try_clone()?;
+                let mut batch = compute_cyq_stock_group_batch(
+                    &worker_reader,
+                    &load_start_date,
+                    &start_date,
+                    &end_date,
+                    config,
+                    ts_group,
+                    None,
+                )?;
+                batch.reserve_memory(&queue_memory)?;
+                sender
+                    .send(CyqWriteMessage::Batch(batch))
+                    .map_err(|e| format!("发送筹码增量批次失败:{e}"))?;
+                Ok(())
+            })
+    });
 
     if let Err(err) = &compute_result {
         let _ = abort_tx.send(CyqWriteMessage::Abort(err.clone()));
@@ -1088,6 +1125,10 @@ pub fn repair_cyq_stocks_if_db_exists(
         .iter()
         .map(|key| (*key).to_string())
         .collect();
+    let reader_template = std::sync::Mutex::new(DataReader::new_with_runtime_keys(
+        source_dir,
+        &required_runtime_keys,
+    )?);
     let cyq_db_str = cyq_db
         .to_str()
         .ok_or_else(|| "筹码库路径不是有效UTF-8".to_string())?
@@ -1107,7 +1148,9 @@ pub fn repair_cyq_stocks_if_db_exists(
         });
     }
 
-    let (tx, rx) = sync_channel(CYQ_QUEUE_BOUND);
+    let queue_memory = lianghua_model::resource::ByteBudget::new(32, 256 << 20)?;
+    let (tx, rx) =
+        sync_channel(lianghua_model::resource::ResourcePlan::detect().batch(16 << 20, 16));
     let abort_tx = tx.clone();
     let writer_ts_codes = ts_codes.clone();
     let write_start_date = start_date.clone();
@@ -1205,42 +1248,49 @@ pub fn repair_cyq_stocks_if_db_exists(
     });
 
     let finished_stock_count = std::sync::atomic::AtomicUsize::new(0);
-    let compute_result = ts_codes
-        .par_chunks(CYQ_GROUP_SIZE_INCREMENTAL)
-        .try_for_each_with(tx, |sender, ts_group| -> Result<(), String> {
-            lianghua_model::task::checkpoint()?;
-            let worker_reader =
-                DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
-            let progress_stock_done = |ts_code: &str| {
-                if let Some(progress_cb) = progress_cb {
-                    let finished =
-                        finished_stock_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                    progress_cb(DownloadProgress {
-                        phase: "compute_cyq".to_string(),
-                        finished,
-                        total: ts_codes.len(),
-                        current_label: Some(ts_code.to_string()),
-                        message: format!(
-                            "筹码局部修复计算中，已计算 {finished} / {} 只股票。",
-                            ts_codes.len()
-                        ),
-                    });
-                }
-            };
-            let batch = compute_cyq_stock_group_batch(
-                &worker_reader,
-                &load_start_date,
-                &start_date,
-                &end_date,
-                config,
-                ts_group,
-                Some(&progress_stock_done),
-            )?;
-            sender
-                .send(CyqWriteMessage::Batch(batch))
-                .map_err(|e| format!("发送筹码局部修复批次失败:{e}"))?;
-            Ok(())
-        });
+    let compute_pool = crate::data::resource::compute_pool(128 << 20)?;
+    let compute_result = compute_pool.install(|| {
+        ts_codes
+            .par_chunks(lianghua_model::resource::ResourcePlan::detect().batch(8 << 20, 32))
+            .try_for_each_with(tx, |sender, ts_group| -> Result<(), String> {
+                lianghua_model::task::checkpoint()?;
+                let worker_reader = reader_template
+                    .lock()
+                    .map_err(|_| "行情读取模板连接锁异常".to_string())?
+                    .try_clone()?;
+                let progress_stock_done = |ts_code: &str| {
+                    if let Some(progress_cb) = progress_cb {
+                        let finished = finished_stock_count
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                            + 1;
+                        progress_cb(DownloadProgress {
+                            phase: "compute_cyq".to_string(),
+                            finished,
+                            total: ts_codes.len(),
+                            current_label: Some(ts_code.to_string()),
+                            message: format!(
+                                "筹码局部修复计算中，已计算 {finished} / {} 只股票。",
+                                ts_codes.len()
+                            ),
+                        });
+                    }
+                };
+                let mut batch = compute_cyq_stock_group_batch(
+                    &worker_reader,
+                    &load_start_date,
+                    &start_date,
+                    &end_date,
+                    config,
+                    ts_group,
+                    Some(&progress_stock_done),
+                )?;
+                batch.reserve_memory(&queue_memory)?;
+                sender
+                    .send(CyqWriteMessage::Batch(batch))
+                    .map_err(|e| format!("发送筹码局部修复批次失败:{e}"))?;
+                Ok(())
+            })
+    });
 
     if let Err(err) = &compute_result {
         let _ = abort_tx.send(CyqWriteMessage::Abort(err.clone()));
@@ -1388,7 +1438,10 @@ pub fn rebuild_cyq_all_with_progress(
         });
     }
 
-    let (tx, rx) = sync_channel(CYQ_QUEUE_BOUND);
+    let reader_template = std::sync::Mutex::new(reader);
+    let queue_memory = lianghua_model::resource::ByteBudget::new(32, 256 << 20)?;
+    let (tx, rx) =
+        sync_channel(lianghua_model::resource::ResourcePlan::detect().batch(16 << 20, 16));
     let abort_tx = tx.clone();
     let writer_handle = thread::spawn(move || {
         (|db_path: &str,
@@ -1464,13 +1517,16 @@ pub fn rebuild_cyq_all_with_progress(
     });
 
     let finished_stock_count = std::sync::atomic::AtomicUsize::new(0);
-    let compute_result =
+    let compute_pool = crate::data::resource::compute_pool(128 << 20)?;
+    let compute_result = compute_pool.install(|| {
         ts_codes
-            .par_chunks(128)
+            .par_chunks(lianghua_model::resource::ResourcePlan::detect().batch(8 << 20, 128))
             .try_for_each_with(tx, |sender, ts_group| -> Result<(), String> {
                 lianghua_model::task::checkpoint()?;
-                let worker_reader =
-                    DataReader::new_with_runtime_keys(source_dir, &required_runtime_keys)?;
+                let worker_reader = reader_template
+                    .lock()
+                    .map_err(|_| "行情读取模板连接锁异常".to_string())?
+                    .try_clone()?;
                 let progress_stock_done = |ts_code: &str| {
                     if let Some(progress_cb) = progress_cb {
                         let finished = finished_stock_count
@@ -1488,7 +1544,7 @@ pub fn rebuild_cyq_all_with_progress(
                         });
                     }
                 };
-                let batch = compute_cyq_stock_group_batch(
+                let mut batch = compute_cyq_stock_group_batch(
                     &worker_reader,
                     &load_start_date,
                     &start_date,
@@ -1497,11 +1553,13 @@ pub fn rebuild_cyq_all_with_progress(
                     ts_group,
                     Some(&progress_stock_done),
                 )?;
+                batch.reserve_memory(&queue_memory)?;
                 sender
                     .send(CyqWriteMessage::Batch(batch))
                     .map_err(|e| format!("发送筹码批次失败:{e}"))?;
                 Ok(())
-            });
+            })
+    });
 
     if let Err(err) = &compute_result {
         let _ = abort_tx.send(CyqWriteMessage::Abort(err.clone()));
@@ -1527,7 +1585,7 @@ pub fn rebuild_cyq_all_with_progress(
 
     compute_result?;
     let (snapshot_rows, bin_rows) = writer_result?;
-    drop(reader);
+    drop(reader_template);
     drop(source_conn);
     crate::data::download_state::complete_chip_rebuild(
         source_dir,

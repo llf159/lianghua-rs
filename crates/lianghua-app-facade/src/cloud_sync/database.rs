@@ -538,7 +538,7 @@ pub(super) fn import(
     }
     let temp = tempfile::tempdir().map_err(|e| e.to_string())?;
     let staging = Connection::open_in_memory().map_err(|e| e.to_string())?;
-    for (table, _, columns) in expected {
+    for (table, primary, columns) in expected {
         let mut entry = archive
             .by_name(&format!("{table}.parquet"))
             .map_err(|_| format!("云端榜单缺少 {table}"))?;
@@ -558,6 +558,13 @@ pub(super) fn import(
         let actual: String = staging.query_row("SELECT string_agg(column_name, ',' ORDER BY ordinal_position) FROM information_schema.columns WHERE table_name = ?", [table], |r| r.get(0)).map_err(|e| e.to_string())?;
         if actual != *columns {
             return Err(format!("云端 {table} 列结构不兼容，未替换本地数据"));
+        }
+        // Ranking tables need not have persistent indexes. Validate the bounded
+        // snapshot here before writing to such a table or deleting local rows.
+        if !similarity && !primary.is_empty() {
+            staging
+                .execute_batch(&format!("ALTER TABLE {table} ADD PRIMARY KEY ({primary})"))
+                .map_err(|e| format!("云端 {table} 结果键无效，未替换本地数据: {e}"))?;
         }
         if !table.ends_with("active_config") {
             let invalid: i64 = staging.query_row(&format!("SELECT COUNT(*) FROM {table} WHERE trade_date IS NULL OR replace(trade_date, '-', '') NOT IN ({date_list})"), [], |r| r.get(0)).map_err(|e| e.to_string())?;

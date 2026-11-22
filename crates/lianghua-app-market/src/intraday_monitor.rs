@@ -1325,24 +1325,23 @@ fn apply_intraday_template_tags(
     let has_ready_template = compiled_templates
         .values()
         .any(|item| matches!(item, CompiledIntradayMonitorTemplate::Ready(_)));
-    if has_ready_template {
-        if let Err(err) = DataReader::new_with_runtime_keys(source_path, &required_runtime_keys) {
-            for row in rows.iter_mut() {
-                if resolve_template_id_for_row(row, rank_mode_configs).is_some() {
-                    set_template_tag(row, format!("runtime 初始化失败: {err}"), "down");
+    let worker_sources = if has_ready_template {
+        let sources = DataReader::new_with_runtime_keys(source_path, &required_runtime_keys)
+            .and_then(|reader| open_result_conn(source_path).map(|conn| (reader, conn)));
+        match sources {
+            Ok(sources) => Some(std::sync::Mutex::new(sources)),
+            Err(err) => {
+                for row in rows.iter_mut() {
+                    if resolve_template_id_for_row(row, rank_mode_configs).is_some() {
+                        set_template_tag(row, format!("runtime 初始化失败: {err}"), "down");
+                    }
                 }
+                return build_template_warning_message(rows);
             }
-            return build_template_warning_message(rows);
         }
-        if let Err(err) = open_result_conn(source_path) {
-            for row in rows.iter_mut() {
-                if resolve_template_id_for_row(row, rank_mode_configs).is_some() {
-                    set_template_tag(row, format!("runtime 初始化失败: {err}"), "down");
-                }
-            }
-            return build_template_warning_message(rows);
-        }
-    }
+    } else {
+        None
+    };
 
     let runtime_context = IntradayTemplateRuntimeContext {
         source_path,
@@ -1358,15 +1357,22 @@ fn apply_intraday_template_tags(
 
     if has_ready_template {
         rows.par_chunks_mut(64).for_each(|chunk| {
-            let worker_context = match (
-                DataReader::new_with_runtime_keys(source_path, &required_runtime_keys),
-                open_result_conn(source_path),
-            ) {
-                (Ok(reader), Ok(result_conn)) => Some(IntradayTemplateWorkerContext {
+            let sources = worker_sources
+                .as_ref()
+                .ok_or_else(|| "缺少行情读取模板".to_string())
+                .and_then(|sources| {
+                    let sources = sources.lock().map_err(|e| e.to_string())?;
+                    Ok((
+                        sources.0.try_clone()?,
+                        sources.1.try_clone().map_err(|e| e.to_string())?,
+                    ))
+                });
+            let worker_context = match sources {
+                Ok((reader, result_conn)) => Some(IntradayTemplateWorkerContext {
                     reader,
                     result_conn,
                 }),
-                (Err(err), _) | (_, Err(err)) => {
+                Err(err) => {
                     for row in chunk {
                         if resolve_template_id_for_row(row, rank_mode_configs).is_some() {
                             set_template_tag(row, format!("runtime 初始化失败: {err}"), "down");

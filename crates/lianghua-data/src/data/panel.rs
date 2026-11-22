@@ -347,6 +347,7 @@ struct Source {
     presence: Vec<Vec<bool>>,
     listed: BTreeMap<String, usize>,
     cached_inputs: HashMap<String, PanelValue>,
+    _input_memory: Option<lianghua_model::resource::MemoryLease>,
 }
 
 impl Source {
@@ -383,9 +384,19 @@ impl Source {
             .saturating_mul(self.dates.len())
             .saturating_mul(inputs.len())
             .saturating_mul(std::mem::size_of::<f64>());
-        if inputs.is_empty() || bytes > 64 * 1024 * 1024 {
+        if inputs.is_empty()
+            || bytes
+                > (lianghua_model::resource::ResourcePlan::detect().bytes / 32).min(512 << 20)
+                    as usize
+        {
             return Ok(());
         }
+        let Ok(memory) =
+            lianghua_model::resource::process_pool().reserve(bytes as u64, bytes as u64)
+        else {
+            return Ok(());
+        };
+        self._input_memory = Some(memory);
         let mut columns = inputs
             .iter()
             .map(|key| {
@@ -922,6 +933,7 @@ fn refresh_inner(
         stocks,
         presence,
         cached_inputs: HashMap::new(),
+        _input_memory: None,
         listed: listing
             .iter()
             .map(|(k, v)| {
@@ -1028,9 +1040,13 @@ fn refresh_inner(
             } else {
                 rt.source.stocks.len()
             };
-            for chunk_start in (0..stock_count).step_by(128) {
+            let save_batch = lianghua_model::resource::ResourcePlan::detect().batch(
+                (rt.source.dates.len() - output_day).saturating_mul(64 + def.name.len()),
+                512,
+            );
+            for chunk_start in (0..stock_count).step_by(save_batch) {
                 lianghua_model::task::checkpoint()?;
-                let chunk_end = (chunk_start + 128).min(stock_count);
+                let chunk_end = (chunk_start + save_batch).min(stock_count);
                 let capacity = (chunk_end - chunk_start) * (rt.source.dates.len() - output_day);
                 let mut names = StringBuilder::with_capacity(capacity, capacity * def.name.len());
                 let mut codes = StringBuilder::with_capacity(capacity, capacity * 9);
@@ -1241,6 +1257,7 @@ prec=12
                 presence: vec![vec![true; 20]],
                 listed: BTreeMap::new(),
                 cached_inputs: HashMap::new(),
+                _input_memory: None,
             };
             cached.cache_inputs(&inputs).unwrap();
             cached

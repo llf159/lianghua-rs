@@ -2177,8 +2177,10 @@ pub fn get_stock_detail_cyq(
                 })
                 .unwrap_or(snapshots.len() - 1);
             // Keep 60 days for scaling, plus 60 days in either direction for cursor movement.
-            let window_start = selected_index.saturating_sub(119);
-            let window_end = (selected_index + 61).min(snapshots.len());
+            let prefetch_days =
+                lianghua_model::resource::ResourcePlan::detect().batch(1 << 20, 180);
+            let window_start = selected_index.saturating_sub(59 + prefetch_days);
+            let window_end = (selected_index + 1 + prefetch_days).min(snapshots.len());
             let has_earlier_snapshots = window_start > 0;
             let has_later_snapshots = window_end < snapshots.len();
             snapshots = snapshots.drain(window_start..window_end).collect();
@@ -2407,8 +2409,10 @@ pub fn get_stock_detail_cyq(
                 })
                 .unwrap_or(snapshots.len() - 1);
             // Keep 60 days for scaling, plus 60 days in either direction for cursor movement.
-            let window_start = selected_index.saturating_sub(119);
-            let window_end = (selected_index + 61).min(snapshots.len());
+            let prefetch_days =
+                lianghua_model::resource::ResourcePlan::detect().batch(1 << 20, 180);
+            let window_start = selected_index.saturating_sub(59 + prefetch_days);
+            let window_end = (selected_index + 1 + prefetch_days).min(snapshots.len());
             let has_earlier_snapshots = window_start > 0;
             let has_later_snapshots = window_end < snapshots.len();
             snapshots = snapshots.drain(window_start..window_end).collect();
@@ -2720,9 +2724,7 @@ mod tests {
         .unwrap();
         drop(conn);
         for model in ["chen", "legacy"] {
-            for (selected_day, expected_start, expected_end) in
-                [(None, 280, 400), (Some(200), 81, 261), (Some(10), 0, 71)]
-            {
+            for selected_day in [None, Some(200), Some(10)] {
                 let selected_date = selected_day.map(|day| {
                     (chrono::NaiveDate::from_ymd_opt(2025, 1, 1).unwrap()
                         + chrono::Duration::days(day))
@@ -2736,7 +2738,16 @@ mod tests {
                     selected_date,
                 )
                 .unwrap();
-                assert_eq!(data.snapshots.len(), expected_end - expected_start);
+                let selected = selected_day.unwrap_or(399) as usize;
+                let expected_start =
+                    chrono::NaiveDate::parse_from_str(&data.snapshots[0].trade_date, "%Y%m%d")
+                        .unwrap()
+                        .signed_duration_since(chrono::NaiveDate::from_ymd_opt(2025, 1, 1).unwrap())
+                        .num_days() as usize;
+                let expected_end = expected_start + data.snapshots.len();
+                assert!(expected_start <= selected.saturating_sub(59));
+                assert!(expected_end > selected);
+                assert!(data.snapshots.len() <= 420);
                 assert_eq!(data.has_earlier_snapshots, expected_start > 0);
                 assert_eq!(data.has_later_snapshots, expected_end < 400);
                 for (day, snapshot) in (expected_start..expected_end).zip(&data.snapshots) {

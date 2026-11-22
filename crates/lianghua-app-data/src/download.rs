@@ -425,6 +425,7 @@ struct StockDataIndicatorWorkItem {
 }
 
 struct StockDataIndicatorRebuildBatch {
+    _memory_permit: std::sync::Arc<lianghua_model::resource::BytePermit>,
     ts_code: String,
     adj_type: AdjType,
     adj_type_label: String,
@@ -586,6 +587,7 @@ fn list_stock_data_indicator_work_items(
 
 fn compute_stock_data_indicator_rebuild_batch(
     sender: &SyncSender<StockDataIndicatorRebuildMessage>,
+    queue_memory: &std::sync::Arc<lianghua_model::resource::ByteBudget>,
     source_path: &str,
     conn: Connection,
     inds_cache: &[lianghua_download::download::ind_calc::IndsCache],
@@ -635,6 +637,19 @@ fn compute_stock_data_indicator_rebuild_batch(
         sender
             .send(StockDataIndicatorRebuildMessage::Batch(
                 StockDataIndicatorRebuildBatch {
+                    _memory_permit: queue_memory.acquire(
+                        (trade_dates
+                            .iter()
+                            .map(|d| d.capacity() + std::mem::size_of::<String>())
+                            .sum::<usize>()
+                            + indicators
+                                .iter()
+                                .map(|(name, values)| {
+                                    name.capacity()
+                                        + values.capacity() * std::mem::size_of::<Option<f64>>()
+                                })
+                                .sum::<usize>()) as u64,
+                    )?,
                     ts_code: item.ts_code.clone(),
                     adj_type,
                     adj_type_label: item.adj_type.clone(),
@@ -2343,12 +2358,14 @@ pub fn run_prepared_stock_data_indicator_columns_rebuild(
         });
     }
 
-    let (tx, rx) = sync_channel(16);
+    let queue_memory = lianghua_model::resource::ByteBudget::new(32, 256 << 20)?;
+    let (tx, rx) =
+        sync_channel(lianghua_model::resource::ResourcePlan::detect().batch(8 << 20, 16));
     let abort_tx = tx.clone();
     let source_path = prepared.source_path.clone();
     let inds_cache_for_workers = inds_cache.clone();
     let work_items_for_workers = work_items
-        .chunks(256)
+        .chunks(lianghua_model::resource::ResourcePlan::detect().batch(2 << 20, 256))
         .map(|group| {
             conn.try_clone()
                 .map(|reader_conn| (reader_conn, group.to_vec()))
@@ -2361,6 +2378,7 @@ pub fn run_prepared_stock_data_indicator_columns_rebuild(
             |sender, (reader_conn, work_group)| {
                 compute_stock_data_indicator_rebuild_batch(
                     sender,
+                    &queue_memory,
                     &source_path,
                     reader_conn,
                     &inds_cache_for_workers,
@@ -2894,6 +2912,7 @@ mod tests {
         let (sender, receiver) = sync_channel(1);
         compute_stock_data_indicator_rebuild_batch(
             &sender,
+            &lianghua_model::resource::ByteBudget::new(32, 256 << 20).unwrap(),
             source_path,
             conn.try_clone().expect("clone reader connection"),
             &cache,

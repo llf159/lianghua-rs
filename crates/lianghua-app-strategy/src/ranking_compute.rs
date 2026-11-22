@@ -4,14 +4,25 @@ use serde::Serialize;
 
 use crate::{
     data::{
-        concept_performance_data::rebuild_concept_performance_all, concept_performance_db_path,
-        cyq::CyqConfig, cyq_chen::ChenChipConfig,
-        cyq_chen_data::rebuild_cyq_chen_all_with_progress, cyq_chen_db_path,
-        cyq_data::rebuild_cyq_all_with_progress, cyq_db_path, load_trade_date_list, result_db_path,
-        scoring_store::build_rank_tiebreak, source_db_path,
+        concept_performance_data::rebuild_concept_performance_all,
+        concept_performance_db_path,
+        cyq::CyqConfig,
+        cyq_chen::ChenChipConfig,
+        cyq_chen_data::rebuild_cyq_chen_all_with_progress,
+        cyq_chen_db_path,
+        cyq_data::rebuild_cyq_all_with_progress,
+        cyq_db_path, load_trade_date_list, result_db_path,
+        scoring_store::{
+            ScoreComputeCheckpoint, ScoreComputeParameters, build_rank_tiebreak,
+            read_score_compute_checkpoint,
+        },
+        source_db_path,
     },
     download::runner::DownloadProgressCallback,
-    scoring::runner::{ScoringRunProfile, preview_scoring_runtime_warnings, scoring_all_to_db},
+    scoring::runner::{
+        ScoringRunProfile, preview_scoring_runtime_warnings, scoring_all_to_db,
+        scoring_compute_resume_key,
+    },
     scoring_model::{RankTiebreakProfile, TieBreakWay},
 };
 
@@ -88,6 +99,7 @@ pub struct RankComputeStatus {
     pub strategy_path: String,
     pub source_db: RankComputeDbRange,
     pub result_db: RankComputeDbRange,
+    pub score_resume: Option<ScoreComputeParameters>,
     pub similarity_rank_db: RankComputeDbRange,
     pub concept_performance_db: RankComputeDbRange,
     pub result_db_continuity: RankComputeResultContinuity,
@@ -281,6 +293,28 @@ fn get_rank_compute_status_inner(
     let cyq_chen_db = cyq_chen_db_path(source_path);
     let source_db_range = query_trade_date_range(&source_db, "stock_data.db", "stock_data")?;
     let result_db_range = query_trade_date_range(&result_db, "scoring_result.db", "score_summary")?;
+    let checkpoint = if result_db.exists() {
+        let conn = crate::data::open_db_readonly(&result_db)
+            .map_err(|e| format!("打开评分断点失败:{e}"))?;
+        read_score_compute_checkpoint(&conn)?
+    } else {
+        None
+    };
+    let score_resume = match checkpoint {
+        Some(ScoreComputeCheckpoint {
+            resume_key,
+            parameters: Some(parameters),
+        }) if parameters.adj_type == "qfq" => scoring_compute_resume_key(
+            source_path,
+            strategy_path,
+            &parameters.adj_type,
+            &parameters.start_date,
+            &parameters.end_date,
+        )
+        .is_ok_and(|current_key| current_key == resume_key)
+        .then_some(parameters),
+        _ => None,
+    };
     let result_db_continuity = (|source_path: &str,
                                  result_db_range: &RankComputeDbRange|
      -> Result<RankComputeResultContinuity, String> {
@@ -608,6 +642,7 @@ fn get_rank_compute_status_inner(
         })(source_path, strategy_path),
         source_db: source_db_range,
         result_db: result_db_range,
+        score_resume,
         similarity_rank_db,
         concept_performance_db,
         result_db_continuity,
@@ -658,14 +693,52 @@ pub fn run_ranking_score_calculation(
     }
 
     let started_at = Instant::now();
-    let profile = scoring_all_to_db(
-        &source_path,
-        strategy_path,
-        "qfq",
-        &start_date,
-        &end_date,
-        progress_cb,
-    )?;
+    let delays = [250, 500, 1_000];
+    let mut retries = 0;
+    let profile = loop {
+        lianghua_model::task::checkpoint()?;
+        match scoring_all_to_db(
+            &source_path,
+            strategy_path,
+            "qfq",
+            &start_date,
+            &end_date,
+            progress_cb,
+        ) {
+            Ok(profile) => break profile,
+            Err(error) => {
+                let rank_write_failed = ["写入场景排名失败:", "写入J值同分总榜排名失败:"]
+                    .iter()
+                    .any(|prefix| {
+                        error.strip_prefix(prefix).is_some_and(|detail| {
+                            detail.starts_with("INTERNAL Error:")
+                                || detail.starts_with(
+                                    "FATAL Error: Failed: database has been invalidated",
+                                )
+                        })
+                    });
+                let Some(&delay) = delays.get(retries).filter(|_| rank_write_failed) else {
+                    return Err(error);
+                };
+                retries += 1;
+                let message = format!(
+                    "DuckDB 排名写入失败，将重新打开数据库并重试 {retries}/{}。",
+                    delays.len()
+                );
+                eprintln!("{message} {}", error.lines().next().unwrap_or(&error));
+                if let Some(cb) = progress_cb {
+                    cb(lianghua_model::DownloadProgress {
+                        phase: "score_prepare".to_string(),
+                        finished: 0,
+                        total: 0,
+                        current_label: None,
+                        message,
+                    });
+                }
+                std::thread::sleep(std::time::Duration::from_millis(delay));
+            }
+        }
+    };
     let status = get_rank_compute_status_inner(&source_path, strategy_path)?;
     Ok(RankComputeRunResult {
         action: "score".to_string(),
@@ -727,7 +800,7 @@ pub fn run_ranking_score_calculation(
                 ),
                 timing_item(
                     "writer-recreate-indexes",
-                    "写库-建索引",
+                    "写库-结果键校验",
                     profile.writer.recreate_indexes_ms,
                     None,
                 ),
@@ -1009,6 +1082,27 @@ mod tests {
             status.result_db_continuity.missing_trade_dates_sample,
             vec!["20260106"]
         );
+        assert!(status.score_resume.is_none());
+        std::fs::write(directory.join("score_rule.toml"), "rules = []\n").unwrap();
+        let key = scoring_compute_resume_key(source, None, "qfq", "20260101", "20260111").unwrap();
+        let results = duckdb::Connection::open(result_db_path(source)).unwrap();
+        results.execute_batch("CREATE TABLE score_compute_checkpoint(resume_key VARCHAR, start_date VARCHAR, end_date VARCHAR, adj_type VARCHAR)").unwrap();
+        results
+            .execute(
+                "INSERT INTO score_compute_checkpoint VALUES (?, '20260101', '20260111', 'qfq')",
+                [key],
+            )
+            .unwrap();
+        drop(results);
+        let status = get_ranking_compute_status(source, None).unwrap();
+        let parameters = status.score_resume.unwrap();
+        assert_eq!(parameters.start_date, "20260101");
+        assert_eq!(parameters.end_date, "20260111");
+        assert_eq!(status.suggested_start_date.as_deref(), Some("20260112"));
+        // A changed input must not offer the old half-finished run as resumable.
+        std::fs::write(directory.join("score_rule.toml"), "rules = []\n# changed\n").unwrap();
+        let status = get_ranking_compute_status(source, None).unwrap();
+        assert!(status.score_resume.is_none());
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

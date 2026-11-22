@@ -40,8 +40,6 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 pub(super) const PCT_CHG_BATCH_SIZE: usize = 512;
-pub(super) const RESIDUAL_SERIES_TARGET_POINTS: usize = 256 * 1024;
-pub(super) const RESIDUAL_STOCK_BATCH_MIN: usize = 128;
 pub(super) const RESIDUAL_STOCK_BATCH_MAX: usize = PCT_CHG_BATCH_SIZE;
 pub(super) const EFFICIENCY_RATIO_PERIOD: usize = 20;
 pub const DEFAULT_RULE_WITH_SAMPLES_PARALLEL_BATCH_SIZE: usize = 4;
@@ -546,7 +544,15 @@ where
         allowed_ts_codes,
     )?;
     let mut out = Vec::with_capacity(rule_names.len());
-    for rule_batch in rule_names.chunks(parallel_batch_size.max(1)) {
+    for rule_batch in rule_names.chunks(
+        lianghua_model::resource::ResourcePlan::detect().workers(
+            parallel_batch_size,
+            runtime_cache
+                .score_column_len
+                .saturating_mul(32)
+                .max(1 << 20),
+        ),
+    ) {
         let batch_results = rule_batch
             .par_iter()
             .map(|rule_name| {
@@ -655,7 +661,15 @@ where
         allowed_ts_codes,
     )?;
     let mut grouped_results = Vec::with_capacity(rule_names.len());
-    for rule_batch in rule_names.chunks(parallel_batch_size.max(1)) {
+    for rule_batch in rule_names.chunks(
+        lianghua_model::resource::ResourcePlan::detect().workers(
+            parallel_batch_size,
+            runtime_cache
+                .score_column_len
+                .saturating_mul(32)
+                .max(1 << 20),
+        ),
+    ) {
         let mut batch_results: Vec<Result<T, String>> = rule_batch
             .par_iter()
             .map(|rule_name| {
@@ -735,7 +749,15 @@ where
         allowed_ts_codes,
     )?;
     let mut grouped_results = Vec::with_capacity(rule_names.len());
-    for rule_batch in rule_names.chunks(parallel_batch_size.max(1)) {
+    for rule_batch in rule_names.chunks(
+        lianghua_model::resource::ResourcePlan::detect().workers(
+            parallel_batch_size,
+            runtime_cache
+                .score_column_len
+                .saturating_mul(32)
+                .max(1 << 20),
+        ),
+    ) {
         let mut batch_results: Vec<Result<T, String>> = rule_batch
             .par_iter()
             .map(|rule_name| {
@@ -930,7 +952,15 @@ where
     );
 
     let mut grouped_results = Vec::with_capacity(rule_names.len());
-    for rule_batch in rule_names.chunks(parallel_batch_size.max(1)) {
+    for rule_batch in rule_names.chunks(
+        lianghua_model::resource::ResourcePlan::detect().workers(
+            parallel_batch_size,
+            runtime_cache
+                .score_column_len
+                .saturating_mul(32)
+                .max(1 << 20),
+        ),
+    ) {
         let mut batch_results: Vec<Result<T, String>> = rule_batch
             .par_iter()
             .map(|rule_name| {
@@ -1014,7 +1044,15 @@ where
     );
 
     let mut grouped_results = Vec::with_capacity(rule_names.len());
-    for rule_batch in rule_names.chunks(parallel_batch_size.max(1)) {
+    for rule_batch in rule_names.chunks(
+        lianghua_model::resource::ResourcePlan::detect().workers(
+            parallel_batch_size,
+            runtime_cache
+                .score_column_len
+                .saturating_mul(32)
+                .max(1 << 20),
+        ),
+    ) {
         let mut batch_results: Vec<Result<T, String>> = rule_batch
             .par_iter()
             .map(|rule_name| {
@@ -1136,7 +1174,13 @@ where
     T: Send,
     F: Fn(&str, RuleLayerMetricsWithValidation) -> Result<T, String> + Sync,
 {
-    let batch_size = parallel_batch_size.max(1);
+    let batch_size = lianghua_model::resource::ResourcePlan::detect().workers(
+        parallel_batch_size,
+        runtime_cache
+            .score_column_len
+            .saturating_mul(32)
+            .max(1 << 20),
+    );
     let mut grouped_results = Vec::with_capacity(rule_names.len());
     for batch_start in (0..rule_names.len()).step_by(batch_size) {
         let batch_end = (batch_start + batch_size).min(rule_names.len());

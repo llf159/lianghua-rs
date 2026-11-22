@@ -690,7 +690,24 @@ pub fn sync_scoped(
             result.skipped += 1;
             continue;
         }
-        if path == "ranking/scoring_result.zip" && !heads.is_empty() {
+        // 新日期发布只替换云端；策略及覆盖范围检查留在下载落库阶段。
+        let mut newer_snapshot = database::is_snapshot(path) && !heads.is_empty();
+        if newer_snapshot {
+            let latest = database::rank_sources(path, bytes)?.dates.into_keys().max();
+            for head in &heads {
+                let remote = dav.download(&head.hash, &local.join("objects"))?;
+                if latest
+                    <= database::rank_sources(path, &remote)?
+                        .dates
+                        .into_keys()
+                        .max()
+                {
+                    newer_snapshot = false;
+                    break;
+                }
+            }
+        }
+        if path == "ranking/scoring_result.zip" && !heads.is_empty() && !newer_snapshot {
             let compatible = if heads.len() == 1 {
                 let remote = dav.download(&heads[0].hash, &local.join("objects"))?;
                 database::same_rank_strategy(path, bytes, &remote)?
@@ -705,17 +722,21 @@ pub fn sync_scoped(
                 continue;
             }
         }
-        let parents = state
-            .base
-            .get(path)
-            .filter(|base| {
-                dav.manifest
-                    .entries
-                    .get(path)
-                    .is_some_and(|versions| versions.iter().any(|v| v.id == base.id))
-            })
-            .map(|b| vec![b.id.clone()])
-            .unwrap_or_default();
+        let parents = if newer_snapshot {
+            heads.iter().map(|head| head.id.clone()).collect()
+        } else {
+            state
+                .base
+                .get(path)
+                .filter(|base| {
+                    dav.manifest
+                        .entries
+                        .get(path)
+                        .is_some_and(|versions| versions.iter().any(|v| v.id == base.id))
+                })
+                .map(|b| vec![b.id.clone()])
+                .unwrap_or_default()
+        };
         if path.starts_with("bundles/") {
             bundles::unpack(path, bytes)?;
         }

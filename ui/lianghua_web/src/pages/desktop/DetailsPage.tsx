@@ -19,6 +19,7 @@ import {
   type ReactNode,
   type WheelEvent as ReactWheelEvent,
 } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { useSearchParams } from "react-router-dom";
 import {
   getStockDetailCyq,
@@ -4873,6 +4874,7 @@ function DetailChart({
       detailCyqFailedRequestKeyRef.current = "";
 
       try {
+        const budget = await invoke<{ frontendCacheBytes: number }>("get_resource_budget");
         const cyq = await getStockDetailCyq({
           sourcePath: normalizedSourcePath,
           tsCode: normalizedTsCode,
@@ -4882,8 +4884,15 @@ function DetailChart({
         if (detailCyqRequestIdRef.current !== requestId) {
           return null;
         }
-        // Keep at most three batch windows; cursor movement does not cancel a running query.
-        setDetailCyqWindows((current) => [cyq, ...current].slice(0, 3));
+        setDetailCyqWindows((current) => {
+          let bytes = 0;
+          return [cyq, ...current].filter((window, index) => {
+            bytes += window.snapshots.reduce(
+              (total, snapshot) => total + 512 + snapshot.bins.length * 256, 0,
+            );
+            return index === 0 || bytes <= budget.frontendCacheBytes;
+          });
+        });
         return cyq;
       } catch (error) {
         if (detailCyqRequestIdRef.current === requestId) {

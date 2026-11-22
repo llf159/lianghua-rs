@@ -1,0 +1,14 @@
+[package]
+name = "lianghua-duckdb"
+version = "0.2.0"
+edition = "2024"
+
+[features]
+default = []
+appender-arrow = ["duckdb/appender-arrow"]
+bundled = ["duckdb/bundled"]
+parquet = ["duckdb/parquet"]
+
+[dependencies]
+duckdb = { version = "~1.20001.0" }
+lianghua-model = { path = "../lianghua-model" }
