@@ -1275,14 +1275,30 @@
 .cloud-text-diff { margin: 8px 0 12px; border: 1px solid #e2e8f0; border-radius: 6px; overflow: hidden; }
 .cloud-text-diff-legend { padding: 8px 10px; background: #f8fafc; color: #475569; font-size: 12px; }
 .cloud-text-diff-lines { max-height: 360px; overflow: auto; overscroll-behavior: contain; background: #fff; font: 12px/1.7 monospace; }
-.cloud-diff-line { display: flex; min-width: max-content; }
+.cloud-diff-line { display: flex; min-width: 0; align-items: flex-start; }
 .cloud-diff-line > span { flex: 0 0 36px; text-align: right; padding-right: 8px; color: #64748b; user-select: none; }
-.cloud-diff-line code { white-space: pre; padding-right: 12px; color: #1f2937; }
+.cloud-diff-line code { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; flex: 1; padding-right: 12px; color: #1f2937; }
+.cloud-diff-omitted { padding: 6px 12px; background: #f1f5f9; color: #64748b; }
+pre.cloud-text-diff-lines { white-space: pre-wrap; overflow-wrap: anywhere; padding: 10px; }
 .cloud-diff-line.is-added { background: #dcfce7; }
 .cloud-diff-line.is-removed { background: #fee2e2; }
 .cloud-review-content summary { cursor: pointer; font-size: 13px; }
 .cloud-strategy-resolution { margin-top: 16px; border-top: 1px solid #e2e8f0; padding-top: 14px; }
 .cloud-strategy-resolution p { color: #64748b; font-size: 13px; line-height: 1.6; }
+.cloud-strategy-choice { min-width: 0; margin: 14px 0; padding: 12px; border: 1px solid #dbe3ee; border-radius: 8px; }
+.cloud-strategy-choice legend { padding: 0 6px; font-weight: 600; }
+.cloud-strategy-choice > p { margin: 0 0 10px; }
+.cloud-strategy-choice-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr)); gap: 10px; }
+.cloud-strategy-choice-options label { display: flex; align-items: flex-start; gap: 10px; margin: 0; padding: 12px; border: 2px solid #dbe3ee; border-radius: 8px; cursor: pointer; }
+.cloud-strategy-choice-options label.is-selected { border-color: #ea580c; background: #fff7ed; }
+.cloud-strategy-choice-options input[type="radio"] { appearance: auto; width: 18px; height: 18px; min-width: 18px; margin: 2px 0 0; accent-color: #ea580c; }
+.cloud-strategy-choice-options span { display: grid; gap: 6px; min-width: 0; }
+.cloud-strategy-choice-options time { font-size: 14px; color: #0f172a; }
+.cloud-strategy-choice-options small { color: #64748b; }
+.cloud-strategy-confirm { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin: 14px 0; }
+.cloud-strategy-confirm button { min-height: 44px; }
+.cloud-review-details { margin-top: 16px; border-top: 1px solid #e2e8f0; padding-top: 14px; }
+.cloud-review-details > summary { cursor: pointer; padding: 8px 0; color: #475569; }
 .cloud-data-review button:disabled { opacity: .55; cursor: default; }
 @media (max-width: 900px) {
   .cloud-review-files button { flex-direction: column; gap: 4px; }
@@ -1339,4 +1355,37 @@
   .cloud-ranking-source-choice { gap: 10px; padding: 14px; }
   .cloud-ranking-source-body { padding: 0 14px 14px 42px; }
   .cloud-ranking-decision { padding: 14px; }
+}
+
+.cloud-diff-line mark { background: #fde68a; color: inherit; font-weight: 700; }
+
+.cloud-diff-navigation { display: flex; align-items: center; gap: 8px; padding: 8px; background: #f8fafc; }
+.cloud-diff-navigation span { flex: 1; }
+.cloud-diff-navigation button { padding: 6px 10px; }
+.cloud-side-diff { max-height: 60dvh; overflow: auto; position: relative; font: 12px/1.7 monospace; }
+.cloud-side-diff-head, .cloud-side-diff-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.cloud-side-diff-head { position: sticky; top: 0; z-index: 1; background: #e2e8f0; }
+.cloud-side-diff-head strong { padding: 8px; }
+.cloud-side-diff-cell { display: flex; min-width: 0; border-right: 1px solid #cbd5e1; }
+.cloud-diff-number { flex: 0 0 34px; color: #64748b; text-align: right; padding-right: 6px; user-select: none; }
+.cloud-side-diff-cell code { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; padding-right: 8px; }
+.cloud-side-diff-cell.is-removed { background: #fff1f2; }
+.cloud-side-diff-cell.is-added { background: #ecfdf5; }
+.cloud-side-diff-cell.is-absent { background: #f1f5f9; }
+.cloud-side-diff-cell mark, .cloud-field-versions mark { background: #fde68a; color: inherit; }
+.cloud-strategy-diff { margin: 12px 0; }
+.cloud-strategy-diff .cloud-review-toolbar { flex-wrap: wrap; }
+.cloud-strategy-diff input { min-width: 0; padding: 8px; border: 1px solid #cbd5e1; border-radius: 6px; }
+.cloud-strategy-changes { display: grid; gap: 6px; max-height: 240px; overflow-y: auto; margin: 10px 0; }
+.cloud-strategy-changes button { display: flex; align-items: baseline; gap: 10px; text-align: left; padding: 9px 12px; border: 1px solid #e2e8f0; border-radius: 6px; background: #fff; color: #334155; }
+.cloud-strategy-changes button.is-selected { border-color: #3b82f6; background: #eff6ff; }
+.cloud-strategy-changes button span { flex-shrink: 0; font-size: 12px; color: #64748b; }
+.cloud-strategy-changes button strong, .cloud-strategy-field > strong { overflow-wrap: anywhere; }
+.cloud-field-versions { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; margin-top: 10px; }
+.cloud-field-versions section { min-width: 0; border: 1px solid #cbd5e1; border-radius: 6px; overflow: hidden; }
+.cloud-field-versions h5 { margin: 0; padding: 8px 10px; background: #f1f5f9; font-size: 13px; }
+.cloud-field-versions pre { margin: 0; padding: 10px; white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.8 monospace; max-height: 45dvh; overflow-y: auto; }
+.cloud-field-versions details { padding: 8px; }
+@media (max-width: 800px) {
+  .cloud-field-versions { grid-template-columns: minmax(0, 1fr); }
 }

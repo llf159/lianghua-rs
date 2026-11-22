@@ -269,7 +269,7 @@ pub fn maintain_cyq_chen_incremental_if_db_exists(
     // scope 统一等待计算与写线程结束，再释放主连接。
     let replay_first_date = std::sync::OnceLock::new();
     let reader_template = std::sync::Mutex::new(reader);
-    let queue_memory = lianghua_model::resource::ByteBudget::new(32, 512 << 20)?;
+    let queue_memory = lianghua_model::resource::ByteBudget::new(32, 512 << 20);
     let compute_pool = crate::data::resource::compute_pool(128 << 20)?;
     let (compute_result, writer_result) = thread::scope(|scope| {
         let (tx, rx) = sync_channel(2 * super::CyqChenWriteBudget::detect().queue_scale);
@@ -645,7 +645,7 @@ pub fn repair_cyq_chen_stocks_if_db_exists(
         });
     }
 
-    let queue_memory = lianghua_model::resource::ByteBudget::new(32, 512 << 20)?;
+    let queue_memory = lianghua_model::resource::ByteBudget::new(32, 512 << 20);
     let (tx, rx) = sync_channel(2 * super::CyqChenWriteBudget::detect().queue_scale);
     let abort_tx = tx.clone();
     let write_start_date = start_date.clone();
@@ -968,7 +968,7 @@ pub fn rebuild_cyq_chen_all_with_progress(
         .num_threads(compute_threads)
         .build()
         .map_err(|e| format!("创建新筹码计算线程池失败:{e}"))?;
-    let queue_memory = lianghua_model::resource::ByteBudget::new(32, 512 << 20)?;
+    let queue_memory = lianghua_model::resource::ByteBudget::new(32, 512 << 20);
     let (tx, rx) = sync_channel(4 * super::CyqChenWriteBudget::detect().queue_scale);
     let abort_tx = tx.clone();
     let written_stocks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(resumed_stocks));

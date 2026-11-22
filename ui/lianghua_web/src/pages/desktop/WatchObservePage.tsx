@@ -5,6 +5,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import { ensureManagedSourcePath } from "../../apis/managedSource";
 import { listRankTradeDates } from "../../apis/reader";
@@ -47,6 +48,7 @@ import {
   listCloudData,
   readWatchlistSyncFingerprint,
   syncCloud,
+  watchlistStartupPhase,
   type WatchlistTransferMode,
 } from "../../apis/cloudSync";
 import { listen } from "@tauri-apps/api/event";
@@ -162,6 +164,14 @@ export default function WatchObservePage() {
     } satisfies PersistedWatchObserveState;
   }, []);
   const [cloudBusy, setCloudBusy] = useState(false);
+  const cloudStartupPhase = useSyncExternalStore(
+    (onChange) => {
+      window.addEventListener("watchlist-startup-phase-changed", onChange);
+      return () =>
+        window.removeEventListener("watchlist-startup-phase-changed", onChange);
+    },
+    () => watchlistStartupPhase,
+  );
   const cloudBusyRef = useRef(false);
   const [cloudConflict, setCloudConflict] = useState(false);
   const [cloudModalOpen, setCloudModalOpen] = useState(false);
@@ -905,18 +915,26 @@ export default function WatchObservePage() {
               {isDeleteMode ? "删除中" : "删除"}
             </button>
             <button
-              className={`watch-observe-toolbar-btn watch-observe-toolbar-btn-secondary${cloudConflict ? " has-sync-conflict" : ""}`}
+              className={`watch-observe-toolbar-btn watch-observe-toolbar-btn-secondary${cloudConflict ? " has-sync-conflict" : ""}${cloudBusy || cloudStartupPhase ? " is-loading" : ""}`}
               type="button"
               disabled={
-                loading || cloudBusy || refreshingRealtime || isDeleteMode
+                loading ||
+                cloudBusy ||
+                cloudStartupPhase !== null ||
+                refreshingRealtime ||
+                isDeleteMode
               }
-              aria-busy={cloudBusy}
+              aria-busy={cloudBusy || cloudStartupPhase !== null}
               aria-haspopup="dialog"
               aria-expanded={cloudModalOpen}
               title={
-                cloudConflict
-                  ? "自选同步冲突，点击选择上传、下载或合并"
-                  : (cloudFeedback?.text ?? "自选自动同步已启用")
+                cloudStartupPhase === "checking"
+                  ? "正在检查云端自选"
+                  : cloudBusy || cloudStartupPhase === "syncing"
+                    ? "正在同步自选"
+                    : cloudConflict
+                      ? "自选同步冲突，点击选择上传、下载或合并"
+                      : (cloudFeedback?.text ?? "自选自动同步已启用")
               }
               onClick={() => {
                 setCloudProgress("");
@@ -926,13 +944,19 @@ export default function WatchObservePage() {
                 setCloudModalOpen(true);
               }}
             >
-              {cloudConflict
-                ? "同步 · 有冲突"
-                : cloudBusy
-                  ? "同步中…"
-                  : cloudFeedback?.kind === "error"
-                    ? "同步 · 失败"
-                    : "同步"}
+              {cloudStartupPhase === "checking"
+                ? "检查云端…"
+                : cloudBusy || cloudStartupPhase === "syncing"
+                  ? cloudConflict
+                    ? "同步中 · 有冲突"
+                    : cloudAction
+                      ? "同步中…"
+                      : "后台同步中…"
+                  : cloudConflict
+                    ? "同步 · 有冲突"
+                    : cloudFeedback?.kind === "error"
+                      ? "同步 · 失败"
+                      : "同步"}
             </button>
 
             <button

@@ -2358,7 +2358,7 @@ pub fn run_prepared_stock_data_indicator_columns_rebuild(
         });
     }
 
-    let queue_memory = lianghua_model::resource::ByteBudget::new(32, 256 << 20)?;
+    let queue_memory = lianghua_model::resource::ByteBudget::new(32, 256 << 20);
     let (tx, rx) =
         sync_channel(lianghua_model::resource::ResourcePlan::detect().batch(8 << 20, 16));
     let abort_tx = tx.clone();
@@ -2912,7 +2912,7 @@ mod tests {
         let (sender, receiver) = sync_channel(1);
         compute_stock_data_indicator_rebuild_batch(
             &sender,
-            &lianghua_model::resource::ByteBudget::new(32, 256 << 20).unwrap(),
+            &lianghua_model::resource::ByteBudget::new(32, 256 << 20),
             source_path,
             conn.try_clone().expect("clone reader connection"),
             &cache,

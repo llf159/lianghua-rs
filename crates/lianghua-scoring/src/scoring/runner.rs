@@ -861,7 +861,7 @@ pub fn scoring_all_to_db(
     let resume_key = compute_resume_key()?;
     let resume = score_compute_checkpoint_matches(out_db_path, &resume_key)?;
     let tracking_calendar = serde_json::to_string(&tracking.calendar).map_err(|e| e.to_string())?;
-    let queue_memory = lianghua_model::resource::ByteBudget::new(32, 256 << 20)?;
+    let queue_memory = lianghua_model::resource::ByteBudget::new(32, 256 << 20);
     let (tx, rx) = sync_channel(2);
     let abort_tx = tx.clone();
     let db_path = out_db_path.to_string();

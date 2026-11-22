@@ -128,12 +128,14 @@
   color: #fff;
 }
 
-.watch-observe-toolbar-btn-primary.is-loading {
+.watch-observe-toolbar-btn-primary.is-loading,
+.watch-observe-toolbar-btn-secondary.is-loading {
   position: relative;
   padding-left: 28px;
 }
 
-.watch-observe-toolbar-btn-primary.is-loading::before {
+.watch-observe-toolbar-btn-primary.is-loading::before,
+.watch-observe-toolbar-btn-secondary.is-loading::before {
   content: "";
   position: absolute;
   left: 10px;
@@ -151,6 +153,11 @@
   border: 1px solid #c6d0da;
   background: #fff;
   color: #4f5f73;
+}
+
+.watch-observe-toolbar-btn-secondary.is-loading::before {
+  border-color: currentColor;
+  border-top-color: transparent;
 }
 
 .watch-observe-toolbar-btn-danger {

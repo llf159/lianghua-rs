@@ -20,7 +20,7 @@ fn main() -> Result<(), String> {
     }
 
     let control = std::sync::Arc::new(lianghua_model::task::TaskControl::default());
-    let _memory = lianghua_model::resource::TaskMemory::enter(control.clone(), false)?;
+    let _memory = lianghua_model::resource::TaskMemory::enter(control.clone(), false);
     let _active = lianghua_model::task::ActiveTask::enter(vec![control]);
     let source_db = source_db_path(&source_path);
     if !source_db.is_file() {

@@ -1,4 +1,4 @@
-//! Shared working-set reservations. Limits are planning ceilings, not an RSS allocator.
+//! Adaptive sizing for memory-intensive work; limits never act as task admission credits.
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 #[derive(Clone, Debug)]
@@ -11,7 +11,7 @@ pub struct DeviceMemory {
 }
 
 impl DeviceMemory {
-    /// Hot-path decisions reuse a short-lived sample; stage reservations sample afresh.
+    /// Hot-path sizing decisions reuse a short-lived sample.
     pub fn current() -> Self {
         static SAMPLE: OnceLock<Mutex<Option<(std::time::Instant, DeviceMemory)>>> =
             OnceLock::new();
@@ -235,77 +235,6 @@ impl DeviceMemory {
     }
 }
 
-#[derive(Debug)]
-pub struct MemoryPool {
-    limit: u64,
-    used: Mutex<u64>,
-}
-
-impl MemoryPool {
-    pub fn new(limit: u64) -> Arc<Self> {
-        Arc::new(Self {
-            limit,
-            used: Mutex::new(0),
-        })
-    }
-    pub fn reserve(self: &Arc<Self>, wanted: u64, minimum: u64) -> Result<MemoryLease, String> {
-        let mut used = self.used.lock().unwrap_or_else(|e| e.into_inner());
-        let bytes = wanted.min(self.limit.saturating_sub(*used));
-        if bytes < minimum {
-            return Err(format!(
-                "内存预算不足：需要至少 {} MiB，剩余 {} MiB；请结束其他重任务后重试",
-                minimum >> 20,
-                bytes >> 20
-            ));
-        }
-        *used += bytes;
-        Ok(MemoryLease {
-            pool: self.clone(),
-            bytes,
-        })
-    }
-    pub fn remaining(&self) -> u64 {
-        self.limit
-            .saturating_sub(*self.used.lock().unwrap_or_else(|e| e.into_inner()))
-    }
-}
-
-#[derive(Debug)]
-pub struct MemoryLease {
-    pool: Arc<MemoryPool>,
-    pub bytes: u64,
-}
-impl Drop for MemoryLease {
-    fn drop(&mut self) {
-        *self.pool.used.lock().unwrap_or_else(|e| e.into_inner()) -= self.bytes;
-    }
-}
-
-pub fn process_pool() -> &'static Arc<MemoryPool> {
-    static POOL: OnceLock<Arc<MemoryPool>> = OnceLock::new();
-    POOL.get_or_init(|| {
-        let snapshot = DeviceMemory::detect();
-        eprintln!(
-            "资源预算：来源={} 可用={}MiB RSS={}MiB 工作集={}MiB CPU={}",
-            snapshot.source,
-            snapshot.available >> 20,
-            snapshot.rss >> 20,
-            snapshot.working_bytes() >> 20,
-            snapshot.cpus
-        );
-        MemoryPool::new(snapshot.working_bytes())
-    })
-}
-
-/// Reserve fresh headroom only; existing RSS is already excluded by MemAvailable.
-pub fn reserve(divisor: u64, maximum: u64, minimum: u64) -> Result<MemoryLease, String> {
-    let snapshot = DeviceMemory::detect();
-    process_pool().reserve(
-        (snapshot.working_bytes() / divisor.max(1)).min(maximum),
-        minimum,
-    )
-}
-
 #[derive(Clone, Copy, Debug)]
 pub struct ResourcePlan {
     pub bytes: u64,
@@ -320,11 +249,11 @@ impl ResourcePlan {
                 .read()
                 .unwrap_or_else(|e| e.into_inner())
                 .as_ref()
-                .map(|lease| lease.bytes)
+                .map(|plan| plan.bytes)
         });
         Self {
             bytes: task_bytes
-                .unwrap_or_else(|| snapshot.working_bytes().min(process_pool().remaining()))
+                .unwrap_or_else(|| snapshot.working_bytes())
                 .min(snapshot.working_bytes()),
             cpus: snapshot.cpus,
         }
@@ -347,31 +276,23 @@ impl ResourcePlan {
         }
         effective
     }
-    pub fn network_workers(&self, requested: usize) -> usize {
-        let effective = requested
-            .max(1)
-            .min((self.bytes as usize / (16 << 20)).max(1));
-        if effective < requested {
-            eprintln!(
-                "下载并发调整：请求={requested} 有效={effective} 工作集={}MiB",
-                self.bytes >> 20
-            );
-        }
-        effective
-    }
 }
 
 /// Cancellation contexts already propagate through compute/download pools.
-/// Keep their working-set lease in that same context, and return it on unwind.
+/// Keep a sizing plan in that same context without reserving memory.
 pub struct TaskMemory {
     control: Arc<crate::task::TaskControl>,
 }
 impl TaskMemory {
-    pub fn enter(control: Arc<crate::task::TaskControl>, background: bool) -> Result<Self, String> {
-        let lease = Arc::new(reserve(if background { 16 } else { 4 }, 8 << 30, 16 << 20)?);
-        eprintln!("任务工作集预算={}MiB", lease.bytes >> 20);
-        *control.memory.write().unwrap_or_else(|e| e.into_inner()) = Some(lease);
-        Ok(Self { control })
+    pub fn enter(control: Arc<crate::task::TaskControl>, background: bool) -> Self {
+        let snapshot = DeviceMemory::detect();
+        let plan = ResourcePlan {
+            bytes: (snapshot.working_bytes() / if background { 4 } else { 1 }).min(8 << 30),
+            cpus: snapshot.cpus,
+        };
+        eprintln!("任务工作集计划={}MiB（不预扣内存）", plan.bytes >> 20);
+        *control.memory.write().unwrap_or_else(|e| e.into_inner()) = Some(plan);
+        Self { control }
     }
 }
 impl Drop for TaskMemory {
@@ -384,27 +305,31 @@ impl Drop for TaskMemory {
     }
 }
 
-/// Byte credits stay with the payload until its buffers are consumed or dropped.
+/// Local queue backpressure follows the payload until its buffers are consumed or dropped.
 #[derive(Debug)]
 pub struct ByteBudget {
-    lease: MemoryLease,
+    capacity: u64,
     used: Mutex<u64>,
     released: Condvar,
 }
 impl ByteBudget {
-    pub fn new(divisor: u64, maximum: u64) -> Result<Arc<Self>, String> {
-        Ok(Arc::new(Self {
-            lease: reserve(divisor, maximum, 1 << 20)?,
+    pub fn new(divisor: u64, maximum: u64) -> Arc<Self> {
+        Arc::new(Self {
+            // A tiny queue must still make progress. This is a backpressure
+            // threshold, not an allocation or a minimum-memory admission test.
+            capacity: (ResourcePlan::detect().bytes / divisor.max(1))
+                .min(maximum)
+                .max(1 << 20),
             used: Mutex::new(0),
             released: Condvar::new(),
-        }))
+        })
     }
     pub fn acquire(self: &Arc<Self>, bytes: u64) -> Result<Arc<BytePermit>, String> {
         // A single oversized stock takes exclusive credits; it must never wait
         // for a capacity that is mathematically impossible to obtain.
-        let bytes = bytes.min(self.lease.bytes);
+        let bytes = bytes.min(self.capacity);
         let mut used = self.used.lock().unwrap_or_else(|e| e.into_inner());
-        while used.saturating_add(bytes) > self.lease.bytes {
+        while used.saturating_add(bytes) > self.capacity {
             crate::task::checkpoint()?;
             used = self
                 .released
@@ -433,7 +358,8 @@ impl Drop for BytePermit {
 
 /// Recomputable cache. Revisions remain part of the caller's key.
 pub struct MemoryCache<K, V> {
-    entries: std::collections::HashMap<K, (V, MemoryLease)>,
+    entries: std::collections::HashMap<K, (V, u64)>,
+    bytes: u64,
     pressure_checked: std::time::Instant,
     pressure_reads: u8,
 }
@@ -441,6 +367,7 @@ impl<K: Eq + std::hash::Hash + Clone, V> Default for MemoryCache<K, V> {
     fn default() -> Self {
         Self {
             entries: std::collections::HashMap::new(),
+            bytes: 0,
             pressure_checked: std::time::Instant::now(),
             pressure_reads: 0,
         }
@@ -455,6 +382,7 @@ impl<K: Eq + std::hash::Hash + Clone, V> MemoryCache<K, V> {
             let snapshot = DeviceMemory::current();
             if snapshot.available < snapshot.total / 16 {
                 self.entries.clear();
+                self.bytes = 0;
             }
             self.pressure_checked = std::time::Instant::now();
         }
@@ -462,27 +390,23 @@ impl<K: Eq + std::hash::Hash + Clone, V> MemoryCache<K, V> {
     }
     pub fn insert(&mut self, key: K, value: V, bytes: u64) {
         let bytes = bytes.max(256);
-        self.entries.remove(&key);
+        if let Some((_, old_bytes)) = self.entries.remove(&key) {
+            self.bytes -= old_bytes;
+        }
         let maximum = (ResourcePlan::detect().bytes / 64).min(128 << 20);
         if bytes > maximum {
             return;
         }
-        while self
-            .entries
-            .values()
-            .map(|(_, lease)| lease.bytes)
-            .sum::<u64>()
-            + bytes
-            > maximum
-        {
+        while self.bytes.saturating_add(bytes) > maximum {
             let Some(key) = self.entries.keys().next().cloned() else {
                 break;
             };
-            self.entries.remove(&key);
+            if let Some((_, old_bytes)) = self.entries.remove(&key) {
+                self.bytes -= old_bytes;
+            }
         }
-        if let Ok(lease) = process_pool().reserve(bytes, bytes) {
-            self.entries.insert(key, (value, lease));
-        }
+        self.entries.insert(key, (value, bytes));
+        self.bytes += bytes;
     }
 }
 
@@ -491,9 +415,8 @@ mod tests {
     use super::*;
     #[test]
     fn oversized_payload_is_exclusive_and_cancelled_wait_releases_nothing_twice() {
-        let pool = MemoryPool::new(8);
         let queue = Arc::new(ByteBudget {
-            lease: pool.reserve(8, 8).unwrap(),
+            capacity: 8,
             used: Mutex::new(0),
             released: Condvar::new(),
         });
@@ -508,20 +431,34 @@ mod tests {
         assert_eq!(*queue.used.lock().unwrap(), 4);
         drop(next);
         assert_eq!(*queue.used.lock().unwrap(), 0);
-        drop(queue);
-        assert_eq!(pool.remaining(), 8);
     }
     #[test]
-    fn concurrent_reservations_release_on_error_and_last_owner() {
-        let pool = MemoryPool::new(100);
-        let first = Arc::new(pool.reserve(70, 10).unwrap());
-        let last = first.clone();
-        assert_eq!(pool.reserve(70, 10).unwrap().bytes, 30);
-        assert!(pool.reserve(100, 40).is_err());
-        drop(first);
-        assert_eq!(pool.remaining(), 30);
-        drop(last);
-        assert_eq!(pool.remaining(), 100);
+    fn independent_queues_do_not_consume_task_headroom() {
+        let control = Arc::new(crate::task::TaskControl::default());
+        *control.memory.write().unwrap() = Some(ResourcePlan { bytes: 0, cpus: 1 });
+        let _active = crate::task::ActiveTask::enter_isolated(vec![control]);
+        let first = ByteBudget::new(32, 256 << 20);
+        assert_eq!(first.capacity, 1 << 20);
+        let _payload = first.acquire(first.capacity).unwrap();
+        let second = ByteBudget::new(32, 256 << 20);
+        let _other_payload = second.acquire(second.capacity).unwrap();
+        assert_eq!(ResourcePlan::detect().bytes, 0);
+    }
+    #[test]
+    fn cache_replacement_and_eviction_keep_byte_accounting() {
+        let mut cache = MemoryCache::default();
+        cache.insert("a", 1, 256);
+        cache.insert("a", 2, 512);
+        assert_eq!(cache.bytes, 512);
+        assert_eq!(cache.get(&"a"), Some(&2));
+        let maximum = (ResourcePlan::detect().bytes / 64).min(128 << 20);
+        cache.insert("b", 3, maximum);
+        assert_eq!(cache.bytes, maximum);
+        assert!(cache.get(&"a").is_none());
+        assert_eq!(cache.get(&"b"), Some(&3));
+        cache.insert("b", 4, maximum + 1);
+        assert_eq!(cache.bytes, 0);
+        assert!(cache.get(&"b").is_none());
     }
     #[test]
     fn constrained_device_never_gains_a_minimum_floor() {

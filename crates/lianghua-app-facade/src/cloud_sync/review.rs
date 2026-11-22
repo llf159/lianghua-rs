@@ -6,6 +6,8 @@ pub struct PreviewFile {
     path: String,
     hash: String,
     text: String,
+    structured: Option<serde_json::Value>,
+    modified_at: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -147,10 +149,32 @@ pub fn preview(
         };
         let mut preview_files = Vec::new();
         for (path, bytes) in files {
+            let hash = digest(&bytes);
+            let text = String::from_utf8(bytes).map_err(|_| "对比文件不是有效 UTF-8 文本")?;
+            let structured = if matches!(
+                path.as_str(),
+                "source/score_rule.toml" | "source/chip_change_rule.toml"
+            ) {
+                toml::from_str::<toml::Value>(&text)
+                    .ok()
+                    .and_then(|value| serde_json::to_value(value).ok())
+            } else {
+                None
+            };
             preview_files.push(PreviewFile {
+                modified_at: if id == "local" {
+                    target_path(app_data, source, &path)
+                        .ok()
+                        .and_then(|target| fs::metadata(target).ok())
+                        .and_then(|metadata| metadata.modified().ok())
+                        .map(|time| chrono::DateTime::<Utc>::from(time).to_rfc3339())
+                } else {
+                    None
+                },
                 path,
-                hash: digest(&bytes),
-                text: String::from_utf8(bytes).map_err(|_| "对比文件不是有效 UTF-8 文本")?,
+                hash,
+                text,
+                structured,
             });
         }
         sides.push(PreviewSide {

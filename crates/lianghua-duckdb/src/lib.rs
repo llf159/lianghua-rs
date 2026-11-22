@@ -1,17 +1,15 @@
-//! DuckDB API with process-wide instance reservations; cloned connections share a lease.
+//! DuckDB API with adaptive cache ceilings; opening a connection reserves no memory.
 pub use duckdb::*;
-use lianghua_model::resource::{DeviceMemory, MemoryLease};
+use lianghua_model::resource::DeviceMemory;
 use std::{
     ops::{Deref, DerefMut},
     path::Path,
-    sync::Arc,
 };
 
 #[derive(Debug)]
 pub struct Connection {
-    // Drop the native connection before returning its reservation.
     inner: duckdb::Connection,
-    budget: Arc<MemoryLease>,
+    budget: u64,
 }
 
 impl Connection {
@@ -29,11 +27,11 @@ impl Connection {
         Self::open_with_budget(
             path,
             config,
-            (device.available / 16).min(8 << 30),
+            (device.available / 4).min(8 << 30),
             device.cpus,
         )
     }
-    /// Explicit stage settings participate in the same pool as default instances.
+    /// A cache ceiling is not an allocation: opening an idle instance reserves no memory.
     pub fn open_with_budget(
         path: impl AsRef<Path>,
         config: Config,
@@ -41,22 +39,16 @@ impl Connection {
         threads: usize,
     ) -> Result<Self> {
         let device = DeviceMemory::current();
-        let budget = Arc::new(
-            lianghua_model::resource::process_pool()
-                .reserve(memory_bytes.min(device.working_bytes()), 16 << 20)
-                .map_err(|error| {
-                    Error::ToSqlConversionFailure(std::io::Error::other(error).into())
-                })?,
-        );
+        let budget = memory_bytes.min(device.working_bytes());
         let threads = threads.clamp(1, device.cpus);
         let config = config
-            .max_memory(&format!("{}B", budget.bytes))?
+            .max_memory(&format!("{}B", budget))?
             .threads(threads as i64)?;
         if std::env::var("LIANGHUA_RESOURCE_PROFILE").as_deref() == Ok("1") {
             eprintln!(
                 "数据库资源：path={} 缓存={}MiB 线程={}",
                 path.as_ref().display(),
-                budget.bytes >> 20,
+                budget >> 20,
                 threads
             );
         }
@@ -66,11 +58,11 @@ impl Connection {
     pub fn try_clone(&self) -> Result<Self> {
         Ok(Self {
             inner: self.inner.try_clone()?,
-            budget: self.budget.clone(),
+            budget: self.budget,
         })
     }
     pub fn memory_budget(&self) -> u64 {
-        self.budget.bytes
+        self.budget
     }
     pub fn transaction(&mut self) -> Result<Transaction<'_>> {
         Transaction::new(self)
@@ -133,10 +125,34 @@ impl Deref for Transaction<'_> {
 mod tests {
     use super::*;
     #[test]
+    fn full_queue_does_not_block_database_or_task_plans() {
+        let queue = lianghua_model::resource::ByteBudget::new(32, 256 << 20);
+        let _payload = queue.acquire(u64::MAX).unwrap();
+        let control = std::sync::Arc::new(lianghua_model::task::TaskControl::default());
+        let _task = lianghua_model::resource::TaskMemory::enter(control.clone(), false);
+        let _active = lianghua_model::task::ActiveTask::enter_isolated(vec![control]);
+        assert!(lianghua_model::resource::ResourcePlan::detect().bytes > 0);
+        let first = Connection::open_in_memory().unwrap();
+        let second = Connection::open_in_memory().unwrap();
+        let clone = first.try_clone().unwrap();
+        assert_eq!(
+            clone
+                .query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            second
+                .query_row("SELECT 2", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+    }
+    #[test]
     fn clone_keeps_instance_budget_and_transactions_keep_atomicity() {
         let mut connection = Connection::open_in_memory().unwrap();
         let cloned = connection.try_clone().unwrap();
-        assert!(Arc::ptr_eq(&connection.budget, &cloned.budget));
+        assert_eq!(connection.memory_budget(), cloned.memory_budget());
         connection
             .execute_batch("CREATE TABLE t(i INTEGER)")
             .unwrap();

@@ -314,10 +314,8 @@ pub async fn run_in_lane<T: Send + 'static>(
             } else {
                 ActiveTask::enter_isolated(vec![worker.control.clone(), control.clone()])
             };
-            let _memory = lianghua_model::resource::TaskMemory::enter(
-                control.clone(),
-                worker.lane != "main",
-            )?;
+            let _memory =
+                lianghua_model::resource::TaskMemory::enter(control.clone(), worker.lane != "main");
             let output = action();
             drop(active);
             let mode = if grouped {

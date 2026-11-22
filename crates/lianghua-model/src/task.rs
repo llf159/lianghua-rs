@@ -13,7 +13,7 @@ pub enum TaskState {
 
 pub struct TaskControl {
     state: AtomicU8,
-    pub(crate) memory: RwLock<Option<Arc<crate::resource::MemoryLease>>>,
+    pub(crate) memory: RwLock<Option<crate::resource::ResourcePlan>>,
 }
 
 impl Default for TaskControl {

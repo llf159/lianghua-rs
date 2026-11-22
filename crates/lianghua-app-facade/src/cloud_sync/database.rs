@@ -467,7 +467,7 @@ fn pack(
         } else {
             format!("WHERE replace(trade_date, '-', '') IN ({date_list})")
         };
-        transaction.execute_batch(&format!("COPY (SELECT * FROM {table} {filter} ORDER BY ALL) TO {} (FORMAT PARQUET, COMPRESSION ZSTD)", sql_string(&target.to_string_lossy()))).map_err(|e| e.to_string())?;
+        transaction.execute_batch(&format!("COPY (SELECT * FROM {table} {filter} ORDER BY ALL) TO {} (FORMAT PARQUET, COMPRESSION ZSTD)", sql_string(&target.to_string_lossy()))).map_err(|e| format!("导出榜单表 {table} 失败：{e}"))?;
         zip.start_file(
             format!("{table}.parquet"),
             SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored),
@@ -537,7 +537,11 @@ pub(super) fn import(
         return Err("云端榜单表不完整，未替换本地数据".into());
     }
     let temp = tempfile::tempdir().map_err(|e| e.to_string())?;
-    let staging = Connection::open_in_memory().map_err(|e| e.to_string())?;
+    let staging =
+        Connection::open(temp.path().join("validation.duckdb")).map_err(|e| e.to_string())?;
+    staging
+        .execute_batch("SET preserve_insertion_order=false;")
+        .map_err(|e| e.to_string())?;
     for (table, primary, columns) in expected {
         let mut entry = archive
             .by_name(&format!("{table}.parquet"))
@@ -559,12 +563,17 @@ pub(super) fn import(
         if actual != *columns {
             return Err(format!("云端 {table} 列结构不兼容，未替换本地数据"));
         }
-        // Ranking tables need not have persistent indexes. Validate the bounded
-        // snapshot here before writing to such a table or deleting local rows.
+        // 用可落盘的聚合校验键，避免为整个快照建立常驻内存索引。
         if !similarity && !primary.is_empty() {
-            staging
-                .execute_batch(&format!("ALTER TABLE {table} ADD PRIMARY KEY ({primary})"))
-                .map_err(|e| format!("云端 {table} 结果键无效，未替换本地数据: {e}"))?;
+            let nulls = primary
+                .split(',')
+                .map(|column| format!("{column} IS NULL"))
+                .collect::<Vec<_>>()
+                .join(" OR ");
+            let invalid: bool = staging.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE {nulls}) OR EXISTS(SELECT 1 FROM {table} GROUP BY {primary} HAVING COUNT(*) > 1)"), [], |row| row.get(0)).map_err(|e| format!("校验云端 {table} 结果键失败：{e}"))?;
+            if invalid {
+                return Err(format!("云端 {table} 结果键无效，未替换本地数据"));
+            }
         }
         if !table.ends_with("active_config") {
             let invalid: i64 = staging.query_row(&format!("SELECT COUNT(*) FROM {table} WHERE trade_date IS NULL OR replace(trade_date, '-', '') NOT IN ({date_list})"), [], |r| r.get(0)).map_err(|e| e.to_string())?;
@@ -598,8 +607,12 @@ pub(super) fn import(
     if actual_dates != dates.iter().cloned().collect() {
         return Err("数据库快照日期清单与内容不符".into());
     }
+    drop(stmt);
+    drop(staging);
     fs::create_dir_all(source).map_err(|e| e.to_string())?;
     let mut conn = Connection::open(db_path(source, similarity)).map_err(|e| e.to_string())?;
+    conn.execute_batch("SET preserve_insertion_order=false;")
+        .map_err(|e| e.to_string())?;
     let transaction = conn.transaction().map_err(|e| e.to_string())?;
     for (table, primary, _) in expected {
         let parquet = sql_string(

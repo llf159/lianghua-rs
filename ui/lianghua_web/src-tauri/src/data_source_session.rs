@@ -227,13 +227,13 @@ pub async fn open_data_source_login(
     .inner_size(800.0, 650.0);
     #[cfg(target_os = "android")]
     let builder = builder.activity_name(config.activity);
-    let window = builder
+    let _window = builder
         .build()
         .map_err(|e| format!("打开登录页面失败: {e}"))?;
     #[cfg(not(target_os = "android"))]
     {
-        let retained = window.clone();
-        window.on_window_event(move |event| {
+        let retained = _window.clone();
+        _window.on_window_event(move |event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 match retained.hide() {
                     Ok(()) => api.prevent_close(),

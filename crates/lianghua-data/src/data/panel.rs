@@ -347,7 +347,6 @@ struct Source {
     presence: Vec<Vec<bool>>,
     listed: BTreeMap<String, usize>,
     cached_inputs: HashMap<String, PanelValue>,
-    _input_memory: Option<lianghua_model::resource::MemoryLease>,
 }
 
 impl Source {
@@ -391,12 +390,6 @@ impl Source {
         {
             return Ok(());
         }
-        let Ok(memory) =
-            lianghua_model::resource::process_pool().reserve(bytes as u64, bytes as u64)
-        else {
-            return Ok(());
-        };
-        self._input_memory = Some(memory);
         let mut columns = inputs
             .iter()
             .map(|key| {
@@ -933,7 +926,6 @@ fn refresh_inner(
         stocks,
         presence,
         cached_inputs: HashMap::new(),
-        _input_memory: None,
         listed: listing
             .iter()
             .map(|(k, v)| {
@@ -1257,7 +1249,6 @@ prec=12
                 presence: vec![vec![true; 20]],
                 listed: BTreeMap::new(),
                 cached_inputs: HashMap::new(),
-                _input_memory: None,
             };
             cached.cache_inputs(&inputs).unwrap();
             cached
@@ -1363,8 +1354,8 @@ prec=12
         let incremental = reader.load_one("A", "qfq", &dates[80], &dates[99]).unwrap();
         refresh(&conn, source, true).unwrap();
         let full = reader.load_one("A", "qfq", &dates[80], &dates[99]).unwrap();
-        for (name, _) in configured_fields(source).unwrap() {
-            for (a, b) in incremental.cols[&name].iter().zip(&full.cols[&name]) {
+        for name in &reader.runtime_panel_fields {
+            for (a, b) in incremental.cols[name].iter().zip(&full.cols[name]) {
                 assert_eq!(a.is_some(), b.is_some());
                 if let (Some(a), Some(b)) = (a, b) {
                     assert!((a - b).abs() < 1e-11, "{name}: {a} != {b}");
@@ -1400,8 +1391,8 @@ prec=12
         let partial = reader.load_one("A", "qfq", &dates[80], &dates[99]).unwrap();
         refresh(&conn, source, true).unwrap();
         let full = reader.load_one("A", "qfq", &dates[80], &dates[99]).unwrap();
-        for (name, _) in configured_fields(source).unwrap() {
-            for (a, b) in partial.cols[&name].iter().zip(&full.cols[&name]) {
+        for name in &reader.runtime_panel_fields {
+            for (a, b) in partial.cols[name].iter().zip(&full.cols[name]) {
                 assert_eq!(a, b, "{name}");
             }
         }

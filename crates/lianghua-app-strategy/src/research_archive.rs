@@ -26,7 +26,7 @@ pub fn try_research_execution() -> Result<ResearchExecution, String> {
         }
     }?;
     let control = std::sync::Arc::new(lianghua_model::task::TaskControl::default());
-    let memory = lianghua_model::resource::TaskMemory::enter(control.clone(), false)?;
+    let memory = lianghua_model::resource::TaskMemory::enter(control.clone(), false);
     Ok(ResearchExecution {
         _active: lianghua_model::task::ActiveTask::enter(vec![control]),
         _memory: memory,

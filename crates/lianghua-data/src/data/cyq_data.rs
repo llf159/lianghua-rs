@@ -830,7 +830,7 @@ pub fn maintain_cyq_incremental_if_db_exists(
         .ok_or_else(|| "筹码库路径不是有效UTF-8".to_string())?
         .to_string();
 
-    let queue_memory = lianghua_model::resource::ByteBudget::new(32, 256 << 20)?;
+    let queue_memory = lianghua_model::resource::ByteBudget::new(32, 256 << 20);
     let (tx, rx) =
         sync_channel(lianghua_model::resource::ResourcePlan::detect().batch(16 << 20, 16));
     let abort_tx = tx.clone();
@@ -1148,7 +1148,7 @@ pub fn repair_cyq_stocks_if_db_exists(
         });
     }
 
-    let queue_memory = lianghua_model::resource::ByteBudget::new(32, 256 << 20)?;
+    let queue_memory = lianghua_model::resource::ByteBudget::new(32, 256 << 20);
     let (tx, rx) =
         sync_channel(lianghua_model::resource::ResourcePlan::detect().batch(16 << 20, 16));
     let abort_tx = tx.clone();
@@ -1439,7 +1439,7 @@ pub fn rebuild_cyq_all_with_progress(
     }
 
     let reader_template = std::sync::Mutex::new(reader);
-    let queue_memory = lianghua_model::resource::ByteBudget::new(32, 256 << 20)?;
+    let queue_memory = lianghua_model::resource::ByteBudget::new(32, 256 << 20);
     let (tx, rx) =
         sync_channel(lianghua_model::resource::ResourcePlan::detect().batch(16 << 20, 16));
     let abort_tx = tx.clone();

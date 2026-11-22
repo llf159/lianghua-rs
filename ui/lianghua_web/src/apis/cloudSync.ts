@@ -90,12 +90,19 @@ export function readWatchlistSyncFingerprint() {
 }
 
 let watchlistStartupTask: Promise<CloudSyncResult | null> | null = null;
+export let watchlistStartupPhase: "checking" | "syncing" | null = null;
+
+function updateWatchlistStartupPhase(phase: typeof watchlistStartupPhase) {
+  watchlistStartupPhase = phase;
+  window.dispatchEvent(new Event("watchlist-startup-phase-changed"));
+}
 
 export function checkWatchlistCloudAtStartup() {
   if (watchlistStartupTask) return watchlistStartupTask;
   watchlistStartupTask = (async () => {
     const config = await getCloudConfig();
     if (!config.endpoint.trim() || !navigator.onLine) return null;
+    updateWatchlistStartupPhase("checking");
     const items = await listCloudData();
     const remoteChanged = items.some(
       (item) =>
@@ -113,6 +120,7 @@ export function checkWatchlistCloudAtStartup() {
       conflict: boolean;
     }>(localStorage, key);
     if (!remoteChanged && previous?.fingerprint === fingerprint) return null;
+    updateWatchlistStartupPhase("syncing");
     const result = await syncCloud(undefined, false, "watchlists");
     writeJsonStorage(localStorage, key, {
       fingerprint:
@@ -122,10 +130,12 @@ export function checkWatchlistCloudAtStartup() {
       conflict: result.conflicts.length > 0,
     });
     return result;
-  })().catch((error) => {
-    console.error("启动时检查自选云端失败", error);
-    return null;
-  });
+  })()
+    .catch((error) => {
+      console.error("启动时检查自选云端失败", error);
+      return null;
+    })
+    .finally(() => updateWatchlistStartupPhase(null));
   return watchlistStartupTask;
 }
 
@@ -262,7 +272,13 @@ export function transferStrategyCloud(mode: WatchlistTransferMode) {
   return invoke<CloudSyncResult>("transfer_strategy_cloud", { mode });
 }
 
-export type CloudPreviewFile = { path: string; hash: string; text: string };
+export type CloudPreviewFile = {
+  path: string;
+  hash: string;
+  text: string;
+  structured?: unknown;
+  modifiedAt?: string | null;
+};
 export type CloudPreviewSide = {
   id: string;
   createdAt: string | null;

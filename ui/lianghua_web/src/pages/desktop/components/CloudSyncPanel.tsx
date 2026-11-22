@@ -39,7 +39,7 @@ export default function CloudSyncPanel({
   const [filter, setFilter] = useState("");
   const [showHistory, setShowHistory] = useState(false);
   const [reviewItem, setReviewItem] = useState<CloudItem | null>(null);
-  const [localPath, setLocalPath] = useState<string | null>(null);
+  const [rankingPath, setRankingPath] = useState<string | null>(null);
   const [selected, setSelected] = useState<CloudItem | null>(null);
   const [action, setAction] = useState<"restore" | "resolve" | "delete" | null>(
     null,
@@ -119,7 +119,7 @@ export default function CloudSyncPanel({
         setItems(result.items);
       }
       setSelected(null);
-      setLocalPath(null);
+      setRankingPath(null);
       setAction(null);
     } catch (e) {
       setError(String(e));
@@ -430,87 +430,93 @@ export default function CloudSyncPanel({
                         : "接收需确认"}
                     </span>
                   </div>
-                  {(group.path === "ranking/scoring_result.zip" ||
-                    group.path === "similarity/strategy_similarity.zip") && (
-                    <button
-                      type="button"
-                      className="settings-primary-btn"
-                      disabled={busy || disabled}
-                      onClick={() => setLocalPath(group.path)}
-                    >
-                      使用本机榜单
-                    </button>
-                  )}
                   {group.versions.length === 0 && (
                     <p>
-                      云端已无当前版本。确认本机榜单可用后，可使用本机榜单重新上传；也可显示历史版本后恢复。
+                      云端已无当前版本。榜单可进入冲突处理选择本机来源，其他数据可显示历史版本后恢复。
                     </p>
                   )}
-                  {!group.path.startsWith("ranking/") &&
-                    !group.path.startsWith("similarity/") &&
-                    group.versions.length > 0 && (
-                      <button
-                        type="button"
-                        className="settings-primary-btn"
-                        disabled={busy || disabled}
-                        onClick={() => setReviewItem(group.versions[0])}
-                      >
-                        查看内容差异
-                        {group.path === "bundles/strategies.zip"
-                          ? "并逐项合并"
-                          : ""}
-                      </button>
-                    )}
-                  <div className="cloud-conflict-branches">
-                    {group.versions.map((item, index) => (
-                      <article
-                        className="cloud-conflict-branch"
-                        key={item.version.id}
-                      >
-                        <div className="cloud-conflict-branch-head">
-                          <strong>
-                            分支 {index + 1}
-                            {item.isLocalBase && <em>本机上次同步</em>}
-                          </strong>
-                          <span>
-                            {new Date(item.version.createdAt).toLocaleString(
-                              "zh-CN",
-                            )}
-                          </span>
-                        </div>
-                        <dl>
-                          <div>
-                            <dt>版本标识</dt>
-                            <dd>{item.version.hash.slice(0, 12)}</dd>
-                          </div>
-                          <div>
-                            <dt>压缩大小</dt>
-                            <dd>{bytes(item.version.compressedSize)}</dd>
-                          </div>
-                        </dl>
-                        <button
-                          className="settings-primary-btn"
-                          type="button"
-                          disabled={busy || disabled}
-                          onClick={() => {
-                            if (
-                              item.path.startsWith("ranking/") ||
-                              item.path.startsWith("similarity/")
-                            ) {
-                              setReviewItem(item);
-                            } else {
-                              setSelected(item);
-                              setAction("resolve");
-                            }
-                          }}
+                  {group.path === "bundles/strategies.zip" ? (
+                    <button
+                      type="button"
+                      className="settings-secondary-btn"
+                      disabled={busy || disabled || !group.versions.length}
+                      onClick={() => setReviewItem(group.versions[0])}
+                    >
+                      选择要使用的策略版本
+                    </button>
+                  ) : group.path.startsWith("ranking/") ||
+                    group.path.startsWith("similarity/") ? (
+                    <button
+                      type="button"
+                      className="settings-secondary-btn"
+                      disabled={busy || disabled}
+                      onClick={() => setRankingPath(group.path)}
+                    >
+                      处理榜单冲突
+                    </button>
+                  ) : (
+                    <div className="cloud-conflict-branches">
+                      {group.versions.map((item, index) => (
+                        <article
+                          className="cloud-conflict-branch"
+                          key={item.version.id}
                         >
-                          {group.versions.length === 1
-                            ? "重新接收此版本"
-                            : "选择此版本"}
-                        </button>
-                      </article>
-                    ))}
-                  </div>
+                          <div className="cloud-conflict-branch-head">
+                            <strong>
+                              分支 {index + 1}
+                              {item.isLocalBase && <em>本机上次同步</em>}
+                            </strong>
+                            <span>
+                              {new Date(item.version.createdAt).toLocaleString(
+                                "zh-CN",
+                              )}
+                            </span>
+                          </div>
+                          <dl>
+                            <div>
+                              <dt>版本标识</dt>
+                              <dd>{item.version.hash.slice(0, 12)}</dd>
+                            </div>
+                            <div>
+                              <dt>压缩大小</dt>
+                              <dd>{bytes(item.version.compressedSize)}</dd>
+                            </div>
+                          </dl>
+                          {!item.path.startsWith("ranking/") &&
+                            !item.path.startsWith("similarity/") && (
+                              <button
+                                type="button"
+                                className="settings-secondary-btn"
+                                disabled={busy || disabled}
+                                onClick={() => setReviewItem(item)}
+                              >
+                                查看此版本内容差异
+                              </button>
+                            )}
+                          <button
+                            className="settings-primary-btn"
+                            type="button"
+                            disabled={busy || disabled}
+                            onClick={() => {
+                              if (
+                                item.path.startsWith("ranking/") ||
+                                item.path.startsWith("similarity/")
+                              ) {
+                                setReviewItem(item);
+                              } else {
+                                setSelected(item);
+                                setAction("resolve");
+                              }
+                            }}
+                          >
+                            {group.versions.length === 1
+                              ? "重新接收此版本"
+                              : "选择此版本"}
+                          </button>
+                        </article>
+                      ))}
+                    </div>
+                  )}
                 </div>
               ))}
             </section>
@@ -629,7 +635,11 @@ export default function CloudSyncPanel({
             aria-label="云端内容差异"
           >
             <div className="cloud-config-head">
-              <h3>{cloudPathLabel(reviewItem.path)}</h3>
+              <h3>
+                {reviewItem.path === "bundles/strategies.zip"
+                  ? "处理策略同步冲突"
+                  : cloudPathLabel(reviewItem.path)}
+              </h3>
               <button
                 type="button"
                 className="cloud-config-close"
@@ -676,36 +686,36 @@ export default function CloudSyncPanel({
           </section>
         </div>
       )}
-      {localPath && (
+      {rankingPath && (
         <div className="settings-modal-backdrop cloud-modal-overlay">
           <section
             className="settings-modal cloud-review-dialog"
             role="dialog"
             aria-modal="true"
-            aria-label="选择本机榜单"
+            aria-label="选择榜单来源"
           >
             <div className="cloud-config-head">
-              <h3>{cloudPathLabel(localPath)}</h3>
+              <h3>{cloudPathLabel(rankingPath)}</h3>
               <button
                 type="button"
                 className="cloud-config-close"
                 disabled={busy}
-                onClick={() => setLocalPath(null)}
+                onClick={() => setRankingPath(null)}
               >
                 ×
               </button>
             </div>
             <CloudRankingReview
-              path={localPath}
+              path={rankingPath}
               disabled={disabled}
               onBusyChange={onReviewBusy}
               onResolved={(items) => {
                 setConflicts((paths) =>
-                  paths.filter((path) => path !== localPath),
+                  paths.filter((path) => path !== rankingPath),
                 );
-                setLocalPath(null);
+                setRankingPath(null);
                 setItems(items);
-                setNotice("已按确认日期发布本机排名包，本地长历史库保持原状。");
+                setNotice("已按确认的来源和替换范围处理排名。");
                 onSynced();
               }}
             />

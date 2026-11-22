@@ -774,9 +774,7 @@ pub fn snapshot(
                 .into_iter()
                 .map(|source| {
                     rayon::ThreadPoolBuilder::new()
-                        .num_threads(
-                            lianghua_model::resource::ResourcePlan::detect().network_workers(4),
-                        )
+                        .num_threads(4)
                         .stack_size(2 * 1024 * 1024)
                         .thread_name(move |index| format!("volume-ratio-{source}-{index}"))
                         .build()

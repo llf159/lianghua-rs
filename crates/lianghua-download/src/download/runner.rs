@@ -1345,7 +1345,7 @@ fn write_prepared_stock_batch(
 
 fn build_download_pool(threads: usize) -> Result<ThreadPool, String> {
     ThreadPoolBuilder::new()
-        .num_threads(lianghua_model::resource::ResourcePlan::detect().network_workers(threads))
+        .num_threads(threads.max(1))
         .build()
         .map_err(|e| format!("创建下载线程池失败: {e}"))
 }
