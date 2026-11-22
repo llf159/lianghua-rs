@@ -85,6 +85,27 @@ pub(super) fn load_data_signature(
             Err(error) => Err(error),
         }
     })(&stock_list_path(source_path))?;
+    // 仅缓存完整内容核验的结果；数据库或 WAL 变化后仍重新计算内容签名。
+    // 缓存独立于云端结果库，不能随另一台设备的快照一起认证本机输入。
+    let score_path = crate::data::result_db_path(source_path);
+    let wal_path = score_path.with_extension("db.wal");
+    let score_file_stamp = file_stamp(&score_path)?;
+    let wal_stamp = if wal_path.exists() {
+        file_stamp(&wal_path)?
+    } else {
+        "missing".to_string()
+    };
+    let cache_key = format!(
+        "{ALGORITHM_VERSION}|date={resolved_trade_date}|stock={stock_stamp}|stock_list={stock_list_stamp}|score={score_file_stamp}|wal={wal_stamp}"
+    );
+    let cache_path = Path::new(source_path).join(".strategy_similarity_signatures.json");
+    let mut cache: Vec<(String, String)> = fs::read(&cache_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    if let Some((_, signature)) = cache.iter().find(|(key, _)| key == &cache_key) {
+        return Ok(signature.clone());
+    }
     let score_stamp: String = conn
         .query_row(
             r#"
@@ -112,9 +133,25 @@ pub(super) fn load_data_signature(
             |row| row.get(0),
         )
         .map_err(|e| format!("读取策略触发数据水位失败: {e}"))?;
-    Ok(format!(
+    let signature = format!(
         "{ALGORITHM_VERSION}|stock={stock_stamp}|stock_list={stock_list_stamp}|score={score_stamp}|rule={rule_stamp}"
-    ))
+    );
+    // 核验期间有写入就不保存缓存；下一次读取必须重新核验。
+    if file_stamp(&score_path)? == score_file_stamp
+        && (if wal_path.exists() {
+            file_stamp(&wal_path)?
+        } else {
+            "missing".to_string()
+        }) == wal_stamp
+    {
+        cache.push((cache_key, signature.clone()));
+        cache.drain(..cache.len().saturating_sub(32));
+        if let Ok(bytes) = serde_json::to_vec(&cache) {
+            // 缓存写入失败不阻止读取，损坏或并发覆盖只会导致下次重新扫描。
+            let _ = fs::write(cache_path, bytes);
+        }
+    }
+    Ok(signature)
 }
 
 pub(super) fn stable_content_signature(path: &Path) -> Result<String, String> {

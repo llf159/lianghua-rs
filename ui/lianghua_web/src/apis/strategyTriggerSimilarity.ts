@@ -155,6 +155,7 @@ export type StrategyTriggerRankingProgress = {
 }
 
 export type StrategyTriggerRankingPageData = {
+  availableTradeDates: string[]
   resolvedTradeDate: string
   historicalCutoffDate: string
   windowTradeDays: number

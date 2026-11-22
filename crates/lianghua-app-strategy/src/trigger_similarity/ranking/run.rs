@@ -1778,6 +1778,58 @@ mod tests {
         assert!(!synced_snapshot.input_signature_verified);
         assert_eq!(synced_snapshot.items.len(), snapshot_source.items.len());
 
+        // 相似榜单日快照与本机总榜日期不一致，也应读取保存的最新相似榜。
+        let result = Connection::open(&result_path).unwrap();
+        result
+            .execute("UPDATE score_summary SET trade_date='20240109'", [])
+            .unwrap();
+        drop(result);
+        let latest = get_strategy_trigger_similarity_ranking_page(
+            source_path.clone(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(100),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("read latest similarity snapshot independently of score dates");
+        assert_eq!(latest.resolved_trade_date, "20240110");
+        assert_eq!(
+            latest.available_trade_dates.first().map(String::as_str),
+            Some("20240110")
+        );
+        assert!(latest.is_fresh);
+        assert!(!latest.input_signature_verified);
+        assert_eq!(latest.items.len(), snapshot_source.items.len());
+
+        let missing = get_strategy_trigger_similarity_ranking_page(
+            source_path.clone(),
+            Some("20240111".into()),
+            None,
+            None,
+            None,
+            None,
+            Some(100),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("missing similarity day returns promptly with no historical validation");
+        assert_eq!(missing.resolved_trade_date, "20240111");
+        assert!(!missing.is_fresh);
+        assert!(missing.items.is_empty());
+        assert!(missing.stale_reason.unwrap().contains("尚未计算"));
+
         let saved = Connection::open(source_dir.join("strategy_similarity.db")).unwrap();
         saved
             .execute(

@@ -9,9 +9,7 @@ use crate::trigger_similarity::ranking::{
 use crate::trigger_similarity::*;
 
 use super::store::open_ranking_conn;
-use crate::trigger_similarity::load::load_all_trade_dates;
 use crate::trigger_similarity::load::resolve_benchmark_index_code;
-use crate::trigger_similarity::load::resolve_existing_trade_date;
 use crate::utils::utils::board_category;
 use duckdb::Connection;
 use duckdb::params;
@@ -38,7 +36,23 @@ pub fn get_strategy_trigger_similarity_ranking_page(
         return Err("source_path 不能为空".to_string());
     }
     let conn = open_ranking_conn(&source_path)?;
-    let resolved_trade_date = resolve_existing_trade_date(&conn, trade_date)?;
+    let available_trade_dates = if table_exists(&conn, "strategy_trigger_similarity_rank_meta")? {
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT trade_date FROM strategy_trigger_similarity_rank_meta ORDER BY trade_date DESC")
+            .map_err(|e| format!("预编译相似榜日期失败: {e}"))?;
+        stmt.query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("查询相似榜日期失败: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("读取相似榜日期失败: {e}"))?
+    } else {
+        Vec::new()
+    };
+    // 展示保存的榜单，不把相似榜日期回退到另一份评分快照的日期。
+    let resolved_trade_date = match trade_date.filter(|value| !value.trim().is_empty()) {
+        Some(date) => lianghua_app_shared::normalize_trade_date(&date)
+            .ok_or_else(|| format!("排名日期格式无效: {date}"))?,
+        None => available_trade_dates.first().cloned().unwrap_or_default(),
+    };
     let use_latest_config = window_trade_days.is_none()
         && pool_segments.is_none()
         && outcome_trade_days.is_none()
@@ -189,15 +203,29 @@ pub fn get_strategy_trigger_similarity_ranking_page(
         }))
     })(&conn, &resolved_trade_date, &key)?;
     let candidate_gap_trade_days = outcome_trade_days.max(sample_gap_trade_days);
-    let all_trade_dates = load_all_trade_dates(&conn)?;
-    let local_historical_cutoff_date = match all_trade_dates.binary_search(&resolved_trade_date) {
-        Ok(target_index) if target_index >= candidate_gap_trade_days => {
-            Some(all_trade_dates[target_index - candidate_gap_trade_days].clone())
+    let local_historical_cutoff_date = if meta.is_some() {
+        let (cutoff, count, latest): (Option<String>, i64, Option<String>) = conn
+            .query_row(
+                "SELECT MIN(trade_date), COUNT(*), MAX(trade_date) FROM (
+                    SELECT DISTINCT trade_date FROM score_summary
+                    WHERE trade_date <= ? ORDER BY trade_date DESC LIMIT ?
+                )",
+                params![
+                    resolved_trade_date,
+                    candidate_gap_trade_days.saturating_add(1) as i64
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(|e| format!("读取相似榜本地历史范围失败: {e}"))?;
+        if count as usize > candidate_gap_trade_days
+            && latest.as_deref() == Some(&resolved_trade_date)
+        {
+            cutoff
+        } else {
+            None
         }
-        Ok(_) if meta.is_some() => None,
-        Ok(_) => return Err("参考日前没有足够历史区间".to_string()),
-        Err(_) if meta.is_some() => None,
-        Err(_) => return Err(format!("参考日不在评分交易日中: {resolved_trade_date}")),
+    } else {
+        None
     };
     let input_signature_verified = local_historical_cutoff_date.is_some();
     let current_signature = if input_signature_verified {
@@ -388,6 +416,7 @@ pub fn get_strategy_trigger_similarity_ranking_page(
         })
         .collect();
     Ok(StrategyTriggerRankingPageData {
+        available_trade_dates,
         resolved_trade_date,
         historical_cutoff_date: meta
             .as_ref()

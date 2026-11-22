@@ -1,7 +1,7 @@
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { ensureManagedSourcePath } from '../../apis/managedSource'
-import { listRankTradeDates, listStockLookupRows, type StockLookupRow } from '../../apis/reader'
+import { listStockLookupRows, type StockLookupRow } from '../../apis/reader'
 import {
   getStrategyTriggerSimilarityRankingPage,
   type StrategyTriggerRankingPageData,
@@ -21,7 +21,7 @@ import {
   findExactStockLookupMatch,
   getLookupDigits,
 } from '../../shared/stockLookup'
-import { normalizeTradeDates, pickDateValue } from '../../shared/tradeDate'
+import { normalizeTradeDates } from '../../shared/tradeDate'
 import StickyHorizontalTable from '../../shared/StickyHorizontalTable'
 import './css/StrategyTriggerSimilarityPage.css'
 import './css/OverviewScenePage.css'
@@ -59,13 +59,15 @@ export default function OverviewSimilarityRankingPage() {
   const [error, setError] = useState('')
   const { excludedConcepts, excludeStBoard } = useConceptExclusions()
   const [limitInput, setLimitInput] = useState('100')
-  const [boardFilter, setBoardFilter] = useState(() => readStoredDefaultBoardFilter())
+  const [boardFilterInput, setBoardFilter] = useState(() => readStoredDefaultBoardFilter())
+  const boardFilter = excludeStBoard && isStBoard(boardFilterInput) ? '全部' : boardFilterInput
   const [lookupRows, setLookupRows] = useState<StockLookupRow[]>([])
   const [lookupInput, setLookupInput] = useState('')
   const [lookupFocused, setLookupFocused] = useState(false)
   const [selectedTsCode, setSelectedTsCode] = useState('')
   const [totalMvMinInput, setTotalMvMinInput] = useState('')
   const [totalMvMaxInput, setTotalMvMaxInput] = useState('')
+  const readRequestRef = useRef(0)
   const initialAutoReadFiltersRef = useRef({
     board:
       boardFilter === '全部' || (excludeStBoard && isStBoard(boardFilter))
@@ -87,12 +89,6 @@ export default function OverviewSimilarityRankingPage() {
   const targetTsCode = selectedTsCode || exactStockMatch?.ts_code || ''
   const showStockCandidates =
     lookupFocused && lookupInput.trim() !== '' && stockCandidates.length > 0
-
-  useEffect(() => {
-    if (excludeStBoard && isStBoard(boardFilter)) {
-      setBoardFilter('全部')
-    }
-  }, [boardFilter, excludeStBoard])
 
   const navigationItems = useMemo(
     () =>
@@ -145,26 +141,24 @@ export default function OverviewSimilarityRankingPage() {
     let cancelled = false
     void ensureManagedSourcePath()
       .then(async (path) => {
-        const [dates, stocks] = await Promise.all([
-          listRankTradeDates(path),
-          listStockLookupRows(path),
-        ])
         if (cancelled) return
-        const normalizedDates = normalizeTradeDates(dates)
-        const initialTradeDate = pickDateValue('', normalizedDates)
         setSourcePath(path)
-        setLookupRows(stocks)
-        setDateOptions(normalizedDates)
-        setTradeDate(initialTradeDate)
-        if (initialTradeDate) {
-          const initialData = await getStrategyTriggerSimilarityRankingPage({
-            sourcePath: path,
-            tradeDate: initialTradeDate,
-            limit: 100,
-            board: initialAutoReadFiltersRef.current.board,
-            excludeStBoard: initialAutoReadFiltersRef.current.excludeStBoard,
-          })
-          if (!cancelled) setData(initialData)
+        // 股票搜索名单不阻塞榜单首屏，失败也不妨碍展示已有排名。
+        void listStockLookupRows(path).then((stocks) => {
+          if (!cancelled) setLookupRows(stocks)
+        }).catch((loadError) => {
+          if (!cancelled) setError(`股票搜索名单读取失败: ${String(loadError)}`)
+        })
+        const initialData = await getStrategyTriggerSimilarityRankingPage({
+          sourcePath: path,
+          limit: 100,
+          board: initialAutoReadFiltersRef.current.board,
+          excludeStBoard: initialAutoReadFiltersRef.current.excludeStBoard,
+        })
+        if (!cancelled) {
+          setDateOptions(normalizeTradeDates(initialData.availableTradeDates))
+          setTradeDate(initialData.resolvedTradeDate)
+          setData(initialData)
         }
       })
       .catch((loadError) => {
@@ -175,16 +169,14 @@ export default function OverviewSimilarityRankingPage() {
       })
     return () => {
       cancelled = true
+      readRequestRef.current += 1
     }
   }, [])
 
-  async function onRead() {
-    if (!sourcePath || !tradeDate) return
-    setLoading(true)
-    setError('')
+  async function onRead(latest = false) {
+    if (!sourcePath || loading) return
     if (lookupInput.trim() && !targetTsCode) {
       setError('请从搜索候选中选择股票')
-      setLoading(false)
       return
     }
     let limit: number | undefined
@@ -193,7 +185,6 @@ export default function OverviewSimilarityRankingPage() {
       const parsedLimit = Number(limitRaw)
       if (!Number.isInteger(parsedLimit) || parsedLimit <= 0) {
         setError('限制行数必须是正整数')
-        setLoading(false)
         return
       }
       limit = parsedLimit
@@ -205,7 +196,6 @@ export default function OverviewSimilarityRankingPage() {
       const parsedMin = Number(minRaw)
       if (!Number.isFinite(parsedMin)) {
         setError('总市值最小值必须是数字')
-        setLoading(false)
         return
       }
       totalMvMin = parsedMin
@@ -217,7 +207,6 @@ export default function OverviewSimilarityRankingPage() {
       const parsedMax = Number(maxRaw)
       if (!Number.isFinite(parsedMax)) {
         setError('总市值最大值必须是数字')
-        setLoading(false)
         return
       }
       totalMvMax = parsedMax
@@ -225,14 +214,17 @@ export default function OverviewSimilarityRankingPage() {
 
     if (totalMvMin !== undefined && totalMvMax !== undefined && totalMvMin > totalMvMax) {
       setError('总市值最小值不能大于最大值')
-      setLoading(false)
       return
     }
 
+    const requestId = ++readRequestRef.current
+    setLoading(true)
+    setError('')
+    setData(null)
     try {
       const result = await getStrategyTriggerSimilarityRankingPage({
         sourcePath,
-        tradeDate,
+        tradeDate: latest ? undefined : tradeDate || undefined,
         limit,
         board: boardFilter === '全部' ? undefined : boardFilter,
         excludeStBoard: excludeStBoard || undefined,
@@ -240,12 +232,16 @@ export default function OverviewSimilarityRankingPage() {
         totalMvMax,
         tsCode: targetTsCode || undefined,
       })
+      if (requestId !== readRequestRef.current) return
+      setDateOptions(normalizeTradeDates(result.availableTradeDates))
+      setTradeDate(result.resolvedTradeDate)
       setData(result)
     } catch (readError) {
+      if (requestId !== readRequestRef.current) return
       setData(null)
       setError(`读取走势相似排名失败: ${String(readError)}`)
     } finally {
-      setLoading(false)
+      if (requestId === readRequestRef.current) setLoading(false)
     }
   }
 
@@ -285,7 +281,12 @@ export default function OverviewSimilarityRankingPage() {
         <div className="overview-form-grid">
           <label className="overview-field">
             <span>排名日期</span>
-            <select value={tradeDate} onChange={(event) => setTradeDate(event.target.value)}>
+            <select value={tradeDate} disabled={loading} onChange={(event) => {
+              setTradeDate(event.target.value)
+              setData(null)
+              setError('')
+            }}>
+              {dateOptions.length === 0 ? <option value="">暂无已保存榜单</option> : null}
               {dateOptions.map((date) => (
                 <option key={date} value={date}>
                   {date}
@@ -394,6 +395,14 @@ export default function OverviewSimilarityRankingPage() {
             onClick={() => void onRead()}
           >
             {loading ? '读取中...' : '读取排名'}
+          </button>
+          <button
+            className="overview-read-btn"
+            type="button"
+            disabled={loading || !sourcePath}
+            onClick={() => void onRead(true)}
+          >
+            读取最新榜单
           </button>
         </div>
         {error ? <div className="trigger-sim-error">{error}</div> : null}

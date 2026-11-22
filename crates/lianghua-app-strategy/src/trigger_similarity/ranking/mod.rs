@@ -184,6 +184,7 @@ pub(super) struct ActiveConfigRecord {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StrategyTriggerRankingPageData {
+    pub available_trade_dates: Vec<String>,
     pub resolved_trade_date: String,
     pub historical_cutoff_date: String,
     pub window_trade_days: usize,
