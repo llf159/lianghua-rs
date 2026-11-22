@@ -48,11 +48,23 @@ pub async fn run_cloud_sync(
     settings: BTreeMap<String, String>,
     download_only: Option<bool>,
     scope: Option<cloud_sync::SyncScope>,
-) -> Result<SyncResult, String> {
+    watch_rows: Option<Vec<lianghua_app_market::watch_observe::WatchObserveStoredRow>>,
+) -> Result<cloud_sync::WatchlistTransferResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = CLOUD_TASK.try_lock().map_err(|_| "云端操作正在进行")?;
         let source = crate::warehouse::warehouse_root(&app)?.join("source");
-        cloud_sync::sync_scoped(
+        if let Some(rows) = watch_rows {
+            return cloud_sync::sync_watchlists(
+                &app.path().app_data_dir().map_err(|e| e.to_string())?,
+                &source,
+                settings,
+                rows,
+                |message| {
+                    let _ = app.emit("cloud-sync-progress", message);
+                },
+            );
+        }
+        let result = cloud_sync::sync_scoped(
             &app.path().app_data_dir().map_err(|e| e.to_string())?,
             &source,
             settings,
@@ -61,7 +73,12 @@ pub async fn run_cloud_sync(
             |message| {
                 let _ = app.emit("cloud-sync-progress", message);
             },
-        )
+        )?;
+        Ok(cloud_sync::WatchlistTransferResult {
+            result,
+            last_modified: None,
+            watch_rows: None,
+        })
     })
     .await
     .map_err(|e| e.to_string())?

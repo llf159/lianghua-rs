@@ -9,7 +9,7 @@ pub use strategies::transfer as transfer_strategies;
 
 pub use watchlists::{
     TransferMode as WatchlistTransferMode, TransferResult as WatchlistTransferResult,
-    transfer as transfer_watchlists,
+    sync as sync_watchlists, transfer as transfer_watchlists,
 };
 
 use chrono::Utc;

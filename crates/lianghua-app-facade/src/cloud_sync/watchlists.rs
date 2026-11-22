@@ -136,6 +136,56 @@ pub fn transfer(
     )
 }
 
+pub fn sync(
+    app_data: &Path,
+    source: &Path,
+    settings: BTreeMap<String, String>,
+    rows: Vec<WatchObserveStoredRow>,
+    progress: impl Fn(&str),
+) -> Result<TransferResult, String> {
+    {
+        let _guard = SOURCE_ACCESS
+            .try_write()
+            .map_err(|_| "数据操作正在进行，请完成后再同步")?;
+        atomic_write(
+            &super::target_path(app_data, source, "app/watch_observe.json")?,
+            &serde_json::to_vec(&rows).map_err(|e| e.to_string())?,
+        )?;
+    }
+    let result = super::sync_scoped(
+        app_data,
+        source,
+        settings,
+        false,
+        super::SyncScope::Watchlists,
+        progress,
+    )?;
+    let last_modified = result
+        .items
+        .iter()
+        .filter(|item| item.is_head && super::SyncScope::Watchlists.includes(&item.path))
+        .map(|item| item.version.created_at.clone())
+        .max();
+    let watch_rows = if result
+        .downloaded_paths
+        .iter()
+        .any(|path| path == "bundles/watchlists.zip" || path == "app/watch_observe.json")
+    {
+        Some(read_json(&super::target_path(
+            app_data,
+            source,
+            "app/watch_observe.json",
+        )?)?)
+    } else {
+        None
+    };
+    Ok(TransferResult {
+        result,
+        last_modified,
+        watch_rows,
+    })
+}
+
 pub(super) fn transfer_bundle(
     app_data: &Path,
     source: &Path,

@@ -1,5 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import {
+  readJsonStorage,
+  readStoredSourcePath,
+  writeJsonStorage,
+} from "../shared/storage";
+import {
   readWatchObserveRowsFromCache,
   writeWatchObserveRowsToCache,
   type WatchObserveRow,
@@ -67,6 +72,63 @@ export function deleteCloudVersion(item: CloudItem) {
     versionId: item.version.id,
   });
 }
+export function readWatchlistSyncFingerprint() {
+  return JSON.stringify([
+    readWatchObserveRowsFromCache()
+      .map(({ tsCode, name, watchDate, tag, concept, markedDate }) => ({
+        tsCode,
+        name,
+        watchDate,
+        tag,
+        concept,
+        markedDate,
+      }))
+      .sort((left, right) => left.tsCode.localeCompare(right.tsCode)),
+    localStorage.getItem("lh_intraday_monitor_watchlist_v1"),
+    localStorage.getItem("am_board_filter"),
+  ]);
+}
+
+let watchlistStartupTask: Promise<CloudSyncResult | null> | null = null;
+
+export function checkWatchlistCloudAtStartup() {
+  if (watchlistStartupTask) return watchlistStartupTask;
+  watchlistStartupTask = (async () => {
+    const config = await getCloudConfig();
+    if (!config.endpoint.trim() || !navigator.onLine) return null;
+    const items = await listCloudData();
+    const remoteChanged = items.some(
+      (item) =>
+        item.isHead &&
+        !item.isLocalBase &&
+        (item.path === "bundles/watchlists.zip" ||
+          item.path === "app/watch_observe.json" ||
+          item.path === "settings/am_board_filter" ||
+          item.path.startsWith("settings/lh_intraday_monitor_watchlist")),
+    );
+    const fingerprint = readWatchlistSyncFingerprint();
+    const key = `lh_watchlist_auto_sync_v1:${readStoredSourcePath().trim()}`;
+    const previous = readJsonStorage<{
+      fingerprint: string;
+      conflict: boolean;
+    }>(localStorage, key);
+    if (!remoteChanged && previous?.fingerprint === fingerprint) return null;
+    const result = await syncCloud(undefined, false, "watchlists");
+    writeJsonStorage(localStorage, key, {
+      fingerprint:
+        result.watchRows && result.conflicts.length === 0
+          ? readWatchlistSyncFingerprint()
+          : fingerprint,
+      conflict: result.conflicts.length > 0,
+    });
+    return result;
+  })().catch((error) => {
+    console.error("启动时检查自选云端失败", error);
+    return null;
+  });
+  return watchlistStartupTask;
+}
+
 export async function syncCloud(
   item?: CloudItem,
   downloadOnly = false,
@@ -81,9 +143,10 @@ export async function syncCloud(
     before.set(key, value);
     if (value !== null) settings[key] = value;
   }
-  const beforeWatchRows = watchlistMode
-    ? localStorage.getItem("lh_watch_observe_list")
-    : null;
+  const beforeWatchRows =
+    scope === "watchlists" || watchlistMode
+      ? localStorage.getItem("lh_watch_observe_list")
+      : null;
   const result = await invoke<CloudSyncResult>(
     watchlistMode
       ? "transfer_watchlist_cloud"
@@ -96,7 +159,13 @@ export async function syncCloud(
         ? { mode: watchlistMode, watchRows: readWatchObserveRowsFromCache() }
         : item
           ? { path: item.path, versionId: item.version.id }
-          : { downloadOnly, scope }),
+          : {
+              downloadOnly,
+              scope,
+              ...(scope === "watchlists"
+                ? { watchRows: readWatchObserveRowsFromCache() }
+                : {}),
+            }),
     },
   );
   // 不覆盖网络等待期间新增的本机编辑；下载版本仍保留在云端和已校验缓存。
@@ -122,8 +191,9 @@ export async function syncCloud(
       result.warnings.push(`设置写入失败，请释放设备存储空间后重试：${key}`);
     }
   }
-  if (watchlistMode && result.watchRows) {
+  if (result.watchRows) {
     if (localStorage.getItem("lh_watch_observe_list") !== beforeWatchRows) {
+      result.conflicts.push("bundles/watchlists.zip");
       result.warnings.push(
         "同步期间自选已修改，已保留页面中的自选；可再次合并",
       );

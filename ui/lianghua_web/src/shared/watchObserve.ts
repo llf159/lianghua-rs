@@ -178,6 +178,7 @@ export function writeWatchObserveRowsToCache(rows: WatchObserveRow[]) {
   }))
 
   window.localStorage.setItem(WATCH_CACHE_WRITE_KEY, JSON.stringify(payload))
+  window.dispatchEvent(new Event('watch-observe-changed'))
 }
 
 export function findWatchObserveRow(rows: WatchObserveRow[], tsCode: string) {

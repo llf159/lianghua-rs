@@ -425,3 +425,8 @@ body .watch-observe-table-wrap {
   overflow: auto !important;
   overscroll-behavior: contain;
 }
+.watch-observe-toolbar-btn.has-sync-conflict {
+  color: #b45309;
+  border-color: #d97706;
+  background: #fffbeb;
+}

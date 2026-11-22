@@ -9,6 +9,7 @@ import type { Location } from "react-router-dom";
 import { lazy, Suspense, useEffect, useState } from "react";
 import PageDesktop from "./PageDesktop.tsx";
 import { ensureManagedSourcePath } from "./apis/managedSource";
+import { checkWatchlistCloudAtStartup } from "./apis/cloudSync";
 import "./App.css";
 
 const pages = {
@@ -80,6 +81,9 @@ function AppRoutes() {
   useEffect(() => {
     let cancelled = false;
     void ensureManagedSourcePath()
+      .then(() => {
+        void checkWatchlistCloudAtStartup();
+      })
       .catch((error) => console.error("解析数据仓库路径失败", error))
       .finally(() => {
         if (!cancelled) {
@@ -203,7 +207,9 @@ function AppRoutes() {
             <Route path="backtest" element={<pages.Backtest />}>
               <Route
                 index
-                element={<Navigate to="/backtest/expression-backtest" replace />}
+                element={
+                  <Navigate to="/backtest/expression-backtest" replace />
+                }
               />
               <Route
                 path="strategy-trigger"

@@ -43,6 +43,7 @@ fn two_devices_keep_conflicts_deduplicate_and_recover() {
             }
             assert!(
                 path.starts_with("/dav/lianghua-rs/")
+                    || path.starts_with("/dav/watch-auto/")
                     || path.starts_with("/dav/watch-transfer/")
                     || path.starts_with("/dav/strategy-transfer/")
                     || path.starts_with("/dav/settings-transfer/")
@@ -419,6 +420,82 @@ fn two_devices_keep_conflicts_deduplicate_and_recover() {
     save_config(&transfer_b, transfer_config).unwrap();
     let first_rows = br#"[{"tsCode":"000001.SZ","name":"A","tag":"","concept":""}]"#;
     let second_rows = br#"[{"tsCode":"600000.SH","name":"B","tag":"","concept":""}]"#;
+    // 自动同步使用页面条目，单端修改自动接收，双端修改保留冲突。
+    let auto_a = temp.path().join("auto-a");
+    let auto_b = temp.path().join("auto-b");
+    let mut auto_config = config.clone();
+    auto_config.folder = "watch-auto".into();
+    save_config(&auto_a, auto_config.clone()).unwrap();
+    save_config(&auto_b, auto_config).unwrap();
+    let sent = sync_watchlists(
+        &auto_a,
+        &source_a,
+        BTreeMap::new(),
+        serde_json::from_slice(first_rows).unwrap(),
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(sent.result.uploaded, 1);
+    let received = transfer_watchlists(
+        &auto_b,
+        &source_b,
+        BTreeMap::new(),
+        Some(Vec::new()),
+        WatchlistTransferMode::Download,
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(received.watch_rows.unwrap()[0].ts_code, "000001.SZ");
+    let sent = sync_watchlists(
+        &auto_a,
+        &source_a,
+        BTreeMap::new(),
+        serde_json::from_slice(second_rows).unwrap(),
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(sent.result.uploaded, 1);
+    let received = sync_watchlists(
+        &auto_b,
+        &source_b,
+        BTreeMap::new(),
+        serde_json::from_slice(first_rows).unwrap(),
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(received.watch_rows.unwrap()[0].ts_code, "600000.SH");
+    sync_watchlists(&auto_a, &source_a, BTreeMap::new(), Vec::new(), |_| {}).unwrap();
+    let conflict = sync_watchlists(
+        &auto_b,
+        &source_b,
+        BTreeMap::new(),
+        serde_json::from_slice(first_rows).unwrap(),
+        |_| {},
+    )
+    .unwrap();
+    assert!(
+        conflict
+            .result
+            .conflicts
+            .iter()
+            .any(|path| path == "bundles/watchlists.zip")
+    );
+    assert!(conflict.watch_rows.is_none());
+    let unchanged = sync_watchlists(
+        &auto_b,
+        &source_b,
+        BTreeMap::new(),
+        serde_json::from_slice(first_rows).unwrap(),
+        |_| {},
+    )
+    .unwrap();
+    assert!(
+        unchanged
+            .result
+            .conflicts
+            .iter()
+            .any(|path| path == "bundles/watchlists.zip")
+    );
     fs::write(transfer_a.join("watch_observe.json"), "[]").unwrap();
     fs::write(transfer_b.join("watch_observe.json"), "[]").unwrap();
     let sent = transfer_watchlists(

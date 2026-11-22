@@ -42,7 +42,10 @@ import {
 } from "../../shared/tradeDate";
 import "./css/WatchObservePage.css";
 import {
+  checkWatchlistCloudAtStartup,
+  getCloudConfig,
   listCloudData,
+  readWatchlistSyncFingerprint,
   syncCloud,
   type WatchlistTransferMode,
 } from "../../apis/cloudSync";
@@ -59,6 +62,7 @@ type WatchObserveSortKey =
   | "postWatchReturnPct"
   | "todayRank";
 const WATCH_OBSERVE_STATE_KEY = "lh_watch_observe_page_state_v1";
+let cloudStartupHandled = false;
 
 type PersistedWatchObserveState = {
   rows: WatchObserveRow[];
@@ -158,6 +162,8 @@ export default function WatchObservePage() {
     } satisfies PersistedWatchObserveState;
   }, []);
   const [cloudBusy, setCloudBusy] = useState(false);
+  const cloudBusyRef = useRef(false);
+  const [cloudConflict, setCloudConflict] = useState(false);
   const [cloudModalOpen, setCloudModalOpen] = useState(false);
   const [cloudInfoLoading, setCloudInfoLoading] = useState(false);
   const [cloudInfoError, setCloudInfoError] = useState(false);
@@ -179,6 +185,18 @@ export default function WatchObservePage() {
     void listCloudData()
       .then((items) => {
         if (cancelled) return;
+        if (
+          items.some(
+            (item) =>
+              item.isHead &&
+              item.conflict &&
+              (item.path === "bundles/watchlists.zip" ||
+                item.path === "app/watch_observe.json" ||
+                item.path === "settings/am_board_filter" ||
+                item.path.startsWith("settings/lh_intraday_monitor_watchlist")),
+          )
+        )
+          setCloudConflict(true);
         const dates = items
           .filter(
             (item) =>
@@ -448,6 +466,129 @@ export default function WatchObservePage() {
 
     void loadDatabaseRows();
   }, [loadDatabaseRows, viewMode]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const autoSync = async () => {
+      const startupResult = await checkWatchlistCloudAtStartup();
+      if (
+        cancelled ||
+        document.hidden ||
+        !navigator.onLine ||
+        cloudBusyRef.current ||
+        cloudModalOpen ||
+        isDeleteMode ||
+        editingTsCode ||
+        editingMarkedDateTsCode ||
+        refreshingRealtime
+      )
+        return;
+      const fingerprint = readWatchlistSyncFingerprint();
+      const previous = readJsonStorage<{
+        fingerprint: string;
+        conflict: boolean;
+      }>(localStorage, `lh_watchlist_auto_sync_v1:${sourcePathTrimmed}`);
+      if (
+        previous?.fingerprint === fingerprint &&
+        (cloudStartupHandled || !startupResult)
+      ) {
+        setCloudConflict(previous.conflict);
+        return;
+      }
+      cloudBusyRef.current = true;
+      try {
+        const config = await getCloudConfig();
+        if (cancelled || !config.endpoint.trim()) return;
+        setCloudBusy(true);
+        const result =
+          !cloudStartupHandled &&
+          startupResult &&
+          previous?.fingerprint === fingerprint
+            ? startupResult
+            : await syncCloud(undefined, false, "watchlists");
+        cloudStartupHandled = true;
+        if (cancelled) return;
+        writeJsonStorage(
+          localStorage,
+          `lh_watchlist_auto_sync_v1:${sourcePathTrimmed}`,
+          {
+            fingerprint:
+              result.watchRows && result.conflicts.length === 0
+                ? readWatchlistSyncFingerprint()
+                : fingerprint,
+            conflict: result.conflicts.length > 0,
+          },
+        );
+        setCloudConflict(result.conflicts.length > 0);
+        setCloudLastModified(result.lastModified ?? null);
+        setCloudFeedback(
+          result.conflicts.length > 0
+            ? {
+                kind: "warning",
+                text: "两端自选存在冲突，请选择上传、下载或合并。",
+              }
+            : result.warnings.length > 0
+              ? { kind: "warning", text: result.warnings.join("；") }
+              : null,
+        );
+        if (result.watchRows) {
+          if (viewMode === "db") await loadDatabaseRows({ showLoading: false });
+          else
+            setRows((current) =>
+              result.watchRows!.map((row) => ({
+                latestClose: null,
+                latestChangePct: null,
+                volumeRatio: null,
+                return3dPct: null,
+                postWatchReturnPct: null,
+                todayRank: null,
+                sceneMarker: null,
+                ...current.find((old) => old.tsCode === row.tsCode),
+                ...row,
+              })),
+            );
+        }
+        scheduleSync();
+      } catch (syncError) {
+        if (!cancelled)
+          setCloudFeedback({
+            kind: "error",
+            text: `自动同步失败：${String(syncError)}`,
+          });
+      } finally {
+        cloudBusyRef.current = false;
+        setCloudBusy(false);
+      }
+    };
+    let timer = window.setTimeout(() => void autoSync(), 1500);
+    const scheduleSync = () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => void autoSync(), 1500);
+    };
+    window.addEventListener("watch-observe-changed", scheduleSync);
+    window.addEventListener("storage", scheduleSync);
+    window.addEventListener("focus", scheduleSync);
+    window.addEventListener("online", scheduleSync);
+    document.addEventListener("visibilitychange", scheduleSync);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+      window.removeEventListener("watch-observe-changed", scheduleSync);
+      window.removeEventListener("storage", scheduleSync);
+      window.removeEventListener("focus", scheduleSync);
+      window.removeEventListener("online", scheduleSync);
+      document.removeEventListener("visibilitychange", scheduleSync);
+    };
+  }, [
+    loadDatabaseRows,
+    viewMode,
+    cloudModalOpen,
+    isDeleteMode,
+    editingTsCode,
+    editingMarkedDateTsCode,
+    refreshingRealtime,
+    sourcePathTrimmed,
+  ]);
 
   useEffect(() => {
     if (viewMode !== "db") {
@@ -764,7 +905,7 @@ export default function WatchObservePage() {
               {isDeleteMode ? "删除中" : "删除"}
             </button>
             <button
-              className="watch-observe-toolbar-btn watch-observe-toolbar-btn-secondary"
+              className={`watch-observe-toolbar-btn watch-observe-toolbar-btn-secondary${cloudConflict ? " has-sync-conflict" : ""}`}
               type="button"
               disabled={
                 loading || cloudBusy || refreshingRealtime || isDeleteMode
@@ -772,8 +913,12 @@ export default function WatchObservePage() {
               aria-busy={cloudBusy}
               aria-haspopup="dialog"
               aria-expanded={cloudModalOpen}
+              title={
+                cloudConflict
+                  ? "自选同步冲突，点击选择上传、下载或合并"
+                  : (cloudFeedback?.text ?? "自选自动同步已启用")
+              }
               onClick={() => {
-                setCloudFeedback(null);
                 setCloudProgress("");
                 setCloudLastModified(null);
                 setCloudInfoLoading(true);
@@ -781,7 +926,13 @@ export default function WatchObservePage() {
                 setCloudModalOpen(true);
               }}
             >
-              同步
+              {cloudConflict
+                ? "同步 · 有冲突"
+                : cloudBusy
+                  ? "同步中…"
+                  : cloudFeedback?.kind === "error"
+                    ? "同步 · 失败"
+                    : "同步"}
             </button>
 
             <button
@@ -1257,10 +1408,16 @@ export default function WatchObservePage() {
                   className={mode === "merge" ? "is-primary" : ""}
                   disabled={cloudBusy || cloudInfoLoading}
                   onClick={async () => {
+                    if (cloudBusyRef.current) return;
+                    await checkWatchlistCloudAtStartup();
+                    if (cloudBusyRef.current) return;
+                    cloudStartupHandled = true;
+                    cloudBusyRef.current = true;
                     setCloudBusy(true);
                     setCloudAction(mode);
                     setCloudFeedback(null);
                     setCloudProgress("准备中…");
+                    const fingerprint = readWatchlistSyncFingerprint();
                     try {
                       const result = await syncCloud(
                         undefined,
@@ -1271,6 +1428,18 @@ export default function WatchObservePage() {
                       if (mode !== "upload")
                         await loadDatabaseRows({ showLoading: false });
                       setCloudLastModified(result.lastModified ?? null);
+                      setCloudConflict(result.conflicts.length > 0);
+                      writeJsonStorage(
+                        localStorage,
+                        `lh_watchlist_auto_sync_v1:${sourcePathTrimmed}`,
+                        {
+                          fingerprint:
+                            result.watchRows && result.conflicts.length === 0
+                              ? readWatchlistSyncFingerprint()
+                              : fingerprint,
+                          conflict: result.conflicts.length > 0,
+                        },
+                      );
                       setCloudFeedback({
                         kind: result.warnings.length ? "warning" : "success",
                         text: `${label}完成${result.warnings.length ? `；${result.warnings.join("；")}` : ""}`,
@@ -1281,6 +1450,7 @@ export default function WatchObservePage() {
                         text: `${label}失败：${String(syncError)}`,
                       });
                     } finally {
+                      cloudBusyRef.current = false;
                       setCloudBusy(false);
                       setCloudAction(null);
                       setCloudProgress("");
@@ -1295,7 +1465,7 @@ export default function WatchObservePage() {
               ))}
             </div>
             <p className="cloud-watch-hint">
-              合并保留两端股票；删除后选上传，让云端与本地一致。
+              启动时检查一次云端，之后本地自选变化才自动同步，无定时轮询。冲突需手动处理。合并保留两端股票；上传以本地为准，下载以云端为准。
             </p>
             {cloudBusy && cloudProgress ? (
               <p className="cloud-notice cloud-progress" role="status">
