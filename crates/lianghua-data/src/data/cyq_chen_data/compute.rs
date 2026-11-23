@@ -1101,7 +1101,7 @@ pub(super) fn write_cyq_chen_batches_from_channel(
     let mut conn = Connection::open_with_budget(
         db_path,
         duckdb::Config::default(),
-        (device.available / 4).min(8 << 30),
+        (device.available / 4).max(256 << 20),
         device.cpus.min(8),
     )
     .map_err(|e| format!("打开筹码库失败:{e}"))?;

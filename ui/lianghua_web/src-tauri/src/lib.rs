@@ -368,41 +368,6 @@ fn emit_ranking_compute_progress_event(
     }
 }
 
-#[cfg(target_os = "linux")]
-fn trim_process_heap() {
-    unsafe {
-        libc::malloc_trim(0);
-    }
-}
-
-#[cfg(target_os = "android")]
-fn trim_process_heap() {
-    use libc::{c_int, c_void};
-
-    type MalloptFn = unsafe extern "C" fn(c_int, c_int) -> c_int;
-
-    unsafe {
-        let symbol = libc::dlsym(libc::RTLD_DEFAULT, b"mallopt\0".as_ptr().cast());
-        if symbol.is_null() {
-            return;
-        }
-
-        let mallopt: MalloptFn =
-            std::mem::transmute::<*mut c_void, MalloptFn>(symbol.cast::<c_void>());
-        mallopt(-100, 0);
-        mallopt(-101, 0);
-    }
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "android")))]
-fn trim_process_heap() {}
-
-fn run_with_heap_trim<T>(f: impl FnOnce() -> T) -> T {
-    let result = f();
-    trim_process_heap();
-    result
-}
-
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WatchObserveUpsertPayload {
@@ -1402,11 +1367,11 @@ async fn run_strategy_paper_validation(
         }
         let journal=lianghua_app_strategy::research_archive::save_research_archive(&source_path,research_selection.as_ref().map(|selection|selection.run_id.clone()),"交易模拟验证".into(),configuration,serde_json::json!({}),"paper_validation","running",None,None)?;
         let _lease=lianghua_app_strategy::research_archive::ResearchArchiveLease{source_path:source_path.clone(),run_id:journal.run_id.clone()};
-        let mut result=run_with_heap_trim(|| {
+        let mut result={
             core_run_strategy_paper_validation(
                 &source_path,start_date,end_date,min_listed_trade_days,index_ts_code,test_ts_code,board,buy_price_basis,slippage_pct,max_position_count,buy_selection_mode,buy_expression,sell_expression,research_selection.clone(),account_settings,
             )
-        });
+        };
         if let Ok(data)=&mut result {data.archive_run_id=Some(journal.run_id.clone());}
         let status=if result.is_ok(){"completed"}else{"failed"};
         let payload=match &result{Ok(data)=>serde_json::to_value(data).map_err(|e|e.to_string())?,Err(error)=>serde_json::json!({"error":error})};
@@ -1691,7 +1656,7 @@ async fn run_scene_layer_backtest(
         let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
             .read()
             .unwrap_or_else(|e| e.into_inner());
-        run_with_heap_trim(|| {
+        {
             core_run_scene_layer_backtest(
                 source_path,
                 stock_adj_type,
@@ -1710,7 +1675,7 @@ async fn run_scene_layer_backtest(
                 total_mv_min,
                 total_mv_max,
             )
-        })
+        }
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1740,7 +1705,7 @@ async fn run_rule_layer_backtest(
         let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
             .read()
             .unwrap_or_else(|e| e.into_inner());
-        run_with_heap_trim(|| {
+        {
             core_run_rule_layer_backtest(
                 source_path,
                 stock_adj_type,
@@ -1760,7 +1725,7 @@ async fn run_rule_layer_backtest(
                 total_mv_min,
                 total_mv_max,
             )
-        })
+        }
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1790,7 +1755,7 @@ async fn run_rank_layer_backtest(
         let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
             .read()
             .unwrap_or_else(|e| e.into_inner());
-        run_with_heap_trim(|| {
+        {
             core_run_rank_layer_backtest(
                 source_path,
                 stock_adj_type,
@@ -1810,7 +1775,7 @@ async fn run_rank_layer_backtest(
                 exclude_st_board,
                 market_value_boundaries,
             )
-        })
+        }
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1839,7 +1804,7 @@ async fn run_transient_scene_layer_backtest(
         let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
             .read()
             .unwrap_or_else(|e| e.into_inner());
-        run_with_heap_trim(|| {
+        {
             core_run_transient_scene_layer_backtest(
                 source_path,
                 stock_adj_type,
@@ -1858,7 +1823,7 @@ async fn run_transient_scene_layer_backtest(
                 total_mv_min,
                 total_mv_max,
             )
-        })
+        }
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1888,7 +1853,7 @@ async fn run_transient_rule_layer_backtest(
         let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
             .read()
             .unwrap_or_else(|e| e.into_inner());
-        run_with_heap_trim(|| {
+        {
             core_run_transient_rule_layer_backtest(
                 source_path,
                 stock_adj_type,
@@ -1908,7 +1873,7 @@ async fn run_transient_rule_layer_backtest(
                 total_mv_min,
                 total_mv_max,
             )
-        })
+        }
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1938,7 +1903,7 @@ async fn run_transient_rank_layer_backtest(
         let _cloud_guard = lianghua_app_facade::cloud_sync::SOURCE_ACCESS
             .read()
             .unwrap_or_else(|e| e.into_inner());
-        run_with_heap_trim(|| {
+        {
             core_run_transient_rank_layer_backtest(
                 source_path,
                 stock_adj_type,
@@ -1958,7 +1923,7 @@ async fn run_transient_rank_layer_backtest(
                 exclude_st_board,
                 market_value_boundaries,
             )
-        })
+        }
     })
     .await
     .map_err(|error| error.to_string())?
@@ -2150,7 +2115,7 @@ async fn run_rule_expression_validation(
             let mut results = Vec::new();
             for period in periods {
                 progress(&format!("准备{period}日评价"))?;
-                let mut data = run_with_heap_trim(|| {
+                let mut data = {
                     core_run_rule_expression_validation(
                         source_path.clone(),
                         import_rule_name.clone(),
@@ -2180,7 +2145,7 @@ async fn run_rule_expression_validation(
                         Some(&progress),
                         Some(&output),
                     )
-                })?;
+                }?;
                 data.membership_saved = false;
                 data.archive_run_id = Some(journal.run_id.clone());
                 data.input_manifest = configuration["input_manifest"].clone();

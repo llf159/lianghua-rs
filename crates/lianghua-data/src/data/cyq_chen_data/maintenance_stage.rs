@@ -129,7 +129,7 @@ pub(super) fn write_cyq_chen_maintenance_batches_from_channel(
         let mut stage = Connection::open_with_budget(
             stage_path,
             duckdb::Config::default(),
-            (device.available / 4).min(8 << 30),
+            (device.available / 4).max(256 << 20),
             1,
         )
         .map_err(|e| e.to_string())?;

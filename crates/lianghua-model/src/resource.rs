@@ -287,7 +287,7 @@ impl TaskMemory {
     pub fn enter(control: Arc<crate::task::TaskControl>, background: bool) -> Self {
         let snapshot = DeviceMemory::detect();
         let plan = ResourcePlan {
-            bytes: (snapshot.working_bytes() / if background { 4 } else { 1 }).min(8 << 30),
+            bytes: snapshot.working_bytes() / if background { 4 } else { 1 },
             cpus: snapshot.cpus,
         };
         eprintln!("任务工作集计划={}MiB（不预扣内存）", plan.bytes >> 20);
@@ -360,32 +360,17 @@ impl Drop for BytePermit {
 pub struct MemoryCache<K, V> {
     entries: std::collections::HashMap<K, (V, u64)>,
     bytes: u64,
-    pressure_checked: std::time::Instant,
-    pressure_reads: u8,
 }
 impl<K: Eq + std::hash::Hash + Clone, V> Default for MemoryCache<K, V> {
     fn default() -> Self {
         Self {
             entries: std::collections::HashMap::new(),
             bytes: 0,
-            pressure_checked: std::time::Instant::now(),
-            pressure_reads: 0,
         }
     }
 }
 impl<K: Eq + std::hash::Hash + Clone, V> MemoryCache<K, V> {
     pub fn get(&mut self, key: &K) -> Option<&V> {
-        self.pressure_reads = self.pressure_reads.wrapping_add(1);
-        if self.pressure_reads == 0
-            && self.pressure_checked.elapsed() >= std::time::Duration::from_secs(1)
-        {
-            let snapshot = DeviceMemory::current();
-            if snapshot.available < snapshot.total / 16 {
-                self.entries.clear();
-                self.bytes = 0;
-            }
-            self.pressure_checked = std::time::Instant::now();
-        }
         self.entries.get(key).map(|(value, _)| value)
     }
     pub fn insert(&mut self, key: K, value: V, bytes: u64) {

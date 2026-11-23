@@ -97,7 +97,6 @@ dependencies = [
  "lianghua-duckdb",
  "lianghua-model",
  "lianghua-provider",
- "libc",
  "log",
  "reqwest",
  "rustls-platform-verifier",

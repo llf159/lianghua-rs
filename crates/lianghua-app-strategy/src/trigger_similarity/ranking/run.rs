@@ -173,11 +173,6 @@ fn compute_strategy_trigger_similarity_ranking(
     let outcome_trade_days = outcome_trade_days
         .map(|v| v as usize)
         .filter(|v| *v > 0)
-        .or_else(|| {
-            active_config
-                .as_ref()
-                .map(|config| config.outcome_trade_days)
-        })
         .unwrap_or(DEFAULT_OUTCOME_TRADE_DAYS);
     let sample_gap_trade_days = sample_gap_trade_days
         .map(|v| v as usize)

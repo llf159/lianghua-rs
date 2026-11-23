@@ -1,4 +1,4 @@
-//! DuckDB API with adaptive cache ceilings; opening a connection reserves no memory.
+//! DuckDB API preserving native defaults; explicit stage budgets reserve no memory.
 pub use duckdb::*;
 use lianghua_model::resource::DeviceMemory;
 use std::{
@@ -23,27 +23,13 @@ impl Connection {
         Self::open_with_flags(":memory:", config)
     }
     pub fn open_with_flags(path: impl AsRef<Path>, config: Config) -> Result<Self> {
-        let device = DeviceMemory::current();
-        Self::open_with_budget(
-            path,
-            config,
-            (device.available / 4).min(8 << 30),
-            device.cpus,
-        )
-    }
-    /// A cache ceiling is not an allocation: opening an idle instance reserves no memory.
-    pub fn open_with_budget(
-        path: impl AsRef<Path>,
-        config: Config,
-        memory_bytes: u64,
-        threads: usize,
-    ) -> Result<Self> {
-        let device = DeviceMemory::current();
-        let budget = memory_bytes.min(device.working_bytes());
-        let threads = threads.clamp(1, device.cpus);
-        let config = config
-            .max_memory(&format!("{}B", budget))?
-            .threads(threads as i64)?;
+        // 普通连接沿用原生配置，不能把当前剩余内存再次折算成数据库硬上限。
+        let inner = duckdb::Connection::open_with_flags(&path, config)?;
+        let (budget, threads) = inner.query_row(
+            "SELECT parse_formatted_bytes(current_setting('memory_limit'))::UBIGINT, current_setting('threads')::BIGINT",
+            [],
+            |row| Ok((row.get::<_, u64>(0)?, row.get::<_, i64>(1)?)),
+        )?;
         if std::env::var("LIANGHUA_RESOURCE_PROFILE").as_deref() == Ok("1") {
             eprintln!(
                 "数据库资源：path={} 缓存={}MiB 线程={}",
@@ -52,8 +38,22 @@ impl Connection {
                 threads
             );
         }
-        let inner = duckdb::Connection::open_with_flags(path, config)?;
         Ok(Self { inner, budget })
+    }
+    /// Explicit ceilings are caller policy, not allocations or admission credits.
+    pub fn open_with_budget(
+        path: impl AsRef<Path>,
+        config: Config,
+        memory_bytes: u64,
+        threads: usize,
+    ) -> Result<Self> {
+        let config = config
+            .max_memory(&format!("{}B", memory_bytes))?
+            .threads(threads.clamp(1, DeviceMemory::current().cpus) as i64)?;
+        let mut connection = Self::open_with_flags(path, config)?;
+        // 显式预算无需从格式化的设置值反算，保留调用方提供的精确字节数。
+        connection.budget = memory_bytes;
+        Ok(connection)
     }
     pub fn try_clone(&self) -> Result<Self> {
         Ok(Self {
@@ -124,6 +124,62 @@ impl Deref for Transaction<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn preserves_native_settings_and_does_not_reclamp_explicit_budgets() {
+        for configured in [false, true] {
+            let native = duckdb::Connection::open_in_memory_with_flags(if configured {
+                Config::default()
+                    .max_memory("64MB")
+                    .unwrap()
+                    .threads(1)
+                    .unwrap()
+            } else {
+                Config::default()
+            })
+            .unwrap();
+            let wrapped = Connection::open_in_memory_with_flags(if configured {
+                Config::default()
+                    .max_memory("64MB")
+                    .unwrap()
+                    .threads(1)
+                    .unwrap()
+            } else {
+                Config::default()
+            })
+            .unwrap();
+            assert_eq!(
+                native
+                    .query_row(
+                        "SELECT current_setting('memory_limit'), current_setting('threads')",
+                        [],
+                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+                    )
+                    .unwrap(),
+                wrapped
+                    .query_row(
+                        "SELECT current_setting('memory_limit'), current_setting('threads')",
+                        [],
+                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+                    )
+                    .unwrap(),
+            );
+        }
+        // 设置额度不分配对应内存；用高于设备总量的额度证明桥接层不再静默裁剪。
+        let requested = DeviceMemory::current().total.saturating_add(1 << 30);
+        let explicit =
+            Connection::open_with_budget(":memory:", Config::default(), requested, 1).unwrap();
+        assert_eq!(explicit.memory_budget(), requested);
+        assert!(
+            explicit
+                .query_row(
+                    "SELECT parse_formatted_bytes(current_setting('memory_limit'))::UBIGINT",
+                    [],
+                    |r| r.get::<_, u64>(0)
+                )
+                .unwrap()
+                > DeviceMemory::current().total
+        );
+    }
     #[test]
     fn full_queue_does_not_block_database_or_task_plans() {
         let queue = lianghua_model::resource::ByteBudget::new(32, 256 << 20);
