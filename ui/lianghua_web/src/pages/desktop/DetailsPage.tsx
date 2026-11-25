@@ -87,16 +87,12 @@ import {
   useConceptExclusions,
 } from "../../shared/conceptExclusions";
 import {
+  CHART_VISIBLE_BARS_MIN,
   readStoredDetailsNavLongPressIntervalSeconds,
   readStoredChartDefaultVisibleBars,
   readStoredChartIndicatorWidthRatio,
-  readStoredChartMainHeightMode,
-  readStoredChartMainPercentMaxHeight,
-  readStoredChartMainPercentMinHeight,
-  readStoredChartMainPercentPixels,
   readStoredChartMainWidthRatio,
   readStoredDetailCyqModel,
-  type ChartMainHeightMode,
   type DetailCyqModel,
 } from "../../shared/chartSettings";
 import {
@@ -127,7 +123,6 @@ import "./css/DetailsPage.css";
 const DEFAULT_TOP_LIMIT = "100";
 const DETAIL_CHART_WINDOW_DAYS = 280;
 const DETAIL_CYQ_SCALE_WINDOW_DAYS = 60;
-const MIN_VISIBLE_BARS = 20;
 const CHART_MIN_RIGHT_ALIGNED_SLOTS = 60;
 const DEFAULT_INDICATOR_PANEL_COUNT = 3;
 const CHART_VIEWBOX_WIDTH = 1120;
@@ -147,7 +142,6 @@ const CHART_TOUCH_FOCUS_HIT_SLOP = 24;
 const CHART_CYQ_PANEL_WIDTH_RATIO = 0.22;
 const CHART_CYQ_PANEL_GAP = 12;
 const CHART_PANEL_GAP_PX = 8;
-const CHART_MAIN_PANEL_CHROME_HEIGHT_PX = 40;
 const STRATEGY_SPLIT_DEFAULT = 0.64;
 const STRATEGY_SPLIT_MIN = 0.24;
 const STRATEGY_SPLIT_MAX = 0.76;
@@ -464,10 +458,6 @@ function getPanelSeries(panel: DetailKlinePanel): DetailChartSeries[] {
 
 function getPanelTooltips(panel: DetailKlinePanel): DetailChartTooltip[] {
   return panel.tooltips ?? [];
-}
-
-function findPanelSeries(panel: DetailKlinePanel, key: string) {
-  return getPanelSeries(panel).find((series) => series.key === key) ?? null;
 }
 
 function formatSeriesLabel(key: string, series?: DetailChartSeries | null) {
@@ -2097,7 +2087,6 @@ function buildDefaultPanels() {
 }
 
 function buildChartPanelHeights(
-  kline: DetailKlinePayload | null | undefined,
   panels: DetailKlinePanel[],
   mainPanelHeight: number,
   indicatorPanelBaseHeight: number,
@@ -2106,7 +2095,6 @@ function buildChartPanelHeights(
     return [mainPanelHeight];
   }
 
-  void kline;
   const matchedMainPanelIndex = panels.findIndex((panel) =>
     isMainChartPanel(panel),
   );
@@ -2119,22 +2107,6 @@ function buildChartPanelHeights(
 
     return indicatorPanelBaseHeight;
   });
-}
-
-function buildChartTemplateRows(
-  kline: DetailKlinePayload | null | undefined,
-  panels: DetailKlinePanel[],
-  mainPanelHeight: number,
-  indicatorPanelBaseHeight: number,
-) {
-  return buildChartPanelHeights(
-    kline,
-    panels,
-    mainPanelHeight,
-    indicatorPanelBaseHeight,
-  )
-    .map((panelHeight) => `${panelHeight.toFixed(2)}px`)
-    .join(" ");
 }
 
 function isFiniteNumber(value: unknown): value is number {
@@ -2174,54 +2146,23 @@ function buildDomain(values: number[], includeZero = false) {
   };
 }
 
-function buildMainPanelPercentSpan(
-  panel: DetailKlinePanel | null | undefined,
+function buildSeriesDomain(
   items: DetailKlineRow[],
+  keys: readonly string[],
+  extraValues: readonly number[] = [],
 ) {
-  if (!panel || items.length === 0) {
-    return null;
+  let min = Math.min(...extraValues);
+  let max = Math.max(...extraValues);
+  for (const row of items) {
+    for (const key of keys) {
+      const value = getNumericField(row, key);
+      if (value !== null) {
+        min = Math.min(min, value);
+        max = Math.max(max, value);
+      }
+    }
   }
-
-  const overlayKeys = getPanelSeries(panel).map((series) => series.key);
-  const values = items.flatMap((row) => {
-    const rowValues = ["open", "high", "low", "close", ...overlayKeys]
-      .map((key) => getNumericField(row, key))
-      .filter((value): value is number => value !== null);
-    return rowValues;
-  });
-  const domain = buildDomain(values);
-  if (!domain) {
-    return null;
-  }
-
-  const tenPercentStep = getCenteredPercentStep(domain.min, domain.max);
-  if (!Number.isFinite(tenPercentStep) || tenPercentStep <= 0) {
-    return null;
-  }
-
-  return ((domain.max - domain.min) / tenPercentStep) * 10;
-}
-
-function buildPercentScaledMainPanelHeight(
-  panel: DetailKlinePanel | null | undefined,
-  items: DetailKlineRow[],
-  pixelsPerPercent: number,
-  minHeight: number,
-  maxHeight: number,
-  fallbackHeight: number,
-) {
-  const percentSpan = buildMainPanelPercentSpan(panel, items);
-  if (percentSpan === null) {
-    return fallbackHeight;
-  }
-
-  const plotScale =
-    CHART_VIEWBOX_HEIGHT /
-    (CHART_VIEWBOX_HEIGHT - CHART_MARGIN.top - CHART_MARGIN.bottom);
-  const targetHeight =
-    CHART_MAIN_PANEL_CHROME_HEIGHT_PX +
-    percentSpan * pixelsPerPercent * plotScale;
-  return Math.min(maxHeight, Math.max(minHeight, targetHeight));
+  return min <= max ? buildDomain([min, max]) : null;
 }
 
 function formatAxisValue(value: number) {
@@ -2414,42 +2355,89 @@ function getChartItemX(
   return CHART_MARGIN.left + step * (leadingSlotCount + itemIndex) + step / 2;
 }
 
-function buildLineSegments(
+function renderChartSeriesLine(
   items: DetailKlineRow[],
-  key: string,
+  series: DetailChartSeries,
+  seriesIndex: number,
   xAt: (index: number) => number,
   yAt: (value: number) => number,
+  variant: "main" | "indicator",
 ) {
-  const segments: Array<Array<{ x: number; y: number }>> = [];
-  let current: Array<{ x: number; y: number }> = [];
+  const commands: string[] = [];
+  let continuesLine = false;
 
   items.forEach((row, index) => {
-    const value = getNumericField(row, key);
+    const value = getNumericField(row, series.key);
     if (value === null) {
-      if (current.length > 0) {
-        segments.push(current);
-        current = [];
-      }
+      continuesLine = false;
       return;
     }
 
-    current.push({ x: xAt(index), y: yAt(value) });
+    commands.push(
+      `${continuesLine ? "L" : "M"} ${xAt(index).toFixed(2)} ${yAt(value).toFixed(2)}`,
+    );
+    continuesLine = true;
   });
 
-  if (current.length > 0) {
-    segments.push(current);
-  }
-
-  return segments;
+  return commands.length === 0 ? null : (
+    <path
+      key={series.key}
+      className={`details-chart-line-path details-chart-line-path-${variant}`}
+      d={commands.join(" ")}
+      stroke={getSeriesColor(seriesIndex, series)}
+      strokeWidth={getSeriesLineWidth(series)}
+      opacity={getSeriesOpacity(series)}
+    />
+  );
 }
 
-function buildLinePath(points: Array<{ x: number; y: number }>) {
-  return points
-    .map(
-      (point, index) =>
-        `${index === 0 ? "M" : "L"} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`,
-    )
-    .join(" ");
+function buildRoundedBarPath(
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius: number,
+) {
+  const rx = Math.min(radius, width / 2);
+  const ry = Math.min(radius, height / 2);
+  const right = x + width;
+  const bottom = y + height;
+  return [
+    `M ${x + rx} ${y} H ${right - rx}`,
+    `A ${rx} ${ry} 0 0 1 ${right} ${y + ry} V ${bottom - ry}`,
+    `A ${rx} ${ry} 0 0 1 ${right - rx} ${bottom} H ${x + rx}`,
+    `A ${rx} ${ry} 0 0 1 ${x} ${bottom - ry} V ${y + ry}`,
+    `A ${rx} ${ry} 0 0 1 ${x + rx} ${y} Z`,
+  ].join(" ");
+}
+
+function appendChartPath(
+  paths: Map<string, string[]>,
+  color: string,
+  path: string,
+) {
+  const colorPaths = paths.get(color);
+  if (colorPaths) {
+    colorPaths.push(path);
+  } else {
+    paths.set(color, [path]);
+  }
+}
+
+function renderChartPaths(
+  paths: Map<string, string[]>,
+  className: string,
+  paint: "wick" | "body" | "bar",
+) {
+  return Array.from(paths, ([color, commands]) => (
+    <path
+      key={`${paint}:${color}`}
+      className={className}
+      d={commands.join(" ")}
+      fill={paint === "wick" ? "none" : color}
+      stroke={paint === "bar" ? undefined : color}
+    />
+  ));
 }
 
 function clampNumber(value: number, min: number, max: number) {
@@ -2961,15 +2949,18 @@ const DetailChartPanelHeader = memo(function DetailChartPanelHeader({
 function DetailChartPanel({
   panel,
   items,
+  priceContextExtrema,
   index,
   watermarkName,
   watermarkCode,
   watermarkConcept,
+  chartPeriodNotice,
   chartFocus,
   effectiveVisibleStart,
   dailyItems,
   dailyToBar,
   barRanges,
+  aggregatedBarCloseDates,
   previousRow,
   layoutSlotCount,
   chartPeriod,
@@ -2996,15 +2987,18 @@ function DetailChartPanel({
 }: {
   panel: DetailKlinePanel;
   items: DetailKlineRow[];
+  priceContextExtrema: readonly number[];
   index: number;
   watermarkName: string;
   watermarkCode: string;
   watermarkConcept: string;
+  chartPeriodNotice: ChartPeriod | null;
   chartFocus: ChartFocus | null;
   effectiveVisibleStart: number;
   dailyItems: DetailKlineRow[];
   dailyToBar: number[];
   barRanges: { start: number; end: number }[];
+  aggregatedBarCloseDates: ReadonlySet<string> | null;
   previousRow: DetailKlineRow | undefined;
   layoutSlotCount: number;
   chartPeriod: ChartPeriod;
@@ -3087,16 +3081,11 @@ function DetailChartPanel({
     const chipPanelRight = plotRight;
     const plotHeight =
       CHART_VIEWBOX_HEIGHT - CHART_MARGIN.top - CHART_MARGIN.bottom;
-    const step =
-      layoutSlotCount > 0 ? klinePlotWidth / layoutSlotCount : klinePlotWidth;
+    const slotCount = Math.max(layoutSlotCount, items.length);
+    const step = slotCount > 0 ? klinePlotWidth / slotCount : klinePlotWidth;
+    const leadingSlotCount = slotCount - items.length;
     const xAt = (itemIndex: number) =>
-      getChartItemX(
-        itemIndex,
-        items.length,
-        layoutSlotCount,
-        reserveCyqPanelWidth,
-      );
-    const barCloseDates = new Set(items.map((row) => row.trade_date));
+      CHART_MARGIN.left + step * (leadingSlotCount + itemIndex) + step / 2;
     const buildAnnotationRenderData = (yAt: (value: number) => number) =>
       buildDetailAnnotationRenderData({
         layers: annotationLayers,
@@ -3107,7 +3096,9 @@ function DetailChartPanel({
         getTradeDate: (row) => row.trade_date,
         getNumericValue: getNumericField,
         isConditionTrue: (row, key) =>
-          row[key] === true && barCloseDates.has(row.trade_date),
+          row[key] === true &&
+          (!aggregatedBarCloseDates ||
+            aggregatedBarCloseDates.has(row.trade_date)),
         viewBoxWidth: CHART_VIEWBOX_WIDTH,
         viewBoxHeight: CHART_VIEWBOX_HEIGHT,
         marginTop: CHART_MARGIN.top,
@@ -3123,27 +3114,11 @@ function DetailChartPanel({
     let extremaOverlayPoints: ChartExtremaOverlayPoint[] = [];
 
     if (kind === "candles") {
-      const values = items.flatMap((row) => {
-        const out: number[] = [];
-        const open = getNumericField(row, "open");
-        const high = getNumericField(row, "high");
-        const low = getNumericField(row, "low");
-        const close = getNumericField(row, "close");
-
-        if (open !== null) out.push(open);
-        if (high !== null) out.push(high);
-        if (low !== null) out.push(low);
-        if (close !== null) out.push(close);
-        for (const key of candleOverlayKeys) {
-          const value = getNumericField(row, key);
-          if (value !== null) {
-            out.push(value);
-          }
-        }
-        return out;
-      });
-
-      domain = buildDomain(values);
+      domain = buildSeriesDomain(
+        items,
+        ["open", "high", "low", "close", ...candleOverlayKeys],
+        priceContextExtrema,
+      );
       if (domain) {
         const currentDomain = domain;
         const yAt = (value: number) =>
@@ -3153,7 +3128,9 @@ function DetailChartPanel({
             plotHeight;
         const bodyWidth = Math.max(Math.min(step * 0.58, 18), 3);
 
-        const candleNodes = items.map((row, itemIndex) => {
+        const wickPaths = new Map<string, string[]>();
+        const bodyPaths = new Map<string, string[]>();
+        items.forEach((row, itemIndex) => {
           const open = getNumericField(row, "open");
           const high = getNumericField(row, "high");
           const low = getNumericField(row, "low");
@@ -3165,12 +3142,14 @@ function DetailChartPanel({
             low === null ||
             close === null
           ) {
-            return null;
+            return;
           }
 
           const x = xAt(itemIndex);
-          const bodyTop = Math.min(yAt(open), yAt(close));
-          const bodyHeight = Math.max(Math.abs(yAt(open) - yAt(close)), 1.2);
+          const openY = yAt(open);
+          const closeY = yAt(close);
+          const bodyTop = Math.min(openY, closeY);
+          const bodyHeight = Math.max(Math.abs(openY - closeY), 1.2);
           const color =
             close > open
               ? CANDLE_UP_COLOR
@@ -3179,68 +3158,40 @@ function DetailChartPanel({
                 : CANDLE_FLAT_COLOR;
           const resolvedColor = getRealtimeSeriesColor(row, color);
 
-          return (
-            <g key={`${panel.key}-${row.trade_date}`}>
-              <line
-                className="details-chart-candle-wick"
-                x1={x}
-                y1={yAt(high)}
-                x2={x}
-                y2={yAt(low)}
-                stroke={resolvedColor}
-              />
-              <rect
-                className="details-chart-candle-body"
-                x={x - bodyWidth / 2}
-                y={bodyTop}
-                width={bodyWidth}
-                height={bodyHeight}
-                fill={resolvedColor}
-                stroke={resolvedColor}
-                rx={1.2}
-              />
-            </g>
+          appendChartPath(
+            wickPaths,
+            resolvedColor,
+            `M ${x} ${yAt(high)} V ${yAt(low)}`,
+          );
+          appendChartPath(
+            bodyPaths,
+            resolvedColor,
+            buildRoundedBarPath(
+              x - bodyWidth / 2,
+              bodyTop,
+              bodyWidth,
+              bodyHeight,
+              1.2,
+            ),
           );
         });
 
-        const overlayNodes = candleOverlayKeys.map((key, seriesIndex) => {
-          const series = findPanelSeries(panel, key);
-          const segments = buildLineSegments(items, key, xAt, yAt);
-          if (segments.length === 0) {
-            return null;
-          }
-
-          return (
-            <g key={`${panel.key}-${key}`}>
-              {segments.map((segment, segmentIndex) => (
-                <path
-                  className="details-chart-line-path details-chart-line-path-main"
-                  key={`${key}-${segmentIndex}`}
-                  d={buildLinePath(segment)}
-                  stroke={getSeriesColor(seriesIndex, series)}
-                  strokeWidth={getSeriesLineWidth(series)}
-                  opacity={getSeriesOpacity(series)}
-                />
-              ))}
-            </g>
-          );
-        });
+        const overlayNodes = candleOverlaySeries.map((series, index) =>
+          renderChartSeriesLine(items, series, index, xAt, yAt, "main"),
+        );
 
         annotationRenderData = buildAnnotationRenderData(yAt);
         extremaOverlayPoints = isInteractivePricePanel(panel)
           ? buildChartExtremaOverlayPoints(items, xAt, yAt)
           : [];
-        svgContent = [...candleNodes, ...overlayNodes];
+        svgContent = [
+          ...renderChartPaths(wickPaths, "details-chart-candle-wick", "wick"),
+          ...renderChartPaths(bodyPaths, "details-chart-candle-body", "body"),
+          ...overlayNodes,
+        ];
       }
     } else if (kind === "line") {
-      const values = items.flatMap((row) =>
-        seriesKeys.flatMap((key) => {
-          const value = getNumericField(row, key);
-          return value === null ? [] : [value];
-        }),
-      );
-
-      domain = buildDomain(values);
+      domain = buildSeriesDomain(items, seriesKeys);
       if (domain) {
         const currentDomain = domain;
         const yAt = (value: number) =>
@@ -3249,25 +3200,9 @@ function DetailChartPanel({
             (currentDomain.max - currentDomain.min)) *
             plotHeight;
 
-        const lineNodes = panelSeries.map((series, seriesIndex) => {
-          const key = series.key;
-          const segments = buildLineSegments(items, key, xAt, yAt);
-
-          return (
-            <g key={`${panel.key}-${key}`}>
-              {segments.map((segment, segmentIndex) => (
-                <path
-                  className="details-chart-line-path details-chart-line-path-indicator"
-                  key={`${key}-${segmentIndex}`}
-                  d={buildLinePath(segment)}
-                  stroke={getSeriesColor(seriesIndex, series)}
-                  strokeWidth={getSeriesLineWidth(series)}
-                  opacity={getSeriesOpacity(series)}
-                />
-              ))}
-            </g>
-          );
-        });
+        const lineNodes = panelSeries.map((series, index) =>
+          renderChartSeriesLine(items, series, index, xAt, yAt, "indicator"),
+        );
         annotationRenderData = buildAnnotationRenderData(yAt);
         svgContent = lineNodes;
       }
@@ -3278,15 +3213,8 @@ function DetailChartPanel({
       const overlayLineSeries = panelSeries.filter(
         (series) => series.kind === "line",
       );
-      const values = items.flatMap((row) =>
-        seriesKeys.flatMap((key) => {
-          const value = getNumericField(row, key);
-          return value === null ? [] : [value];
-        }),
-      );
-
       const baseValue = getSeriesBaseValue(primaryBarSeries);
-      domain = buildDomain([...values, baseValue]);
+      domain = buildSeriesDomain(items, seriesKeys, [baseValue]);
       if (domain) {
         const currentDomain = domain;
         const yAt = (value: number) =>
@@ -3298,12 +3226,13 @@ function DetailChartPanel({
         const zeroBaseline = zeroY;
         const barWidth = Math.max(Math.min(step * 0.72, 18), 3);
 
-        const barNodes = items.map((row, itemIndex) => {
+        const barPaths = new Map<string, string[]>();
+        items.forEach((row, itemIndex) => {
           const value = primaryBarKey
             ? getNumericField(row, primaryBarKey)
             : null;
           if (value === null) {
-            return null;
+            return;
           }
 
           const prevRow = itemIndex > 0 ? items[itemIndex - 1] : previousRow;
@@ -3322,40 +3251,25 @@ function DetailChartPanel({
             : color;
           const resolvedColor = getRealtimeSeriesColor(row, protocolColor);
           const x = xAt(itemIndex);
-          const y = Math.min(yAt(value), zeroBaseline);
-          const height = Math.max(Math.abs(zeroBaseline - yAt(value)), 1);
+          const valueY = yAt(value);
+          const y = Math.min(valueY, zeroBaseline);
+          const height = Math.max(Math.abs(zeroBaseline - valueY), 1);
 
-          return (
-            <rect
-              className="details-chart-bar"
-              key={`${panel.key}-${row.trade_date}`}
-              x={x - barWidth / 2}
-              y={y}
-              width={barWidth}
-              height={height}
-              fill={resolvedColor}
-              rx={1}
-            />
+          appendChartPath(
+            barPaths,
+            resolvedColor,
+            buildRoundedBarPath(x - barWidth / 2, y, barWidth, height, 1),
           );
         });
-        const overlayNodes = overlayLineSeries.flatMap(
-          (overlaySeries, overlayIndex) =>
-            buildLineSegments(items, overlaySeries.key, xAt, yAt).map(
-              (segment, segmentIndex) => (
-                <path
-                  className="details-chart-line-path details-chart-line-path-indicator"
-                  key={`${panel.key}-${overlaySeries.key}-${segmentIndex}`}
-                  d={buildLinePath(segment)}
-                  stroke={getSeriesColor(overlayIndex + 1, overlaySeries)}
-                  strokeWidth={getSeriesLineWidth(overlaySeries)}
-                  opacity={getSeriesOpacity(overlaySeries)}
-                />
-              ),
-            ),
+        const overlayNodes = overlayLineSeries.map((series, index) =>
+          renderChartSeriesLine(items, series, index + 1, xAt, yAt, "indicator"),
         );
 
         annotationRenderData = buildAnnotationRenderData(yAt);
-        svgContent = [...barNodes, ...overlayNodes];
+        svgContent = [
+          ...renderChartPaths(barPaths, "details-chart-bar", "bar"),
+          ...overlayNodes,
+        ];
       }
     } else if (kind === "brick") {
       const brickSeries =
@@ -3385,7 +3299,9 @@ function DetailChartPanel({
             plotHeight;
         const bodyWidth = Math.max(Math.min(step * 0.72, 22), 4);
 
-        const brickNodes = bodies.map((body) => {
+        const wickPaths = new Map<string, string[]>();
+        const bodyPaths = new Map<string, string[]>();
+        bodies.forEach((body) => {
           const x = xAt(body.item_index);
           const openY = yAt(body.open);
           const closeY = yAt(body.close);
@@ -3418,31 +3334,24 @@ function DetailChartPanel({
             direction,
           );
 
-          return (
-            <g key={`${panel.key}-${body.trade_date}`}>
-              <line
-                className="details-chart-candle-wick"
-                x1={x}
-                y1={highY}
-                x2={x}
-                y2={lowY}
-                stroke={resolvedColor}
-              />
-              <rect
-                className="details-chart-brick-body"
-                x={x - bodyWidth / 2}
-                y={bodyTop}
-                width={bodyWidth}
-                height={bodyHeight}
-                fill={resolvedColor}
-                stroke={resolvedColor}
-                rx={1.2}
-              />
-            </g>
+          appendChartPath(wickPaths, resolvedColor, `M ${x} ${highY} V ${lowY}`);
+          appendChartPath(
+            bodyPaths,
+            resolvedColor,
+            buildRoundedBarPath(
+              x - bodyWidth / 2,
+              bodyTop,
+              bodyWidth,
+              bodyHeight,
+              1.2,
+            ),
           );
         });
         annotationRenderData = buildAnnotationRenderData(yAt);
-        svgContent = brickNodes;
+        svgContent = [
+          ...renderChartPaths(wickPaths, "details-chart-candle-wick", "wick"),
+          ...renderChartPaths(bodyPaths, "details-chart-brick-body", "body"),
+        ];
       }
     }
 
@@ -3544,8 +3453,10 @@ function DetailChartPanel({
   }, [
     panel,
     items,
+    priceContextExtrema,
     dailyItems,
     dailyToBar,
+    aggregatedBarCloseDates,
     previousRow,
     layoutSlotCount,
     chartPeriod,
@@ -3828,6 +3739,7 @@ function DetailChartPanel({
 
       <div
         className="details-chart-viewport"
+        data-reserve-cyq-width={reserveCyqPanelWidthForAllPanels}
         onPointerDown={(event) => onChartPointerDown(panel.key, event)}
         onPointerMove={(event) => onChartPointerMove(panel.key, event)}
         onPointerUp={(event) => onChartPointerUp(panel.key, event)}
@@ -3845,6 +3757,9 @@ function DetailChartPanel({
             <strong>{watermarkName}</strong>
             <span>{watermarkCode}</span>
             {watermarkConcept !== "" ? <small>{watermarkConcept}</small> : null}
+            <div className="details-chart-period-notice" role="status">
+              {chartPeriodNotice ? `已切换至${chartPeriodNotice}` : ""}
+            </div>
           </div>
         ) : null}
 
@@ -4735,23 +4650,13 @@ function DetailChart({
   const [chartLayoutWidth, setChartLayoutWidth] = useState(() =>
     typeof window === "undefined" ? CHART_VIEWBOX_WIDTH : window.innerWidth,
   );
+  const [chartLandscape, setChartLandscape] = useState(
+    () =>
+      typeof window !== "undefined" && window.innerWidth > window.innerHeight,
+  );
   const [chartMainWidthRatio, setChartMainWidthRatio] = useState(() =>
     readStoredChartMainWidthRatio(),
   );
-  const [chartMainHeightMode, setChartMainHeightMode] =
-    useState<ChartMainHeightMode>(() => readStoredChartMainHeightMode());
-  const [chartMainPercentPixels, setChartMainPercentPixels] = useState(() =>
-    readStoredChartMainPercentPixels(),
-  );
-  const [chartMainPercentMinHeight, setChartMainPercentMinHeight] = useState(
-    () => readStoredChartMainPercentMinHeight(),
-  );
-  const [chartMainPercentMaxHeight, setChartMainPercentMaxHeight] = useState(
-    () => readStoredChartMainPercentMaxHeight(),
-  );
-  const [panningMainPanelHeight, setPanningMainPanelHeight] = useState<
-    number | null
-  >(null);
   const [chartIndicatorWidthRatio, setChartIndicatorWidthRatio] = useState(() =>
     readStoredChartIndicatorWidthRatio(),
   );
@@ -4883,7 +4788,7 @@ function DetailChart({
   const allChartItems = kline?.items ?? EMPTY_KLINE_ROWS;
   const totalChartItems = allChartItems.length;
   const minVisibleBars =
-    totalChartItems === 0 ? 0 : Math.min(MIN_VISIBLE_BARS, totalChartItems);
+    totalChartItems === 0 ? 0 : Math.min(CHART_VISIBLE_BARS_MIN, totalChartItems);
   const effectiveVisibleBarCount =
     totalChartItems === 0
       ? 0
@@ -4897,15 +4802,74 @@ function DetailChart({
     0,
     maxVisibleStart,
   );
+  const priceContextExtrema = useMemo(() => {
+    const margin = Math.ceil(effectiveVisibleBarCount / 2);
+    const visibleEnd = effectiveVisibleStart + effectiveVisibleBarCount;
+    const extraRanges = [
+      [Math.max(0, effectiveVisibleStart - margin), effectiveVisibleStart],
+      [visibleEnd, Math.min(allChartItems.length, visibleEnd + margin)],
+    ];
+    let low = Infinity;
+    let high = -Infinity;
+    for (const [start, end] of extraRanges) {
+      for (let index = start; index < end; index += 1) {
+        const row = allChartItems[index];
+        low = Math.min(low, getNumericField(row, "low") ?? Infinity);
+        high = Math.max(high, getNumericField(row, "high") ?? -Infinity);
+      }
+    }
+    return [low, high].filter(Number.isFinite);
+  }, [allChartItems, effectiveVisibleStart, effectiveVisibleBarCount]);
   const chartPeriod: ChartPeriod =
     effectiveVisibleBarCount > 1800
       ? "季线"
-      : effectiveVisibleBarCount > 650
+      : effectiveVisibleBarCount > 1000
         ? "月线"
-        : effectiveVisibleBarCount > 140
+        : effectiveVisibleBarCount > 240
           ? "周线"
           : "日线";
-  const { dailyItems, chartItems, barRanges, dailyToBar } = useMemo(() => {
+  const displayedChartPeriod =
+    !detailLoading && totalChartItems > 0 ? chartPeriod : null;
+  const [previousChartPeriod, setPreviousChartPeriod] = useState(
+    displayedChartPeriod,
+  );
+  const [chartPeriodNotice, setChartPeriodNotice] = useState<ChartPeriod | null>(
+    null,
+  );
+  if (previousChartPeriod !== displayedChartPeriod) {
+    setPreviousChartPeriod(displayedChartPeriod);
+    setChartPeriodNotice(previousChartPeriod ? displayedChartPeriod : null);
+  }
+  useEffect(() => {
+    if (!chartPeriodNotice) return;
+
+    const timer = window.setTimeout(() => setChartPeriodNotice(null), 2000);
+    return () => window.clearTimeout(timer);
+  }, [chartPeriodNotice]);
+  const periodKeys = useMemo(() => {
+    if (chartPeriod === "日线") return null;
+
+    return allChartItems.map((row) => {
+      const date = row.trade_date.replaceAll("-", "");
+      const year = Number(date.slice(0, 4));
+      const month = Number(date.slice(4, 6)) - 1;
+      if (chartPeriod === "周线") {
+        const day = Date.UTC(year, month, Number(date.slice(6, 8))) / 86400000;
+        // The Unix epoch was a Thursday. Adding three days starts buckets on Monday.
+        return Math.floor((day + 3) / 7);
+      }
+      return chartPeriod === "月线"
+        ? year * 12 + month
+        : year * 4 + Math.floor(month / 3);
+    });
+  }, [allChartItems, chartPeriod]);
+  const {
+    dailyItems,
+    chartItems,
+    barRanges,
+    dailyToBar,
+    aggregatedBarCloseDates,
+  } = useMemo(() => {
     const dailyItems = allChartItems.slice(
       effectiveVisibleStart,
       effectiveVisibleStart + effectiveVisibleBarCount,
@@ -4913,25 +4877,9 @@ function DetailChart({
     const barRanges: { start: number; end: number }[] = [];
     const dailyToBar: number[] = [];
     let previousPeriodKey: number | null = null;
-    dailyItems.forEach((row, index) => {
+    dailyItems.forEach((_, index) => {
       const dailyIndex = effectiveVisibleStart + index;
-      let periodKey = dailyIndex;
-      if (chartPeriod !== "日线") {
-        const date = row.trade_date.replaceAll("-", "");
-        const year = Number(date.slice(0, 4));
-        const month = Number(date.slice(4, 6)) - 1;
-        if (chartPeriod === "周线") {
-          const day =
-            Date.UTC(year, month, Number(date.slice(6, 8))) / 86400000;
-          // The Unix epoch was a Thursday. Adding three days starts buckets on Monday.
-          periodKey = Math.floor((day + 3) / 7);
-        } else {
-          periodKey =
-            chartPeriod === "月线"
-              ? year * 12 + month
-              : year * 4 + Math.floor(month / 3);
-        }
-      }
+      const periodKey = periodKeys?.[dailyIndex] ?? dailyIndex;
       if (periodKey === previousPeriodKey) {
         barRanges[barRanges.length - 1].end = dailyIndex;
       } else {
@@ -4940,13 +4888,21 @@ function DetailChart({
       }
       dailyToBar.push(barRanges.length - 1);
     });
-    if (chartPeriod === "日线") {
-      return { dailyItems, chartItems: dailyItems, barRanges, dailyToBar };
+    if (!periodKeys) {
+      return {
+        dailyItems,
+        chartItems: dailyItems,
+        barRanges,
+        dailyToBar,
+        aggregatedBarCloseDates: null,
+      };
     }
 
+    const aggregatedBarCloseDates = new Set<string>();
     const chartItems = barRanges.map(({ start, end }): DetailKlineRow => {
       const first = allChartItems[start];
       const last = allChartItems[end];
+      aggregatedBarCloseDates.add(last.trade_date);
       const row: DetailKlineRow = {
         ...last,
         open: first.open,
@@ -4982,10 +4938,16 @@ function DetailChart({
       row.__tooltip_price_turnover = row.tor;
       return row;
     });
-    return { dailyItems, chartItems, barRanges, dailyToBar };
+    return {
+      dailyItems,
+      chartItems,
+      barRanges,
+      dailyToBar,
+      aggregatedBarCloseDates,
+    };
   }, [
     allChartItems,
-    chartPeriod,
+    periodKeys,
     effectiveVisibleStart,
     effectiveVisibleBarCount,
   ]);
@@ -5113,6 +5075,23 @@ function DetailChart({
     () => (kline?.panels?.length ? kline.panels : buildDefaultPanels()),
     [kline?.panels],
   );
+  const mainChartPanel = panels.find(isMainChartPanel) ?? panels[0];
+  const indicatorPanels = panels.filter((panel) => panel !== mainChartPanel);
+  const volumePanel =
+    indicatorPanels.find((panel) => panel.key === "volume") ??
+    indicatorPanels.find((panel) =>
+      panel.series?.some(
+        (series) => series.key === "vol" && series.kind === "bar",
+      ),
+    );
+  const sideIndicators = indicatorPanels
+    .filter((panel) => panel !== volumePanel)
+    .slice(0, 4);
+  const useSideIndicator = chartLandscape && chartLayoutWidth >= 760;
+  const leftPanelCount = volumePanel ? 2 : 1;
+  const visiblePanels = useSideIndicator
+    ? [mainChartPanel, ...(volumePanel ? [volumePanel] : []), ...sideIndicators]
+    : panels;
   const annotationProviderContext = useMemo(
     () => ({
       sourcePath: sourcePathTrimmed,
@@ -5133,62 +5112,41 @@ function DetailChart({
   const {
     shouldReserveCyqPanelWidth,
     shouldUseCyqSummaryIndicatorSlot,
-    chartMainPanelHeight,
     chartShellHeight,
     chartTemplateRows,
     cyqSummaryOverlayStyle,
   } = useMemo(() => {
-    const indicatorPanelCount = panels.filter(
-      (panel) => !isMainChartPanel(panel),
-    ).length;
     const shouldReserveCyqPanelWidth =
       detailCyqVisible &&
       panels.some((panel) => isInteractivePricePanel(panel));
     const shouldUseCyqSummaryIndicatorSlot =
-      shouldReserveCyqPanelWidth && indicatorPanelCount === 0;
-    const fixedChartMainPanelHeight = chartLayoutWidth * chartMainWidthRatio;
-    const mainChartPanel =
-      panels.find((panel) => isMainChartPanel(panel)) ?? panels[0] ?? null;
-    const chartMainPanelHeight =
-      chartMainHeightMode === "percent"
-        ? (panningMainPanelHeight ??
-          buildPercentScaledMainPanelHeight(
-            mainChartPanel,
-            chartItems,
-            chartMainPercentPixels,
-            chartMainPercentMinHeight,
-            chartMainPercentMaxHeight,
-            fixedChartMainPanelHeight,
-          ))
-        : fixedChartMainPanelHeight;
+      shouldReserveCyqPanelWidth &&
+      (useSideIndicator || !panels.some((panel) => !isMainChartPanel(panel)));
+    const chartMainPanelHeight = chartLayoutWidth * chartMainWidthRatio;
     const chartIndicatorPanelBaseHeight =
       (chartLayoutWidth * chartIndicatorWidthRatio) /
       DEFAULT_INDICATOR_PANEL_COUNT;
-    const chartPanelHeights = buildChartPanelHeights(
-      kline,
-      panels,
-      chartMainPanelHeight,
-      chartIndicatorPanelBaseHeight,
-    );
+    const chartPanelHeights = useSideIndicator
+      ? [
+          chartMainPanelHeight,
+          ...(volumePanel ? [chartIndicatorPanelBaseHeight] : []),
+        ]
+      : buildChartPanelHeights(
+          panels,
+          chartMainPanelHeight,
+          chartIndicatorPanelBaseHeight,
+        );
     const cyqSummaryIndicatorSlotHeight = shouldUseCyqSummaryIndicatorSlot
       ? chartIndicatorPanelBaseHeight
       : 0;
-    const chartPanelGapTotal =
-      Math.max(
-        0,
-        panels.length - 1 + (shouldUseCyqSummaryIndicatorSlot ? 1 : 0),
-      ) * CHART_PANEL_GAP_PX;
-    const chartShellHeight =
+    const chartPanelsHeight =
       chartPanelHeights.reduce((sum, panelHeight) => sum + panelHeight, 0) +
-      cyqSummaryIndicatorSlotHeight +
-      chartPanelGapTotal;
+      Math.max(0, chartPanelHeights.length - 1) * CHART_PANEL_GAP_PX;
+    const chartShellHeight = shouldUseCyqSummaryIndicatorSlot
+      ? chartPanelsHeight + CHART_PANEL_GAP_PX + cyqSummaryIndicatorSlotHeight
+      : chartPanelsHeight;
     const chartTemplateRows = [
-      buildChartTemplateRows(
-        kline,
-        panels,
-        chartMainPanelHeight,
-        chartIndicatorPanelBaseHeight,
-      ),
+      ...chartPanelHeights.map((height) => `${height.toFixed(2)}px`),
       shouldUseCyqSummaryIndicatorSlot
         ? `${cyqSummaryIndicatorSlotHeight.toFixed(2)}px`
         : "",
@@ -5201,8 +5159,11 @@ function DetailChart({
       cyqSummaryPlotWidth * CHART_CYQ_PANEL_WIDTH_RATIO;
     const cyqSummaryPanelLeft =
       CHART_VIEWBOX_WIDTH - CHART_MARGIN.right - cyqSummaryPanelWidth;
+    const cyqSummaryTop =
+      (useSideIndicator ? chartPanelsHeight : chartMainPanelHeight) +
+      CHART_PANEL_GAP_PX;
     const cyqSummaryOverlayStyle = {
-      "--details-cyq-summary-top": `${chartMainPanelHeight + CHART_PANEL_GAP_PX}px`,
+      "--details-cyq-summary-top": `${cyqSummaryTop}px`,
       "--details-cyq-summary-left": shouldUseCyqSummaryIndicatorSlot
         ? "0px"
         : `${(cyqSummaryPanelLeft / CHART_VIEWBOX_WIDTH) * 100}%`,
@@ -5214,23 +5175,17 @@ function DetailChart({
     return {
       shouldReserveCyqPanelWidth,
       shouldUseCyqSummaryIndicatorSlot,
-      chartMainPanelHeight,
       chartShellHeight,
       chartTemplateRows,
       cyqSummaryOverlayStyle,
     };
   }, [
     panels,
-    kline,
-    chartItems,
+    useSideIndicator,
+    volumePanel,
     detailCyqVisible,
     chartLayoutWidth,
     chartMainWidthRatio,
-    chartMainHeightMode,
-    panningMainPanelHeight,
-    chartMainPercentPixels,
-    chartMainPercentMinHeight,
-    chartMainPercentMaxHeight,
     chartIndicatorWidthRatio,
   ]);
   const shouldShowCyqSummary =
@@ -5331,7 +5286,6 @@ function DetailChart({
 
     initializedChartKeyRef.current = chartKey;
     cancelChartPointerMove();
-    setPanningMainPanelHeight(null);
     if (totalChartItems === 0) {
       chartDragRef.current = null;
       setVisibleBarCount(defaultVisibleBars);
@@ -5351,7 +5305,7 @@ function DetailChart({
 
     const nextVisibleBarCount = clampNumber(
       defaultVisibleBars,
-      Math.min(MIN_VISIBLE_BARS, totalChartItems),
+      Math.min(CHART_VISIBLE_BARS_MIN, totalChartItems),
       totalChartItems,
     );
     const referenceIndex = allChartItems.findIndex(
@@ -5378,7 +5332,7 @@ function DetailChart({
           1;
         const restoredVisibleBarCount = clampNumber(
           Math.max(defaultVisibleBars, intervalBarCount + 20),
-          Math.min(MIN_VISIBLE_BARS, totalChartItems),
+          Math.min(CHART_VISIBLE_BARS_MIN, totalChartItems),
           totalChartItems,
         );
         const intervalMidpoint = Math.floor(
@@ -5455,6 +5409,7 @@ function DetailChart({
           ? cardWidth
           : window.innerWidth;
       setChartLayoutWidth(nextWidth);
+      setChartLandscape(window.innerWidth > window.innerHeight);
     };
 
     updateChartLayoutWidth();
@@ -5486,27 +5441,15 @@ function DetailChart({
       if (
         event.key === null ||
         event.key === "lh_chart_main_width_ratio_v1" ||
-        event.key === "lh_chart_indicator_width_ratio_v1" ||
-        event.key === "lh_chart_main_height_mode_v1" ||
-        event.key === "lh_chart_main_percent_pixels_v1" ||
-        event.key === "lh_chart_main_percent_min_height_v1" ||
-        event.key === "lh_chart_main_percent_max_height_v1"
+        event.key === "lh_chart_indicator_width_ratio_v1"
       ) {
         setChartMainWidthRatio(readStoredChartMainWidthRatio());
         setChartIndicatorWidthRatio(readStoredChartIndicatorWidthRatio());
-        setChartMainHeightMode(readStoredChartMainHeightMode());
-        setChartMainPercentPixels(readStoredChartMainPercentPixels());
-        setChartMainPercentMinHeight(readStoredChartMainPercentMinHeight());
-        setChartMainPercentMaxHeight(readStoredChartMainPercentMaxHeight());
       }
     };
 
     setChartMainWidthRatio(readStoredChartMainWidthRatio());
     setChartIndicatorWidthRatio(readStoredChartIndicatorWidthRatio());
-    setChartMainHeightMode(readStoredChartMainHeightMode());
-    setChartMainPercentPixels(readStoredChartMainPercentPixels());
-    setChartMainPercentMinHeight(readStoredChartMainPercentMinHeight());
-    setChartMainPercentMaxHeight(readStoredChartMainPercentMaxHeight());
     window.addEventListener("storage", onStorage);
     return () => {
       window.removeEventListener("storage", onStorage);
@@ -5636,7 +5579,9 @@ function DetailChart({
     if (rect.width <= 0) return null;
 
     const chartX = ((clientX - rect.left) / rect.width) * CHART_VIEWBOX_WIDTH;
-    const plotWidth = getChartKlinePlotWidth(shouldReserveCyqPanelWidth);
+    const plotWidth = getChartKlinePlotWidth(
+      viewport.dataset.reserveCyqWidth === "true",
+    );
     const leadingSlotCount = chartLayoutSlotCount - chartItems.length;
     const visiblePosition = clampNumber(
       ((chartX - CHART_MARGIN.left) / plotWidth) * chartLayoutSlotCount -
@@ -5693,7 +5638,6 @@ function DetailChart({
       startAnchorRatio: anchor.ratio,
     };
     chartDragRef.current = null;
-    setPanningMainPanelHeight(null);
     setChartFocus(null);
     setChartIntervalDraftSelection(null);
     setChartIntervalPanelOpen(false);
@@ -5787,7 +5731,7 @@ function DetailChart({
       clientY,
       chartItems.length,
       chartLayoutSlotCount,
-      shouldReserveCyqPanelWidth,
+      viewport.dataset.reserveCyqWidth === "true",
     );
     if (!pointer) {
       return null;
@@ -5951,6 +5895,7 @@ function DetailChart({
     let moveSelectionStartAbsoluteIndex: number | undefined;
     let moveSelectionEndAbsoluteIndex: number | undefined;
     let intervalStartedOutsideSelection = false;
+    const panOrTap = maxVisibleStart > 0 ? "pan" : "tap";
     const mode =
       panelKey === "price" && chartIntervalMode
         ? (() => {
@@ -6045,13 +5990,11 @@ function DetailChart({
               dailyToBar[chartFocus.absoluteIndex - effectiveVisibleStart],
               chartItems.length,
               chartLayoutSlotCount,
-              shouldReserveCyqPanelWidth,
+              event.currentTarget.dataset.reserveCyqWidth === "true",
             )
-            ? "dismiss"
+            ? useSideIndicator ? panOrTap : "dismiss"
             : "focus"
-          : maxVisibleStart > 0
-            ? "pan"
-            : "tap";
+          : panOrTap;
 
     if (mode === "interval-select" && anchorAbsoluteIndex === undefined) {
       setChartIntervalDraftSelection(null);
@@ -6095,9 +6038,6 @@ function DetailChart({
       moveSelectionEndAbsoluteIndex,
       intervalStartedOutsideSelection,
     };
-    if (mode === "pan" && chartMainHeightMode === "percent") {
-      setPanningMainPanelHeight(chartMainPanelHeight);
-    }
   }
 
   function onChartPointerMove(
@@ -6225,6 +6165,13 @@ function DetailChart({
         dragState.maxVisibleStart,
       );
 
+      if (
+        useSideIndicator &&
+        nextVisibleStart !== effectiveVisibleStart &&
+        chartFocusRef.current?.pinned
+      ) {
+        setChartFocus(null);
+      }
       setVisibleStartIndex(nextVisibleStart);
       return;
     }
@@ -6343,7 +6290,6 @@ function DetailChart({
     }
     chartTouchPointersRef.current.delete(event.pointerId);
     chartDragRef.current = null;
-    setPanningMainPanelHeight(null);
   }
 
   function onChartPointerUp(
@@ -6575,7 +6521,6 @@ function DetailChart({
         chartDragRef.current = null;
         chartPinchRef.current = null;
         chartTouchPointersRef.current.clear();
-        setPanningMainPanelHeight(null);
         setChartFocus(null);
         setChartIntervalMode(selecting);
         setChartIntervalSelection(null);
@@ -6587,6 +6532,87 @@ function DetailChart({
     [cancelChartPointerMove, setChartFocus],
   );
 
+  const chartPanelElements = visiblePanels.map((panel, index) => (
+    <DetailChartPanel
+      key={panel.key}
+      panel={panel}
+      items={chartItems}
+      priceContextExtrema={priceContextExtrema}
+      index={index}
+      watermarkName={watermarkName}
+      watermarkCode={watermarkCode}
+      watermarkConcept={watermarkConcept}
+      chartPeriodNotice={index === 0 ? chartPeriodNotice : null}
+      chartFocus={chartFocus}
+      effectiveVisibleStart={effectiveVisibleStart}
+      dailyItems={dailyItems}
+      dailyToBar={dailyToBar}
+      barRanges={barRanges}
+      aggregatedBarCloseDates={aggregatedBarCloseDates}
+      previousRow={allChartItems[effectiveVisibleStart - 1]}
+      layoutSlotCount={chartLayoutSlotCount}
+      chartPeriod={chartPeriod}
+      referenceTradeDate={
+        resolvedTradeDate !== "--" ? resolvedTradeDate : null
+      }
+      annotationLayers={annotationLayers}
+      onChartPointerDown={onChartPointerDown}
+      onChartPointerMove={onChartPointerMove}
+      onChartPointerUp={onChartPointerUp}
+      onChartPointerLeave={onChartPointerLeave}
+      onChartPointerCancel={onChartPointerCancel}
+      onChartDoubleClick={onChartDoubleClick}
+      isCyqPanelVisible={detailCyqVisible}
+      selectedCyqSnapshot={selectedCyqSnapshot}
+      cyqScaleMaxChip={cyqScaleMaxChip}
+      reserveCyqPanelWidthForAllPanels={
+        shouldReserveCyqPanelWidth &&
+        (!useSideIndicator || index < leftPanelCount)
+      }
+      cyqHolderView={detailCyqHolderView}
+      cyqStatusText={
+        detailCyqError
+          ? "筹码读取失败"
+          : detailCyqLoading
+            ? "筹码加载中…"
+            : "该日暂无筹码"
+      }
+      chipToggleButton={
+        detailCyqModel === "chen" &&
+        detailCyqVisible &&
+        shouldReserveCyqPanelWidth ? (
+          <div
+            className="details-chart-cyq-holder-switch"
+            onPointerDown={(event) => {
+              event.stopPropagation();
+            }}
+          >
+            {DETAIL_CYQ_HOLDER_OPTIONS.map((option) => (
+              <button
+                className={
+                  detailCyqHolderView === option.value ? "is-active" : ""
+                }
+                key={option.value}
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setDetailCyqHolderView(option.value);
+                }}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        ) : null
+      }
+      chartIntervalSelection={chartIntervalSelection}
+      chartIntervalDraftSelection={chartIntervalDraftSelection}
+      chartIntervalPanelOpen={chartIntervalPanelOpen}
+      intervalStatsSections={intervalStatsSections}
+      onCloseChartIntervalPanel={closeChartIntervalPanel}
+    />
+  ));
+
   return (
     <section className="details-card details-chart-card" ref={chartCardRef}>
       <h3 className="details-subtitle">
@@ -6597,7 +6623,9 @@ function DetailChart({
           : ""}
       </h3>
 
-      <div className="details-chart-toolbar">
+      <div
+        className={`details-chart-toolbar${useSideIndicator ? " is-side-by-side" : ""}`}
+      >
         <label className="details-chart-slider-field">
           <span>缩放</span>
           <input
@@ -6621,13 +6649,6 @@ function DetailChart({
             max={Math.max(maxVisibleStart, 1)}
             step={1}
             value={effectiveVisibleStart}
-            onPointerDown={(event) => {
-              if (event.button === 0 && chartMainHeightMode === "percent") {
-                event.currentTarget.setPointerCapture(event.pointerId);
-                setPanningMainPanelHeight(chartMainPanelHeight);
-              }
-            }}
-            onLostPointerCapture={() => setPanningMainPanelHeight(null)}
             onChange={(event) =>
               setVisibleStartIndex(Number(event.target.value))
             }
@@ -6696,90 +6717,20 @@ function DetailChart({
       </div>
 
       <div
-        className="details-chart-shell"
+        className={`details-chart-shell${useSideIndicator ? " is-side-by-side" : ""}${useSideIndicator && volumePanel ? " has-volume" : ""}`}
         style={{
           height: `${chartShellHeight}px`,
-          minHeight:
-            chartMainHeightMode === "percent"
-              ? `${chartShellHeight}px`
-              : undefined,
           gridTemplateRows: chartTemplateRows,
         }}
       >
-        {panels.map((panel, index) => (
-          <DetailChartPanel
-            key={panel.key}
-            panel={panel}
-            items={chartItems}
-            index={index}
-            watermarkName={watermarkName}
-            watermarkCode={watermarkCode}
-            watermarkConcept={watermarkConcept}
-            chartFocus={chartFocus}
-            effectiveVisibleStart={effectiveVisibleStart}
-            dailyItems={dailyItems}
-            dailyToBar={dailyToBar}
-            barRanges={barRanges}
-            previousRow={allChartItems[effectiveVisibleStart - 1]}
-            layoutSlotCount={chartLayoutSlotCount}
-            chartPeriod={chartPeriod}
-            referenceTradeDate={
-              resolvedTradeDate !== "--" ? resolvedTradeDate : null
-            }
-            annotationLayers={annotationLayers}
-            onChartPointerDown={onChartPointerDown}
-            onChartPointerMove={onChartPointerMove}
-            onChartPointerUp={onChartPointerUp}
-            onChartPointerLeave={onChartPointerLeave}
-            onChartPointerCancel={onChartPointerCancel}
-            onChartDoubleClick={onChartDoubleClick}
-            isCyqPanelVisible={detailCyqVisible}
-            selectedCyqSnapshot={selectedCyqSnapshot}
-            cyqScaleMaxChip={cyqScaleMaxChip}
-            reserveCyqPanelWidthForAllPanels={shouldReserveCyqPanelWidth}
-            cyqHolderView={detailCyqHolderView}
-            cyqStatusText={
-              detailCyqError
-                ? "筹码读取失败"
-                : detailCyqLoading
-                  ? "筹码加载中…"
-                  : "该日暂无筹码"
-            }
-            chipToggleButton={
-              detailCyqModel === "chen" &&
-              detailCyqVisible &&
-              shouldReserveCyqPanelWidth ? (
-                <div
-                  className="details-chart-cyq-holder-switch"
-                  onPointerDown={(event) => {
-                    event.stopPropagation();
-                  }}
-                >
-                  {DETAIL_CYQ_HOLDER_OPTIONS.map((option) => (
-                    <button
-                      className={
-                        detailCyqHolderView === option.value ? "is-active" : ""
-                      }
-                      key={option.value}
-                      type="button"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        setDetailCyqHolderView(option.value);
-                      }}
-                    >
-                      {option.label}
-                    </button>
-                  ))}
-                </div>
-              ) : null
-            }
-            chartIntervalSelection={chartIntervalSelection}
-            chartIntervalDraftSelection={chartIntervalDraftSelection}
-            chartIntervalPanelOpen={chartIntervalPanelOpen}
-            intervalStatsSections={intervalStatsSections}
-            onCloseChartIntervalPanel={closeChartIntervalPanel}
-          />
-        ))}
+        {useSideIndicator ? (
+          <>
+            {chartPanelElements.slice(0, leftPanelCount)}
+            <section className="details-chart-side-panels" aria-label="右侧指标">
+              {chartPanelElements.slice(leftPanelCount)}
+            </section>
+          </>
+        ) : chartPanelElements}
         {shouldShowCyqSummary ? (
           <div
             className={[
