@@ -88,7 +88,6 @@ import {
 } from "../../shared/conceptExclusions";
 import {
   readStoredDetailsNavLongPressIntervalSeconds,
-  readStoredDetailsSimilarityNavMode,
   readStoredChartDefaultVisibleBars,
   readStoredChartIndicatorWidthRatio,
   readStoredChartMainHeightMode,
@@ -97,7 +96,6 @@ import {
   readStoredChartMainPercentPixels,
   readStoredChartMainWidthRatio,
   readStoredDetailCyqModel,
-  writeStoredDetailsSimilarityNavMode,
   type ChartMainHeightMode,
   type DetailCyqModel,
 } from "../../shared/chartSettings";
@@ -109,9 +107,9 @@ import {
   upsertWatchObserveRow,
 } from "../../apis/watchObserve";
 import type {
+  DetailsEvidenceSelection,
   DetailsNavigationItem,
   DetailsNavigationRole,
-  DetailsSimilarityNavMode,
 } from "../../shared/detailsLinkState";
 import type { DetailsStrategyCompareSnapshot } from "../../shared/detailsLinkState";
 import DetailsLink from "../../shared/DetailsLink";
@@ -134,7 +132,7 @@ const CHART_MIN_RIGHT_ALIGNED_SLOTS = 60;
 const DEFAULT_INDICATOR_PANEL_COUNT = 3;
 const CHART_VIEWBOX_WIDTH = 1120;
 const CHART_VIEWBOX_HEIGHT = 240;
-const CHART_MARGIN = { top: 12, right: 8, bottom: 28, left: 52 };
+const CHART_MARGIN = { top: 8, right: 8, bottom: 8, left: 52 };
 const CHART_DATE_TICK_COUNT = 6;
 const CHART_CURSOR_Y_MIN = 6;
 const CHART_CURSOR_Y_MAX = 94;
@@ -213,10 +211,11 @@ type FieldRow = {
   value: string;
 };
 
+type ChartPeriod = "日线" | "周线" | "月线" | "季线";
+
 type ChartFocus = {
   absoluteIndex: number;
   panelKey: string;
-  cursorXPercent: number;
   cursorYPercent: number;
   pinned: boolean;
 };
@@ -233,14 +232,8 @@ type ChartPointerInput = Pick<
 >;
 
 type ChartPointerSnapshot = {
-  cursorXPercent: number;
   cursorYPercent: number;
   visibleIndex: number;
-};
-
-type ChartAnchorSnapshot = {
-  visiblePosition: number;
-  visibleRatio: number;
 };
 
 type ChartExtremaOverlayPoint = {
@@ -334,6 +327,7 @@ type DetailsAutoNavDirection = "prev" | "next";
 export type DetailsPageProps = {
   variant?: DetailsPageVariant;
   navigationItems?: DetailsNavigationItem[] | null;
+  evidenceSelection?: DetailsEvidenceSelection;
   evidenceNavigationItems?: DetailsNavigationItem[] | null;
   strategyCompareSnapshot?: DetailsStrategyCompareSnapshot | null;
 };
@@ -2250,11 +2244,15 @@ function formatAxisValue(value: number) {
   return value.toFixed(3);
 }
 
-function formatTradeDateLabel(value: string) {
+function formatTradeDateLabel(
+  value: string,
+  yearFormat: "full" | "short" | "auto",
+) {
   if (/^\d{8}$/.test(value)) {
     const month = value.slice(4, 6);
     const day = value.slice(6, 8);
-    return month === "01"
+    if (yearFormat === "full") return `${value.slice(0, 4)}-${month}-${day}`;
+    return yearFormat === "short" || month === "01"
       ? `${value.slice(2, 4)}-${month}-${day}`
       : `${month}-${day}`;
   }
@@ -2380,17 +2378,6 @@ function buildDateTickIndices(count: number, maxTicks = CHART_DATE_TICK_COUNT) {
   return [...ticks].sort((left, right) => left - right);
 }
 
-function getChartLayoutSlotCount(itemCount: number, totalItemCount: number) {
-  if (itemCount <= 0) {
-    return 0;
-  }
-
-  return totalItemCount === itemCount &&
-    itemCount < CHART_MIN_RIGHT_ALIGNED_SLOTS
-    ? CHART_MIN_RIGHT_ALIGNED_SLOTS
-    : itemCount;
-}
-
 function getChartKlinePlotWidth(reserveCyqPanelWidth: boolean) {
   const plotWidth =
     CHART_VIEWBOX_WIDTH - CHART_MARGIN.left - CHART_MARGIN.right;
@@ -2505,48 +2492,6 @@ function resolveVisibleIndexFromChartX(
   return visibleIndex;
 }
 
-function resolveChartAnchorFromClientX(
-  viewport: HTMLDivElement,
-  clientX: number,
-  itemCount: number,
-  layoutSlotCount = itemCount,
-  reserveCyqPanelWidth = false,
-): ChartAnchorSnapshot | null {
-  if (itemCount <= 0 || layoutSlotCount <= 0) {
-    return null;
-  }
-
-  const svgRect = getChartViewportContentRect(viewport);
-  if (svgRect.width <= 0) {
-    return null;
-  }
-
-  const chartXPercent = clampNumber(
-    ((clientX - svgRect.left) / svgRect.width) * 100,
-    0,
-    99.9999,
-  );
-  const plotStartPercent = (CHART_MARGIN.left / CHART_VIEWBOX_WIDTH) * 100;
-  const plotEndPercent =
-    (getChartKlinePlotRight(reserveCyqPanelWidth) / CHART_VIEWBOX_WIDTH) * 100;
-  const plotXPercent = clampNumber(
-    (chartXPercent - plotStartPercent) / (plotEndPercent - plotStartPercent),
-    0,
-    1,
-  );
-  const leadingSlotCount = Math.max(layoutSlotCount - itemCount, 0);
-  const visiblePosition = clampNumber(
-    plotXPercent * layoutSlotCount - leadingSlotCount,
-    0,
-    Math.max(itemCount - 1, 0),
-  );
-
-  return {
-    visiblePosition,
-    visibleRatio: itemCount <= 1 ? 1 : visiblePosition / (itemCount - 1),
-  };
-}
-
 function buildChartPointerSnapshot(
   viewport: HTMLDivElement,
   clientX: number,
@@ -2586,15 +2531,6 @@ function buildChartPointerSnapshot(
   }
 
   return {
-    cursorXPercent:
-      (getChartItemX(
-        visibleIndex,
-        itemCount,
-        layoutSlotCount,
-        reserveCyqPanelWidth,
-      ) /
-        CHART_VIEWBOX_WIDTH) *
-      100,
     cursorYPercent: chartYPercent,
     visibleIndex,
   };
@@ -2603,27 +2539,13 @@ function buildChartPointerSnapshot(
 function detectChartIntervalDragTarget(
   viewport: HTMLDivElement,
   clientX: number,
-  selection: ResolvedIntervalRestore | null,
-  effectiveVisibleStart: number,
+  startVisibleIndex: number | undefined,
+  endVisibleIndex: number | undefined,
   itemCount: number,
   layoutSlotCount: number,
   reserveCyqPanelWidth: boolean,
 ): ChartIntervalDragTarget | null {
-  if (!selection || itemCount <= 0 || layoutSlotCount <= 0) {
-    return null;
-  }
-
-  const startVisibleIndex =
-    selection.startAbsoluteIndex >= effectiveVisibleStart &&
-    selection.startAbsoluteIndex < effectiveVisibleStart + itemCount
-      ? selection.startAbsoluteIndex - effectiveVisibleStart
-      : null;
-  const endVisibleIndex =
-    selection.endAbsoluteIndex >= effectiveVisibleStart &&
-    selection.endAbsoluteIndex < effectiveVisibleStart + itemCount
-      ? selection.endAbsoluteIndex - effectiveVisibleStart
-      : null;
-  if (startVisibleIndex === null || endVisibleIndex === null) {
+  if (startVisibleIndex === undefined || endVisibleIndex === undefined) {
     return null;
   }
 
@@ -2655,7 +2577,7 @@ function detectChartIntervalDragTarget(
   const rightDistance = Math.abs(clientX - rightClientX);
   const edgeHitSlop =
     CHART_INTERVAL_EDGE_HIT_SLOP_PX *
-    (selection.startAbsoluteIndex === selection.endAbsoluteIndex ? 1.5 : 1);
+    (startVisibleIndex === endVisibleIndex ? 1.5 : 1);
 
   if (leftDistance <= edgeHitSlop && rightDistance <= edgeHitSlop) {
     return clientX <= (leftClientX + rightClientX) / 2 ? "start" : "end";
@@ -2677,22 +2599,27 @@ function detectChartIntervalDragTarget(
 }
 
 function isPointerNearChartFocus(
-  _panelKey: string,
   viewport: HTMLDivElement,
   clientX: number,
-  _clientY: number,
-  focus: ChartFocus | null,
+  visibleIndex: number | undefined,
+  itemCount: number,
+  layoutSlotCount: number,
+  reserveCyqPanelWidth: boolean,
 ) {
-  if (!focus) {
-    return false;
-  }
+  if (visibleIndex === undefined) return false;
 
   const rect = getChartViewportContentRect(viewport);
   if (rect.width <= 0 || rect.height <= 0) {
     return false;
   }
 
-  const focusClientX = rect.left + (rect.width * focus.cursorXPercent) / 100;
+  const focusX = getChartItemX(
+    visibleIndex,
+    itemCount,
+    layoutSlotCount,
+    reserveCyqPanelWidth,
+  );
+  const focusClientX = rect.left + (rect.width * focusX) / CHART_VIEWBOX_WIDTH;
   return Math.abs(clientX - focusClientX) <= CHART_TOUCH_FOCUS_HIT_SLOP;
 }
 
@@ -2910,13 +2837,15 @@ const DetailChartFocusOverlay = memo(function DetailChartFocusOverlay({
   focusXPercent,
   cursorYPercent,
   pinned,
-  tradeDate,
+  dateLabel,
+  showDateOnly,
   tooltipSections,
 }: {
   focusXPercent: number | null;
   cursorYPercent: number | null;
   pinned: boolean;
-  tradeDate: string | undefined;
+  dateLabel: string | undefined;
+  showDateOnly: boolean;
   tooltipSections: TooltipSection[];
 }) {
   const tooltipHorizontalClass =
@@ -2938,7 +2867,7 @@ const DetailChartFocusOverlay = memo(function DetailChartFocusOverlay({
             className="details-chart-crosshair-horizontal"
             style={{ top: `${cursorYPercent}%` }}
           />
-          {tooltipSections.length > 0 ? (
+          {dateLabel && (showDateOnly || tooltipSections.length > 0) ? (
             <div
               className={[
                 "details-chart-tooltip",
@@ -2953,7 +2882,7 @@ const DetailChartFocusOverlay = memo(function DetailChartFocusOverlay({
               }}
             >
               <div className="details-chart-tooltip-head">
-                <strong>{tradeDate ?? "--"}</strong>
+                <strong>{dateLabel}</strong>
               </div>
               <div className="details-chart-tooltip-body">
                 {tooltipSections.map((section) => (
@@ -3033,13 +2962,17 @@ function DetailChartPanel({
   panel,
   items,
   index,
-  panelCount,
   watermarkName,
   watermarkCode,
   watermarkConcept,
   chartFocus,
   effectiveVisibleStart,
-  allItems,
+  dailyItems,
+  dailyToBar,
+  barRanges,
+  previousRow,
+  layoutSlotCount,
+  chartPeriod,
   referenceTradeDate,
   annotationLayers,
   onChartPointerDown,
@@ -3055,7 +2988,6 @@ function DetailChartPanel({
   cyqHolderView,
   cyqStatusText,
   chipToggleButton,
-  watchObserveButton,
   chartIntervalSelection,
   chartIntervalDraftSelection,
   chartIntervalPanelOpen,
@@ -3065,13 +2997,17 @@ function DetailChartPanel({
   panel: DetailKlinePanel;
   items: DetailKlineRow[];
   index: number;
-  panelCount: number;
   watermarkName: string;
   watermarkCode: string;
   watermarkConcept: string;
   chartFocus: ChartFocus | null;
   effectiveVisibleStart: number;
-  allItems: DetailKlineRow[];
+  dailyItems: DetailKlineRow[];
+  dailyToBar: number[];
+  barRanges: { start: number; end: number }[];
+  previousRow: DetailKlineRow | undefined;
+  layoutSlotCount: number;
+  chartPeriod: ChartPeriod;
   referenceTradeDate: string | null;
   annotationLayers: readonly DetailAnnotationLayer[];
   onChartPointerDown: (
@@ -3105,7 +3041,6 @@ function DetailChartPanel({
   cyqHolderView: DetailCyqHolderView;
   cyqStatusText: string;
   chipToggleButton: ReactNode;
-  watchObserveButton: ReactNode;
   chartIntervalSelection: ResolvedIntervalRestore | null;
   chartIntervalDraftSelection: ResolvedIntervalRestore | null;
   chartIntervalPanelOpen: boolean;
@@ -3135,7 +3070,6 @@ function DetailChartPanel({
     const kind = resolveChartPanelRenderKind(panel);
     const isMainPanel = isMainChartPanel(panel);
     const panelSeries = getPanelSeries(panel);
-    const showDateAxis = index === panelCount - 1;
     const seriesKeys = panelSeries.map((series) => series.key);
     const candleOverlaySeries = kind === "candles" ? panelSeries : [];
     const candleOverlayKeys = candleOverlaySeries.map((series) => series.key);
@@ -3153,10 +3087,6 @@ function DetailChartPanel({
     const chipPanelRight = plotRight;
     const plotHeight =
       CHART_VIEWBOX_HEIGHT - CHART_MARGIN.top - CHART_MARGIN.bottom;
-    const layoutSlotCount = getChartLayoutSlotCount(
-      items.length,
-      allItems.length,
-    );
     const step =
       layoutSlotCount > 0 ? klinePlotWidth / layoutSlotCount : klinePlotWidth;
     const xAt = (itemIndex: number) =>
@@ -3166,16 +3096,18 @@ function DetailChartPanel({
         layoutSlotCount,
         reserveCyqPanelWidth,
       );
+    const barCloseDates = new Set(items.map((row) => row.trade_date));
     const buildAnnotationRenderData = (yAt: (value: number) => number) =>
       buildDetailAnnotationRenderData({
         layers: annotationLayers,
         panelKey: panel.key,
-        items,
-        xAt,
+        items: dailyItems,
+        xAt: (index) => xAt(dailyToBar[index]),
         yAt,
         getTradeDate: (row) => row.trade_date,
         getNumericValue: getNumericField,
-        isConditionTrue: (row, key) => row[key] === true,
+        isConditionTrue: (row, key) =>
+          row[key] === true && barCloseDates.has(row.trade_date),
         viewBoxWidth: CHART_VIEWBOX_WIDTH,
         viewBoxHeight: CHART_VIEWBOX_HEIGHT,
         marginTop: CHART_MARGIN.top,
@@ -3374,11 +3306,8 @@ function DetailChartPanel({
             return null;
           }
 
-          const absoluteIndex = effectiveVisibleStart + itemIndex;
-          const prevClose =
-            absoluteIndex > 0
-              ? getNumericField(allItems[absoluteIndex - 1], "close")
-              : null;
+          const prevRow = itemIndex > 0 ? items[itemIndex - 1] : previousRow;
+          const prevClose = prevRow ? getNumericField(prevRow, "close") : null;
           const close = getNumericField(row, "close");
           const color =
             close !== null && prevClose !== null
@@ -3432,12 +3361,9 @@ function DetailChartPanel({
       const brickSeries =
         panelSeries.find((series) => series.kind === "brick") ?? null;
       const brickKey = brickSeries?.key ?? seriesKeys[0] ?? "brick";
-      const previousRow =
-        effectiveVisibleStart > 0
-          ? (allItems[effectiveVisibleStart - 1] ?? null)
-          : null;
-      const previousBrick =
-        previousRow !== null ? getNumericField(previousRow, brickKey) : null;
+      const previousBrick = previousRow
+        ? getNumericField(previousRow, brickKey)
+        : null;
       const visibleBrickValues = items.flatMap((row) => {
         const value = getNumericField(row, brickKey);
         return value === null ? [] : [value];
@@ -3540,10 +3466,13 @@ function DetailChartPanel({
         }))
       : [];
     const xAxisLabels =
-      showDateAxis && items.length > 0
+      isMainPanel && items.length > 0
         ? dateTickIndices.map((itemIndex) => ({
             key: `${panel.key}-x-${items[itemIndex]?.trade_date ?? itemIndex}`,
-            value: formatTradeDateLabel(items[itemIndex]?.trade_date ?? ""),
+            value: formatTradeDateLabel(
+              items[itemIndex].trade_date,
+              chartPeriod === "日线" ? "auto" : "short",
+            ),
             leftPercent: (xAt(itemIndex) / CHART_VIEWBOX_WIDTH) * 100,
           }))
         : [];
@@ -3615,46 +3544,59 @@ function DetailChartPanel({
   }, [
     panel,
     items,
-    index,
-    panelCount,
-    allItems,
-    effectiveVisibleStart,
+    dailyItems,
+    dailyToBar,
+    previousRow,
+    layoutSlotCount,
+    chartPeriod,
     annotationLayers,
     reserveCyqPanelWidthForAllPanels,
     isCyqPanelVisible,
   ]);
-  const activeVisibleIndex =
-    chartFocus &&
-    chartFocus.absoluteIndex >= effectiveVisibleStart &&
-    chartFocus.absoluteIndex < effectiveVisibleStart + items.length
-      ? chartFocus.absoluteIndex - effectiveVisibleStart
-      : null;
+  const activeVisibleIndex = chartFocus
+    ? (dailyToBar[chartFocus.absoluteIndex - effectiveVisibleStart] ?? null)
+    : null;
   const isActivePanel = chartFocus?.panelKey === panel.key;
   const focusXPercent =
     activeVisibleIndex !== null
       ? (xAt(activeVisibleIndex) / CHART_VIEWBOX_WIDTH) * 100
       : null;
-  const referenceVisibleIndex =
-    referenceTradeDate !== null
-      ? items.findIndex((item) => item.trade_date === referenceTradeDate)
-      : -1;
+  const focusedBar =
+    activeVisibleIndex === null ? undefined : items[activeVisibleIndex];
+  const focusedRange =
+    activeVisibleIndex === null ? undefined : barRanges[activeVisibleIndex];
+  const focusedStartRow = focusedRange
+    ? dailyItems[focusedRange.start - effectiveVisibleStart]
+    : undefined;
+  const focusedEndDate = focusedBar
+    ? formatTradeDateLabel(focusedBar.trade_date, "full")
+    : undefined;
+  const focusedDateLabel =
+    chartPeriod !== "日线" &&
+    focusedStartRow &&
+    focusedBar &&
+    focusedStartRow.trade_date !== focusedBar.trade_date
+      ? `${formatTradeDateLabel(focusedStartRow.trade_date, "full")} ~ ${focusedEndDate}`
+      : focusedEndDate;
+  const referenceVisibleIndex = useMemo(() => {
+    const dailyIndex = dailyItems.findIndex(
+      (item) => item.trade_date === referenceTradeDate,
+    );
+    return dailyToBar[dailyIndex] ?? -1;
+  }, [dailyItems, dailyToBar, referenceTradeDate]);
   const activeIntervalSelection = isInteractivePricePanel(panel)
     ? (chartIntervalDraftSelection ?? chartIntervalSelection)
     : null;
-  const intervalStartVisibleIndex =
-    activeIntervalSelection &&
-    activeIntervalSelection.startAbsoluteIndex >= effectiveVisibleStart &&
-    activeIntervalSelection.startAbsoluteIndex <
-      effectiveVisibleStart + items.length
-      ? activeIntervalSelection.startAbsoluteIndex - effectiveVisibleStart
-      : null;
-  const intervalEndVisibleIndex =
-    activeIntervalSelection &&
-    activeIntervalSelection.endAbsoluteIndex >= effectiveVisibleStart &&
-    activeIntervalSelection.endAbsoluteIndex <
-      effectiveVisibleStart + items.length
-      ? activeIntervalSelection.endAbsoluteIndex - effectiveVisibleStart
-      : null;
+  const intervalStartVisibleIndex = activeIntervalSelection
+    ? (dailyToBar[
+        activeIntervalSelection.startAbsoluteIndex - effectiveVisibleStart
+      ] ?? null)
+    : null;
+  const intervalEndVisibleIndex = activeIntervalSelection
+    ? (dailyToBar[
+        activeIntervalSelection.endAbsoluteIndex - effectiveVisibleStart
+      ] ?? null)
+    : null;
   const intervalSelectionBounds = isInteractivePricePanel(panel)
     ? buildIntervalSelectionBounds(
         intervalStartVisibleIndex,
@@ -3891,6 +3833,11 @@ function DetailChartPanel({
         onPointerUp={(event) => onChartPointerUp(panel.key, event)}
         onPointerLeave={(event) => onChartPointerLeave(panel.key, event)}
         onPointerCancel={(event) => onChartPointerCancel(panel.key, event)}
+        onLostPointerCapture={(event) => {
+          if (event.target === event.currentTarget) {
+            onChartPointerCancel(panel.key, event);
+          }
+        }}
         onDoubleClick={(event) => onChartDoubleClick(panel.key, event)}
       >
         {index === 0 ? (
@@ -3902,7 +3849,6 @@ function DetailChartPanel({
         ) : null}
 
         {isInteractivePricePanel(panel) ? chipToggleButton : null}
-        {isInteractivePricePanel(panel) ? watchObserveButton : null}
 
         {domain && svgContent ? (
           <svg
@@ -3932,6 +3878,18 @@ function DetailChartPanel({
 
         <div className="details-chart-overlay-layer" aria-hidden="true">
           {staticOverlayContent}
+
+          {isMainPanel && focusXPercent !== null && focusedEndDate ? (
+            <span
+              aria-hidden="true"
+              className="details-chart-x-label details-chart-x-label-focus"
+              style={{
+                left: `clamp(38px, ${focusXPercent}%, calc(100% - 38px))`,
+              }}
+            >
+              {focusedEndDate}
+            </span>
+          ) : null}
 
           {domain && svgContent && showCyqPanel && !selectedCyqSnapshot ? (
             <span
@@ -3970,10 +3928,10 @@ function DetailChartPanel({
             isActivePanel && chartFocus ? chartFocus.cursorYPercent : null
           }
           pinned={isActivePanel && chartFocus ? chartFocus.pinned : false}
-          tradeDate={items[activeVisibleIndex ?? 0]?.trade_date}
+          dateLabel={showDefaultTooltip ? focusedDateLabel : undefined}
+          showDateOnly={chartPeriod !== "日线"}
           tooltipSections={tooltipSections}
         />
-
         {isMainPanel &&
         isInteractivePricePanel(panel) &&
         chartIntervalSelection &&
@@ -4744,6 +4702,7 @@ function DetailChart({
   );
   const [visibleBarCount, setVisibleBarCount] = useState(defaultVisibleBars);
   const [visibleStartIndex, setVisibleStartIndex] = useState(0);
+  const initializedChartKeyRef = useRef("");
   const [chartFocus, setChartFocusImmediate] = useState<ChartFocus | null>(
     null,
   );
@@ -4754,7 +4713,6 @@ function DetailChart({
       if (!current || !focus) return current === focus ? current : focus;
       return current.absoluteIndex === focus.absoluteIndex &&
         current.panelKey === focus.panelKey &&
-        current.cursorXPercent === focus.cursorXPercent &&
         current.cursorYPercent === focus.cursorYPercent &&
         current.pinned === focus.pinned
         ? current
@@ -4791,6 +4749,9 @@ function DetailChart({
   const [chartMainPercentMaxHeight, setChartMainPercentMaxHeight] = useState(
     () => readStoredChartMainPercentMaxHeight(),
   );
+  const [panningMainPanelHeight, setPanningMainPanelHeight] = useState<
+    number | null
+  >(null);
   const [chartIndicatorWidthRatio, setChartIndicatorWidthRatio] = useState(() =>
     readStoredChartIndicatorWidthRatio(),
   );
@@ -4920,13 +4881,120 @@ function DetailChart({
   }, [detailCyqModel, resolvedTsCode, sourcePathTrimmed]);
 
   const allChartItems = kline?.items ?? EMPTY_KLINE_ROWS;
+  const totalChartItems = allChartItems.length;
+  const minVisibleBars =
+    totalChartItems === 0 ? 0 : Math.min(MIN_VISIBLE_BARS, totalChartItems);
+  const effectiveVisibleBarCount =
+    totalChartItems === 0
+      ? 0
+      : clampNumber(visibleBarCount, minVisibleBars, totalChartItems);
+  const maxVisibleStart = Math.max(
+    totalChartItems - effectiveVisibleBarCount,
+    0,
+  );
+  const effectiveVisibleStart = clampNumber(
+    visibleStartIndex,
+    0,
+    maxVisibleStart,
+  );
+  const chartPeriod: ChartPeriod =
+    effectiveVisibleBarCount > 1800
+      ? "季线"
+      : effectiveVisibleBarCount > 650
+        ? "月线"
+        : effectiveVisibleBarCount > 140
+          ? "周线"
+          : "日线";
+  const { dailyItems, chartItems, barRanges, dailyToBar } = useMemo(() => {
+    const dailyItems = allChartItems.slice(
+      effectiveVisibleStart,
+      effectiveVisibleStart + effectiveVisibleBarCount,
+    );
+    const barRanges: { start: number; end: number }[] = [];
+    const dailyToBar: number[] = [];
+    let previousPeriodKey: number | null = null;
+    dailyItems.forEach((row, index) => {
+      const dailyIndex = effectiveVisibleStart + index;
+      let periodKey = dailyIndex;
+      if (chartPeriod !== "日线") {
+        const date = row.trade_date.replaceAll("-", "");
+        const year = Number(date.slice(0, 4));
+        const month = Number(date.slice(4, 6)) - 1;
+        if (chartPeriod === "周线") {
+          const day =
+            Date.UTC(year, month, Number(date.slice(6, 8))) / 86400000;
+          // The Unix epoch was a Thursday. Adding three days starts buckets on Monday.
+          periodKey = Math.floor((day + 3) / 7);
+        } else {
+          periodKey =
+            chartPeriod === "月线"
+              ? year * 12 + month
+              : year * 4 + Math.floor(month / 3);
+        }
+      }
+      if (periodKey === previousPeriodKey) {
+        barRanges[barRanges.length - 1].end = dailyIndex;
+      } else {
+        barRanges.push({ start: dailyIndex, end: dailyIndex });
+        previousPeriodKey = periodKey;
+      }
+      dailyToBar.push(barRanges.length - 1);
+    });
+    if (chartPeriod === "日线") {
+      return { dailyItems, chartItems: dailyItems, barRanges, dailyToBar };
+    }
+
+    const chartItems = barRanges.map(({ start, end }): DetailKlineRow => {
+      const first = allChartItems[start];
+      const last = allChartItems[end];
+      const row: DetailKlineRow = {
+        ...last,
+        open: first.open,
+        high: null,
+        low: null,
+        vol: null,
+        amount: null,
+        tor: null,
+        realtime_color_hint: null,
+      };
+      for (let index = start; index <= end; index += 1) {
+        const daily = allChartItems[index];
+        const high = getNumericField(daily, "high");
+        const low = getNumericField(daily, "low");
+        if (high !== null) row.high = Math.max(row.high ?? high, high);
+        if (low !== null) row.low = Math.min(row.low ?? low, low);
+        for (const key of ["vol", "amount", "tor"] as const) {
+          const value = getNumericField(daily, key);
+          if (value !== null) row[key] = (row[key] ?? 0) + value;
+        }
+      }
+      const previousClose =
+        start > 0 ? getNumericField(allChartItems[start - 1], "close") : null;
+      const close = getNumericField(last, "close");
+      row.__tooltip_price_change_pct =
+        previousClose && close !== null
+          ? (close / previousClose - 1) * 100
+          : null;
+      row.__tooltip_price_open = row.open;
+      row.__tooltip_price_high = row.high;
+      row.__tooltip_price_low = row.low;
+      row.__tooltip_price_close = row.close;
+      row.__tooltip_price_turnover = row.tor;
+      return row;
+    });
+    return { dailyItems, chartItems, barRanges, dailyToBar };
+  }, [
+    allChartItems,
+    chartPeriod,
+    effectiveVisibleStart,
+    effectiveVisibleBarCount,
+  ]);
+  const focusedBarIndex = chartFocus
+    ? dailyToBar[chartFocus.absoluteIndex - effectiveVisibleStart]
+    : undefined;
   const selectedCyqTradeDate =
-    chartFocus &&
-    chartFocus.absoluteIndex >= 0 &&
-    chartFocus.absoluteIndex < allChartItems.length
-      ? (allChartItems[chartFocus.absoluteIndex]?.trade_date ?? null)
-      : (allChartItems[allChartItems.length - 1]?.trade_date ??
-        (resolvedTradeDate !== "--" ? resolvedTradeDate : null));
+    chartItems[focusedBarIndex ?? chartItems.length - 1]?.trade_date ??
+    (resolvedTradeDate !== "--" ? resolvedTradeDate : null);
   const detailCyqData = useMemo(() => {
     const windows = detailCyqWindows.filter(
       (data) =>
@@ -4948,30 +5016,6 @@ function DetailChart({
     detailCyqData.model === detailCyqModel
       ? detailCyqData.snapshots
       : EMPTY_CYQ_SNAPSHOTS;
-  const totalChartItems = allChartItems.length;
-  const minVisibleBars =
-    totalChartItems === 0 ? 0 : Math.min(MIN_VISIBLE_BARS, totalChartItems);
-  const effectiveVisibleBarCount =
-    totalChartItems === 0
-      ? 0
-      : clampNumber(visibleBarCount, minVisibleBars, totalChartItems);
-  const maxVisibleStart = Math.max(
-    totalChartItems - effectiveVisibleBarCount,
-    0,
-  );
-  const effectiveVisibleStart = clampNumber(
-    visibleStartIndex,
-    0,
-    maxVisibleStart,
-  );
-  const chartItems = useMemo(
-    () =>
-      allChartItems.slice(
-        effectiveVisibleStart,
-        effectiveVisibleStart + effectiveVisibleBarCount,
-      ),
-    [allChartItems, effectiveVisibleStart, effectiveVisibleBarCount],
-  );
   useEffect(() => {
     if (
       !detailCyqVisible ||
@@ -5059,10 +5103,12 @@ function DetailChart({
     cyqScaleMaxChips[
       findCyqSnapshotIndexForTradeDate(detailCyqSnapshots, selectedCyqTradeDate)
     ] ?? 0;
-  const chartLayoutSlotCount = getChartLayoutSlotCount(
-    chartItems.length,
-    totalChartItems,
-  );
+  const chartLayoutSlotCount =
+    chartPeriod === "日线" &&
+    effectiveVisibleBarCount === totalChartItems &&
+    totalChartItems > 0
+      ? Math.max(chartItems.length, CHART_MIN_RIGHT_ALIGNED_SLOTS)
+      : chartItems.length;
   const panels = useMemo(
     () => (kline?.panels?.length ? kline.panels : buildDefaultPanels()),
     [kline?.panels],
@@ -5087,6 +5133,7 @@ function DetailChart({
   const {
     shouldReserveCyqPanelWidth,
     shouldUseCyqSummaryIndicatorSlot,
+    chartMainPanelHeight,
     chartShellHeight,
     chartTemplateRows,
     cyqSummaryOverlayStyle,
@@ -5104,14 +5151,15 @@ function DetailChart({
       panels.find((panel) => isMainChartPanel(panel)) ?? panels[0] ?? null;
     const chartMainPanelHeight =
       chartMainHeightMode === "percent"
-        ? buildPercentScaledMainPanelHeight(
+        ? (panningMainPanelHeight ??
+          buildPercentScaledMainPanelHeight(
             mainChartPanel,
             chartItems,
             chartMainPercentPixels,
             chartMainPercentMinHeight,
             chartMainPercentMaxHeight,
             fixedChartMainPanelHeight,
-          )
+          ))
         : fixedChartMainPanelHeight;
     const chartIndicatorPanelBaseHeight =
       (chartLayoutWidth * chartIndicatorWidthRatio) /
@@ -5166,6 +5214,7 @@ function DetailChart({
     return {
       shouldReserveCyqPanelWidth,
       shouldUseCyqSummaryIndicatorSlot,
+      chartMainPanelHeight,
       chartShellHeight,
       chartTemplateRows,
       cyqSummaryOverlayStyle,
@@ -5178,6 +5227,7 @@ function DetailChart({
     chartLayoutWidth,
     chartMainWidthRatio,
     chartMainHeightMode,
+    panningMainPanelHeight,
     chartMainPercentPixels,
     chartMainPercentMinHeight,
     chartMainPercentMaxHeight,
@@ -5193,8 +5243,8 @@ function DetailChart({
   const chartAnchorTradeDate = quoteTradeDate?.trim() || resolvedTradeDate;
 
   const chartRangeText =
-    chartItems.length > 0
-      ? `${chartItems[0].trade_date} -> ${chartItems[chartItems.length - 1].trade_date}`
+    dailyItems.length > 0
+      ? `${dailyItems[0].trade_date} -> ${dailyItems[dailyItems.length - 1].trade_date}`
       : "--";
   const cyqToggleTitle = detailCyqLoading
     ? "筹码分布加载中..."
@@ -5267,11 +5317,21 @@ function DetailChart({
   ]);
 
   useEffect(() => {
-    if (pendingIntervalRestore && detailLoading) {
-      return;
-    }
+    if (detailLoading) return;
 
+    const chartKey = [
+      sourcePathTrimmed,
+      resolvedTsCode,
+      resolvedTradeDate,
+      chartAnchorTradeDate,
+      allChartItems[0]?.trade_date,
+    ].join("|");
+    if (initializedChartKeyRef.current === chartKey && !pendingIntervalRestore)
+      return;
+
+    initializedChartKeyRef.current = chartKey;
     cancelChartPointerMove();
+    setPanningMainPanelHeight(null);
     if (totalChartItems === 0) {
       chartDragRef.current = null;
       setVisibleBarCount(defaultVisibleBars);
@@ -5374,7 +5434,7 @@ function DetailChart({
     resolvedTradeDate,
     resolvedTsCode,
     detailLoading,
-    quoteTradeDate,
+    sourcePathTrimmed,
     pendingIntervalRestore,
     setPendingIntervalRestore,
     setActiveIntervalContext,
@@ -5569,6 +5629,42 @@ function DetailChart({
     );
   }
 
+  function resolveZoomAnchor(viewport: HTMLDivElement, clientX: number) {
+    if (chartItems.length === 0) return null;
+
+    const rect = getChartViewportContentRect(viewport);
+    if (rect.width <= 0) return null;
+
+    const chartX = ((clientX - rect.left) / rect.width) * CHART_VIEWBOX_WIDTH;
+    const plotWidth = getChartKlinePlotWidth(shouldReserveCyqPanelWidth);
+    const leadingSlotCount = chartLayoutSlotCount - chartItems.length;
+    const visiblePosition = clampNumber(
+      ((chartX - CHART_MARGIN.left) / plotWidth) * chartLayoutSlotCount -
+        leadingSlotCount,
+      0,
+      chartItems.length,
+    );
+    const barIndex = Math.min(
+      Math.floor(visiblePosition),
+      barRanges.length - 1,
+    );
+    const range = barRanges[barIndex];
+    const dailyPosition = clampNumber(
+      range.start +
+        (visiblePosition - barIndex) * (range.end - range.start + 1),
+      effectiveVisibleStart,
+      effectiveVisibleStart + effectiveVisibleBarCount - 1,
+    );
+    return {
+      absoluteIndex: dailyPosition,
+      ratio:
+        effectiveVisibleBarCount <= 1
+          ? 1
+          : (dailyPosition - effectiveVisibleStart) /
+            (effectiveVisibleBarCount - 1),
+    };
+  }
+
   function startChartPinch(
     panelKey: string,
     viewport: HTMLDivElement,
@@ -5580,13 +5676,7 @@ function DetailChart({
 
     const [firstPointer, secondPointer] = pointers;
     const midpointX = (firstPointer.clientX + secondPointer.clientX) / 2;
-    const anchor = resolveChartAnchorFromClientX(
-      viewport,
-      midpointX,
-      chartItems.length,
-      chartLayoutSlotCount,
-      shouldReserveCyqPanelWidth,
-    );
+    const anchor = resolveZoomAnchor(viewport, midpointX);
     if (!anchor) {
       return false;
     }
@@ -5599,10 +5689,11 @@ function DetailChart({
         CHART_PINCH_MIN_DISTANCE,
       ),
       startVisibleBarCount: effectiveVisibleBarCount,
-      startAnchorAbsoluteIndex: effectiveVisibleStart + anchor.visiblePosition,
-      startAnchorRatio: anchor.visibleRatio,
+      startAnchorAbsoluteIndex: anchor.absoluteIndex,
+      startAnchorRatio: anchor.ratio,
     };
     chartDragRef.current = null;
+    setPanningMainPanelHeight(null);
     setChartFocus(null);
     setChartIntervalDraftSelection(null);
     setChartIntervalPanelOpen(false);
@@ -5645,21 +5736,15 @@ function DetailChart({
     clientX: number,
     deltaY: number,
   ) {
-    const anchor = resolveChartAnchorFromClientX(
-      viewport,
-      clientX,
-      chartItems.length,
-      chartLayoutSlotCount,
-      shouldReserveCyqPanelWidth,
-    );
+    const anchor = resolveZoomAnchor(viewport, clientX);
     if (!anchor) {
       return false;
     }
 
     setChartZoomAnchored(
       effectiveVisibleBarCount * Math.exp(deltaY * CHART_WHEEL_ZOOM_FACTOR),
-      effectiveVisibleStart + anchor.visiblePosition,
-      anchor.visibleRatio,
+      anchor.absoluteIndex,
+      anchor.ratio,
     );
     return true;
   }
@@ -5709,9 +5794,8 @@ function DetailChart({
     }
 
     return {
-      absoluteIndex: effectiveVisibleStart + pointer.visibleIndex,
+      absoluteIndex: barRanges[pointer.visibleIndex].end,
       panelKey,
-      cursorXPercent: pointer.cursorXPercent,
       cursorYPercent: pointer.cursorYPercent,
       pinned,
     };
@@ -5735,10 +5819,14 @@ function DetailChart({
       return null;
     }
 
+    const anchorRange =
+      barRanges[dailyToBar[anchorAbsoluteIndex - effectiveVisibleStart]];
+    const pointerRange = barRanges[pointer.visibleIndex];
+    if (!anchorRange) return null;
     return buildIntervalSelectionFromAbsoluteIndices(
       allChartItems,
-      anchorAbsoluteIndex,
-      effectiveVisibleStart + pointer.visibleIndex,
+      Math.min(anchorRange.start, pointerRange.start),
+      Math.max(anchorRange.end, pointerRange.end),
     );
   }
 
@@ -5761,14 +5849,14 @@ function DetailChart({
       return null;
     }
 
-    const pointerAbsoluteIndex = effectiveVisibleStart + pointer.visibleIndex;
+    const pointerRange = barRanges[pointer.visibleIndex];
     const nextStartAbsoluteIndex =
       side === "start"
-        ? Math.min(pointerAbsoluteIndex, fixedAbsoluteIndex)
+        ? Math.min(pointerRange.start, fixedAbsoluteIndex)
         : fixedAbsoluteIndex;
     const nextEndAbsoluteIndex =
       side === "end"
-        ? Math.max(pointerAbsoluteIndex, fixedAbsoluteIndex)
+        ? Math.max(pointerRange.end, fixedAbsoluteIndex)
         : fixedAbsoluteIndex;
 
     return buildIntervalSelectionFromAbsoluteIndices(
@@ -5798,7 +5886,7 @@ function DetailChart({
       return null;
     }
 
-    const pointerAbsoluteIndex = effectiveVisibleStart + pointer.visibleIndex;
+    const pointerAbsoluteIndex = barRanges[pointer.visibleIndex].end;
     const delta = pointerAbsoluteIndex - anchorAbsoluteIndex;
     const span = Math.max(
       0,
@@ -5869,8 +5957,18 @@ function DetailChart({
             const dragTarget = detectChartIntervalDragTarget(
               event.currentTarget,
               event.clientX,
-              chartIntervalSelection,
-              effectiveVisibleStart,
+              chartIntervalSelection
+                ? dailyToBar[
+                    chartIntervalSelection.startAbsoluteIndex -
+                      effectiveVisibleStart
+                  ]
+                : undefined,
+              chartIntervalSelection
+                ? dailyToBar[
+                    chartIntervalSelection.endAbsoluteIndex -
+                      effectiveVisibleStart
+                  ]
+                : undefined,
               chartItems.length,
               chartLayoutSlotCount,
               shouldReserveCyqPanelWidth,
@@ -5901,8 +5999,7 @@ function DetailChart({
                 return "interval-select" as const;
               }
 
-              anchorAbsoluteIndex =
-                effectiveVisibleStart + pointer.visibleIndex;
+              anchorAbsoluteIndex = barRanges[pointer.visibleIndex].end;
               moveSelectionStartAbsoluteIndex =
                 chartIntervalSelection.startAbsoluteIndex;
               moveSelectionEndAbsoluteIndex =
@@ -5925,11 +6022,12 @@ function DetailChart({
               return "interval-select" as const;
             }
 
-            anchorAbsoluteIndex = effectiveVisibleStart + pointer.visibleIndex;
+            const range = barRanges[pointer.visibleIndex];
+            anchorAbsoluteIndex = range.end;
             const intervalSelection = buildIntervalSelectionFromAbsoluteIndices(
               allChartItems,
-              anchorAbsoluteIndex,
-              anchorAbsoluteIndex,
+              range.start,
+              range.end,
             );
             intervalStartedOutsideSelection = chartIntervalSelection !== null;
             if (intervalSelection && !intervalStartedOutsideSelection) {
@@ -5942,11 +6040,12 @@ function DetailChart({
         : chartFocus?.pinned
           ? isTouchPointer &&
             !isPointerNearChartFocus(
-              panelKey,
               event.currentTarget,
               event.clientX,
-              event.clientY,
-              chartFocus,
+              dailyToBar[chartFocus.absoluteIndex - effectiveVisibleStart],
+              chartItems.length,
+              chartLayoutSlotCount,
+              shouldReserveCyqPanelWidth,
             )
             ? "dismiss"
             : "focus"
@@ -5996,6 +6095,9 @@ function DetailChart({
       moveSelectionEndAbsoluteIndex,
       intervalStartedOutsideSelection,
     };
+    if (mode === "pan" && chartMainHeightMode === "percent") {
+      setPanningMainPanelHeight(chartMainPanelHeight);
+    }
   }
 
   function onChartPointerMove(
@@ -6127,6 +6229,15 @@ function DetailChart({
       return;
     }
 
+    if (
+      !dragState.moved &&
+      (dragState.mode === "interval-adjust-start" ||
+        dragState.mode === "interval-adjust-end" ||
+        dragState.mode === "interval-move")
+    ) {
+      return;
+    }
+
     if (dragState.mode === "interval-select") {
       if (dragState.intervalStartedOutsideSelection && !dragState.moved) {
         return;
@@ -6232,6 +6343,7 @@ function DetailChart({
     }
     chartTouchPointersRef.current.delete(event.pointerId);
     chartDragRef.current = null;
+    setPanningMainPanelHeight(null);
   }
 
   function onChartPointerUp(
@@ -6269,6 +6381,17 @@ function DetailChart({
       if (!dragState.moved) {
         setChartFocus(null);
       }
+      return;
+    }
+
+    if (
+      !dragState.moved &&
+      (dragState.mode === "interval-adjust-start" ||
+        dragState.mode === "interval-adjust-end" ||
+        dragState.mode === "interval-move")
+    ) {
+      setChartIntervalDraftSelection(null);
+      setChartIntervalPanelOpen(true);
       return;
     }
 
@@ -6410,6 +6533,9 @@ function DetailChart({
   ) {
     if (chartPinchRef.current?.pointerIds.includes(event.pointerId)) {
       chartPinchRef.current = null;
+    } else if (chartDragRef.current?.pointerId !== event.pointerId) {
+      chartTouchPointersRef.current.delete(event.pointerId);
+      return;
     }
     if (
       chartDragRef.current?.mode === "interval-select" ||
@@ -6449,6 +6575,7 @@ function DetailChart({
         chartDragRef.current = null;
         chartPinchRef.current = null;
         chartTouchPointersRef.current.clear();
+        setPanningMainPanelHeight(null);
         setChartFocus(null);
         setChartIntervalMode(selecting);
         setChartIntervalSelection(null);
@@ -6463,7 +6590,7 @@ function DetailChart({
   return (
     <section className="details-card details-chart-card" ref={chartCardRef}>
       <h3 className="details-subtitle">
-        K线图
+        K线图{chartItems.length > 0 ? ` · ${chartPeriod}` : ""}
         {detailIndicatorsLoading ? " · 指标异步加载中" : ""}
         {!detailIndicatorsLoading && detailIndicatorsNotice
           ? ` · ${detailIndicatorsNotice}`
@@ -6479,10 +6606,11 @@ function DetailChart({
             max={Math.max(totalChartItems, 1)}
             step={1}
             value={Math.max(effectiveVisibleBarCount, 1)}
+            aria-valuetext={`${chartPeriod} ${chartItems.length} 根，覆盖 ${effectiveVisibleBarCount} 个交易日`}
             onChange={(event) => setChartZoom(Number(event.target.value))}
             disabled={totalChartItems === 0}
           />
-          <strong>{effectiveVisibleBarCount || 0} 根</strong>
+          <strong>{chartItems.length} 根</strong>
         </label>
 
         <label className="details-chart-slider-field details-chart-slider-field-wide">
@@ -6493,6 +6621,13 @@ function DetailChart({
             max={Math.max(maxVisibleStart, 1)}
             step={1}
             value={effectiveVisibleStart}
+            onPointerDown={(event) => {
+              if (event.button === 0 && chartMainHeightMode === "percent") {
+                event.currentTarget.setPointerCapture(event.pointerId);
+                setPanningMainPanelHeight(chartMainPanelHeight);
+              }
+            }}
+            onLostPointerCapture={() => setPanningMainPanelHeight(null)}
             onChange={(event) =>
               setVisibleStartIndex(Number(event.target.value))
             }
@@ -6500,6 +6635,64 @@ function DetailChart({
           />
           <strong>{chartRangeText}</strong>
         </label>
+        {panels.some(isInteractivePricePanel) ? (
+          <div className="details-chart-watch-action">
+            <div className="details-chart-watch-row">
+              <button
+                className={[
+                  "details-chart-watch-btn",
+                  "details-chart-watch-btn-interval",
+                  chartIntervalSelecting ? "is-selecting" : "",
+                  chartIntervalMode || chartIntervalSelection
+                    ? "is-active"
+                    : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+                type="button"
+                data-testid="details-interval-toggle"
+                onPointerDown={(event) => {
+                  event.stopPropagation();
+                }}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  toggleChartIntervalMode();
+                }}
+                aria-busy={chartIntervalSelecting}
+              >
+                {chartIntervalButtonLabel}
+              </button>
+              <button
+                className={[
+                  "details-chart-cyq-toggle",
+                  "details-chart-cyq-toggle-inline",
+                  detailCyqVisible ? "is-active" : "",
+                  detailCyqLoading ? "is-loading" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+                type="button"
+                onPointerDown={(event) => {
+                  event.stopPropagation();
+                }}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void onToggleCyqPanel();
+                }}
+                title={cyqToggleTitle}
+              >
+                筹
+              </button>
+              {watchActions}
+            </div>
+            {watchNotes}
+            {chartIntervalNotice ? (
+              <span className="details-chart-watch-note">
+                {chartIntervalNotice}
+              </span>
+            ) : null}
+          </div>
+        ) : null}
       </div>
 
       <div
@@ -6519,13 +6712,17 @@ function DetailChart({
             panel={panel}
             items={chartItems}
             index={index}
-            panelCount={panels.length}
             watermarkName={watermarkName}
             watermarkCode={watermarkCode}
             watermarkConcept={watermarkConcept}
             chartFocus={chartFocus}
             effectiveVisibleStart={effectiveVisibleStart}
-            allItems={allChartItems}
+            dailyItems={dailyItems}
+            dailyToBar={dailyToBar}
+            barRanges={barRanges}
+            previousRow={allChartItems[effectiveVisibleStart - 1]}
+            layoutSlotCount={chartLayoutSlotCount}
+            chartPeriod={chartPeriod}
             referenceTradeDate={
               resolvedTradeDate !== "--" ? resolvedTradeDate : null
             }
@@ -6576,64 +6773,6 @@ function DetailChart({
                 </div>
               ) : null
             }
-            watchObserveButton={
-              <div className="details-chart-watch-action">
-                <div className="details-chart-watch-row">
-                  <button
-                    className={[
-                      "details-chart-watch-btn",
-                      "details-chart-watch-btn-interval",
-                      chartIntervalSelecting ? "is-selecting" : "",
-                      chartIntervalMode || chartIntervalSelection
-                        ? "is-active"
-                        : "",
-                    ]
-                      .filter(Boolean)
-                      .join(" ")}
-                    type="button"
-                    data-testid="details-interval-toggle"
-                    onPointerDown={(event) => {
-                      event.stopPropagation();
-                    }}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      toggleChartIntervalMode();
-                    }}
-                    aria-busy={chartIntervalSelecting}
-                  >
-                    {chartIntervalButtonLabel}
-                  </button>
-                  <button
-                    className={[
-                      "details-chart-cyq-toggle",
-                      "details-chart-cyq-toggle-inline",
-                      detailCyqVisible ? "is-active" : "",
-                      detailCyqLoading ? "is-loading" : "",
-                    ]
-                      .filter(Boolean)
-                      .join(" ")}
-                    type="button"
-                    onPointerDown={(event) => {
-                      event.stopPropagation();
-                    }}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      void onToggleCyqPanel();
-                    }}
-                    title={cyqToggleTitle}
-                  >
-                    筹
-                  </button>
-                  {watchActions}
-                </div>
-                {watchNotes}
-                {chartIntervalNotice ? (
-                  <span className="details-chart-watch-note">
-                    {chartIntervalNotice}
-                  </span>
-                ) : null}
-              </div>
-            }
             chartIntervalSelection={chartIntervalSelection}
             chartIntervalDraftSelection={chartIntervalDraftSelection}
             chartIntervalPanelOpen={chartIntervalPanelOpen}
@@ -6671,6 +6810,7 @@ function DetailChart({
 export default function DetailsPage({
   variant = "default",
   navigationItems,
+  evidenceSelection,
   evidenceNavigationItems,
   strategyCompareSnapshot: externalStrategyCompareSnapshot = null,
 }: DetailsPageProps) {
@@ -6743,10 +6883,6 @@ export default function DetailsPage({
     detailsNavLongPressIntervalSeconds,
     setDetailsNavLongPressIntervalSeconds,
   ] = useState(() => readStoredDetailsNavLongPressIntervalSeconds());
-  const [detailsSimilarityNavMode, setDetailsSimilarityNavMode] =
-    useState<DetailsSimilarityNavMode>(() =>
-      readStoredDetailsSimilarityNavMode(),
-    );
   const [strategyCompareSnapshot, setStrategyCompareSnapshot] =
     useState<StrategyCompareSnapshot | null>(
       externalStrategyCompareSnapshot ?? null,
@@ -6844,6 +6980,13 @@ export default function DetailsPage({
     () => normalizeNavigationItems(evidenceNavigationItems),
     [evidenceNavigationItems],
   );
+  const evidenceSelfItems = useMemo(
+    () =>
+      normalizedEvidenceNavigationItems.filter((item) => item.role === "self"),
+    [normalizedEvidenceNavigationItems],
+  );
+  const [selectedEvidenceItem, setSelectedEvidenceItem] =
+    useState<DetailsNavigationItem | null>(null);
 
   useEffect(() => {
     setStrategyCompareSnapshot(externalStrategyCompareSnapshot ?? null);
@@ -7895,28 +8038,36 @@ export default function DetailsPage({
     [sourcePathTrimmed, topRows, tradeDateInput],
   );
   const hasEvidenceNavigation = normalizedEvidenceNavigationItems.length > 0;
-  const isEvidenceNavActive =
-    hasEvidenceNavigation && detailsSimilarityNavMode === "evidence";
-  const activeNavigationItems = isEvidenceNavActive
-    ? normalizedEvidenceNavigationItems
+  const currentEvidenceGroup =
+    selectedEvidenceItem?.groupId ?? evidenceSelection?.groupId;
+  const evidenceGroupItems = useMemo(
+    () =>
+      currentEvidenceGroup
+        ? normalizedEvidenceNavigationItems.filter(
+            (item) => item.groupId === currentEvidenceGroup,
+          )
+        : [],
+    [currentEvidenceGroup, normalizedEvidenceNavigationItems],
+  );
+  const currentEvidenceRole =
+    selectedEvidenceItem?.role ?? evidenceSelection?.role;
+  const evidenceSelf = evidenceGroupItems.find((item) => item.role === "self");
+  const activeNavigationItems = hasEvidenceNavigation
+    ? evidenceSelfItems
     : linkedNavigationItems.length > 0
       ? linkedNavigationItems
       : inlineNavigationItems && inlineNavigationItems.length > 0
         ? inlineNavigationItems
         : defaultNavigationItems;
-  const currentNavigationIndex = findNavigationIndex(
-    activeNavigationItems,
-    resolvedTsCode,
-    resolvedTradeDate,
-    activeIntervalContext?.startTradeDate ?? "",
-    activeIntervalContext?.endTradeDate ?? "",
-  );
-  const currentNavigationItem =
-    currentNavigationIndex >= 0
-      ? activeNavigationItems[currentNavigationIndex]
-      : null;
-  const currentNavigationRole = currentNavigationItem?.role ?? null;
-  const currentNavigationGroupId = currentNavigationItem?.groupId ?? null;
+  const currentNavigationIndex = evidenceSelf
+    ? activeNavigationItems.indexOf(evidenceSelf)
+    : findNavigationIndex(
+        activeNavigationItems,
+        resolvedTsCode,
+        resolvedTradeDate,
+        activeIntervalContext?.startTradeDate ?? "",
+        activeIntervalContext?.endTradeDate ?? "",
+      );
   const prevNavigationItem =
     currentNavigationIndex > 0
       ? activeNavigationItems[currentNavigationIndex - 1]
@@ -7926,38 +8077,11 @@ export default function DetailsPage({
     currentNavigationIndex < activeNavigationItems.length - 1
       ? activeNavigationItems[currentNavigationIndex + 1]
       : null;
-  const navigationRoleLabel = (
-    role: DetailsNavigationRole | null | undefined,
-  ) =>
-    role === "self"
-      ? "本体"
-      : role === "success"
-        ? "成功历史"
-        : role === "failure"
-          ? "失败历史"
-          : null;
-  const navigationButtonLabel = (
-    direction: DetailsAutoNavDirection,
-    target: DetailsNavigationItem | null,
-  ) => {
-    if (!isEvidenceNavActive || !target) {
-      return direction === "prev" ? "上一条" : "下一条";
-    }
-    if (
-      target.groupId &&
-      currentNavigationGroupId &&
-      target.groupId !== currentNavigationGroupId
-    ) {
-      return direction === "prev" ? "上一条" : "下一条";
-    }
-    return (
-      navigationRoleLabel(target.role) ??
-      (direction === "prev" ? "上一条" : "下一条")
-    );
+  const navigationRoleLabels: Record<DetailsNavigationRole, string> = {
+    self: "本体",
+    success: "成功历史",
+    failure: "失败历史",
   };
-  const prevNavigationLabel = navigationButtonLabel("prev", prevNavigationItem);
-  const nextNavigationLabel = navigationButtonLabel("next", nextNavigationItem);
-  const currentNavigationRoleLabel = navigationRoleLabel(currentNavigationRole);
   const isPrevAutoLocked = detailsNavAutoDirection === "prev";
   const isNextAutoLocked = detailsNavAutoDirection === "next";
   const strategyGridStyle = useMemo(
@@ -8237,6 +8361,7 @@ export default function DetailsPage({
       return;
     }
 
+    setSelectedEvidenceItem(null);
     autoFillTopRef.current = false;
     setSourcePath(nextSourcePath);
     setTradeDateInput(routeEffectiveTradeDate);
@@ -8255,6 +8380,7 @@ export default function DetailsPage({
     );
   }, [
     readDetail,
+    evidenceSelection,
     routeEffectiveTradeDate,
     routeIntervalRestore,
     routeSourcePath,
@@ -8526,7 +8652,6 @@ export default function DetailsPage({
       }
 
       const nextCode = sanitizeCodeInput(splitTsCode(target.tsCode));
-      const nextTradeDate = target.tradeDate?.trim() || tradeDateInput.trim();
       const explicitIntervalRestore = normalizeIntervalRestoreRequest(
         target.intervalStartTradeDate ?? "",
         target.intervalEndTradeDate ?? "",
@@ -8536,11 +8661,17 @@ export default function DetailsPage({
           ? null
           : (explicitIntervalRestore ?? activeIntervalContext);
 
+      const nextTradeDate =
+        (target.groupId ? explicitIntervalRestore?.endTradeDate : null) ||
+        target.tradeDate?.trim() ||
+        tradeDateInput.trim();
+
       if (nextCode === "") {
         return;
       }
 
       pendingPageScrollRef.current = captureContentScroll(chartCardRef.current);
+      setSelectedEvidenceItem(target.groupId ? target : null);
       autoFillTopRef.current = false;
       setSourcePath(nextSourcePath);
       setLookupInput(target.name?.trim() || nextCode);
@@ -8575,15 +8706,6 @@ export default function DetailsPage({
         current === direction ? null : direction,
       );
       detailsNavLongPressHandledRef.current = true;
-    },
-    [],
-  );
-
-  const onSelectSimilarityNavMode = useCallback(
-    (mode: DetailsSimilarityNavMode) => {
-      setDetailsNavAutoDirection(null);
-      setDetailsSimilarityNavMode(mode);
-      writeStoredDetailsSimilarityNavMode(mode);
     },
     [],
   );
@@ -9537,44 +9659,32 @@ export default function DetailsPage({
       ) : null}
 
       <div className="details-float-nav">
-        {hasEvidenceNavigation ? (
+        {hasEvidenceNavigation && evidenceGroupItems.length > 1 ? (
           <div
             className="details-nav-mode-switch"
             role="group"
-            aria-label="详情切换模式"
+            aria-label="当前股票的证据"
           >
-            <button
-              className={[
-                "details-nav-mode-btn",
-                isEvidenceNavActive ? "is-active" : "",
-              ]
-                .filter(Boolean)
-                .join(" ")}
-              type="button"
-              onClick={() => onSelectSimilarityNavMode("evidence")}
-            >
-              证据链
-            </button>
-            <button
-              className={[
-                "details-nav-mode-btn",
-                !isEvidenceNavActive ? "is-active" : "",
-              ]
-                .filter(Boolean)
-                .join(" ")}
-              type="button"
-              onClick={() => onSelectSimilarityNavMode("list")}
-            >
-              名单
-            </button>
-          </div>
-        ) : null}
-        {isEvidenceNavActive && currentNavigationRoleLabel ? (
-          <div className="details-nav-role-chip">
-            当前：{currentNavigationRoleLabel}
-            {currentNavigationItem?.name
-              ? ` · ${currentNavigationItem.name}`
-              : ""}
+            {evidenceGroupItems.map((item) => {
+              if (!item.role) return null;
+              const isCurrent = item.role === currentEvidenceRole;
+              return (
+                <button
+                  key={item.role}
+                  className={`details-nav-mode-btn${isCurrent ? " is-active" : ""}`}
+                  type="button"
+                  aria-pressed={isCurrent}
+                  disabled={detailLoading}
+                  onClick={() => {
+                    if (isCurrent) return;
+                    setDetailsNavAutoDirection(null);
+                    onJumpNavigationTarget(item);
+                  }}
+                >
+                  {navigationRoleLabels[item.role]}
+                </button>
+              );
+            })}
           </div>
         ) : null}
         <button
@@ -9596,7 +9706,7 @@ export default function DetailsPage({
           onContextMenu={handleDetailsNavContextMenu}
           onClick={(event) => handleDetailsNavClick("prev", event)}
         >
-          {isPrevAutoLocked ? "自动中" : prevNavigationLabel}
+          {isPrevAutoLocked ? "自动中" : "上一条"}
         </button>
         <button
           className={[
@@ -9617,7 +9727,7 @@ export default function DetailsPage({
           onContextMenu={handleDetailsNavContextMenu}
           onClick={(event) => handleDetailsNavClick("next", event)}
         >
-          {isNextAutoLocked ? "自动中" : nextNavigationLabel}
+          {isNextAutoLocked ? "自动中" : "下一条"}
         </button>
       </div>
     </div>

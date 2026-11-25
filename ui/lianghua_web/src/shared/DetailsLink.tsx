@@ -2,6 +2,7 @@ import { type ReactNode } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { buildLinkedDetailsPath, type DetailsRouteInput } from "./detailsRoute";
 import type {
+  DetailsEvidenceSelection,
   DetailsNavigationItem,
   DetailsLinkLocationState,
   DetailsStrategyCompareSnapshot,
@@ -12,6 +13,7 @@ type DetailsLinkProps = DetailsRouteInput & {
   className?: string;
   title?: string;
   navigationItems?: DetailsNavigationItem[];
+  evidenceSelection?: DetailsEvidenceSelection;
   evidenceNavigationItems?: DetailsNavigationItem[];
   strategyCompareSnapshot?: DetailsStrategyCompareSnapshot | null;
 };
@@ -27,6 +29,7 @@ export default function DetailsLink({
   className,
   title,
   navigationItems,
+  evidenceSelection,
   evidenceNavigationItems,
   strategyCompareSnapshot,
 }: DetailsLinkProps) {
@@ -56,6 +59,7 @@ export default function DetailsLink({
         {
           backgroundLocation,
           navigationItems,
+          evidenceSelection,
           evidenceNavigationItems,
           strategyCompareSnapshot,
         } satisfies DetailsLinkLocationState

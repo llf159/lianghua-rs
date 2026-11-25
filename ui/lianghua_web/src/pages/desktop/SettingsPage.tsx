@@ -559,7 +559,7 @@ export default function SettingsPage() {
   function onSaveChartDefaultVisibleBars() {
     const parsedValue = Number(chartDefaultVisibleBarsInput.trim())
     if (!Number.isInteger(parsedValue)) {
-      setChartDefaultVisibleBarsError('请输入整数根数。')
+      setChartDefaultVisibleBarsError('请输入整数交易日数量。')
       setChartDefaultVisibleBarsNotice('')
       return
     }
@@ -568,7 +568,7 @@ export default function SettingsPage() {
       parsedValue > CHART_DEFAULT_VISIBLE_BARS_MAX
     ) {
       setChartDefaultVisibleBarsError(
-        `根数需在 ${CHART_DEFAULT_VISIBLE_BARS_MIN} 到 ${CHART_DEFAULT_VISIBLE_BARS_MAX} 之间。`,
+        `交易日数量需在 ${CHART_DEFAULT_VISIBLE_BARS_MIN} 到 ${CHART_DEFAULT_VISIBLE_BARS_MAX} 之间。`,
       )
       setChartDefaultVisibleBarsNotice('')
       return
@@ -578,7 +578,7 @@ export default function SettingsPage() {
     writeStoredChartDefaultVisibleBars(normalizedValue)
     setChartDefaultVisibleBarsInput(String(normalizedValue))
     setChartDefaultVisibleBarsError('')
-    setChartDefaultVisibleBarsNotice('已保存。之后打开个股详情时会使用新的默认根数。')
+    setChartDefaultVisibleBarsNotice('已保存。之后打开个股详情时会使用新的默认交易日范围。')
   }
 
   function onSelectDefaultBoardFilter(nextValue: DefaultBoardFilter) {
@@ -748,8 +748,8 @@ export default function SettingsPage() {
 
           <button className="settings-list-item" type="button" onClick={openChartDefaultVisibleBarsSetting}>
             <div className="settings-list-item-main">
-              <strong>主图默认根数</strong>
-              <span>控制新打开个股详情时，主图默认展示的 K 线根数。</span>
+              <strong>主图默认范围</strong>
+              <span>控制打开个股详情时主图覆盖的交易日数量。</span>
             </div>
             <span className="settings-list-item-value">{readStoredChartDefaultVisibleBars()} 根</span>
           </button>
@@ -978,11 +978,11 @@ export default function SettingsPage() {
             }
           }}
         >
-          <section className="settings-modal settings-modal-narrow" role="dialog" aria-modal="true" aria-label="主图默认根数设置">
+          <section className="settings-modal settings-modal-narrow" role="dialog" aria-modal="true" aria-label="主图默认范围设置">
             <div className="settings-modal-head">
               <div>
-                <h3 className="settings-subtitle-head">主图默认根数</h3>
-                <p className="settings-section-note">设置新打开个股详情时主图默认显示多少根 K 线，当前默认值为 90。</p>
+                <h3 className="settings-subtitle-head">主图默认范围</h3>
+                <p className="settings-section-note">主图默认覆盖 90 个交易日，并按范围自动选择 K 线周期。</p>
               </div>
               <button className="settings-secondary-btn" type="button" onClick={closeActiveModal}>
                 关闭
@@ -990,7 +990,7 @@ export default function SettingsPage() {
             </div>
 
             <div className="settings-field settings-field-textarea">
-              <span>K 线根数</span>
+              <span>交易日数量</span>
               <input
                 type="number"
                 min={CHART_DEFAULT_VISIBLE_BARS_MIN}
@@ -999,7 +999,7 @@ export default function SettingsPage() {
                 value={chartDefaultVisibleBarsInput}
                 onChange={(event) => setChartDefaultVisibleBarsInput(event.target.value)}
               />
-              <small>预览：{chartDefaultVisibleBarsPreview === null ? '--' : `${chartDefaultVisibleBarsPreview} 根`}</small>
+              <small>预览：{chartDefaultVisibleBarsPreview === null ? '--' : `${chartDefaultVisibleBarsPreview} 个交易日`}</small>
             </div>
 
             {chartDefaultVisibleBarsError ? <div className="settings-error">{chartDefaultVisibleBarsError}</div> : null}

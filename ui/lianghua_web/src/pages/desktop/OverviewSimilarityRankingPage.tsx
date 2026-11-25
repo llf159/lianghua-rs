@@ -90,21 +90,9 @@ export default function OverviewSimilarityRankingPage() {
   const showStockCandidates =
     lookupFocused && lookupInput.trim() !== '' && stockCandidates.length > 0
 
-  const navigationItems = useMemo(
-    () =>
-      (data?.items ?? []).map((row) => ({
-        tsCode: row.tsCode,
-        tradeDate: data?.resolvedTradeDate,
-        sourcePath: sourcePath || undefined,
-        name: row.name || row.tsCode,
-      })),
-    [data, sourcePath],
-  )
-
   const evidenceNavigationItems = useMemo<DetailsNavigationItem[]>(
     () =>
       (data?.items ?? []).flatMap((row) => {
-        const groupId = `${row.rank ?? row.tsCode}:${row.tsCode}`
         const groupItems: DetailsNavigationItem[] = [
           {
             tsCode: row.tsCode,
@@ -112,7 +100,7 @@ export default function OverviewSimilarityRankingPage() {
             sourcePath: sourcePath || undefined,
             name: row.name || row.tsCode,
             role: 'self',
-            groupId,
+            groupId: row.tsCode,
           },
         ]
         const matches = [
@@ -129,7 +117,7 @@ export default function OverviewSimilarityRankingPage() {
             sourcePath: sourcePath || undefined,
             name: match.name || match.tsCode,
             role,
-            groupId,
+            groupId: row.tsCode,
           })
         }
         return groupItems
@@ -457,6 +445,7 @@ export default function OverviewSimilarityRankingPage() {
                   const renderTemplateMatch = (
                     label: string,
                     match: typeof successMatch,
+                    role: 'success' | 'failure',
                   ) => match ? (
                     <DetailsLink
                       className="trigger-sim-stock-link trigger-sim-history-link"
@@ -465,7 +454,7 @@ export default function OverviewSimilarityRankingPage() {
                       intervalStartTradeDate={match.outcomeStartTradeDate}
                       intervalEndTradeDate={match.outcomeEndTradeDate}
                       sourcePath={sourcePath}
-                      navigationItems={navigationItems}
+                      evidenceSelection={{ groupId: row.tsCode, role }}
                       evidenceNavigationItems={evidenceNavigationItems}
                       title={`查看${label}${match.name || match.tsCode}的后验走势`}
                     >
@@ -484,7 +473,7 @@ export default function OverviewSimilarityRankingPage() {
                           tsCode={row.tsCode}
                           tradeDate={data.resolvedTradeDate}
                           sourcePath={sourcePath}
-                          navigationItems={navigationItems}
+                          evidenceSelection={{ groupId: row.tsCode, role: 'self' }}
                           evidenceNavigationItems={evidenceNavigationItems}
                         >
                           <strong>{row.name || row.tsCode}</strong>
@@ -513,10 +502,10 @@ export default function OverviewSimilarityRankingPage() {
                       </td>
                       <td>{formatPercent(row.diagnostics.excessReturnStdPct)}</td>
                       <td className="trigger-sim-template-cell">
-                        {renderTemplateMatch('跑赢', successMatch)}
+                        {renderTemplateMatch('跑赢', successMatch, 'success')}
                       </td>
                       <td className="trigger-sim-template-cell">
-                        {renderTemplateMatch('跑输', failureMatch)}
+                        {renderTemplateMatch('跑输', failureMatch, 'failure')}
                       </td>
                       <td className="trigger-sim-concept-cell" title={conceptText}>
                         {conceptText}

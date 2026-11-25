@@ -14,7 +14,7 @@ export type DetailsNavigationItem = {
   groupId?: string | null;
 };
 
-export type DetailsSimilarityNavMode = "evidence" | "list";
+export type DetailsEvidenceSelection = { groupId: string; role: DetailsNavigationRole };
 
 export type DetailsStrategyCompareSnapshot = {
   tsCode: string;
@@ -25,6 +25,7 @@ export type DetailsStrategyCompareSnapshot = {
 export type DetailsLinkLocationState = {
   backgroundLocation?: Location;
   navigationItems?: DetailsNavigationItem[];
+  evidenceSelection?: DetailsEvidenceSelection;
   evidenceNavigationItems?: DetailsNavigationItem[];
   strategyCompareSnapshot?: DetailsStrategyCompareSnapshot | null;
 };
